@@ -1,9 +1,9 @@
 """Atomic hosted balances; callers own commit boundaries and provider dispatch.
 
-``launch_account_ids``, ``initialize_zero_launch``, and ``launch_system_models``
-are deliberate groundwork for the account-balance-baseline reconciliation
-described in the PR rollout notes. They are not wired to production callers
-yet and must be connected before hosted-spend activation.
+Launch helpers support the account-balance-baseline reconciliation required
+before hosted-spend activation. Edition operator tooling consumes these helpers;
+they are not automatic startup routines. Recovery helpers likewise require an
+operator's verified evidence. Unknown provider charges stay reserved until verified.
 """
 
 from datetime import UTC, date, datetime
@@ -277,8 +277,8 @@ def launch_account_ids(
 ) -> list[Any]:
     """Read a bounded stable page for launch initialization.
 
-    Groundwork for account-balance-baseline reconciliation in the PR rollout
-    notes; wire a consumer before hosted-spend activation.
+    Edition operator tooling uses this for account-balance-baseline reconciliation
+    before hosted-spend activation; startup does not call it automatically.
     """
     if not 1 <= limit <= 500:
         raise ValueError("Launch batch size must be between 1 and 500")
@@ -301,8 +301,8 @@ def initialize_zero_launch(
     Existing balances and reservations are never reset. Caller commits each
     applied account separately. Preview is read-only and repeats checks on apply.
     Zero is consumed usage, not a replacement for the plan's included allowance.
-    Groundwork for account-balance-baseline reconciliation in the PR rollout
-    notes; wire a consumer before hosted-spend activation.
+    Edition operator tooling performs this pre-activation baseline reconciliation;
+    startup does not call it automatically.
     """
     if not evidence or len(evidence) > 500:
         raise HostedSpendUnavailableError(
@@ -345,8 +345,8 @@ def initialize_zero_launch(
 def launch_system_models(db: Session, *, limit: int = 101) -> list[models.AIModel]:
     """Read a bounded system-model set for tariff readiness checks.
 
-    Groundwork for account-balance-baseline reconciliation in the PR rollout
-    notes; wire a consumer before hosted-spend activation.
+    Edition operator tooling checks these before hosted-spend activation;
+    startup does not attest the provider tariffs automatically.
     """
     if not 1 <= limit <= 501:
         raise ValueError("Model readiness limit must be between 1 and 501")
@@ -358,3 +358,120 @@ def launch_system_models(db: Session, *, limit: int = 101) -> list[models.AIMode
             .limit(limit)
         )
     )
+
+
+def recover_verified_cost(
+    db: Session,
+    *,
+    account_id: Any,
+    reservation_id: Any,
+    actual: Any,
+    evidence: str,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Preview or settle one verified charge with an atomic durable audit.
+
+    The caller must independently verify the provider's actual USD charge and
+    commit the transaction. This helper makes no provider calls and never guesses
+    zero from elapsed time or missing responses. Exact replays preserve the first
+    audit; conflicting amounts are refused. Previously settled reservations are
+    reported honestly without fabricating a recovery audit after the fact.
+    """
+    if not isinstance(evidence, str) or not evidence.strip() or len(evidence) > 500:
+        raise HostedSpendUnavailableError("Recovery evidence requires 1-500 characters")
+    actual = money(actual)
+    if apply:
+        row = _locked_reservation(
+            db, account_id=account_id, reservation_id=reservation_id
+        )
+    else:
+        row = db.scalar(
+            select(models.HostedSpendReservation).where(
+                models.HostedSpendReservation.account_id == account_id,
+                models.HostedSpendReservation.id == reservation_id,
+            )
+        )
+    if row is None:
+        raise HostedSpendUnavailableError("Hosted reservation is unavailable")
+    operation_key = "hosted-recovery:" + str(row.id)
+    audit = db.scalar(
+        select(models.BillingOperation).where(
+            models.BillingOperation.account_id == account_id,
+            models.BillingOperation.operation_key == operation_key,
+        )
+    )
+    result = {
+        "reservation_id": str(row.id),
+        "account_id": str(row.account_id),
+        "prior_status": row.status,
+        "reserved_usd": str(row.reserved),
+        "actual_usd": str(actual),
+    }
+    if row.status in {"settled", "released"}:
+        if row.actual != actual:
+            raise HostedSpendUnavailableError("Conflicting hosted settlement")
+        if audit is not None:
+            if (
+                audit.kind != "hosted_recovery"
+                or audit.status != "completed"
+                or audit.payload.get("actual_usd") != str(actual)
+            ):
+                raise HostedSpendUnavailableError("Conflicting hosted recovery audit")
+            return {**result, "status": "already_recovered", "audit_id": str(audit.id)}
+        return {**result, "status": "already_settled_without_recovery_audit"}
+    if (
+        row.status not in {"reserved", "dispatched", "recovery_required"}
+        or audit is not None
+    ):
+        raise HostedSpendUnavailableError("Hosted recovery state requires review")
+    if not apply:
+        return {**result, "status": "would_settle"}
+    settle(db, account_id=account_id, reservation_id=row.id, actual=actual)
+    audit = models.BillingOperation(
+        account_id=account_id,
+        operation_key=operation_key,
+        kind="hosted_recovery",
+        status="completed",
+        payload={
+            **result,
+            "evidence": evidence.strip(),
+            "recorded_at": datetime.now(UTC).isoformat(),
+        },
+        result={"status": "settled", "actual_usd": str(actual)},
+    )
+    db.add(audit)
+    db.flush()
+    return {**result, "status": "settled", "audit_id": str(audit.id)}
+
+
+def unresolved_reservations(
+    db: Session, *, account_id: Any, after_id: Any = None, limit: int = 100
+) -> list[dict[str, str]]:
+    """Read a bounded account-scoped recovery page without prompts or credentials."""
+    if not 1 <= limit <= 100:
+        raise ValueError("Recovery listing size must be between 1 and 100")
+    query = (
+        select(models.HostedSpendReservation)
+        .where(
+            models.HostedSpendReservation.account_id == account_id,
+            models.HostedSpendReservation.status.in_(
+                ("reserved", "dispatched", "recovery_required")
+            ),
+        )
+        .order_by(models.HostedSpendReservation.id)
+        .limit(limit)
+    )
+    if after_id is not None:
+        query = query.where(models.HostedSpendReservation.id > after_id)
+    return [
+        {
+            "reservation_id": str(row.id),
+            "operation_key": row.operation_key,
+            "created_at": row.created_at.isoformat(),
+            "updated_at": row.updated_at.isoformat(),
+            "status": row.status,
+            "reserved_usd": str(row.reserved),
+            "period": row.period.isoformat(),
+        }
+        for row in db.scalars(query)
+    ]
