@@ -3191,7 +3191,7 @@ class OpenAIGatewayService:
         authorized_ids = self._authorized_model_ids(account_models)
         gateway_enabled_models: List[tuple[models.AIModel, str]] = []
         unauthorized_gateway_models: List[tuple[models.AIModel, str]] = []
-        default_gateway_model: Optional[GatewayModel] = None
+        default_gateway_model: Optional[models.AIModel] = None
         for ai_model in account_models:
             runtime = resolve_ai_model_runtime(ai_model)
             if runtime.model_gateway_enabled and runtime.model_gateway_model_alias:
@@ -3353,7 +3353,7 @@ class OpenAIGatewayService:
         *,
         provider: GatewayProvider,
         gateway_enabled_models: List[tuple[models.AIModel, str]],
-    ) -> Optional[GatewayModel]:
+    ) -> Optional[models.AIModel]:
         """Auto-register an unknown ``claude-*`` model for subscription OAuth.
 
         Claude Code updates ship new built-in dated model identifiers (and the
@@ -3401,7 +3401,7 @@ class OpenAIGatewayService:
         if not base_requested.lower().startswith("claude-"):
             return None
 
-        template: Optional[GatewayModel] = None
+        template: Optional[models.AIModel] = None
         for ai_model, _alias in gateway_enabled_models:
             if (
                 (ai_model.provider_name or "").strip().lower() == "anthropic"
@@ -3481,7 +3481,7 @@ class OpenAIGatewayService:
         *,
         provider: GatewayProvider,
         gateway_enabled_models: List[tuple[models.AIModel, str]],
-    ) -> Optional[GatewayModel]:
+    ) -> Optional[models.AIModel]:
         """Auto-register an unknown Codex/OpenAI model for ChatGPT OAuth.
 
         Codex CLI ships a built-in picker (``gpt-6-astra``, dated gpt-5.6
@@ -3517,7 +3517,7 @@ class OpenAIGatewayService:
         if base_requested is None:
             return None
 
-        template: Optional[GatewayModel] = None
+        template: Optional[models.AIModel] = None
         for ai_model, _alias in gateway_enabled_models:
             if (
                 (ai_model.provider_name or "").strip().lower() == "openai-codex"
@@ -3549,14 +3549,14 @@ class OpenAIGatewayService:
         *,
         identifier: str,
         alias: str,
-        template: GatewayModel,
+        template: models.AIModel,
         provider_name: str,
         source_agent: str,
         managed_by: str,
         name_prefix: str,
         description: str,
         log_label: str,
-    ) -> Optional[GatewayModel]:
+    ) -> Optional[models.AIModel]:
         """Create a sibling models.AIModel + agent binding under a savepoint.
 
         A failure here must undo ONLY the auto-registration writes. A
@@ -8691,7 +8691,9 @@ class OpenAIGatewayService:
             # from the live upstream map once (background thread, negative-
             # cached) and fix this row when found.
             try:
-                schedule_price_lookup(ai_model=ai_model, api_usage_id=str(usage_row.id))
+                schedule_price_lookup(
+                    ai_model_id=ai_model.id, api_usage_id=str(usage_row.id)
+                )
             except Exception:  # noqa: BLE001 - never break recording
                 logger.debug("Scheduling live price lookup failed", exc_info=True)
             # Tell an admin the catalog is missing this model. Deduplicated

@@ -371,6 +371,8 @@ async def test_repeated_cancellation_drains_accounting_owned_session(
                     try:
                         await task
                     except asyncio.CancelledError:
+                        # Expected: the request task was cancelled to prove
+                        # accounting keeps its Session through drain.
                         pass
         assert len(accounting) == 1
         assert accounting[0] in closed

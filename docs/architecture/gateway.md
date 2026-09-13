@@ -64,7 +64,7 @@ creates a fresh worker-owned Session; request dependency cleanup cannot close it
 | Policy evaluation | Load current rules in a fresh short unit, then close it before detectors or approval waits. Reload rules at the initial stream pull and required final buffered-output checks. |
 | Credential preparation | Re-read the selected model through CRUD, resolve its current credentials, persist refresh/rotation, and close before inference. Provider callbacks receive only the required access credentials; Codex refresh tokens stay inside this phase. |
 | Provider and stream | OpenAI Chat Completions, Responses (including native passthrough and its transcode fallback), Codex, Anthropic and Gemini retain scalar model/auth/budget values. No database Session spans inference, stream pulls or retry backoff. |
-| Completion and cancellation | Record usage and budget rollups through CRUD in a fresh accounting Session. Close on success or failure. Repeated cancellation drains a running worker before teardown; deferred recording retains the existing local once-only behavior. |
+| Completion and cancellation | Record usage and budget rollups through CRUD in a fresh accounting Session. Close on success or failure. Unpriced-model live price lookup is scheduled with the model id only; the lookup worker re-reads the row through CRUD on its own Session so Alibaba overlay refresh can resolve stored credentials without the HTTP snapshot carrying secrets. Repeated cancellation drains a running worker before teardown; deferred recording retains the existing local once-only behavior. |
 
 OAuth credential rotation deliberately retains its serialized database lock
 across the bounded refresh HTTP call, because concurrent single-use refreshes
