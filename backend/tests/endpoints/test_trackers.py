@@ -285,6 +285,8 @@ GITHUB_GITLAB_UNLOCKED = {
     "get_pull_request",
     "update_pull_request",
     "create_pull_request",
+    "get_issue_triage_context",
+    "apply_issue_triage",
 }
 
 

@@ -91,6 +91,8 @@ EXPECTED_TOOLS = {
     "search",
     "estimate_compliance",
     "improve_compliance",
+    "get_issue_triage_context",
+    "apply_issue_triage",
     "request_approval",
     "permission_prompt",
     "add_comment",

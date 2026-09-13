@@ -898,19 +898,37 @@ def get_tracker_types(account: Account, db: Session) -> List[str]:
 def register_default_tools(server: DynamicMCPServer):
     """Register all default tools with the DynamicMCPServer.
 
-    This function registers the 6 default tools from the current MCP implementation:
-    1. get_issue
-    2. create_issue
-    3. update_issue
-    4. search
-    5. estimate_compliance
-    6. improve_compliance
+    This function registers the 8 default tools from the current MCP implementation:
+    1. get_issue_triage_context
+    2. apply_issue_triage
+    3. get_issue
+    4. create_issue
+    5. update_issue
+    6. search
+    7. estimate_compliance
+    8. improve_compliance
 
     Args:
         server: The DynamicMCPServer instance to register tools with
     """
     # Import the MCP router functions
     from preloop.api.endpoints import mcp as mcp_router
+
+    from preloop.tools.builtin_defs import (
+        APPLY_ISSUE_TRIAGE_TOOL,
+        GET_ISSUE_TRIAGE_CONTEXT_TOOL,
+    )
+
+    for definition, handler in (
+        (GET_ISSUE_TRIAGE_CONTEXT_TOOL, mcp_router.get_issue_triage_context),
+        (APPLY_ISSUE_TRIAGE_TOOL, mcp_router.apply_issue_triage),
+    ):
+        server.register_default_tool(
+            name=definition["name"],
+            description=definition["description"],
+            input_schema=definition["schema"],
+            handler=handler,
+        )
 
     # Tool 1: get_issue
     server.register_default_tool(
@@ -1093,7 +1111,7 @@ def register_default_tools(server: DynamicMCPServer):
         handler=mcp_router.improve_compliance,
     )
 
-    logger.info("All 6 default tools registered successfully")
+    logger.info("All 8 default tools registered successfully")
 
 
 def initialize_dynamic_mcp_server() -> DynamicMCPServer:
