@@ -1,4 +1,10 @@
-"""Atomic hosted balances; callers own commit boundaries and provider dispatch."""
+"""Atomic hosted balances; callers own commit boundaries and provider dispatch.
+
+``launch_account_ids``, ``initialize_zero_launch``, and ``launch_system_models``
+are deliberate groundwork for the account-balance-baseline reconciliation
+described in the PR rollout notes. They are not wired to production callers
+yet and must be connected before hosted-spend activation.
+"""
 
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
@@ -269,7 +275,11 @@ def settle(
 def launch_account_ids(
     db: Session, *, after_id: Any = None, limit: int = 100
 ) -> list[Any]:
-    """Read a bounded stable page for the operator's launch initialization."""
+    """Read a bounded stable page for launch initialization.
+
+    Groundwork for account-balance-baseline reconciliation in the PR rollout
+    notes; wire a consumer before hosted-spend activation.
+    """
     if not 1 <= limit <= 500:
         raise ValueError("Launch batch size must be between 1 and 500")
     query = select(models.Account.id).order_by(models.Account.id).limit(limit)
@@ -286,11 +296,13 @@ def initialize_zero_launch(
     evidence: str,
     apply: bool = False,
 ) -> str:
-    """Initialize missing state after an explicit operator zero-start decision.
+    """Initialize missing state after an explicit zero-start decision.
 
     Existing balances and reservations are never reset. Caller commits each
     applied account separately. Preview is read-only and repeats checks on apply.
     Zero is consumed usage, not a replacement for the plan's included allowance.
+    Groundwork for account-balance-baseline reconciliation in the PR rollout
+    notes; wire a consumer before hosted-spend activation.
     """
     if not evidence or len(evidence) > 500:
         raise HostedSpendUnavailableError(
@@ -331,7 +343,11 @@ def initialize_zero_launch(
 
 
 def launch_system_models(db: Session, *, limit: int = 101) -> list[models.AIModel]:
-    """Read a bounded system-model set for operator tariff readiness checks."""
+    """Read a bounded system-model set for tariff readiness checks.
+
+    Groundwork for account-balance-baseline reconciliation in the PR rollout
+    notes; wire a consumer before hosted-spend activation.
+    """
     if not 1 <= limit <= 501:
         raise ValueError("Model readiness limit must be between 1 and 501")
     return list(
