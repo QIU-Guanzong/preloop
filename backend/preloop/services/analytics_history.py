@@ -6,6 +6,7 @@ firewall, approvals, budgets and audit/evidence exports never use this cutoff.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -57,6 +58,20 @@ def history_cutoff(
     return None if days is None else (now or datetime.now(UTC)) - timedelta(days=days)
 
 
+@dataclass(frozen=True)
+class AnalyticsHistoryWindow:
+    """One reporting request's policy snapshot; never cached on Account/Session."""
+
+    cutoff: datetime | None
+
+
+def resolve_history_window(
+    db: Session, *, account: models.Account, now: datetime | None = None
+) -> AnalyticsHistoryWindow:
+    """Resolve once, then pass this snapshot to every read in the request."""
+    return AnalyticsHistoryWindow(history_cutoff(db, account=account, now=now))
+
+
 def restrict_history_window(
     db: Session,
     *,
@@ -64,13 +79,18 @@ def restrict_history_window(
     start_date: datetime | None,
     end_date: datetime | None,
     now: datetime | None = None,
+    history_window: AnalyticsHistoryWindow | None = None,
 ) -> tuple[datetime | None, datetime | None]:
     """Clamp analytics windows; refuse wholly unavailable historical periods.
 
     Returning an empty/zero result for a wholly unavailable period would
     falsely imply observed zero usage. Upgrades cannot recreate deleted rows.
     """
-    cutoff = history_cutoff(db, account=account, now=now)
+    cutoff = (
+        history_window.cutoff
+        if history_window is not None
+        else history_cutoff(db, account=account, now=now)
+    )
     if cutoff is None:
         return start_date, end_date
     start = (
@@ -116,10 +136,18 @@ def storage_history_days(db: Session, *, account: models.Account) -> int | None:
 
 
 def require_session_history(
-    db: Session, *, account: models.Account, summary: dict[str, Any]
+    db: Session,
+    *,
+    account: models.Account,
+    summary: dict[str, Any],
+    history_window: AnalyticsHistoryWindow | None = None,
 ) -> None:
     """Refuse old analytics while allowing a long-lived session with new activity."""
-    cutoff = history_cutoff(db, account=account)
+    cutoff = (
+        history_window.cutoff
+        if history_window is not None
+        else history_cutoff(db, account=account)
+    )
     if cutoff is None:
         return
     dates = [

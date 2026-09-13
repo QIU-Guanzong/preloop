@@ -24,6 +24,8 @@ from preloop.models.crud import (
 )
 from preloop.models.models.account import Account
 from preloop.services.analytics_history import (
+    AnalyticsHistoryWindow,
+    resolve_history_window,
     history_cutoff,
     require_session_history,
     restrict_history_window,
@@ -111,9 +113,14 @@ class RuntimeSessionExplorerService:
         offset: int = 0,
         background_tasks: Optional[BackgroundTasks] = None,
     ) -> AccountRuntimeSessionListResponse:
+        history_window = resolve_history_window(self.db, account=account)
         start_date, end_date = self._normalize_period(start_date, end_date)
         start_date, end_date = restrict_history_window(
-            self.db, account=account, start_date=start_date, end_date=end_date
+            self.db,
+            account=account,
+            start_date=start_date,
+            end_date=end_date,
+            history_window=history_window,
         )
         results = crud_runtime_session.list_account_sessions(
             self.db,
@@ -134,7 +141,9 @@ class RuntimeSessionExplorerService:
             background_tasks=background_tasks,
         )
         items = [self._summary_row_to_schema(item) for item in raw_items]
-        self._attach_optimization_badges(account=account, items=items)
+        self._attach_optimization_badges(
+            account=account, items=items, history_window=history_window
+        )
         return AccountRuntimeSessionListResponse(
             period_start=start_date,
             period_end=end_date,
@@ -148,7 +157,11 @@ class RuntimeSessionExplorerService:
         )
 
     def _attach_optimization_badges(
-        self, *, account: Account, items: list[RuntimeSessionSummary]
+        self,
+        *,
+        account: Account,
+        items: list[RuntimeSessionSummary],
+        history_window: AnalyticsHistoryWindow,
     ) -> None:
         """Attach cached waste-score badges to session summaries in place.
 
@@ -159,13 +172,14 @@ class RuntimeSessionExplorerService:
         Args:
             account: Owning account.
             items: Session summaries for the current page.
+            history_window: The list request's already-resolved policy.
         """
         if not items:
             return
         try:
             cached_rows = crud_runtime_session_optimization_result.list_for_sessions(
                 self.db,
-                start_date=history_cutoff(self.db, account=account),
+                start_date=history_window.cutoff,
                 account_id=account.id,
                 runtime_session_ids=[item.id for item in items],
             )
@@ -276,8 +290,13 @@ class RuntimeSessionExplorerService:
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
     ) -> AccountRuntimeSessionDetailResponse:
+        history_window = resolve_history_window(self.db, account=account)
         start_date, end_date = restrict_history_window(
-            self.db, account=account, start_date=start_date, end_date=end_date
+            self.db,
+            account=account,
+            start_date=start_date,
+            end_date=end_date,
+            history_window=history_window,
         )
         summary_row = crud_runtime_session.get_account_session_summary(
             self.db,
@@ -288,7 +307,9 @@ class RuntimeSessionExplorerService:
         )
         if summary_row is None:
             raise HTTPException(status_code=404, detail="Runtime session not found")
-        require_session_history(self.db, account=account, summary=summary_row)
+        require_session_history(
+            self.db, account=account, summary=summary_row, history_window=history_window
+        )
 
         flow_execution_id = summary_row.get("flow_execution_id")
         usage_by_model = crud_api_usage.get_gateway_usage_by_model(
@@ -322,8 +343,13 @@ class RuntimeSessionExplorerService:
         interaction_limit: int = 50,
         interaction_offset: int = 0,
     ) -> AccountGatewayUsageSearchResponse:
+        history_window = resolve_history_window(self.db, account=account)
         start_date, end_date = restrict_history_window(
-            self.db, account=account, start_date=start_date, end_date=end_date
+            self.db,
+            account=account,
+            start_date=start_date,
+            end_date=end_date,
+            history_window=history_window,
         )
         summary_row = crud_runtime_session.get_account_session_summary(
             self.db,
@@ -334,7 +360,9 @@ class RuntimeSessionExplorerService:
         )
         if summary_row is None:
             raise HTTPException(status_code=404, detail="Runtime session not found")
-        require_session_history(self.db, account=account, summary=summary_row)
+        require_session_history(
+            self.db, account=account, summary=summary_row, history_window=history_window
+        )
 
         flow_execution_id = summary_row.get("flow_execution_id")
         interactions = crud_gateway_usage_search_document.search_account_documents(
@@ -369,22 +397,29 @@ class RuntimeSessionExplorerService:
         account: Account,
         runtime_session_id: str,
     ) -> RuntimeSessionActivityListResponse:
+        history_window = resolve_history_window(self.db, account=account)
         summary_row = crud_runtime_session.get_account_session_summary(
             self.db,
             account_id=str(account.id),
             runtime_session_id=runtime_session_id,
-            start_date=history_cutoff(self.db, account=account),
+            start_date=history_window.cutoff,
         )
         if summary_row is None:
             raise HTTPException(status_code=404, detail="Runtime session not found")
-        require_session_history(self.db, account=account, summary=summary_row)
+        require_session_history(
+            self.db, account=account, summary=summary_row, history_window=history_window
+        )
 
         # The timeline builder also expects interactions in the current structure
         # In a highly optimized world, we might fetch just the metadata rather than
         # the full SearchDocument. For now, limit the interactions we merge into timeline.
         start_date, end_date = self._normalize_period(None, None)
         start_date, end_date = restrict_history_window(
-            self.db, account=account, start_date=start_date, end_date=end_date
+            self.db,
+            account=account,
+            start_date=start_date,
+            end_date=end_date,
+            history_window=history_window,
         )
         flow_execution_id = summary_row.get("flow_execution_id")
         interactions = crud_gateway_usage_search_document.search_account_documents(
@@ -406,7 +441,7 @@ class RuntimeSessionExplorerService:
             summary_row=summary_row,
             interactions=interaction_items,
         )
-        cutoff = history_cutoff(self.db, account=account)
+        cutoff = history_window.cutoff
         if cutoff is not None:
             items = [
                 item
@@ -428,15 +463,18 @@ class RuntimeSessionExplorerService:
         deterministic summary from captured usage until persisted model-backed
         summaries are enabled.
         """
+        history_window = resolve_history_window(self.db, account=account)
         summary_row = crud_runtime_session.get_account_session_summary(
             self.db,
             account_id=str(account.id),
             runtime_session_id=runtime_session_id,
-            start_date=history_cutoff(self.db, account=account),
+            start_date=history_window.cutoff,
         )
         if summary_row is None:
             raise HTTPException(status_code=404, detail="Runtime session not found")
-        require_session_history(self.db, account=account, summary=summary_row)
+        require_session_history(
+            self.db, account=account, summary=summary_row, history_window=history_window
+        )
         summary = self._summary_row_to_schema(summary_row)
         fast_model = crud_ai_model.get_default_active_model(
             self.db, account_id=str(account.id)
