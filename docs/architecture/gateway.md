@@ -69,6 +69,11 @@ canonical spend bucket. User-scoped policies apply to spending attributed to
 agents owned by that user; they do not cover every directly authenticated call.
 An alias rename preserves legacy model-ID policy applicability to the current
 model bucket; it does not migrate historical spend from the former alias.
+New explicit alias-scoped policies must name an enabled gateway model available
+to the account. Existing account/agent/API-key alias policies remain readable
+if that alias is later renamed or disabled, but do not follow the model to its
+new alias. Review and explicitly replace those policies when changing model
+routing. Listing policies never rewrites aliases or historical spend.
 
 ### Historical repricing jobs
 

@@ -316,8 +316,11 @@ def test_import_new_default_unmarks_existing_without_partial_flush(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mechanism", [None, "standard", "manual", "slack", "mattermost", "webhook"]
+)
 async def test_update_empty_human_routing_keeps_actor_as_approver(
-    db_session, import_account, monkeypatch
+    db_session, import_account, monkeypatch, mechanism
 ):
     from preloop.api.endpoints.tools import (
         create_approval_workflow,
@@ -333,7 +336,7 @@ async def test_update_empty_human_routing_keeps_actor_as_approver(
     account, users = import_account
     created = await create_approval_workflow(
         workflow_data=ApprovalWorkflowCreate(
-            name="Actor default", approval_type="standard"
+            name="Actor default", **({"approval_type": mechanism} if mechanism else {})
         ),
         account=account,
         current_user=users[0],

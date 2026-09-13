@@ -1226,7 +1226,7 @@ async def create_approval_workflow(
         ensure_permission_in_oss, db, current_user, "manage_approval_workflows"
     )
     if (
-        workflow_data.approval_type in {"standard", "manual"}
+        workflow_data.approval_mode != "ai_driven"
         and not workflow_data.approver_user_ids
         and not workflow_data.approver_team_ids
     ):
@@ -1368,8 +1368,7 @@ async def update_approval_workflow(
         ensure_permission_in_oss, db, current_user, "manage_approval_workflows"
     )
     if (
-        update_data.get("approval_type", workflow.approval_type)
-        in {"standard", "manual"}
+        update_data.get("approval_mode", workflow.approval_mode) != "ai_driven"
         and not update_data.get("approver_user_ids", workflow.approver_user_ids)
         and not update_data.get("approver_team_ids", workflow.approver_team_ids)
     ):

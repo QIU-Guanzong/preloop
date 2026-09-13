@@ -15,7 +15,7 @@ from preloop.models import models
 def load_migration():
     path = (
         Path(__file__).resolve().parents[2]
-        / "preloop/models/alembic/versions/20260912_account_durable_policy.py"
+        / "preloop/models/alembic/versions/20260912_history_floor.py"
     )
     spec = importlib.util.spec_from_file_location("account_durable_migration", path)
     module = importlib.util.module_from_spec(spec)

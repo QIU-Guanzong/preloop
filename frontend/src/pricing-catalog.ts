@@ -6,7 +6,7 @@ interface Catalog {
   storage_retention?: { minimum_days?: number; legal_holds_override?: boolean };
 }
 const CAPABILITIES: Record<string, string> = {
-  ai_optimization: 'AI optimization',
+  ai_optimization: 'Built-in model optimization',
   value_reviews: 'Value reviews',
   rbac: 'Role-based access control',
   team_approvals: 'Team approval workflows',

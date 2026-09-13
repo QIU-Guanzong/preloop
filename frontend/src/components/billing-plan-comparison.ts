@@ -12,7 +12,7 @@ import type {
 } from '../types/billing';
 
 const CAPABILITIES: Record<string, string> = {
-  ai_optimization: 'AI optimization',
+  ai_optimization: 'Built-in model optimization',
   value_reviews: 'Value reviews',
   rbac: 'Role-based access control',
   team_approvals: 'Team approval workflows',

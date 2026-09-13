@@ -63,10 +63,11 @@ class BudgetPolicyCreate(BaseModel):
     )
 
     @field_validator("subject_id", mode="before")
-    def serialize_uuid(cls, v):
-        if isinstance(v, uuid.UUID):
-            return str(v)
-        return v
+    @classmethod
+    def serialize_uuid(cls, value: Any) -> Any:
+        if isinstance(value, uuid.UUID):
+            return str(value)
+        return value
 
 
 class BudgetPolicyUpdate(BaseModel):
@@ -111,12 +112,24 @@ def _subject_coordinates(
         if model_alias and model_alias != alias:
             raise ValueError("Model alias does not match the selected model")
         return "account", None, alias
+    model_alias = model_alias.strip() or None if model_alias is not None else None
+    if model_alias is not None:
+        from preloop.models.crud import crud_ai_model
+        from preloop.services.model_runtime_resolver import effective_gateway_alias
+
+        available = crud_ai_model.get_all_for_account(db, account_id=account_id)
+        if not any(
+            effective_gateway_alias(model) == model_alias for model in available
+        ):
+            raise ValueError(
+                "Model alias does not match an enabled gateway model in this account"
+            )
     return subject_type, subject_id, model_alias
 
 
-def _policy_to_response(db: Session, policy: Any) -> BudgetPolicyResponse:
-    """Serialize a policy with its period-aligned current spend."""
-    response = BudgetPolicyResponse(
+def _policy_response_fields(policy: Any) -> BudgetPolicyResponse:
+    """Serialize configured fields without an individual spend query."""
+    return BudgetPolicyResponse(
         id=policy.id,
         subject_type=policy.subject_type,
         subject_id=policy.subject_id,
@@ -130,25 +143,44 @@ def _policy_to_response(db: Session, policy: Any) -> BudgetPolicyResponse:
         notification_team_ids=policy.notification_team_ids,
         notification_emails=policy.notification_emails,
     )
-    try:
-        now = datetime.now(timezone.utc)
-        bucket_type, bucket_subject_id, bucket_model_alias = spend_bucket_for_policy(
-            policy
-        )
+
+
+def _policies_to_response(
+    db: Session, policies: list[Any]
+) -> list[BudgetPolicyResponse]:
+    """Decorate one account's policies from a single current-period spend query."""
+    responses = [_policy_response_fields(policy) for policy in policies]
+    if not policies:
+        return responses
+    now = datetime.now(timezone.utc)
+    buckets = []
+    for policy, response in zip(policies, responses, strict=False):
         response.period_start = get_period_start(now, policy.period)
         response.period_end = get_period_end(now, policy.period)
-        response.current_spend_usd = crud_budget_spend.get_spend(
-            db,
-            account_id=policy.account_id,
-            subject_type=bucket_type,
-            subject_id=bucket_subject_id,
-            model_alias=bucket_model_alias,
-            period=policy.period,
-            period_start=response.period_start,
+        bucket_type, subject_id, alias = spend_bucket_for_policy(policy)
+        buckets.append(
+            (
+                bucket_type,
+                subject_id,
+                alias or None,
+                policy.period,
+                response.period_start,
+            )
         )
-    except Exception:  # noqa: BLE001 - spend decoration must not break listing
-        logger.exception("Failed to resolve current spend for policy %s", policy.id)
-    return response
+    try:
+        spend = crud_budget_spend.get_spend_multi(
+            db, account_id=policies[0].account_id, buckets=list(dict.fromkeys(buckets))
+        )
+    except Exception:  # noqa: BLE001 - unavailable spend is unknown, never zero
+        logger.exception("Failed to resolve current spend for account policies")
+        return responses
+    for response, bucket in zip(responses, buckets, strict=False):
+        response.current_spend_usd = spend.get(bucket, 0.0)
+    return responses
+
+
+def _policy_to_response(db: Session, policy: Any) -> BudgetPolicyResponse:
+    return _policies_to_response(db, [policy])[0]
 
 
 @router.post(
@@ -198,7 +230,7 @@ def create_budget_policy(
         subject_id=subject_id_uuid,
     )
     for p in existing:
-        if p.model_alias == model_alias and p.period == policy_in.period:
+        if (p.model_alias or None) == model_alias and p.period == policy_in.period:
             raise HTTPException(
                 status_code=400,
                 detail="Policy with this subject, model, and period already exists",
@@ -262,31 +294,28 @@ def get_budget_policies(
                 subject_type="account",
                 subject_id=None,
             )
-            return [
-                _policy_to_response(db, policy)
-                for policy in [
+            return _policies_to_response(
+                db,
+                [
                     *legacy,
                     *(
                         policy
                         for policy in account_policies
                         if policy.model_alias == alias
                     ),
-                ]
-            ]
+                ],
+            )
         policies = crud_budget_policy.get_policies_for_subject(
             db,
             account_id=current_user.account_id,
             subject_type=lookup_subject_type,
             subject_id=sid,
         )
-        return [_policy_to_response(db, policy) for policy in policies]
+        return _policies_to_response(db, policies)
 
-    return [
-        _policy_to_response(db, policy)
-        for policy in crud_budget_policy.get_multi(
-            db, account_id=str(current_user.account_id)
-        )
-    ]
+    return _policies_to_response(
+        db, crud_budget_policy.get_multi(db, account_id=str(current_user.account_id))
+    )
 
 
 @router.put(

@@ -12,7 +12,7 @@ def validate_budget_subject(
     if subject_type == "account":
         if subject_id is not None:
             raise ValueError("Account policies must not specify a subject id")
-        return
+        return None
     subjects = {
         "api_key": models.ApiKey,
         "managed_agent": models.ManagedAgent,
