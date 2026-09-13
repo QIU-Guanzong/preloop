@@ -383,6 +383,100 @@ class CRUDBilling:
         }
         return str(generation) if generation else None
 
+    def bind_checkout_customer(
+        self,
+        db: Session,
+        *,
+        account_id: str,
+        customer_id: str,
+        session_id: str,
+        subscription_id: str,
+        allow_association: bool,
+    ) -> bool:
+        """Bind a trusted checkout or durably acknowledge an identity conflict.
+
+        Email matching is not account authorization. Only a server-generated
+        authenticated account reference may fill a NULL customer mapping.
+        Conflicts never change ownership, entitlements or provider objects.
+        Repeated deliveries retain one auditable reconciliation result.
+        """
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:customer, 0))"),
+            {"customer": customer_id},
+        )
+        account = self.lock_account(db, account_id)
+        key = f"checkout:{session_id}"
+        operation = self.operation(db, account_id, key)
+        if operation is not None:
+            result = operation.result or {}
+            associated = (
+                result.get("status") == "associated"
+                and account.stripe_customer_id == customer_id
+                and operation.payload.get("customer_id") == customer_id
+                and operation.payload.get("subscription_id") == subscription_id
+            )
+            if result.get("status") == "associated" and not associated:
+                operation.result = {
+                    "status": "reconciliation_required",
+                    "reason": "customer_mapping_changed",
+                }
+            db.commit()
+            return associated
+        owner = self.account_by_customer(db, customer_id)
+        reason = None
+        if owner is not None and str(owner.id) != str(account.id):
+            reason = "customer_owned_by_another_account"
+        elif account.stripe_customer_id and account.stripe_customer_id != customer_id:
+            reason = "customer_mismatch"
+        elif not account.stripe_customer_id and not allow_association:
+            reason = "account_reference_required"
+        if reason is None:
+            account.stripe_customer_id = customer_id
+        db.add(
+            models.BillingOperation(
+                account_id=account.id,
+                operation_key=key,
+                kind="checkout_reconciliation",
+                status="completed",
+                lease_until=None,
+                payload={
+                    "session_id": session_id,
+                    "subscription_id": subscription_id,
+                    "customer_id": customer_id,
+                },
+                result={
+                    "status": "reconciliation_required" if reason else "associated",
+                    "reason": reason,
+                    "existing_customer_id": account.stripe_customer_id,
+                },
+            )
+        )
+        db.commit()
+        return reason is None
+
+    def checkout_reconciliation_hold(
+        self, db: Session, *, customer_id: str, subscription_id: str
+    ) -> models.BillingOperation | None:
+        """Find only an already-recorded provider identity conflict.
+
+        Provider webhook processing may acknowledge this exact pair without
+        retrying a permanent conflict. Unrelated unlinked subscriptions must
+        still retry until checkout establishes their account.
+        """
+        return (
+            db.query(models.BillingOperation)
+            .filter(
+                models.BillingOperation.kind == "checkout_reconciliation",
+                models.BillingOperation.payload["customer_id"].as_string()
+                == customer_id,
+                models.BillingOperation.payload["subscription_id"].as_string()
+                == subscription_id,
+                models.BillingOperation.result["status"].as_string()
+                == "reconciliation_required",
+            )
+            .first()
+        )
+
     def create_checkout_account(
         self,
         db: Session,
