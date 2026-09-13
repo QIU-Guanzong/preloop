@@ -129,6 +129,33 @@ describe('PreloopFlowForm approval window', () => {
     expect((element as any).flow.approval_window_seconds).to.equal(null);
   });
 
+  it('keeps a typed amount and unit across a GitHub OAuth round-trip', async () => {
+    const element = await mount(null);
+    const input = amountInput(element);
+    input.value = '48';
+    input.dispatchEvent(new CustomEvent('sl-input'));
+    await element.updateComplete;
+    const select = unitSelect(element);
+    select.value = 'hours';
+    select.dispatchEvent(new CustomEvent('sl-change'));
+    await element.updateComplete;
+
+    expect((element as any).flow.approval_window_seconds).to.equal(172800);
+
+    element.dispatchEvent(new CustomEvent('github-oauth-starting'));
+    const snapshot = JSON.parse(
+      sessionStorage.getItem('preloop_flow_form_state') || '{}'
+    );
+    expect(snapshot.approvalWindowAmount).to.equal(48);
+    expect(snapshot.approvalWindowUnit).to.equal('hours');
+
+    fixtureCleanup();
+    const restored = await mount(null);
+    expect(amountInput(restored).value).to.equal('48');
+    expect(unitSelect(restored).value).to.equal('hours');
+    expect((restored as any).flow.approval_window_seconds).to.equal(172800);
+  });
+
   it('explains that a parked run does not spend the execution timeout', async () => {
     const element = await mount(259200);
     const help = element.shadowRoot?.querySelector('.approval-window-help');
