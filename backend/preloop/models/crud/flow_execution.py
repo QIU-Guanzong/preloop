@@ -450,7 +450,8 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
 
         The caller resolves ownership before calling this internal write. The
         lock protects concurrent result writers and refreshes stale ORM state.
-        Explicit adoption can defer commit to its thread-registration boundary.
+        An identical URL (and branch, when supplied) is a no-op. Explicit
+        adoption can defer commit to its thread-registration boundary.
         """
         with db.no_autoflush:
             execution = (
@@ -471,6 +472,10 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             and current["pr_source_branch"] != source_branch
         ):
             raise ValueError("Publishing execution binding changed")
+        if current.get("pr_url") == pr_url and (
+            not source_branch or current.get("pr_source_branch") == source_branch
+        ):
+            return execution
         execution.result = {
             **current,
             "pr_url": pr_url,

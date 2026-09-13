@@ -531,6 +531,9 @@ class FlowExecutionOrchestrator:
         # PR/MR the container wrapper opened in its post-execution step, read
         # from the PRELOOP_PR_OPENED log line and bound at terminal status.
         self._opened_pr: Optional[Dict[str, str]] = None
+        # True after this orchestrator has already persisted ``_opened_pr``.
+        # Live log frames bind immediately; terminal rescan must not bind twice.
+        self._opened_pr_bound = False
         # Native CLI agent session (opencode/codex) reported by the container
         # via the PRELOOP_AGENT_SESSION marker, persisted on the execution so
         # a correlated PR-comment resume can invoke the CLI resume flag.
@@ -3111,7 +3114,9 @@ class FlowExecutionOrchestrator:
             if archive:
                 artifact = extract_result_json(archive)
         sanitized = sanitize_captured_result(artifact)
-        return self._persist_cra_result_boundary(sanitized)
+        return self._persist_cra_result_boundary(
+            sanitized, session_reference=session_reference
+        )
 
     def _cra_prompt_text(self) -> Optional[str]:
         """Configured flow prompt used to detect an expected CRA result schema."""
@@ -3125,25 +3130,42 @@ class FlowExecutionOrchestrator:
             return resolved
         return None
 
-    def _cra_execution_runner(self) -> Optional[Dict[str, Any]]:
+    def _cra_execution_runner(
+        self, session_reference: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
         """Where this execution ran, derived from the row the same way the API does.
 
         The agent cannot know this, so the persist boundary stamps it into
         ``result.runner`` rather than storing the agent's null placeholder.
+        Console reads treat a missing assignment as unknown. A live
+        control-plane capture session that is not a private-runner lease is
+        hosted, even when the row has not recorded that assignment yet.
         """
         from preloop.services.runner_service import derive_execution_runner
 
         execution = getattr(self, "execution_log", None)
-        if execution is None:
-            return None
-        reference = getattr(execution, "agent_session_reference", None)
+        stored = (
+            getattr(execution, "agent_session_reference", None)
+            if execution is not None
+            else None
+        )
+        if isinstance(stored, str) and stored.strip():
+            reference: Optional[str] = stored
+        elif isinstance(session_reference, str) and session_reference.strip():
+            reference = session_reference
+        else:
+            reference = None
         return derive_execution_runner(
-            runner_id=getattr(execution, "runner_id", None),
-            agent_session_reference=reference if isinstance(reference, str) else None,
+            runner_id=(
+                getattr(execution, "runner_id", None) if execution is not None else None
+            ),
+            agent_session_reference=reference,
         )
 
     def _persist_cra_result_boundary(
-        self, artifact: Optional[Dict[str, Any]]
+        self,
+        artifact: Optional[Dict[str, Any]],
+        session_reference: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Validate CRA result.json after capture/sanitize."""
         from preloop.cra.persist import (
@@ -3163,7 +3185,7 @@ class FlowExecutionOrchestrator:
             trigger_payload=getattr(self, "trigger_event_data", None),
             platform_approvals=approvals,
             authority=authority,
-            execution_runner=self._cra_execution_runner(),
+            execution_runner=self._cra_execution_runner(session_reference),
         )
         self._cra_persist_decision = decision
         persisted = decision.artifact
@@ -3593,6 +3615,7 @@ class FlowExecutionOrchestrator:
                 parsed["url"],
                 source_branch=parsed.get("branch"),
             )
+            self._opened_pr_bound = True
         logger.info("Wrapper opened a pull request for this execution")
         self.execution_logger.log_milestone(
             "pull_request_opened",
@@ -3713,15 +3736,18 @@ class FlowExecutionOrchestrator:
     def _bind_opened_pr(self, output_summary: Optional[str]) -> None:
         """Persist the wrapper-opened PR on this execution's result.
 
-        Runs on the terminal path so a later comment on that PR can resume
-        this flow. ``output_summary`` is rescanned when the live stream
-        missed the marker line (reconnects can drop the tail).
+        Live log frames persist in ``_note_opened_pr``. This rescans
+        ``output_summary`` when that path missed the marker, and binds a
+        trusted publication receipt that never went through the wrapper
+        marker. The same URL is not written twice.
         """
         if self._opened_pr is None and output_summary:
             for line in output_summary.splitlines():
                 if PR_OPENED_MARKER in line:
                     self._note_opened_pr(line)
                     break
+        if getattr(self, "_opened_pr_bound", False):
+            return
         if self._opened_pr is None or self.execution_log is None:
             return
         record_opened_pr(
@@ -3730,6 +3756,7 @@ class FlowExecutionOrchestrator:
             self._opened_pr.get("url", ""),
             source_branch=self._opened_pr.get("branch"),
         )
+        self._opened_pr_bound = True
 
     async def _start_queued_followup(self) -> None:
         """Start the single follow-up resume queued while this run was going.
@@ -3968,7 +3995,9 @@ class FlowExecutionOrchestrator:
                 if isinstance(result_artifact, dict)
                 else nudge_artifact
             )
-            merged_artifact = self._persist_cra_result_boundary(merged_artifact)
+            merged_artifact = self._persist_cra_result_boundary(
+                merged_artifact, session_reference=session_reference
+            )
 
         if nudge_outcome == "confirmed_success":
             return result.status.value, result.error_message, merged_artifact
