@@ -624,6 +624,17 @@ func runRunnerSession(
 				}
 				continue
 			}
+			if msg.Type == "error" && msg.Error == "Invalid runner log batch" && msg.BatchID != "" {
+				if *runningCmd != nil {
+					if b, ok := (*runningCmd).Stdout.(*runnerLogBuffer); ok {
+						b.acknowledgeBatch(msg.BatchID)
+					}
+				}
+				if *lastComplete != nil && (*lastComplete).logBuffer != nil {
+					(*lastComplete).logBuffer.acknowledgeBatch(msg.BatchID)
+				}
+				continue
+			}
 			if strings.HasPrefix(msg.Type, "publication_") {
 				if publication == nil {
 					return errors.New("unexpected publication message without active lease")

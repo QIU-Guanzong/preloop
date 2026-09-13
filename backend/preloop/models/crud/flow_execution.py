@@ -464,8 +464,14 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         if execution is None:
             return None
         current = execution.result if isinstance(execution.result, dict) else {}
-        if current.get("pr_url") and current["pr_url"] != pr_url:
-            raise ValueError("Publishing execution binding changed")
+        stored_url = current.get("pr_url")
+        if stored_url and stored_url != pr_url:
+            from preloop.services.flow_pr_binding import normalize_pr_url
+
+            stored_key = normalize_pr_url(stored_url) or stored_url
+            incoming_key = normalize_pr_url(pr_url) or pr_url
+            if stored_key != incoming_key:
+                raise ValueError("Publishing execution binding changed")
         if (
             source_branch
             and current.get("pr_source_branch")

@@ -126,34 +126,6 @@ func (b *runnerLogBuffer) String() string {
 	return strings.Join(b.results, "\n")
 }
 
-func (b *runnerLogBuffer) batch() []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	size := 0
-	count := 0
-	for count < len(b.pending) && count < 128 {
-		size += len(b.pending[count])
-		count++
-		if size >= runnerLogLineLimit {
-			break
-		}
-	}
-	return append([]string(nil), b.pending[:count]...)
-}
-
-func (b *runnerLogBuffer) acknowledge(count int) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, line := range b.pending[:count] {
-		b.pendingBytes -= len(line)
-	}
-	copy(b.pending, b.pending[count:])
-	for i := len(b.pending) - count; i < len(b.pending); i++ {
-		b.pending[i] = ""
-	}
-	b.pending = b.pending[:len(b.pending)-count]
-}
-
 func (b *runnerLogBuffer) setLogAcknowledgements(enabled bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

@@ -509,3 +509,79 @@ async def test_legacy_terminal_log_frame_remains_bounded_and_supported(
         await runners.persist_runner_logs(
             MagicMock(), uuid4(), ["progress"] * 512, str(uuid4())
         )
+
+
+@pytest.mark.asyncio
+async def test_invalid_log_batch_error_echoes_batch_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI needs the rejected identity to drop inflight and reclaim budget."""
+    execution_id = uuid4()
+    batch_id = str(uuid4())
+    runner = SimpleNamespace(
+        id=uuid4(),
+        account_id=uuid4(),
+        current_execution_id=execution_id,
+        pending_job=None,
+        halt_requested=False,
+        status="busy",
+        reported_status="RUNNING",
+        publication_capabilities=None,
+    )
+
+    def set_publication_capabilities(
+        db: object,
+        *,
+        runner_id: UUID,
+        capabilities: dict | None,
+        expected_connection_id: str | None = None,
+        offline: bool = False,
+        clear_lease: bool = False,
+        execution_id: UUID | None = None,
+        reported_status: str | None = None,
+        commit: bool = True,
+    ) -> bool:
+        current = (runner.publication_capabilities or {}).get("connection_id")
+        if expected_connection_id is not None and current != expected_connection_id:
+            return False
+        runner.publication_capabilities = capabilities
+        return True
+
+    websocket = MagicMock()
+    websocket.accept = AsyncMock()
+    websocket.send_json = AsyncMock()
+    websocket.receive_json = AsyncMock(
+        side_effect=[
+            {
+                "type": "logs",
+                "execution_id": str(execution_id),
+                "batch_id": batch_id,
+                "lines": ["progress"] * 512,
+            },
+            WebSocketDisconnect(),
+        ]
+    )
+    monkeypatch.setattr(runners, "_authenticate_runner", lambda *args: runner)
+    monkeypatch.setattr(runners, "emit_runner_updated", MagicMock())
+    monkeypatch.setattr(runners.crud_flow_runner, "get", lambda *args, **kwargs: runner)
+    monkeypatch.setattr(runners.crud_flow_runner, "touch_heartbeat", MagicMock())
+    monkeypatch.setattr(
+        runners.crud_flow_runner,
+        "set_publication_capabilities",
+        set_publication_capabilities,
+    )
+
+    await runners.runner_ws(websocket, runner.id, MagicMock())
+
+    errors = [
+        call.args[0]
+        for call in websocket.send_json.call_args_list
+        if call.args and call.args[0].get("type") == "error"
+    ]
+    assert errors == [
+        {
+            "type": "error",
+            "error": "Invalid runner log batch",
+            "batch_id": batch_id,
+        }
+    ]

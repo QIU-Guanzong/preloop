@@ -525,7 +525,11 @@ async def runner_ws(
                         )
                     except (ValueError, TypeError):
                         await websocket.send_json(
-                            {"type": "error", "error": "Invalid runner log batch"}
+                            {
+                                "type": "error",
+                                "error": "Invalid runner log batch",
+                                "batch_id": raw.get("batch_id"),
+                            }
                         )
                         continue
                     execution = crud_flow_execution.get(

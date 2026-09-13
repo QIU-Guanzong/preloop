@@ -21,14 +21,16 @@ func TestRunnerLogBufferSeparatesEnvelopeAndBoundsUnterminatedOutput(t *testing.
 	var buffer runnerLogBuffer
 	line := resultLine(`{"status":"success"}`, 0)
 	_, _ = buffer.Write([]byte("early\n" + line[:20]))
-	if got := buffer.batch(); len(got) != 1 || got[0] != "early" {
-		t.Fatalf("batch=%v", got)
+	early, err := buffer.nextBatch()
+	if err != nil || early == nil || len(early.lines) != 1 || early.lines[0] != "early" {
+		t.Fatalf("batch=%v err=%v", early, err)
 	}
-	buffer.acknowledge(1)
+	buffer.acknowledgeBatch(early.id)
 	_, _ = buffer.Write([]byte(line[20:] + "\nlast partial"))
 	buffer.finish()
-	if got := buffer.batch(); len(got) != 1 || got[0] != "last partial" {
-		t.Fatalf("batch=%v", got)
+	last, err := buffer.nextBatch()
+	if err != nil || last == nil || len(last.lines) != 1 || last.lines[0] != "last partial" {
+		t.Fatalf("batch=%v err=%v", last, err)
 	}
 	if buffer.String() != line {
 		t.Fatal("missing result envelope")
@@ -180,6 +182,22 @@ func TestRunnerLogsRetainBatchUntilServerAcknowledges(t *testing.T) {
 	buffer.acknowledgeBatch(batch.id)
 	if next, err := buffer.nextBatch(); err != nil || next != nil || buffer.pendingBytes != 0 {
 		t.Fatal("acknowledged batch was retained")
+	}
+}
+
+func TestRejectedLogBatchReclaimsInflight(t *testing.T) {
+	var buffer runnerLogBuffer
+	buffer.setLogAcknowledgements(true)
+	_, _ = buffer.Write([]byte("native session\n"))
+	batch, err := buffer.nextBatch()
+	if err != nil || batch == nil {
+		t.Fatal(err)
+	}
+	buffer.markBatchSent(batch.id)
+	// Same drop the receive loop uses when the server rejects the batch.
+	buffer.acknowledgeBatch(batch.id)
+	if buffer.pendingBytes != 0 || len(buffer.inflight) != 0 {
+		t.Fatal("rejected batch still consumed queue budget")
 	}
 }
 
