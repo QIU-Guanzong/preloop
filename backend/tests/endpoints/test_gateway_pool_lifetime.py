@@ -599,7 +599,7 @@ async def test_gateway_auth_releases_pool_before_other_request_dependencies(
 
 
 @pytest.mark.asyncio
-async def test_gateway_owned_auth_detaches_context_and_still_checks_revocation(
+async def test_gateway_owned_auth_snapshots_context_and_still_checks_revocation(
     gateway_pool: GatewayPoolFixture,
 ) -> None:
     """Releasing auth reads never turns a prior success into an auth cache."""
@@ -622,8 +622,8 @@ async def test_gateway_owned_auth_detaches_context_and_still_checks_revocation(
         context = await authenticate_bearer_token(token, db, owns_db_session=True)
         assert context is not None and context.api_key is not None
         assert gateway_pool.engine.pool.checkedout() == 0
-        assert inspect(context.user).detached
-        assert inspect(context.api_key).detached
+        assert inspect(context.user, raiseerr=False) is None
+        assert inspect(context.api_key, raiseerr=False) is None
         # Scalar state needed by the next phase remains readable without SQL.
         assert context.user.account_id == gateway_pool.account_id
         assert context.api_key.id == key_id
@@ -638,7 +638,7 @@ async def test_gateway_owned_auth_detaches_context_and_still_checks_revocation(
 
 
 @pytest.mark.asyncio
-async def test_gateway_owned_oauth_auth_detaches_context_and_checks_revocation(
+async def test_gateway_owned_oauth_auth_snapshots_context_and_checks_revocation(
     gateway_pool: GatewayPoolFixture,
 ) -> None:
     """OAuth snapshots release capacity while subsequent revocation stays fresh."""
@@ -664,12 +664,12 @@ async def test_gateway_owned_oauth_auth_detaches_context_and_checks_revocation(
         context = await authenticate_bearer_token(token, db, owns_db_session=True)
         assert context is not None and context.oauth_access_token is not None
         assert gateway_pool.engine.pool.checkedout() == 0
-        assert inspect(context.user).detached
-        assert inspect(context.oauth_access_token).detached
+        assert inspect(context.user, raiseerr=False) is None
+        assert inspect(context.oauth_access_token, raiseerr=False) is None
         assert context.user.account_id == gateway_pool.account_id
         assert context.oauth_access_token.id == oauth_id
-        assert context.oauth_access_token.scopes == ["mcp:read"]
-        assert context.oauth_access_token.client_id == "synthetic-client"
+        assert context.token == ""
+        assert not hasattr(context.oauth_access_token, "token")
         assert gateway_pool.engine.pool.checkedout() == 0
 
     with Session(gateway_pool.engine) as db:

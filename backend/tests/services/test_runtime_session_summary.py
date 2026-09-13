@@ -10,6 +10,9 @@ import httpx
 import pytest
 from openai import InternalServerError
 
+from preloop.models import models
+from preloop.services.gateway_execution import GatewayModelSnapshot
+
 from preloop.services.model_gateway_auth import ModelGatewayAuthContext
 from preloop.services.model_gateway_errors import ModelGatewayAPIError
 from preloop.services.openai_gateway import OpenAIGatewayService
@@ -37,8 +40,11 @@ def _usage(status: int = 200) -> SimpleNamespace:
     )
 
 
-def _model() -> SimpleNamespace:
-    return SimpleNamespace(
+def _model() -> models.AIModel:
+    return models.AIModel(
+        id=uuid4(),
+        name="summary",
+        account_id=uuid4(),
         provider_name="openai-compatible",
         model_identifier="summary-model",
         api_endpoint="https://summary.example.com/v1",
@@ -338,9 +344,6 @@ def test_summary_wait_releases_db_and_preserves_primary_objects_and_identity() -
         upstream_backend=MagicMock(),
         owns_db_session=True,
     )
-    service._wait_model = _model()
-    retained = (SimpleNamespace(id="runtime"), _usage())
-    service._wait_preserve = retained
     service._client_identity_headers = {"user-agent": "opencode/test"}
     children = []
 
@@ -352,6 +355,9 @@ def test_summary_wait_releases_db_and_preserves_primary_objects_and_identity() -
         assert child._owns_db_session
         assert child._resolved_runtime_session_attempted
         assert not getattr(child, "_client_identity_headers", None)
+        assert isinstance(_args[0], GatewayModelSnapshot)
+        assert child.db is not service.db
+        child.db.execute(text("SELECT 1"))
         return {"model": "openai/test", "messages": kwargs["messages"]}
 
     def completion(**_kwargs: Any) -> Any:
@@ -364,7 +370,7 @@ def test_summary_wait_releases_db_and_preserves_primary_objects_and_identity() -
 
     service.upstream_backend.completion.side_effect = completion
     try:
-        db.execute(text("SELECT 1"))
+        service.db.execute(text("SELECT 1"))
         assert engine.pool.checkedout() == 1
         with (
             patch.object(
@@ -386,13 +392,9 @@ def test_summary_wait_releases_db_and_preserves_primary_objects_and_identity() -
         ):
             assert _generate(service) == "Reviewed changes"
         assert engine.pool.checkedout() == 0
-        assert children[0]._wait_preserve == (*retained, service._wait_model)
-        preserved = release.call_args.kwargs["preserve"]
-        assert all(
-            any(item is original for item in preserved)
-            for original in (*retained, service._wait_model)
-        )
-        assert service._wait_preserve is retained
+        assert children[0]._db is None
+        assert all(call.args[0] is not db for call in release.call_args_list)
+        service._close_owned_db()
         assert service._client_identity_headers == {"user-agent": "opencode/test"}
     finally:
         db.close()

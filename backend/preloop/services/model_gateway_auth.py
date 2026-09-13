@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import logging
 import time
 from typing import Optional, Sequence
@@ -23,6 +24,11 @@ from preloop.models.crud import (
     crud_user,
 )
 from preloop.models.crud.oauth_mcp_token import crud_oauth_mcp_access_token
+from preloop.services.gateway_execution import (
+    GatewayApiKeySnapshot,
+    GatewayOAuthSnapshot,
+    GatewayUserSnapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +39,37 @@ logger = logging.getLogger(__name__)
 NO_BEARER_TOKEN = ""
 
 
-@dataclass
+@dataclass(frozen=True)
 class ModelGatewayAuthContext:
     """Authenticated model gateway request context."""
 
     token: str
-    user: models.User
-    api_key: Optional[models.ApiKey] = None
-    oauth_access_token: Optional[models.OAuthMCPAccessToken] = None
+    user: models.User | GatewayUserSnapshot
+    api_key: models.ApiKey | GatewayApiKeySnapshot | None = None
+    oauth_access_token: models.OAuthMCPAccessToken | GatewayOAuthSnapshot | None = None
+
+    def snapshot(self) -> ModelGatewayAuthContext:
+        """Copy the authenticated identity before its owning worker closes DB."""
+        if isinstance(self.user, GatewayUserSnapshot):
+            return self
+        key = self.api_key
+        return ModelGatewayAuthContext(
+            # Authentication is complete. No later phase needs the bearer.
+            token=NO_BEARER_TOKEN,
+            user=GatewayUserSnapshot(id=self.user.id, account_id=self.user.account_id),
+            api_key=GatewayApiKeySnapshot(
+                id=key.id,
+                account_id=key.account_id,
+                user_id=key.user_id,
+                name=key.name,
+                context_json=json.dumps(key.context_data or {}),
+            )
+            if key is not None
+            else None,
+            oauth_access_token=GatewayOAuthSnapshot(id=self.oauth_access_token.id)
+            if self.oauth_access_token is not None
+            else None,
+        )
 
 
 async def authenticate_bearer_token(
@@ -58,21 +87,27 @@ async def authenticate_bearer_token(
 
     from preloop.api.loop_safety import run_db_off_loop
 
-    def authenticate() -> Optional[ModelGatewayAuthContext]:
-        user = get_user_from_token_if_valid_sync(token, db)
+    def authenticate_in_session(session: Session) -> Optional[ModelGatewayAuthContext]:
+        user = get_user_from_token_if_valid_sync(token, session)
         if user is not None:
             # A last-use commit may expire the user. Hydrate while this worker
             # still owns the session rather than issuing ORM I/O on the loop.
             _ = user.id, user.account_id, user.username, user.email, user.is_active
-        context = _resolve_bearer_context(token, db, user)
-        if owns_db_session:
-            preserve = (
-                (context.user, context.api_key, context.oauth_access_token)
-                if context is not None
-                else ()
-            )
-            release_gateway_session(db, preserve=preserve)
-        return context
+        context = _resolve_bearer_context(token, session, user)
+        return (
+            context.snapshot() if owns_db_session and context is not None else context
+        )
+
+    # Capture only the engine; dependency cleanup never owns the worker Session.
+    bind = db.get_bind() if owns_db_session else None
+
+    def authenticate() -> Optional[ModelGatewayAuthContext]:
+        if not owns_db_session:
+            return authenticate_in_session(db)
+        with Session(bind=bind, expire_on_commit=False) as session:
+            context = authenticate_in_session(session)
+            release_gateway_session(session)
+            return context
 
     return await run_db_off_loop(authenticate)
 
