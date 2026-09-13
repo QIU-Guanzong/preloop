@@ -3,6 +3,7 @@ import { expect } from '@open-wc/testing';
 import {
   executionStatusVariant,
   formatApprovalWindow,
+  isExecutionRequestFailureStatus,
   parkWaitingSummary,
   parkedRowTitle,
 } from './execution-presentation';
@@ -21,6 +22,36 @@ describe('executionStatusVariant, waiting on a human', () => {
     expect(executionStatusVariant('FAILED')).to.equal('danger');
     expect(executionStatusVariant('RUNNING')).to.equal('primary');
     expect(executionStatusVariant('CANCELLED')).to.equal('neutral');
+  });
+
+  it('marks backend failure spellings as danger chips, stopped as neutral', () => {
+    expect(executionStatusVariant('TIMEOUT')).to.equal('danger');
+    expect(executionStatusVariant('TIMED_OUT')).to.equal('danger');
+    expect(executionStatusVariant('ABORTED')).to.equal('danger');
+    expect(executionStatusVariant('ERROR')).to.equal('danger');
+    expect(executionStatusVariant('STOPPED')).to.equal('neutral');
+  });
+});
+
+describe('isExecutionRequestFailureStatus', () => {
+  it('includes danger failures and operator-stopped runs', () => {
+    for (const status of [
+      'FAILED',
+      'TIMEOUT',
+      'TIMED_OUT',
+      'ABORTED',
+      'ERROR',
+      'STOPPED',
+      'CANCELLED',
+    ]) {
+      expect(isExecutionRequestFailureStatus(status)).to.equal(true);
+    }
+  });
+
+  it('does not fire on success or in-flight statuses', () => {
+    for (const status of ['SUCCEEDED', 'RUNNING', 'WAITING_FOR_HUMAN']) {
+      expect(isExecutionRequestFailureStatus(status)).to.equal(false);
+    }
   });
 });
 
