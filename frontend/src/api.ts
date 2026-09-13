@@ -119,6 +119,18 @@ let userProfileCache: TimedCacheEntry<UserProfile> | null = null;
 let userProfileInflight: Promise<UserProfile> | null = null;
 let userProfileEpoch = 0;
 
+/**
+ * GETs that are in the air right now, keyed by URL.
+ *
+ * Two components asking the same endpoint for the same thing in the same
+ * moment (the Overview and the activity feed both wanting `/api/v1/users`,
+ * a card and the attention loader both wanting the budget policies) is one
+ * question, not two. The second caller joins the first request and gets a
+ * clone of its response; nothing is remembered once it settles, so this is a
+ * coalescer, not a cache, and no caller can ever read a stale body.
+ */
+const inFlightGets = new Map<string, Promise<Response>>();
+
 export function invalidateApiCaches(): void {
   featuresCache = null;
   featuresInflight = null;
@@ -126,6 +138,9 @@ export function invalidateApiCaches(): void {
   userProfileCache = null;
   userProfileInflight = null;
   userProfileEpoch += 1;
+  // Drop coalesced GETs so a later caller cannot join a response that started
+  // under a previous session or fetch stub.
+  inFlightGets.clear();
   if (typeof sessionStorage !== 'undefined') {
     try {
       sessionStorage.removeItem('preloop.agents.gateway_summary.v1');
@@ -301,18 +316,6 @@ async function refreshToken(): Promise<RefreshResult> {
   return refreshPromise;
 }
 
-/**
- * GETs that are in the air right now, keyed by URL.
- *
- * Two components asking the same endpoint for the same thing in the same
- * moment (the Overview and the activity feed both wanting `/api/v1/users`,
- * a card and the attention loader both wanting the budget policies) is one
- * question, not two. The second caller joins the first request and gets a
- * clone of its response; nothing is remembered once it settles, so this is a
- * coalescer, not a cache, and no caller can ever read a stale body.
- */
-const inFlightGets = new Map<string, Promise<Response>>();
-
 export async function fetchWithTimeout(
   input: string,
   init: RequestInit = {},
@@ -357,7 +360,9 @@ export async function fetchWithAuth(
       return (await pending).clone();
     }
     const request = performFetchWithAuth(url, options).finally(() => {
-      inFlightGets.delete(url);
+      if (inFlightGets.get(url) === request) {
+        inFlightGets.delete(url);
+      }
     });
     inFlightGets.set(url, request);
     // The first caller gets a clone too, so every caller reads its own body.
@@ -504,7 +509,18 @@ export async function startCheckout(
       }
     );
     if (!response.ok) {
-      throw new Error('Failed to create checkout session');
+      const body = await response.json().catch(() => ({}));
+      const detail = body.detail;
+      const message = ['legacy_plan_unavailable', 'catalog_not_ready'].includes(
+        detail?.code
+      )
+        ? 'This offer has changed. Refresh the plan comparison before choosing a plan.'
+        : typeof detail?.message === 'string'
+          ? detail.message
+          : typeof detail === 'string'
+            ? detail
+            : 'Checkout is unavailable. Review the current plans or try again.';
+      throw new Error(message);
     }
     const result = await response.json();
     if (result.action === 'redirect' && result.url) {
@@ -5690,5 +5706,19 @@ export async function replayWebhookEvent(
     const body = await response.json().catch(() => null);
     throw new Error(body?.detail ?? 'Failed to replay the event');
   }
+  return response.json();
+}
+
+export interface ConfigurationCapabilities {
+  basic_budgets: boolean;
+  single_user_approvals: boolean;
+  advanced_budget_administration: boolean;
+  advanced_approvals: boolean;
+}
+
+export async function getConfigurationCapabilities(): Promise<ConfigurationCapabilities> {
+  const response = await fetchWithAuth('/api/v1/configuration-capabilities');
+  if (!response.ok)
+    throw new Error('Configuration capabilities are unavailable');
   return response.json();
 }

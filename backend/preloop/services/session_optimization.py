@@ -52,6 +52,7 @@ from preloop.schemas.gateway_usage import (
     RuntimeSessionOptimizationSuggestion,
     RuntimeSessionSummary,
 )
+from preloop.services.analytics_history import history_cutoff, require_session_history
 from preloop.services.account_governance_cache import (
     invalidate_account_governance_cache,
 )
@@ -144,8 +145,9 @@ BUDGET_SUGGESTION_MULTIPLIER = 3.0
 class SessionOptimizationService:
     """Generate cost and context optimization suggestions for runtime sessions."""
 
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, *, owns_db_session: bool = False) -> None:
         self.db = db
+        self._owns_db_session = owns_db_session
 
     def get_account_session_optimization_suggestions(
         self,
@@ -161,9 +163,11 @@ class SessionOptimizationService:
             self.db,
             account_id=str(account.id),
             runtime_session_id=runtime_session_id,
+            start_date=history_cutoff(self.db, account=account),
         )
         if summary_row is None:
             raise HTTPException(status_code=404, detail="Runtime session not found")
+        require_session_history(self.db, account=account, summary=summary_row)
         summary = RuntimeSessionExplorerService._summary_row_to_schema(summary_row)
         # Cache-only requests surface previously generated suggestions on panel
         # open without triggering a (potentially slow) generation. A miss is
@@ -760,6 +764,7 @@ class SessionOptimizationService:
         try:
             cached = crud_runtime_session_optimization_result.get_by_scope(
                 self.db,
+                start_date=history_cutoff(self.db, account=account),
                 account_id=account.id,
                 runtime_session_id=runtime_session_id,
                 scope_hash=scope_hash,
@@ -798,6 +803,7 @@ class SessionOptimizationService:
         try:
             rows = crud_runtime_session_optimization_result.list_for_sessions(
                 self.db,
+                start_date=history_cutoff(self.db, account=account),
                 account_id=account.id,
                 runtime_session_ids=[runtime_session_id],
             )
@@ -1376,6 +1382,7 @@ class SessionOptimizationService:
             auth_context,
             budget_enforcer=budget_enforcer,
             skip_runtime_session_resolution=True,
+            owns_db_session=self._owns_db_session,
         )
         return gateway
 
@@ -1796,6 +1803,7 @@ class SessionOptimizationService:
         """
         rows = crud_runtime_session_optimization_action.list_for_session(
             self.db,
+            start_date=history_cutoff(self.db, account=account),
             account_id=account.id,
             runtime_session_id=runtime_session_id,
         )

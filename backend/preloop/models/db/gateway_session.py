@@ -1,4 +1,4 @@
-"""Explicit transaction boundaries for an HTTP-owned model gateway session."""
+"""Explicit transaction boundaries for an explicitly owned model gateway session."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from preloop.models import models
 def release_gateway_session(db: Session, *, preserve: Iterable[Any]) -> None:
     """Finish request preparation and preserve detached values for provider waits.
 
-    Only an HTTP request that owns its entire session may use this boundary.
-    Internal gateways can share a caller transaction and must not call it.
+    Only a request/job that explicitly owns its entire session may use this
+    boundary. Internal gateways sharing a caller transaction must not call it.
     Credential refresh must finish its serialized rotation before this boundary.
 
     Materialize the small model/auth graph while it is still attached. Preserve

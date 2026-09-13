@@ -859,4 +859,85 @@ describe('ConsoleShell', () => {
       expect(sidebar?.classList.contains('closed')).to.be.true;
     });
   });
+  describe('upgrade modal', () => {
+    /** Collapse Lit's template line breaks so assertions test copy, not layout. */
+    function copy(el: ConsoleShell): string {
+      return (el.shadowRoot?.textContent ?? '').replace(/\s+/g, ' ').trim();
+    }
+
+    async function openGate(feature: string) {
+      const el = (await fixture(
+        html`<console-shell></console-shell>`
+      )) as ConsoleShell;
+      await el.updateComplete;
+      // show() would open a real dialog and animate; the copy under test is
+      // rendered from _upgradeFeature either way.
+      sinon.stub((el as any)._upgradeModal, 'show');
+      window.dispatchEvent(
+        new CustomEvent('show-upgrade-modal', {
+          detail: { code: 'upgrade_required', feature },
+        })
+      );
+      await el.updateComplete;
+      return el;
+    }
+
+    it('names the gated feature without naming a specific plan', async () => {
+      const el = await openGate('session_optimization');
+      const text = copy(el);
+      expect(text).to.contain('AI session optimization is a paid feature');
+      // "Teams" is the grandfathered legacy plan and is no longer sold, so
+      // promising the feature under that name sends buyers to a dead plan.
+      expect(text).to.not.contain('Teams feature');
+    });
+
+    it('uses no em dash in the upgrade copy (founder ruling)', async () => {
+      const el = await openGate('replay_verification');
+      expect(copy(el)).to.not.contain('\u2014');
+    });
+
+    it('checks out the entry paid plan, not the withdrawn legacy plan', async () => {
+      const el = await openGate('session_titles');
+      await (el as any)._startUpgradeCheckout();
+
+      const checkoutCall = fetchStub
+        .getCalls()
+        .find((c) => String(c.args[0]).includes('create-checkout-session'));
+      expect(checkoutCall, 'expected a checkout request').to.exist;
+      const body = JSON.parse(String(checkoutCall!.args[1]?.body));
+      // 'teams' is not purchasable in the 2026 ladder: the backend refuses it
+      // and redirects to the demo form, so the button would silently fail.
+      expect(body.plan_id).to.equal('pro');
+      expect(body.plan_id).to.not.equal('teams');
+    });
+
+    it('shows stale checkout offers as a visible refresh instruction', async () => {
+      const el = await openGate('session_titles');
+      fetchStub
+        .withArgs('/api/v1/billing/create-checkout-session', sinon.match.any)
+        .resolves(
+          new Response(
+            JSON.stringify({ detail: { code: 'legacy_plan_unavailable' } }),
+            { status: 409 }
+          )
+        );
+      await (el as any)._startUpgradeCheckout();
+      await el.updateComplete;
+      expect(
+        el.shadowRoot?.querySelector('[role="alert"]')?.textContent
+      ).to.include('Refresh the plan comparison');
+    });
+
+    it('offers a route to the full plan list for higher-tier features', async () => {
+      const el = await openGate('session_optimization');
+      const link = el.shadowRoot?.querySelector(
+        'sl-button[href="/console/settings/account"]'
+      );
+      // /console/pricing rendered a nonexistent element, so the old link
+      // opened an empty frame.
+      expect(link, 'plan list link').to.exist;
+      expect(el.shadowRoot?.querySelector('sl-button[href="/console/pricing"]'))
+        .to.not.exist;
+    });
+  });
 });

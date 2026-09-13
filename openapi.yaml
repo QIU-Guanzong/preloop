@@ -8476,6 +8476,145 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
       security:
       - bearerAuth: []
+  /api/v1/budget/policies:
+    post:
+      tags:
+      - Budget
+      - Budget
+      summary: Create Budget Policy
+      description: Create a new budget policy.
+      operationId: create_budget_policy_api_v1_budget_policies_post
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BudgetPolicyCreate'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BudgetPolicyResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    get:
+      tags:
+      - Budget
+      - Budget
+      summary: Get Budget Policies
+      description: Retrieve budget policies for the account, optionally filtered.
+      operationId: get_budget_policies_api_v1_budget_policies_get
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: subject_type
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Subject Type
+      - name: subject_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Subject Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BudgetPolicyResponse'
+                title: Response Get Budget Policies Api V1 Budget Policies Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/budget/policies/{policy_id}:
+    put:
+      tags:
+      - Budget
+      - Budget
+      summary: Update Budget Policy
+      description: Update a budget policy.
+      operationId: update_budget_policy_api_v1_budget_policies__policy_id__put
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: policy_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Policy Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BudgetPolicyUpdate'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BudgetPolicyResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    delete:
+      tags:
+      - Budget
+      - Budget
+      summary: Delete Budget Policy
+      description: Delete a budget policy.
+      operationId: delete_budget_policy_api_v1_budget_policies__policy_id__delete
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: policy_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Policy Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                title: Response Delete Budget Policy Api V1 Budget Policies  Policy
+                  Id  Delete
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/cost/summary:
     get:
       tags:
@@ -15383,6 +15522,247 @@ components:
       required:
       - file
       title: Body_validate_policy_api_v1_policies_validate_post
+    BudgetPeriod:
+      type: string
+      enum:
+      - hourly
+      - daily
+      - weekly
+      - monthly
+      - yearly
+      - all_time
+      title: BudgetPeriod
+    BudgetPolicyCreate:
+      properties:
+        subject_type:
+          type: string
+          title: Subject Type
+          description: 'Subject type: account, api_key, managed_agent, ai_model, or
+            user'
+        subject_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: string
+          - type: 'null'
+          title: Subject Id
+          description: UUID of the subject. None if subject_type is account
+        model_alias:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model Alias
+          description: Model alias to restrict. None for all models.
+        period:
+          $ref: '#/components/schemas/BudgetPeriod'
+        hard_limit_usd:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Hard Limit Usd
+          description: Hard limit in USD
+        soft_limit_usd:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Soft Limit Usd
+          description: Soft limit in USD
+        notify_on_soft:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Notify On Soft
+          default: false
+        notify_on_hard:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Notify On Hard
+          default: false
+        notification_user_ids:
+          anyOf:
+          - items:
+              type: string
+              format: uuid
+            type: array
+          - type: 'null'
+          title: Notification User Ids
+          description: Users to notify using their notification preferences
+        notification_team_ids:
+          anyOf:
+          - items:
+              type: string
+              format: uuid
+            type: array
+          - type: 'null'
+          title: Notification Team Ids
+          description: Teams to notify using member notification preferences
+        notification_emails:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Notification Emails
+          description: Additional custom email addresses to notify
+      type: object
+      required:
+      - subject_type
+      - period
+      title: BudgetPolicyCreate
+    BudgetPolicyResponse:
+      properties:
+        subject_type:
+          type: string
+          title: Subject Type
+          description: 'Subject type: account, api_key, managed_agent, ai_model, or
+            user'
+        subject_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: string
+          - type: 'null'
+          title: Subject Id
+          description: UUID of the subject. None if subject_type is account
+        model_alias:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model Alias
+          description: Model alias to restrict. None for all models.
+        period:
+          $ref: '#/components/schemas/BudgetPeriod'
+        hard_limit_usd:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Hard Limit Usd
+          description: Hard limit in USD
+        soft_limit_usd:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Soft Limit Usd
+          description: Soft limit in USD
+        notify_on_soft:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Notify On Soft
+          default: false
+        notify_on_hard:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Notify On Hard
+          default: false
+        notification_user_ids:
+          anyOf:
+          - items:
+              type: string
+              format: uuid
+            type: array
+          - type: 'null'
+          title: Notification User Ids
+          description: Users to notify using their notification preferences
+        notification_team_ids:
+          anyOf:
+          - items:
+              type: string
+              format: uuid
+            type: array
+          - type: 'null'
+          title: Notification Team Ids
+          description: Teams to notify using member notification preferences
+        notification_emails:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Notification Emails
+          description: Additional custom email addresses to notify
+        id:
+          type: string
+          format: uuid
+          title: Id
+        current_spend_usd:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Current Spend Usd
+        period_start:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Period Start
+        period_end:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Period End
+      type: object
+      required:
+      - subject_type
+      - period
+      - id
+      title: BudgetPolicyResponse
+    BudgetPolicyUpdate:
+      properties:
+        hard_limit_usd:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Hard Limit Usd
+        soft_limit_usd:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Soft Limit Usd
+        notify_on_soft:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Notify On Soft
+        notify_on_hard:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Notify On Hard
+        notification_user_ids:
+          anyOf:
+          - items:
+              type: string
+              format: uuid
+            type: array
+          - type: 'null'
+          title: Notification User Ids
+        notification_team_ids:
+          anyOf:
+          - items:
+              type: string
+              format: uuid
+            type: array
+          - type: 'null'
+          title: Notification Team Ids
+        notification_emails:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Notification Emails
+      type: object
+      title: BudgetPolicyUpdate
     ChainBreakRead:
       properties:
         kind:
@@ -22488,10 +22868,13 @@ components:
         days:
           type: integer
           title: Days
+          description: Effective stored retention days; -1 means an unlimited subscription
+            history promise prevents deletion
         source:
           type: string
           title: Source
-          description: '''account'' when this account set it, ''default'' otherwise'
+          description: account, default, or subscription_history when a current/previous
+            subscription requires longer storage
         floored:
           type: boolean
           title: Floored

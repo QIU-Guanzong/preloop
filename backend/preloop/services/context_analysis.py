@@ -27,6 +27,7 @@ from preloop.models.models.api_usage import ApiUsage
 # Re-exported from core so the gateway and billing plugin share a single
 # token-estimation implementation (DRY). ``estimate_tokens`` stays importable
 # from this module path for existing callers.
+from preloop.services.analytics_history import history_cutoff
 from preloop.services.context_optimization import estimate_tokens
 
 SEGMENT_KINDS = (
@@ -1512,6 +1513,7 @@ def load_session_gateway_events(
     rows = (
         crud_runtime_session_activity.list_full_model_gateway_call_payloads_for_session(
             db,
+            start_date=history_cutoff(db, account=account),
             account_id=account.id,
             runtime_session_id=runtime_session_id,
             limit=limit,

@@ -293,6 +293,7 @@ class CRUDRuntimeSessionActivity(CRUDBase[RuntimeSessionActivity]):
         *,
         account_id: Any,
         runtime_session_id: Any,
+        start_date: Optional[datetime] = None,
         tail: Optional[int] = None,
         limit: int = 25,
         offset: int = 0,
@@ -356,6 +357,7 @@ class CRUDRuntimeSessionActivity(CRUDBase[RuntimeSessionActivity]):
             .filter(
                 self.model.account_id == account_id,
                 self.model.runtime_session_id == runtime_session_id,
+                self.model.timestamp >= start_date if start_date is not None else True,
                 self.model.activity_type == "model_gateway_call",
             )
             .order_by(self.model.timestamp.desc())
@@ -370,6 +372,7 @@ class CRUDRuntimeSessionActivity(CRUDBase[RuntimeSessionActivity]):
         self,
         db: Session,
         *,
+        start_date: Optional[datetime] = None,
         account_id: Any,
         runtime_session_id: Any,
         limit: int = 50,
@@ -393,6 +396,7 @@ class CRUDRuntimeSessionActivity(CRUDBase[RuntimeSessionActivity]):
             db.query(self.model.id, self.model.timestamp, self.model.metadata_)
             .filter(
                 self.model.account_id == account_id,
+                self.model.timestamp >= start_date if start_date is not None else True,
                 self.model.runtime_session_id == runtime_session_id,
                 self.model.activity_type == "model_gateway_call",
             )
@@ -431,6 +435,7 @@ class CRUDRuntimeSessionActivity(CRUDBase[RuntimeSessionActivity]):
         *,
         account_id: Any,
         runtime_session_id: Any,
+        start_date: Optional[datetime] = None,
     ) -> int:
         """Return the number of model gateway call activities for a session."""
         return (
@@ -438,6 +443,7 @@ class CRUDRuntimeSessionActivity(CRUDBase[RuntimeSessionActivity]):
             .filter(
                 self.model.account_id == account_id,
                 self.model.runtime_session_id == runtime_session_id,
+                self.model.timestamp >= start_date if start_date is not None else True,
                 self.model.activity_type == "model_gateway_call",
             )
             .count()
@@ -449,6 +455,7 @@ class CRUDRuntimeSessionActivity(CRUDBase[RuntimeSessionActivity]):
         *,
         account_id: Any,
         runtime_session_id: Any,
+        start_date: Optional[datetime] = None,
         activity_id: Any,
     ) -> Optional[RuntimeSessionActivity]:
         """Return a single model gateway call activity by id."""
@@ -458,6 +465,7 @@ class CRUDRuntimeSessionActivity(CRUDBase[RuntimeSessionActivity]):
                 self.model.id == activity_id,
                 self.model.account_id == account_id,
                 self.model.runtime_session_id == runtime_session_id,
+                self.model.timestamp >= start_date if start_date is not None else True,
             )
             .first()
         )

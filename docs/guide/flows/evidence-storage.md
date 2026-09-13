@@ -458,3 +458,49 @@ the storage layer.
    only here, they prove consistency between two things under the same
    control. Run `preloop audit verify` on a schedule and treat a break as an
    incident.
+
+### Cloud analytics history and stored records
+
+Cloud plans can limit the age of reports, session replay events, and derived
+optimization records visible in the product. With the new pricing ladder
+activated, Free includes 183 days, Pro 365 days, and Team and Business 730 days.
+Legacy and custom subscriptions retain longer agreed terms. Self-hosted OSS
+has no cloud analytics cutoff. An upgrade cannot restore records already
+removed; the advertised period is a maximum available window, not a promise
+of historical backfill.
+
+This reporting window does not gate the gateway, firewall, approvals, budgets,
+session controls, or access to retained audit/evidence exports. A long-lived
+session remains usable and exposes its in-window events even if it began
+before the cutoff. Direct event IDs obey the same reporting limit.
+
+Usage and session deletion follows the longest of the account/deployment
+retention setting, current subscription promise, and any previously preserved
+longer promise. Subscription transitions retain that promise atomically in
+account metadata. Standalone purge workers also consult stored plan features
+through the CRUD layer. Retention settings and purge previews report the
+resulting physical retention; `days: -1` denotes an unlimited promise. Audit,
+approval, and evidence record classes retain their existing policy, six-month
+minimum, and legal-hold behavior. Encrypted evidence payload lifetime remains
+a separate setting as described above.
+
+The account's dedicated `subscription_history_retention_days` column preserves
+longer physical history promises independently of general account metadata. Its
+metadata mirror remains for compatibility. Purge workers take a fresh account
+lock and recompute policy in each deletion transaction, skipping busy accounts;
+an upgrade committed between batches therefore protects subsequent records.
+
+For rollout, apply the additive account policy migration before starting the new
+application. Stop or replace every old purge worker before activating new plans
+or recording new promises. Old binaries only understand the metadata mirror and
+are not safe purgers after an unrelated metadata replacement. Keep the dedicated
+columns and upgraded purge worker during an application rollback; do not reverse
+this migration after new promises or billing repair intents have been written.
+
+The migration waits at most five seconds to acquire a busy database lock. Its
+backfill only updates accounts with legacy policy/billing metadata. The
+500-row batches bound memory, not lock duration: PostgreSQL holds the account
+DDL lock until commit. For large account tables, rehearse the migration against
+a recent restored snapshot; split additive DDL and an operational backfill if
+needed, completing and verifying both before starting the new application or
+enabling the pricing flag.

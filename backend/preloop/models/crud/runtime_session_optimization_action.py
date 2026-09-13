@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from typing import Any, Optional, Union
 
 import uuid
@@ -75,6 +77,7 @@ class CRUDRuntimeSessionOptimizationAction(CRUDBase[RuntimeSessionOptimizationAc
         self,
         db: Session,
         *,
+        start_date: Optional[datetime] = None,
         account_id: Union[uuid.UUID, str],
         runtime_session_id: Union[uuid.UUID, str],
         limit: int = 50,
@@ -94,6 +97,7 @@ class CRUDRuntimeSessionOptimizationAction(CRUDBase[RuntimeSessionOptimizationAc
             db.query(self.model)
             .filter(
                 self.model.account_id == account_id,
+                self.model.created_at >= start_date if start_date is not None else True,
                 self.model.runtime_session_id == runtime_session_id,
             )
             .order_by(self.model.created_at.desc())

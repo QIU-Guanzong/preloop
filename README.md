@@ -10,6 +10,9 @@
 
 Preloop is a single self-hostable platform: an **MCP firewall** for tool access, an **AI model gateway** for cost, safety and attribution, **policy-as-code** with **human approvals**, and **runtime session observability**.
 
+Basic account, agent, API-key and model budgets and single-person human approval workflows are included in the open-source core and cloud Free. Multi-user approval routing, quorum, escalations and advanced organization administration are commercial features. Cloud usage allowances and hosted credits are separate from governance budgets.
+
+
 Flow presets can collect machine evidence for CRA- and EU AI Act-style reviews (SBOM verify, exploit check); Runtime Observability keeps the session timeline next to it. That is not a conformity assessment, certification, or legal advice. Presets: [security audit presets](docs/guide/flows/security-audit-presets.md).
 
 Onboard existing agents with one command. Talk to long-running ones from the console, phone, or watch. Deploy event-driven automations when GitHub, GitLab, Jira, or a webhook fires. Works with OpenClaw, Claude Code, Codex CLI, Cursor, Gemini CLI, Hermes, OpenCode, Windsurf, and any MCP-compatible agent.
@@ -174,7 +177,7 @@ Also compare: [LiteLLM](https://preloop.ai/vs/litellm), [Portkey](https://preloo
 
 Unqualified **Preloop** is this repository (Apache 2.0, self-hosted). **Preloop Cloud** is the hosted service at [preloop.ai](https://preloop.ai). **Preloop Enterprise** is the commercial self-hosted edition.
 
-Cloud is managed hosting. Cloud and Enterprise include support plans.
+Cloud is managed hosting. Cloud and Enterprise include support plans. Cloud billing owners can compare the available usage from the previous three completed months in Account settings before requesting a plan-change quote. Missing history is labeled explicitly; a change requires confirmation of its price, limits and effective date. Cloud plan limits do not apply to the open-source self-hosted edition.
 
 | Feature | Open Source | Cloud / Enterprise |
 |---|:---:|:---:|

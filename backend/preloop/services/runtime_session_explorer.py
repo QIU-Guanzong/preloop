@@ -23,6 +23,11 @@ from preloop.models.crud import (
     crud_runtime_session_optimization_result,
 )
 from preloop.models.models.account import Account
+from preloop.services.analytics_history import (
+    history_cutoff,
+    require_session_history,
+    restrict_history_window,
+)
 from preloop.services.litellm_routing import to_litellm_model
 from preloop.services.model_credentials import (
     build_aux_kwargs,
@@ -88,8 +93,9 @@ def _default_activity_title(activity: Any) -> str:
 class RuntimeSessionExplorerService:
     """Build runtime session explorer responses."""
 
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, *, owns_db_session: bool = False) -> None:
         self.db = db
+        self._owns_db_session = owns_db_session
 
     def list_account_sessions(
         self,
@@ -106,6 +112,9 @@ class RuntimeSessionExplorerService:
         background_tasks: Optional[BackgroundTasks] = None,
     ) -> AccountRuntimeSessionListResponse:
         start_date, end_date = self._normalize_period(start_date, end_date)
+        start_date, end_date = restrict_history_window(
+            self.db, account=account, start_date=start_date, end_date=end_date
+        )
         results = crud_runtime_session.list_account_sessions(
             self.db,
             account_id=str(account.id),
@@ -156,6 +165,7 @@ class RuntimeSessionExplorerService:
         try:
             cached_rows = crud_runtime_session_optimization_result.list_for_sessions(
                 self.db,
+                start_date=history_cutoff(self.db, account=account),
                 account_id=account.id,
                 runtime_session_ids=[item.id for item in items],
             )
@@ -266,6 +276,9 @@ class RuntimeSessionExplorerService:
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
     ) -> AccountRuntimeSessionDetailResponse:
+        start_date, end_date = restrict_history_window(
+            self.db, account=account, start_date=start_date, end_date=end_date
+        )
         summary_row = crud_runtime_session.get_account_session_summary(
             self.db,
             account_id=str(account.id),
@@ -275,6 +288,7 @@ class RuntimeSessionExplorerService:
         )
         if summary_row is None:
             raise HTTPException(status_code=404, detail="Runtime session not found")
+        require_session_history(self.db, account=account, summary=summary_row)
 
         flow_execution_id = summary_row.get("flow_execution_id")
         usage_by_model = crud_api_usage.get_gateway_usage_by_model(
@@ -308,6 +322,9 @@ class RuntimeSessionExplorerService:
         interaction_limit: int = 50,
         interaction_offset: int = 0,
     ) -> AccountGatewayUsageSearchResponse:
+        start_date, end_date = restrict_history_window(
+            self.db, account=account, start_date=start_date, end_date=end_date
+        )
         summary_row = crud_runtime_session.get_account_session_summary(
             self.db,
             account_id=str(account.id),
@@ -317,6 +334,7 @@ class RuntimeSessionExplorerService:
         )
         if summary_row is None:
             raise HTTPException(status_code=404, detail="Runtime session not found")
+        require_session_history(self.db, account=account, summary=summary_row)
 
         flow_execution_id = summary_row.get("flow_execution_id")
         interactions = crud_gateway_usage_search_document.search_account_documents(
@@ -355,14 +373,19 @@ class RuntimeSessionExplorerService:
             self.db,
             account_id=str(account.id),
             runtime_session_id=runtime_session_id,
+            start_date=history_cutoff(self.db, account=account),
         )
         if summary_row is None:
             raise HTTPException(status_code=404, detail="Runtime session not found")
+        require_session_history(self.db, account=account, summary=summary_row)
 
         # The timeline builder also expects interactions in the current structure
         # In a highly optimized world, we might fetch just the metadata rather than
         # the full SearchDocument. For now, limit the interactions we merge into timeline.
         start_date, end_date = self._normalize_period(None, None)
+        start_date, end_date = restrict_history_window(
+            self.db, account=account, start_date=start_date, end_date=end_date
+        )
         flow_execution_id = summary_row.get("flow_execution_id")
         interactions = crud_gateway_usage_search_document.search_account_documents(
             self.db,
@@ -383,6 +406,13 @@ class RuntimeSessionExplorerService:
             summary_row=summary_row,
             interactions=interaction_items,
         )
+        cutoff = history_cutoff(self.db, account=account)
+        if cutoff is not None:
+            items = [
+                item
+                for item in items
+                if self._normalize_timestamp(item.timestamp) >= cutoff
+            ]
         return RuntimeSessionActivityListResponse(items=items)
 
     def get_account_session_summary_insight(
@@ -402,9 +432,11 @@ class RuntimeSessionExplorerService:
             self.db,
             account_id=str(account.id),
             runtime_session_id=runtime_session_id,
+            start_date=history_cutoff(self.db, account=account),
         )
         if summary_row is None:
             raise HTTPException(status_code=404, detail="Runtime session not found")
+        require_session_history(self.db, account=account, summary=summary_row)
         summary = self._summary_row_to_schema(summary_row)
         fast_model = crud_ai_model.get_default_active_model(
             self.db, account_id=str(account.id)
@@ -465,6 +497,7 @@ class RuntimeSessionExplorerService:
 
         activity = crud_runtime_session_activity.get_model_gateway_call_for_session(
             self.db,
+            start_date=history_cutoff(self.db, account=account),
             account_id=account.id,
             runtime_session_id=runtime_session_id,
             activity_id=activity_id,
@@ -487,7 +520,7 @@ class RuntimeSessionExplorerService:
 
         def _call(model_to_use: AIModel, creds: dict[str, Any]) -> dict[str, Any]:
             return self._call_interaction_summary_model(
-                model_to_use, creds, payload=payload
+                model_to_use, creds, payload=payload, account_id=account.id
             )
 
         try:
@@ -651,6 +684,7 @@ class RuntimeSessionExplorerService:
         creds_kwargs: dict[str, Any],
         *,
         payload: dict[str, Any],
+        account_id: Any = None,
     ) -> dict[str, Any]:
         messages = self._extract_request_messages(payload)
         compact_messages = [
@@ -707,7 +741,27 @@ class RuntimeSessionExplorerService:
         kwargs["timeout"] = INTERACTION_SUMMARY_ATTEMPT_TIMEOUT_SECONDS
         kwargs["num_retries"] = 0
 
-        response = litellm.completion(**kwargs)
+        from preloop.plugins import get_plugin_manager
+        from preloop.models.db.gateway_session import release_gateway_session
+
+        meter = get_plugin_manager().get_service("hosted_spend")
+        reservation = None
+        if meter is not None and meter.applies(model):
+            if self._owns_db_session:
+                self.db.expire_on_commit = False
+                release_gateway_session(self.db, preserve=(model,))
+            reservation = meter.prepare(
+                self.db,
+                account_id=account_id,
+                model=model,
+                kwargs=kwargs,
+                owns_session=self._owns_db_session,
+            )
+        response = (
+            reservation.invoke(lambda: litellm.completion(**kwargs), stream=False)
+            if reservation is not None
+            else litellm.completion(**kwargs)
+        )
         check_reasoning_model_empty_content(response)
         raw = response.choices[0].message.content or "{}"
         raw = raw.strip()

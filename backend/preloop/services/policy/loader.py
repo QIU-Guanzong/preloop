@@ -12,7 +12,7 @@ import json
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import yaml
 from pydantic import ValidationError
@@ -703,7 +703,12 @@ class PolicyApplier:
     based on a policy document.
     """
 
-    def __init__(self, db: Session, account_id: Union[str, UUID]):
+    def __init__(
+        self,
+        db: Session,
+        account_id: Union[str, UUID],
+        actor_id: Optional[Union[str, UUID]] = None,
+    ):
         """Initialize the policy applier.
 
         Args:
@@ -712,6 +717,8 @@ class PolicyApplier:
         """
         self.db = db
         self.account_id = str(account_id)
+        self.actor_id = str(actor_id) if actor_id is not None else None
+        self._resolved_workflows: Dict[str, Dict[str, Any]] = {}
 
         # Track created entities for rollback and reporting
         self._result = PolicyImportResult(
@@ -761,6 +768,9 @@ class PolicyApplier:
                 for error in validation_errors:
                     self._result.errors.append(error)
                 return self._result
+
+            # Resolve and authorize every workflow before mutating any policy object.
+            self._prepare_approval_workflows(policy.approval_workflows or [])
 
             # Apply in order: servers, policies, tools, defaults
             if policy.mcp_servers:
@@ -1039,151 +1049,116 @@ class PolicyApplier:
                 self._result.mcp_servers_created += 1
                 logger.info(f"Created MCP server: {server_def.name}")
 
-    def _apply_approval_workflows(
-        self,
-        policies: List[ApprovalWorkflowDefinition],
-        dry_run: bool,
-    ) -> None:
-        """Apply approval workflow definitions.
-
-        Note: notification_channels is no longer used. Approvers configure their
-        own notification preferences in user settings.
-
-        Handles both standard (human) and AI-driven approval workflows.
-        """
-        from preloop.models.crud import crud_approval_workflow
-        from preloop.models.models.tool_configuration import ApprovalWorkflow
-
-        for policy_def in policies:
-            # Map YAML approval_type to database approval_mode
-            # The model has:
-            # - approval_type: mechanism (slack, mattermost, webhook, manual)
-            # - approval_mode: who approves (standard=human, ai_driven=AI)
-            db_approval_mode = (
-                "ai_driven" if policy_def.approval_type == "ai_driven" else "standard"
-            )
-
-            # Check if policy exists by name
-            existing = crud_approval_workflow.get_by_name(
-                self.db, account_id=self.account_id, name=policy_def.name
-            )
-
-            if existing:
-                # Update existing policy
-                if not dry_run:
-                    existing.description = policy_def.description
-                    existing.timeout_seconds = policy_def.timeout_seconds
-                    existing.require_reason = policy_def.require_reason
-                    existing.is_default = policy_def.is_default
-                    existing.workflow_type = policy_def.workflow_type
-                    existing.approvals_required = policy_def.approvals_required
-                    existing.approval_mode = db_approval_mode  # standard or ai_driven
-                    if policy_def.channel_configs:
-                        existing.channel_configs = policy_def.channel_configs
-
-                    # Update AI-driven settings
-                    existing.ai_model = policy_def.ai_model
-                    existing.ai_guidelines = policy_def.ai_guidelines
-                    existing.ai_context = policy_def.ai_context
-                    existing.ai_confidence_threshold = (
-                        policy_def.ai_confidence_threshold
-                    )
-                    existing.ai_fallback_behavior = policy_def.ai_fallback_behavior
-                    existing.async_approval_enabled = policy_def.async_approval
-                    # Store escalation_workflow name for second-pass resolution
-                    existing._pending_escalation_workflow = (
-                        policy_def.escalation_workflow
-                    )
-                self._policy_map[policy_def.name] = existing.id
-                self._result.policies_updated += 1
-                logger.info(f"Updated approval workflow: {policy_def.name}")
-            else:
-                # Create new policy
-                if not dry_run:
-                    new_policy = ApprovalWorkflow(
-                        account_id=self.account_id,
-                        name=policy_def.name,
-                        description=policy_def.description,
-                        approval_type="manual",  # Mechanism: manual approval via UI
-                        approval_mode=db_approval_mode,  # Who approves: standard or ai_driven
-                        timeout_seconds=policy_def.timeout_seconds,
-                        require_reason=policy_def.require_reason,
-                        is_default=policy_def.is_default,
-                        workflow_type=policy_def.workflow_type,
-                        approvals_required=policy_def.approvals_required,
-                        channel_configs=policy_def.channel_configs,
-                        # AI-driven settings
-                        ai_model=policy_def.ai_model,
-                        ai_guidelines=policy_def.ai_guidelines,
-                        ai_context=policy_def.ai_context,
-                        ai_confidence_threshold=policy_def.ai_confidence_threshold,
-                        ai_fallback_behavior=policy_def.ai_fallback_behavior,
-                        async_approval_enabled=policy_def.async_approval,
-                        # escalation_workflow_id resolved in second pass
-                    )
-                    # Store escalation_workflow name for second-pass resolution
-                    new_policy._pending_escalation_workflow = (
-                        policy_def.escalation_workflow
-                    )
-                    self.db.add(new_policy)
-                    self.db.flush()
-                    self._policy_map[policy_def.name] = new_policy.id
-                self._result.policies_created += 1
-                logger.info(f"Created approval workflow: {policy_def.name}")
-
-        # Second pass: resolve escalation_workflow references
-        if not dry_run:
-            self._resolve_escalation_workflows(policies)
-
-    def _resolve_escalation_workflows(
+    def _prepare_approval_workflows(
         self, policies: List[ApprovalWorkflowDefinition]
     ) -> None:
-        """Resolve escalation_workflow names to IDs (second pass).
-
-        This is called after all policies are created/updated, so we can
-        resolve cross-references between policies.
-        """
+        """Resolve recipients and forward references, then authorize actual changes."""
         from preloop.models.crud import crud_approval_workflow
+        from preloop.services.configuration_gating import (
+            authorize_team_approval_configuration,
+        )
 
-        for policy_def in policies:
-            if not policy_def.escalation_workflow:
-                continue
-
-            # Get the policy we just created/updated
-            policy = crud_approval_workflow.get_by_name(
-                self.db, account_id=self.account_id, name=policy_def.name
+        existing_by_name = {
+            item.name: crud_approval_workflow.get_by_name(
+                self.db, account_id=self.account_id, name=item.name
             )
-            if not policy:
-                continue
-
-            # Look up the escalation workflow by name
-            escalation_workflow_id = self._policy_map.get(
-                policy_def.escalation_workflow
-            )
-            if not escalation_workflow_id:
-                # Try to find it in the database
-                escalation_workflow = crud_approval_workflow.get_by_name(
+            for item in policies
+        }
+        self._policy_map = {
+            item.name: existing_by_name[item.name].id
+            if existing_by_name[item.name]
+            else uuid4()
+            for item in policies
+        }
+        self._resolved_workflows = {}
+        for item in policies:
+            existing = existing_by_name[item.name]
+            data = {
+                key: getattr(item, key)
+                for key in (
+                    "name",
+                    "description",
+                    "timeout_seconds",
+                    "require_reason",
+                    "is_default",
+                    "workflow_type",
+                    "approvals_required",
+                    "ai_model",
+                    "ai_guidelines",
+                    "ai_context",
+                    "ai_confidence_threshold",
+                    "ai_fallback_behavior",
+                )
+            }
+            data["approval_mode"] = item.approval_type
+            data["async_approval_enabled"] = item.async_approval
+            if item.channel_configs is not None:
+                data["channel_configs"] = item.channel_configs
+            data.update(
+                crud_approval_workflow.resolve_import_recipients(
                     self.db,
                     account_id=self.account_id,
-                    name=policy_def.escalation_workflow,
+                    data=item.model_dump(),
+                    existing=existing,
+                    actor_id=self.actor_id,
                 )
-                if escalation_workflow:
-                    escalation_workflow_id = escalation_workflow.id
+            )
+            escalation_id = None
+            if item.escalation_workflow:
+                escalation_id = self._policy_map.get(item.escalation_workflow)
+                if escalation_id is None:
+                    target = crud_approval_workflow.get_by_name(
+                        self.db,
+                        account_id=self.account_id,
+                        name=item.escalation_workflow,
+                    )
+                    if target is None:
+                        raise ValueError(
+                            f"Unknown escalation workflow: {item.escalation_workflow}"
+                        )
+                    escalation_id = target.id
+            elif existing is not None:
+                escalation_id = existing.escalation_workflow_id
+            data["escalation_workflow_id"] = escalation_id
+            authorize_team_approval_configuration(
+                self.db, self.account_id, data, previous=existing
+            )
+            self._resolved_workflows[item.name] = data
 
-            if escalation_workflow_id:
-                policy.escalation_workflow_id = escalation_workflow_id
-                logger.info(
-                    f"Resolved escalation workflow '{policy_def.escalation_workflow}' "
-                    f"for policy '{policy_def.name}'"
-                )
+    def _apply_approval_workflows(
+        self, policies: List[ApprovalWorkflowDefinition], dry_run: bool
+    ) -> None:
+        """Persist validated routing through CRUD in the policy transaction."""
+        from preloop.models.crud import crud_approval_workflow
+
+        for item in policies:
+            existing = crud_approval_workflow.get_by_name(
+                self.db, account_id=self.account_id, name=item.name
+            )
+            if existing is None:
+                self._result.policies_created += 1
             else:
-                logger.warning(
-                    f"Escalation policy '{policy_def.escalation_workflow}' not found "
-                    f"for policy '{policy_def.name}'"
+                self._result.policies_updated += 1
+            if not dry_run:
+                data = self._resolved_workflows[item.name].copy()
+                data.pop("escalation_workflow_id")
+                crud_approval_workflow.stage_import(
+                    self.db,
+                    account_id=self.account_id,
+                    workflow_id=self._policy_map[item.name],
+                    data=data,
                 )
-                self._result.warnings.append(
-                    f"Escalation policy '{policy_def.escalation_workflow}' not found "
-                    f"for policy '{policy_def.name}'"
+        if not dry_run:
+            for item in policies:
+                crud_approval_workflow.stage_import(
+                    self.db,
+                    account_id=self.account_id,
+                    workflow_id=self._policy_map[item.name],
+                    data={
+                        "escalation_workflow_id": self._resolved_workflows[item.name][
+                            "escalation_workflow_id"
+                        ]
+                    },
                 )
 
     def _apply_tools(
@@ -1586,6 +1561,7 @@ def export_current_policy(
             )
 
         policy_def = ApprovalWorkflowDefinition(
+            **crud_approval_workflow.export_recipient_names(db, workflow=policy),
             name=policy.name,
             description=policy.description,
             timeout_seconds=policy.timeout_seconds,

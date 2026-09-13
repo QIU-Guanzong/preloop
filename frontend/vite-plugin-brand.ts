@@ -1,3 +1,4 @@
+import { applyPricingCatalog } from './src/pricing-catalog';
 import { Plugin } from 'vite';
 import * as yaml from 'js-yaml';
 import * as fs from 'fs';
@@ -96,7 +97,10 @@ export function discover_static_markdown_pages(
       continue;
     }
     const slug = filename.replace(/\.md$/, '');
-    if (!isStaticMarkdownSlug(slug) || !allowStaticMarkdownSlug(slug, edition)) {
+    if (
+      !isStaticMarkdownSlug(slug) ||
+      !allowStaticMarkdownSlug(slug, edition)
+    ) {
       continue;
     }
     pages.push(staticMarkdownPageForSlug(slug));
@@ -360,6 +364,19 @@ export function brandPlugin(
       if (!brandConfig) {
         throw new Error(
           `Brand "${brandKey}" not found in brands.yaml. Available brands: ${Object.keys(brands.brands).join(', ')}`
+        );
+      }
+
+      const pricing = brandConfig.landing?.pricing;
+      if (pricing?.catalog_path) {
+        const catalogPath = path.resolve(
+          path.dirname(configPath),
+          pricing.catalog_path
+        );
+        const catalog = yaml.load(fs.readFileSync(catalogPath, 'utf-8'));
+        brandConfig.landing.pricing = applyPricingCatalog(
+          pricing,
+          catalog as Parameters<typeof applyPricingCatalog>[1]
         );
       }
 
@@ -635,11 +652,7 @@ export function brandPlugin(
       );
 
       const generatedPages = ['privacy.html', 'terms.html', 'whatis-mcp.html'];
-      const coreMarkdownRoutes = new Set([
-        '/privacy',
-        '/terms',
-        '/whatis-mcp',
-      ]);
+      const coreMarkdownRoutes = new Set(['/privacy', '/terms', '/whatis-mcp']);
 
       for (const page of loadStaticMarkdownPages()) {
         const rel = markdownRelFromSrc(page.src);
@@ -1020,8 +1033,8 @@ async function generateSlottedContentForRoute(
     ${
       (config.landing as { legal_disclaimer?: string }).legal_disclaimer
         ? `<p slot="legal-disclaimer">${escapeHtml(
-            (config.landing as { legal_disclaimer?: string }).legal_disclaimer ||
-              ''
+            (config.landing as { legal_disclaimer?: string })
+              .legal_disclaimer || ''
           )}</p>`
         : ''
     }
@@ -1703,6 +1716,14 @@ function escapeHtmlAllowingGradientSpan(
     .replaceAll('&lt;/span&gt;', '</span>');
 }
 
+/**
+ * Price string for the crawler-visible SSR markup.
+ *
+ * Plans are priced per BRACKET, not per seat, so no `/user` unit appears:
+ * the seat allowance is a row in the comparison table. `price_label` wins
+ * when set so a floor price ("from $30k/yr") is never rendered as an exact
+ * amount.
+ */
 function formatPlanPrice(plan: any): string {
   if (plan.price_label) return plan.price_label;
   const monthly = plan.price_monthly;
@@ -1711,15 +1732,18 @@ function formatPlanPrice(plan: any): string {
     monthly === 0 &&
     (annually === 0 || annually === null || annually === undefined)
   ) {
-    return 'Free';
+    // '$0', not 'Free': the client component renders '$0' and a crawler that
+    // saw a different string than the visitor does is a cloaking signal. The
+    // plan is already named "Free" right above the number anyway.
+    return '$0';
   }
   if (monthly === null || monthly === undefined) {
     return 'Custom';
   }
   if (annually !== null && annually !== undefined) {
-    return `$${monthly} / user / month — or $${annually} / user / year`;
+    return `$${monthly} / month, or $${annually} / year`;
   }
-  return `$${monthly} / user / month`;
+  return `$${monthly} / month`;
 }
 
 /**
@@ -1754,6 +1778,9 @@ function generatePricingSlottedContent(config: BrandConfig): string {
       const description = plan.description
         ? `<p class="plan-description">${escapeHtml(plan.description)}</p>`
         : '';
+      const tagline = plan.tagline
+        ? `<p class="plan-tagline">${escapeHtml(plan.tagline)}</p>`
+        : '';
       const badge = plan.badge
         ? `<span class="badge">${escapeHtml(plan.badge)}</span>`
         : '';
@@ -1766,6 +1793,9 @@ function generatePricingSlottedContent(config: BrandConfig): string {
              data-price-monthly="${escapeAttr(plan.price_monthly)}"
              data-price-annually="${escapeAttr(plan.price_annually)}"
              data-price-label="${escapeAttr(plan.price_label || '')}"
+             data-price-note="${escapeAttr(plan.price_note || '')}"
+             data-price-note-annual="${escapeAttr(plan.price_note_annual || '')}"
+             data-tagline="${escapeAttr(plan.tagline || '')}"
              data-badge="${escapeAttr(plan.badge || '')}"
              data-highlight="${plan.highlight ? 'true' : 'false'}"
              data-cta-text="${escapeAttr(cta)}"
@@ -1775,6 +1805,7 @@ function generatePricingSlottedContent(config: BrandConfig): string {
           ${badge}
           <h2>${escapeHtml(plan.name)}</h2>
           <p class="price">${escapeHtml(price)}</p>
+          ${tagline}
           ${description}
           <ul>
             ${featureItems}
@@ -1797,9 +1828,30 @@ function generatePricingSlottedContent(config: BrandConfig): string {
     )
     .join('\n');
 
+  const comparisonBlock = generatePricingComparisonBlock(pricing, plans);
+  const deploymentOptions = pricing.deployment_options || [];
+  const deploymentBlock = deploymentOptions.length
+    ? `
+    <section slot="deployment-options" data-deployments="${escapeAttr(JSON.stringify(deploymentOptions))}" class="pricing-deployments">
+      <h2>Self-hosted options</h2>
+      ${deploymentOptions
+        .map(
+          (option: {
+            title: string;
+            description: string;
+            cta_url: string;
+            cta_text: string;
+          }) => `
+        <article><h3>${escapeHtml(option.title)}</h3><p>${escapeHtml(option.description)}</p>
+        <a href="${escapeAttr(option.cta_url)}">${escapeHtml(option.cta_text)}</a></article>`
+        )
+        .join('')}
+    </section>`
+    : '';
+
   return `
     <article class="pricing-content">
-      <header class="pricing-header">
+      <header class="pricing-header" slot="pricing-heading" data-title="${escapeAttr(title)}" data-lead="${escapeAttr(lead)}" data-billing-toggle="${pricing.billing_toggle !== false}">
         <h1>${escapeHtml(title)}</h1>
         <p class="lead">${escapeHtml(lead)}</p>
       </header>
@@ -1807,6 +1859,9 @@ function generatePricingSlottedContent(config: BrandConfig): string {
       <section class="pricing-plans">
         ${planBlocks}
       </section>
+
+      ${comparisonBlock}
+      ${deploymentBlock}
 
       ${
         faqs.length > 0
@@ -1819,4 +1874,76 @@ function generatePricingSlottedContent(config: BrandConfig): string {
       }
     </article>
   `;
+}
+
+/**
+ * Render the plan comparison table into the light DOM.
+ *
+ * The table is emitted twice over: once as real `<table>` markup so crawlers
+ * and no-JS visitors see the quotas, and once as a JSON payload on
+ * `data-comparison` so `<public-pricing-view>` can rehydrate it without
+ * re-parsing HTML. Returns an empty string when no comparison is configured,
+ * which keeps brands that only want cards unaffected.
+ */
+function generatePricingComparisonBlock(pricing: any, plans: any[]): string {
+  const comparison = pricing?.comparison;
+  const groups = (comparison?.groups || []) as any[];
+  if (!groups.length || !plans.length) return '';
+
+  const heading = comparison.title || 'Compare plans';
+  const planIds = plans.map((p) => p.id);
+
+  const cell = (value: unknown): string => {
+    if (value === true) return 'Included';
+    if (value === false) return 'Not included';
+    if (value === null || value === undefined) return '';
+    return escapeHtml(String(value));
+  };
+
+  const headerCells = plans
+    .map((p) => `<th scope="col">${escapeHtml(p.name)}</th>`)
+    .join('');
+
+  const bodyRows = groups
+    .map((group) => {
+      const groupHeader = `
+            <tr class="group-row">
+              <th scope="colgroup" colspan="${planIds.length + 1}">${escapeHtml(
+                group.title || ''
+              )}</th>
+            </tr>`;
+      const rows = ((group.rows || []) as any[])
+        .map((row) => {
+          const cells = planIds
+            .map((id) => `<td>${cell(row.values?.[id])}</td>`)
+            .join('');
+          return `
+            <tr>
+              <th scope="row">${escapeHtml(row.label || '')}</th>
+              ${cells}
+            </tr>`;
+        })
+        .join('');
+      return groupHeader + rows;
+    })
+    .join('');
+
+  const note = comparison.note
+    ? `<p class="comparison-note">${escapeHtml(comparison.note)}</p>`
+    : '';
+
+  return `
+      <section slot="comparison"
+               class="pricing-comparison"
+               data-comparison="${escapeAttr(JSON.stringify(comparison))}">
+        <h2>${escapeHtml(heading)}</h2>
+        <table>
+          <thead>
+            <tr><th scope="col"></th>${headerCells}</tr>
+          </thead>
+          <tbody>${bodyRows}
+          </tbody>
+        </table>
+        ${note}
+      </section>`;
 }

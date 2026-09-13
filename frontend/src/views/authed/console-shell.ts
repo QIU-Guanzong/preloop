@@ -85,6 +85,17 @@ const PREMIUM_FEATURE_LABELS: Record<string, string> = {
   session_titles: 'AI session titles',
 };
 
+/**
+ * Plan the one-click upgrade button buys.
+ *
+ * Every feature currently reachable through the 402 gate unlocks at the
+ * cheapest paid plan, so sending the visitor anywhere more expensive would
+ * overcharge them for the thing they just clicked. Was hardcoded to the
+ * legacy 'teams' plan, which is no longer purchasable and would now be
+ * refused at checkout.
+ */
+const UPGRADE_PLAN_ID = 'pro';
+
 @customElement('console-shell')
 export class ConsoleShell extends LitElement {
   @query('#upgrade-modal')
@@ -95,6 +106,9 @@ export class ConsoleShell extends LitElement {
 
   @state()
   private _upgradeStarting = false;
+
+  @state()
+  private _upgradeError = '';
 
   @state()
   private features: FeaturesResponse['features'] = {};
@@ -396,16 +410,25 @@ export class ConsoleShell extends LitElement {
 
   private async _startUpgradeCheckout() {
     this._upgradeStarting = true;
+    this._upgradeError = '';
     try {
       // Land back exactly where the gate was hit once checkout-success
       // reconciles the new subscription (webhook-independent).
+      //
+      // UPGRADE_PLAN_ID is the entry paid plan, not the plan that unlocks
+      // every gated feature. Features gated above it (RBAC, team approvals)
+      // send the visitor to the plan list instead of this button, which is
+      // why the modal keeps a "View plans" route alongside it.
       await startCheckout(
-        'teams',
+        UPGRADE_PLAN_ID,
         'month',
         window.location.pathname + window.location.search
       );
     } catch (error) {
-      console.error('Failed to start upgrade checkout', error);
+      this._upgradeError =
+        error instanceof Error
+          ? error.message
+          : 'Checkout is unavailable. Review the current plans or try again.';
       this._upgradeStarting = false;
     }
   }
@@ -643,13 +666,14 @@ export class ConsoleShell extends LitElement {
                 PREMIUM_FEATURE_LABELS[this._upgradeFeature] ||
                 this._upgradeFeature
               }
-              is a Teams feature. Upgrade to unlock it — you'll come right back
-              here, already unlocked.`
-            : html`You have exceeded the usage limits of your current plan.
-              Please upgrade to continue using this feature.`
+              is a paid feature. Upgrade to unlock it and you will come right
+              back here, already unlocked.`
+            : html`This feature is not included in your current plan. Upgrade to
+              unlock it.`
         }
-        <sl-button slot="footer" href="/console/pricing">
-          View Plans
+        ${this._upgradeError ? html`<p role="alert">${this._upgradeError}</p>` : nothing}
+        <sl-button slot="footer" href="/console/settings/account">
+          View plans
         </sl-button>
         <sl-button
           slot="footer"

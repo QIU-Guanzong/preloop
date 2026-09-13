@@ -1,7 +1,7 @@
+import type { PricingDeploymentOption } from '../../brand-config';
 import { LitElement, html, css, unsafeCSS } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { customElement, state } from 'lit/decorators.js';
-import { startCheckout } from '../../api';
 import landingStyles from '../../styles/landing.css?inline';
 import pricingStyles from '../../styles/pricing-styles.css?inline';
 import '../../components/billing-toggle';
@@ -19,6 +19,9 @@ interface Plan {
   cta_url?: string;
   description?: string;
   price_label?: string;
+  price_note?: string;
+  price_note_annual?: string;
+  tagline?: string;
 }
 
 interface PricingFaq {
@@ -26,14 +29,32 @@ interface PricingFaq {
   a: string;
 }
 
+interface ComparisonRow {
+  label: string;
+  values: Record<string, string | boolean>;
+}
+
+interface ComparisonGroup {
+  title: string;
+  rows: ComparisonRow[];
+}
+
+interface Comparison {
+  title?: string;
+  note?: string;
+  groups: ComparisonGroup[];
+}
+
 @customElement('public-pricing-view')
 export class PublicPricingView extends LitElement {
   @state() private _interval: 'month' | 'year' = 'year';
 
   @state() private _plans: Plan[] = [];
+  @state() private _comparison: Comparison | null = null;
   @state() private _faqs: PricingFaq[] = [];
+  @state() private _deployments: PricingDeploymentOption[] = [];
   @state() private _title = 'Pricing';
-  @state() private _lead = 'Start your 14-day free trial today.';
+  @state() private _lead = 'Start free with your own keys.';
   @state() private _billingToggle = true;
   @state() private _loaded = false;
 
@@ -46,7 +67,7 @@ export class PublicPricingView extends LitElement {
     try {
       // Prefer slotted SEO content (SSR-injected light DOM) so we keep
       // whatever was actually served to the user / crawler.
-      const children = Array.from(this.children);
+      const children = Array.from(this.querySelectorAll('[slot]'));
       const hasSlottedPlan = children.some((el) =>
         el.getAttribute('slot')?.startsWith('plan-')
       );
@@ -70,6 +91,15 @@ export class PublicPricingView extends LitElement {
   }
 
   private _loadFromSlots(children: Element[]) {
+    const heading = children.find(
+      (c) => c.getAttribute('slot') === 'pricing-heading'
+    );
+    if (heading) {
+      this._title = heading.getAttribute('data-title') || this._title;
+      this._lead = heading.getAttribute('data-lead') || this._lead;
+      this._billingToggle =
+        heading.getAttribute('data-billing-toggle') !== 'false';
+    }
     const plans: Plan[] = [];
     for (let i = 0; i < 20; i++) {
       const el = children.find(
@@ -97,6 +127,10 @@ export class PublicPricingView extends LitElement {
           ? (priceAnnually as number)
           : null,
         price_label: el.getAttribute('data-price-label') || undefined,
+        price_note: el.getAttribute('data-price-note') || undefined,
+        price_note_annual:
+          el.getAttribute('data-price-note-annual') || undefined,
+        tagline: el.getAttribute('data-tagline') || undefined,
         badge: el.getAttribute('data-badge') || undefined,
         highlight: el.getAttribute('data-highlight') === 'true',
         cta_text: el.getAttribute('data-cta-text') || undefined,
@@ -104,6 +138,34 @@ export class PublicPricingView extends LitElement {
         description: el.getAttribute('data-description') || undefined,
         features: featuresAttr ? featuresAttr.split('|').filter(Boolean) : [],
       });
+    }
+
+    // The comparison table is serialised as one JSON blob on its own slot:
+    // it is a nested structure, and flattening it into data-* attributes
+    // would make the SSR markup unreadable and the parse error-prone.
+    const comparisonEl = children.find(
+      (c) => c.getAttribute('slot') === 'comparison'
+    ) as HTMLElement | undefined;
+    if (comparisonEl) {
+      const raw = comparisonEl.getAttribute('data-comparison');
+      if (raw) {
+        try {
+          this._comparison = JSON.parse(raw) as Comparison;
+        } catch (err) {
+          // A malformed table must not take the whole page down: the cards
+          // above the fold carry the price, which is the part that matters.
+          console.error('[pricing-view] Invalid comparison payload:', err);
+        }
+      }
+    }
+
+    const deployments = children.find(
+      (c) => c.getAttribute('slot') === 'deployment-options'
+    );
+    if (deployments?.getAttribute('data-deployments')) {
+      this._deployments = JSON.parse(
+        deployments.getAttribute('data-deployments')!
+      );
     }
 
     const faqs: PricingFaq[] = [];
@@ -139,6 +201,9 @@ export class PublicPricingView extends LitElement {
         price_monthly: p.price_monthly ?? null,
         price_annually: p.price_annually ?? null,
         price_label: p.price_label,
+        price_note: p.price_note,
+        price_note_annual: p.price_note_annual,
+        tagline: p.tagline,
         badge: p.badge,
         highlight: p.highlight,
         cta_text: p.cta_text,
@@ -147,6 +212,11 @@ export class PublicPricingView extends LitElement {
         features: p.features || [],
       }));
     }
+    if (pricing.comparison && Array.isArray(pricing.comparison.groups)) {
+      this._comparison = pricing.comparison as Comparison;
+    }
+    if (Array.isArray(pricing.deployment_options))
+      this._deployments = pricing.deployment_options;
     if (Array.isArray(pricing.faqs)) {
       this._faqs = pricing.faqs;
     }
@@ -178,33 +248,44 @@ export class PublicPricingView extends LitElement {
       return;
     }
 
+    // Enterprise is quoted, never checked out: send it to the contact route.
     if (planId === 'enterprise') {
       this._navigate(plan?.cta_url || '/request-demo');
       return;
     }
 
-    if (planId === 'teams') {
-      // Signup is card-free (T2 paywall move): logged-out visitors register
-      // first and upgrade in-product. Logged-in users on /pricing are here to
-      // upgrade — the shared checkout helper is the one deliberate paid door.
-      const authed = !!localStorage.getItem('accessToken');
-      if (!authed) {
-        this._navigate('/register');
-        return;
-      }
-      try {
-        await startCheckout('teams', this._interval, '/console');
-      } catch (error) {
-        console.error('Checkout error:', error);
-        this._navigate('/register');
-      }
+    // Existing accounts compare observed usage and confirm a quote in the
+    // account view; the public page must never silently switch a subscription.
+    if (localStorage.getItem('accessToken')) {
+      this._navigate(
+        `/console/settings/account?plan=${encodeURIComponent(planId)}&interval=${this._interval}`
+      );
+      return;
     }
+    this._navigate('/register');
   }
 
   static styles = [
     unsafeCSS(pricingStyles),
     unsafeCSS(landingStyles),
     css`
+      .deployment-options {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 1.5rem;
+      }
+      .deployment-options article {
+        padding: 1.25rem;
+        border: 1px solid var(--sl-color-neutral-300);
+        border-radius: 0.75rem;
+      }
+      .deployment-options p {
+        line-height: 1.6;
+      }
+      .deployment-options a {
+        display: inline-block;
+        padding: 0.75rem 0;
+      }
       .loading,
       .error {
         text-align: center;
@@ -214,157 +295,91 @@ export class PublicPricingView extends LitElement {
         color: var(--sl-color-danger-600);
       }
 
-      .pricing-table {
-        display: none; /* Hidden by default on mobile */
-        width: 80%;
-        margin: 0 auto;
-        table-layout: fixed;
-        border-collapse: separate;
-        border-spacing: 0;
-        border-radius: 16px;
-        background-color: #21262f; /* Dark background from landing page */
-        color: #e6edf3; /* Light text color from landing page */
-        border: 1px solid #161b22; /* Subtle border from landing page */
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+      /* Five cards need a tighter minimum than the shared 260px grid or the
+         ladder wraps to two rows on ordinary laptop widths. */
+      .plans-grid {
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
       }
 
-      .pricing-table th,
-      .pricing-table td {
-        font-size: 1rem;
-        padding: 1rem;
+      .comparison-section {
+        margin-top: 3.5rem;
+      }
+
+      /* Narrow screens scroll the table sideways instead of squashing five
+         columns into unreadable slivers. */
+      .comparison-scroll {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      .comparison-table {
+        width: 100%;
+        min-width: 720px;
+        margin: 0 auto;
+        border-collapse: collapse;
+        background-color: #21262f;
+        color: #e6edf3;
+        border-radius: 16px;
+        overflow: hidden;
+      }
+
+      .comparison-table th,
+      .comparison-table td {
+        font-size: 0.95rem;
+        padding: 0.75rem 1rem;
         text-align: center;
         vertical-align: middle;
+        border-bottom: 1px solid rgba(230, 237, 243, 0.12);
       }
 
-      .pricing-table tr:last-child td {
-        border-bottom: none; /* Remove border for the last row */
-      }
-
-      .pricing-table th,
-      .pricing-table td {
-        width: 33.33%;
-      }
-
-      .pricing-table th {
-        padding: 2rem 0 0.5rem 0;
-        font-size: 1.1rem;
+      .comparison-table thead th {
+        font-size: 1.05rem;
         font-weight: 600;
-        border-bottom: 2px solid #58a6ff; /* Header underline inspired by landing page */
+        border-bottom: 2px solid #58a6ff;
       }
 
-      .pricing-table td:first-child {
+      .comparison-table .row-label {
         text-align: left;
         font-weight: 500;
+        min-width: 220px;
       }
 
-      .pricing-table th {
-        font-weight: 600;
-        font-size: 1.1rem;
-      }
-
-      .pricing-table .price {
-        font-size: 2.4rem;
+      .comparison-table .group-row th {
+        text-align: left;
+        font-size: 0.8rem;
         font-weight: 700;
-        text-align: center;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: #8b949e;
+        padding-top: 1.5rem;
+        border-bottom: 1px solid rgba(230, 237, 243, 0.2);
       }
 
-      /* Popular column styles */
-      .popular {
-        position: relative;
-        background: linear-gradient(
-          90deg,
-          hsl(220, 60%, 40%),
-          hsl(260, 65%, 38%)
-        );
-        color: white;
-      }
-
-      .pricing-table th.popular {
-        border-bottom-color: #a777ff;
-      }
-
-      /* Rounded corners for table cells */
-      .pricing-table th:first-child {
-        border-top-left-radius: 12px;
-      }
-
-      .pricing-table th:last-child {
-        border-top-right-radius: 12px;
-      }
-
-      .pricing-table tr:last-child td:first-child {
-        border-bottom-left-radius: 12px;
-      }
-
-      .pricing-table tr:last-child td:last-child {
-        border-bottom-right-radius: 12px;
-      }
-
-      .badge {
-        position: absolute;
-        top: -15px;
-        left: 50%;
-        transform: translateX(-50%);
-        background: linear-gradient(45deg, #a777ff, #f777ff);
-        color: white;
-        padding: 0.4rem 1rem;
-        border-radius: 16px;
-        font-size: 0.9rem;
-        font-weight: 700;
-        white-space: nowrap;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-        z-index: 1;
-      }
-
-      /* Default outlined button style */
-      .pricing-button::part(base) {
-        background-color: transparent;
-        border: 1px solid #58a6ff;
-        color: #58a6ff;
-        font-size: 1rem;
-        font-weight: 600;
-        transition: all 0.2s ease-in-out;
-      }
-
-      .pricing-button::part(base):hover {
-        background-color: #58a6ff;
-        color: white;
-      }
-
-      /* Solid, gradient button for the popular plan */
-      .popular .pricing-button::part(base) {
-        background: linear-gradient(45deg, #a777ff, #f777ff);
-        border: none;
-        color: white;
-        font-weight: 600;
-      }
-
-      .popular .pricing-button::part(base):hover {
-        filter: brightness(1.1);
+      .comparison-table tbody tr:last-child th,
+      .comparison-table tbody tr:last-child td {
+        border-bottom: none;
       }
 
       .check-mark sl-icon {
-        color: #58a6ff; /* Icon color from landing page */
+        color: #58a6ff;
         font-size: 1.2rem;
       }
 
-      .popular .check-mark sl-icon {
-        color: white;
+      .cross-mark sl-icon {
+        color: #6e7681;
+        font-size: 1.1rem;
+      }
+
+      .comparison-note {
+        margin-top: 1rem;
+        text-align: center;
+        font-size: 0.9rem;
+        color: var(--sl-color-text-secondary);
       }
 
       .hero-content .lead {
         margin: 0 auto;
         text-align: center;
-      }
-
-      /* Desktop view */
-      @media (min-width: 860px) {
-        .plans-grid {
-          display: none;
-        }
-        .pricing-table {
-          display: table;
-        }
       }
     `,
   ];
@@ -385,112 +400,82 @@ export class PublicPricingView extends LitElement {
     `;
   }
 
-  private _renderTable() {
-    const maxFeatures = Math.max(
-      ...this._plans.map((p) => (p.features as string[]).length)
-    );
+  /** Render one comparison cell: booleans become marks, text prints as-is. */
+  private _renderCell(value: string | boolean | undefined) {
+    if (value === true) {
+      return html`<span class="check-mark"
+        ><sl-icon name="check-lg" label="Included"></sl-icon
+      ></span>`;
+    }
+    if (value === false) {
+      return html`<span class="cross-mark"
+        ><sl-icon name="x-lg" label="Not included"></sl-icon
+      ></span>`;
+    }
+    // Undefined renders empty rather than as a dash or a "no": an unstated
+    // limit is not a claim that the plan lacks the capability.
+    return value ?? '';
+  }
+
+  /**
+   * The below-the-fold comparison table. Quotas, retention, and the feature
+   * split live here, keeping every card to one number plus one line.
+   */
+  private _renderComparison() {
+    if (!this._comparison?.groups?.length || !this._plans.length) return '';
+
+    const planIds = this._plans.map((p) => p.id);
+    const colCount = planIds.length + 1;
 
     return html`
-      <table class="pricing-table">
-        <thead>
-          <tr>
-            ${this._plans.map(
-              (plan) =>
-                html`<th class="${plan.id === 'teams' ? 'popular' : ''}">
-                  <div class="plan-name">${plan.name}</div>
-                  ${
-                    plan.badge
-                      ? html`<div class="badge">${plan.badge}</div>`
-                      : ''
-                  }
-                </th>`
-            )}
-          </tr>
-        </thead>
-        <tbody>
-          <!-- Price Row -->
-          <tr>
-            ${this._plans.map((plan) => {
-              let priceHtml;
-              if (plan.id === 'enterprise') {
-                priceHtml = html`<div class="price">Custom</div>`;
-              } else if (
-                plan.price_monthly !== null &&
-                plan.price_annually !== null
-              ) {
-                const isMonthly = this._interval === 'month';
-                const amount = isMonthly
-                  ? plan.price_monthly
-                  : plan.price_annually;
-
-                const unit = isMonthly ? ' /user/month' : ' /user/year';
-
-                priceHtml = html`
-                  <div class="price">
-                    $${amount}
-                    <p style="font-size: 1rem; font-weight: 400;">${unit}</p>
-                  </div>
-                `;
-              }
-              return html`<td class="${plan.id === 'teams' ? 'popular' : ''}">
-                ${priceHtml}
-              </td>`;
-            })}
-          </tr>
-
-          <!-- Features Rows -->
-          ${Array.from({ length: maxFeatures }).map((_, idx) => {
-            return html`
-              <tr>
-                ${this._plans.map((plan) => {
-                  const features = plan.features as string[];
-                  const feature = features[idx];
-                  return html`<td
-                    class="${plan.id === 'teams' ? 'popular' : ''}"
-                    style="text-align: left; padding-left: 2rem;"
-                  >
-                    ${
-                      feature
-                        ? html`<span class="check-mark"
-                              ><sl-icon name="check-lg"></sl-icon
-                            ></span>
-                            ${feature}`
-                        : ''
-                    }
-                  </td>`;
-                })}
-              </tr>
-            `;
-          })}
-
-          <!-- Button Row -->
-          <tr>
-            ${this._plans.map(
-              (plan) => html`
-                <td class="${plan.id === 'teams' ? 'popular' : ''}">
-                  <sl-button
-                    class="pricing-button"
-                    style="width: 100%;"
-                    variant="default"
-                    size="large"
-                    @click=${() => this._handleSignUp(plan.id)}
-                  >
-                    ${
-                      plan.cta_text
-                        ? plan.cta_text
-                        : plan.id === 'enterprise'
-                          ? 'Contact Sales'
-                          : plan.id === 'opensource'
-                            ? 'View on GitHub'
-                            : 'Start Free Trial'
-                    }
-                  </sl-button>
-                </td>
-              `
-            )}
-          </tr>
-        </tbody>
-      </table>
+      <section class="comparison-section">
+        <div class="section-container">
+          <h2 class="text-center">
+            ${this._comparison.title || 'Compare plans'}
+          </h2>
+          <div class="comparison-scroll">
+            <table class="comparison-table">
+              <thead>
+                <tr>
+                  <th scope="col" class="row-label"></th>
+                  ${this._plans.map(
+                    (plan) => html`<th scope="col">${plan.name}</th>`
+                  )}
+                </tr>
+              </thead>
+              <tbody>
+                ${this._comparison.groups.map(
+                  (group) => html`
+                    <tr class="group-row">
+                      <th scope="colgroup" colspan=${colCount}>
+                        ${group.title}
+                      </th>
+                    </tr>
+                    ${group.rows.map(
+                      (row) => html`
+                        <tr>
+                          <th scope="row" class="row-label">${row.label}</th>
+                          ${planIds.map(
+                            (id) =>
+                              html`<td>
+                                ${this._renderCell(row.values?.[id])}
+                              </td>`
+                          )}
+                        </tr>
+                      `
+                    )}
+                  `
+                )}
+              </tbody>
+            </table>
+          </div>
+          ${
+            this._comparison.note
+              ? html`<p class="comparison-note">${this._comparison.note}</p>`
+              : ''
+          }
+        </div>
+      </section>
     `;
   }
 
@@ -526,6 +511,25 @@ export class PublicPricingView extends LitElement {
         { once: true }
       );
     }
+  }
+
+  private _renderDeployments() {
+    if (!this._deployments.length) return '';
+    return html`<section class="main-section" aria-label="Self-hosted options">
+      <div class="section-container">
+        <h2>Self-hosted options</h2>
+        <div class="deployment-options">
+          ${this._deployments.map(
+            (option) =>
+              html`<article>
+                <h3>${option.title}</h3>
+                <p>${option.description}</p>
+                <a href=${option.cta_url}>${option.cta_text}</a>
+              </article>`
+          )}
+        </div>
+      </div>
+    </section>`;
   }
 
   private _renderFaqs() {
@@ -579,13 +583,10 @@ export class PublicPricingView extends LitElement {
                   ></billing-toggle>`
                 : ''
             }
-            ${
-              this._plans.length
-                ? html`${this._renderCards()} ${this._renderTable()}`
-                : ''
-            }
+            ${this._plans.length ? this._renderCards() : ''}
           </div>
         </section>
+        ${this._renderComparison()} ${this._renderDeployments()}
         ${this._renderFaqs()}
       </main>
       <app-footer></app-footer>

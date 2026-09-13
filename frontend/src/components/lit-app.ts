@@ -398,7 +398,15 @@ export class LitApp extends LitElement {
             path: 'settings/notification-preferences',
             component: 'notification-preferences-view',
           },
-          { path: 'pricing', component: 'pricing-view' },
+          {
+            // No 'pricing-view' element exists (the public page is
+            // 'public-pricing-view'), so this route rendered a blank frame.
+            // Plans live on the account page, where the current subscription
+            // is shown next to them.
+            path: 'pricing',
+            action: (_context, commands) =>
+              commands.redirect('/console/settings/account'),
+          },
           { path: 'approvals', component: 'approvals-view' },
           { path: 'approval/:requestId', component: 'approval-view' },
           { path: 'authorize', component: 'oauth-consent-view' },

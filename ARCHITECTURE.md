@@ -18,6 +18,8 @@ caller's machine. See [Evidence storage and signed records](docs/guide/flows/evi
 The chain proves order and non-deletion in the range it names, not that the
 records were true when written; the signing key lives beside the records.
 
+Cloud analytics history is resolved through a billing plugin service at reporting boundaries. Physical retention preserves longer subscription promises through account-locked CRUD updates and remains separate from audit/evidence policy and live governance. See [Cloud analytics history and stored records](docs/guide/flows/evidence-storage.md#cloud-analytics-history-and-stored-records).
+
 ## High-Level Architecture
 
 ```mermaid
