@@ -353,3 +353,27 @@ async def test_update_empty_human_routing_keeps_actor_as_approver(
         db=db_session,
     )
     assert list(map(str, updated.approver_user_ids)) == [str(users[0].id)]
+
+
+@pytest.mark.asyncio
+async def test_ai_driven_empty_routing_is_not_defaulted_to_actor(
+    db_session, import_account, monkeypatch
+):
+    from preloop.api.endpoints.tools import create_approval_workflow
+    from preloop.models.schemas.tool_configuration import ApprovalWorkflowCreate
+    from preloop.utils import permissions
+
+    monkeypatch.setattr(permissions, "_plugin_require_permission", None)
+    account, users = import_account
+    created = await create_approval_workflow(
+        workflow_data=ApprovalWorkflowCreate(
+            name="AI empty",
+            approval_mode="ai_driven",
+            approval_type="slack",
+        ),
+        account=account,
+        current_user=users[0],
+        db=db_session,
+    )
+    assert not created.approver_user_ids
+    assert not created.approver_team_ids

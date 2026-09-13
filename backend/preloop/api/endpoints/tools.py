@@ -1194,6 +1194,27 @@ async def list_approval_workflows(
     return [ApprovalWorkflowResponse.model_validate(p) for p in policies]
 
 
+def _empty_human_approver_default(
+    *,
+    approval_mode: str | None,
+    approval_type: str | None,
+    approver_user_ids: Optional[List[UUID]],
+    approver_team_ids: Optional[List[UUID]],
+    actor_id: UUID,
+) -> Optional[List[UUID]]:
+    """Default empty human routing to the actor.
+
+    ``approval_type`` is the notification mechanism (default slack). Human vs
+    AI is ``approval_mode``. Keep ``manual``/``standard`` mechanism values so
+    callers that conflate the fields still get an approver instead of hanging.
+    """
+    if approver_user_ids or approver_team_ids:
+        return None
+    if approval_mode == "standard" or approval_type in {"standard", "manual"}:
+        return [actor_id]
+    return None
+
+
 @router.post("/approval-workflows", status_code=status.HTTP_201_CREATED)
 @require_permission("manage_approval_workflows")
 async def create_approval_workflow(
@@ -1225,13 +1246,16 @@ async def create_approval_workflow(
     await run_in_threadpool(
         ensure_permission_in_oss, db, current_user, "manage_approval_workflows"
     )
-    if (
-        workflow_data.approval_mode != "ai_driven"
-        and not workflow_data.approver_user_ids
-        and not workflow_data.approver_team_ids
-    ):
+    default_approvers = _empty_human_approver_default(
+        approval_mode=workflow_data.approval_mode,
+        approval_type=workflow_data.approval_type,
+        approver_user_ids=workflow_data.approver_user_ids,
+        approver_team_ids=workflow_data.approver_team_ids,
+        actor_id=current_user.id,
+    )
+    if default_approvers is not None:
         workflow_data = workflow_data.model_copy(
-            update={"approver_user_ids": [current_user.id]}
+            update={"approver_user_ids": default_approvers}
         )
     await run_in_threadpool(
         authorize_team_approval_configuration,
@@ -1367,12 +1391,19 @@ async def update_approval_workflow(
     await run_in_threadpool(
         ensure_permission_in_oss, db, current_user, "manage_approval_workflows"
     )
-    if (
-        update_data.get("approval_mode", workflow.approval_mode) != "ai_driven"
-        and not update_data.get("approver_user_ids", workflow.approver_user_ids)
-        and not update_data.get("approver_team_ids", workflow.approver_team_ids)
-    ):
-        update_data["approver_user_ids"] = [current_user.id]
+    default_approvers = _empty_human_approver_default(
+        approval_mode=update_data.get("approval_mode", workflow.approval_mode),
+        approval_type=update_data.get("approval_type", workflow.approval_type),
+        approver_user_ids=update_data.get(
+            "approver_user_ids", workflow.approver_user_ids
+        ),
+        approver_team_ids=update_data.get(
+            "approver_team_ids", workflow.approver_team_ids
+        ),
+        actor_id=current_user.id,
+    )
+    if default_approvers is not None:
+        update_data["approver_user_ids"] = default_approvers
     try:
         await run_in_threadpool(
             crud_approval_workflow.validate_configuration_references,

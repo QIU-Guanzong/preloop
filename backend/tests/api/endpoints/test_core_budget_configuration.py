@@ -51,14 +51,19 @@ def test_oss_owner_creates_reads_updates_and_removes_basic_zero_budget(budget_cl
     assert response.status_code == 200, response.text
     policy_id = response.json()["id"]
     assert response.json()["hard_limit_usd"] == 0
-    assert len(client.get("/api/v1/budget/policies").json()) == 1
+    listed = client.get("/api/v1/budget/policies")
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
     changed = client.put(
         "/api/v1/budget/policies/" + policy_id, json={"hard_limit_usd": None}
     )
-    assert changed.status_code == 200 and changed.json()["hard_limit_usd"] is None
+    assert changed.status_code == 200
+    assert changed.json()["hard_limit_usd"] is None
     deleted = client.delete("/api/v1/budget/policies/" + policy_id)
     assert deleted.status_code == 200
-    assert client.get("/api/v1/budget/policies").json() == []
+    remaining = client.get("/api/v1/budget/policies")
+    assert remaining.status_code == 200
+    assert remaining.json() == []
 
 
 def test_oss_member_cannot_raise_or_delete_budget(budget_client, db_session):
@@ -69,19 +74,15 @@ def test_oss_member_cannot_raise_or_delete_budget(budget_client, db_session):
     )
     policy_id = response.json()["id"]
     crud_account.update(db_session, db_obj=account, obj_in={"primary_user_id": None})
-    assert (
-        client.post(
-            "/api/v1/budget/policies",
-            json={"subject_type": "account", "period": "daily", "hard_limit_usd": 100},
-        ).status_code
-        == 403
+    raised = client.post(
+        "/api/v1/budget/policies",
+        json={"subject_type": "account", "period": "daily", "hard_limit_usd": 100},
     )
-    assert (
-        client.put(
-            "/api/v1/budget/policies/" + policy_id, json={"hard_limit_usd": 100}
-        ).status_code
-        == 403
+    assert raised.status_code == 403
+    updated = client.put(
+        "/api/v1/budget/policies/" + policy_id, json={"hard_limit_usd": 100}
     )
+    assert updated.status_code == 403
     deleted = client.delete("/api/v1/budget/policies/" + policy_id)
     assert deleted.status_code == 403
 
@@ -103,13 +104,13 @@ def test_foreign_policy_and_subject_are_not_accessible(budget_client, db_session
     )
     db_session.add_all([foreign, foreign_model])
     db_session.commit()
-    assert client.get("/api/v1/budget/policies").json() == []
-    assert (
-        client.put(
-            "/api/v1/budget/policies/" + str(foreign.id), json={"hard_limit_usd": 100}
-        ).status_code
-        == 404
+    listed = client.get("/api/v1/budget/policies")
+    assert listed.status_code == 200
+    assert listed.json() == []
+    updated = client.put(
+        "/api/v1/budget/policies/" + str(foreign.id), json={"hard_limit_usd": 100}
     )
+    assert updated.status_code == 404
     deleted = client.delete("/api/v1/budget/policies/" + str(foreign.id))
     assert deleted.status_code == 404
     rejected = client.post(
@@ -130,41 +131,35 @@ def test_foreign_policy_and_subject_are_not_accessible(budget_client, db_session
 )
 def test_nonfinite_or_negative_limits_are_rejected(budget_client, payload):
     client, _, _ = budget_client
-    assert (
-        client.post(
-            "/api/v1/budget/policies",
-            json={"subject_type": "account", "period": "monthly", **payload},
-        ).status_code
-        == 422
+    response = client.post(
+        "/api/v1/budget/policies",
+        json={"subject_type": "account", "period": "monthly", **payload},
     )
+    assert response.status_code == 422
 
 
 def test_oss_advanced_budget_routing_is_explicitly_commercial(budget_client):
     client, _, user = budget_client
-    assert (
-        client.post(
-            "/api/v1/budget/policies",
-            json={
-                "subject_type": "account",
-                "period": "monthly",
-                "hard_limit_usd": 1,
-                "notify_on_hard": True,
-            },
-        ).status_code
-        == 402
+    notify = client.post(
+        "/api/v1/budget/policies",
+        json={
+            "subject_type": "account",
+            "period": "monthly",
+            "hard_limit_usd": 1,
+            "notify_on_hard": True,
+        },
     )
-    assert (
-        client.post(
-            "/api/v1/budget/policies",
-            json={
-                "subject_type": "user",
-                "subject_id": str(user.id),
-                "period": "monthly",
-                "hard_limit_usd": 1,
-            },
-        ).status_code
-        == 402
+    assert notify.status_code == 402
+    scoped = client.post(
+        "/api/v1/budget/policies",
+        json={
+            "subject_type": "user",
+            "subject_id": str(user.id),
+            "period": "monthly",
+            "hard_limit_usd": 1,
+        },
     )
+    assert scoped.status_code == 402
 
 
 @pytest.mark.parametrize("subject_type", ["api_key", "managed_agent", "ai_model"])
@@ -212,6 +207,7 @@ def test_each_basic_subject_can_be_configured_in_oss(
             "/api/v1/budget/policies",
             params={"subject_type": "ai_model", "subject_id": str(subject.id)},
         )
+        assert listed.status_code == 200
         assert [row["id"] for row in listed.json()] == [response.json()["id"]]
     else:
         assert response.json()["subject_id"] == str(subject.id)
@@ -330,17 +326,45 @@ def test_explicit_alias_must_resolve_to_an_available_enabled_gateway(
         assert response.json()["model_alias"] == "canonical-alias"
     else:
         assert response.status_code == 400
-        assert (
+        remaining = (
             db_session.query(models.BudgetPolicy)
             .filter_by(account_id=account.id)
             .count()
-            == 0
         )
+        assert remaining == 0
+
+
+def test_account_policy_rejects_typo_model_alias(budget_client, db_session):
+    client, account, _ = budget_client
+    db_session.add(
+        models.AIModel(
+            account_id=account.id,
+            name="Configured model",
+            provider_name="openai",
+            model_identifier="test-alias-model",
+            meta_data={"gateway": {"enabled": True, "model_alias": "canonical-alias"}},
+        )
+    )
+    db_session.commit()
+    response = client.post(
+        "/api/v1/budget/policies",
+        json={
+            "subject_type": "account",
+            "model_alias": "canonical-alais",
+            "period": "daily",
+            "hard_limit_usd": 1,
+        },
+    )
+    assert response.status_code == 400
+    remaining = (
+        db_session.query(models.BudgetPolicy).filter_by(account_id=account.id).count()
+    )
+    assert remaining == 0
 
 
 @pytest.mark.parametrize("params", [{}, {"subject_type": "account"}])
 def test_policy_list_batches_current_period_spend_query(
-    budget_client, db_session, params
+    budget_client, db_session, monkeypatch, params
 ):
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import event
@@ -382,6 +406,11 @@ def test_policy_list_batches_current_period_spend_query(
     )
     db_session.commit()
     statements = []
+
+    def fail_single_spend(*args, **kwargs):
+        raise AssertionError("get_spend must not run per listed policy")
+
+    monkeypatch.setattr(budget.crud_budget_spend, "get_spend", fail_single_spend)
 
     def record_query(conn, cursor, statement, parameters, context, executemany):
         if (

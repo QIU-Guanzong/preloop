@@ -26,7 +26,6 @@ from preloop.models.models.account import Account
 from preloop.services.analytics_history import (
     AnalyticsHistoryWindow,
     resolve_history_window,
-    history_cutoff,
     require_session_history,
     restrict_history_window,
 )
@@ -533,9 +532,10 @@ class RuntimeSessionExplorerService:
         if session is None:
             raise HTTPException(status_code=404, detail="Runtime session not found")
 
+        history_window = resolve_history_window(self.db, account=account)
         activity = crud_runtime_session_activity.get_model_gateway_call_for_session(
             self.db,
-            start_date=history_cutoff(self.db, account=account),
+            start_date=history_window.cutoff,
             account_id=account.id,
             runtime_session_id=runtime_session_id,
             activity_id=activity_id,

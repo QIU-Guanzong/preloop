@@ -55,6 +55,13 @@ def mock_db():
     return MagicMock()
 
 
+def _patch_approval_reference_validation(mocker):
+    """Skip account-membership checks in mocked approval write tests."""
+    return mocker.patch(
+        "preloop.api.endpoints.tools.crud_approval_workflow.validate_configuration_references"
+    )
+
+
 class TestListAllTools:
     """Test list_all_tools endpoint."""
 
@@ -960,6 +967,7 @@ class TestApprovalWorkflowEndpoints:
             "preloop.api.endpoints.tools.crud_approval_workflow.get_by_name",
             return_value=None,
         )
+        _patch_approval_reference_validation(mocker)
 
         # Mock the created policy
         created_policy = MagicMock(spec=ApprovalWorkflow)
@@ -997,7 +1005,7 @@ class TestApprovalWorkflowEndpoints:
         created_policy.updated_at = datetime.now(UTC)
 
         # Mock crud_approval_workflow.create
-        mocker.patch(
+        create = mocker.patch(
             "preloop.api.endpoints.tools.crud_approval_workflow.create",
             return_value=created_policy,
         )
@@ -1012,6 +1020,7 @@ class TestApprovalWorkflowEndpoints:
         assert isinstance(result, ApprovalWorkflowResponse)
         assert result.name == workflow_data.name
         assert result.is_default
+        assert create.call_args.kwargs["obj_in"].approver_user_ids == [mock_user.id]
 
     async def test_create_approval_workflow_duplicate_name(
         self, mock_db, mock_user, mock_account, mocker
@@ -1030,6 +1039,7 @@ class TestApprovalWorkflowEndpoints:
             "preloop.api.endpoints.tools.crud_approval_workflow.get_by_name",
             return_value=existing_policy,
         )
+        _patch_approval_reference_validation(mocker)
 
         with pytest.raises(HTTPException) as exc_info:
             await tools.create_approval_workflow(
@@ -1151,6 +1161,7 @@ class TestApprovalWorkflowEndpoints:
             "preloop.api.endpoints.tools.crud_approval_workflow.update",
             return_value=policy,
         )
+        _patch_approval_reference_validation(mocker)
 
         update_data = ApprovalWorkflowUpdate(name="New Name")
 
@@ -1274,6 +1285,7 @@ class TestApprovalWorkflowEndpointsErrorHandling:
             "preloop.api.endpoints.tools.crud_approval_workflow.get_by_name",
             return_value=existing_policy,
         )
+        _patch_approval_reference_validation(mocker)
 
         update_data = ApprovalWorkflowUpdate(name="Conflicting Name")
 
@@ -1355,6 +1367,7 @@ class TestApprovalWorkflowEndpointsErrorHandling:
             "preloop.api.endpoints.tools.crud_approval_workflow.get_by_name",
             return_value=None,
         )
+        _patch_approval_reference_validation(mocker)
         mocker.patch(
             "preloop.api.endpoints.tools.crud_approval_workflow.create",
             side_effect=Exception("Database error"),
