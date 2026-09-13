@@ -1582,6 +1582,29 @@ describe('FlowExecutionView', () => {
       });
     }
 
+    for (const status of ['TIMED_OUT', 'ABORTED']) {
+      it(`shows the execution failure banner for ${status}`, async () => {
+        const element = await load('exec-failed');
+        await waitUntil(() => (element as any).gatewayEvents.length > 0);
+        (element as any).execution = {
+          ...(element as any).execution,
+          status,
+        };
+        await element.updateComplete;
+
+        expect(
+          element
+            .shadowRoot!.querySelector('[data-testid="error-line"]')!
+            .textContent!.trim()
+        ).to.equal('Insufficient Balance (HTTP 402 from deepseek)');
+        expect(
+          element
+            .shadowRoot!.querySelector('.status-pill sl-badge')!
+            .getAttribute('variant')
+        ).to.equal('danger');
+      });
+    }
+
     it('preserves the execution failure when a request was also cancelled', async () => {
       const element = await load('exec-failed');
       await waitUntil(() => (element as any).gatewayEvents.length > 0);

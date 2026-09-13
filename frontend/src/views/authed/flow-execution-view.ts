@@ -39,6 +39,7 @@ import {
   executionModelCss,
   executionStatusLabel,
   executionStatusVariant,
+  isExecutionRequestFailureStatus,
   parkWaitingSummary,
   type ExecutionPark,
   formatEstimatedCost,
@@ -1597,9 +1598,7 @@ export class FlowExecutionView extends LitElement {
     // Individual model requests can fail or be cancelled while the execution
     // continues successfully. Only a terminal execution failure owns this
     // banner; request diagnostics remain in the timeline.
-    if (
-      !['FAILED', 'TIMEOUT', 'STOPPED', 'CANCELLED'].includes(execution.status)
-    ) {
+    if (!isExecutionRequestFailureStatus(execution.status)) {
       return '';
     }
     const failed = this.firstFailedGatewayEvent();
