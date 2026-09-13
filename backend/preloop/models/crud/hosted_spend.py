@@ -83,8 +83,9 @@ def establish_baseline(
     """Initialize once from a proven baseline, never from retained usage scans.
 
     Runtime only calls this inside the newly created account transaction.
-    Existing accounts require a separately reviewed operator reconciliation
-    with a reliable lifetime/current-month source; no public reset endpoint.
+    Existing accounts require reviewed reconciliation or an explicitly approved
+    zero-consumption launch through initialize_zero_launch. Neither path resets
+    existing wallets; there is no public reset endpoint.
     """
     if not evidence or len(evidence) > 500:
         raise HostedSpendUnavailableError("A verified baseline needs evidence")
@@ -263,3 +264,81 @@ def settle(
     row.actual = actual
     row.status = "released" if proven_not_dispatched else "settled"
     db.flush()
+
+
+def launch_account_ids(
+    db: Session, *, after_id: Any = None, limit: int = 100
+) -> list[Any]:
+    """Read a bounded stable page for the operator's launch initialization."""
+    if not 1 <= limit <= 500:
+        raise ValueError("Launch batch size must be between 1 and 500")
+    query = select(models.Account.id).order_by(models.Account.id).limit(limit)
+    if after_id is not None:
+        query = query.where(models.Account.id > after_id)
+    return list(db.scalars(query))
+
+
+def initialize_zero_launch(
+    db: Session,
+    *,
+    account_id: Any,
+    now: datetime,
+    evidence: str,
+    apply: bool = False,
+) -> str:
+    """Initialize missing state after an explicit operator zero-start decision.
+
+    Existing balances and reservations are never reset. Caller commits each
+    applied account separately. Preview is read-only and repeats checks on apply.
+    Zero is consumed usage, not a replacement for the plan's included allowance.
+    """
+    if not evidence or len(evidence) > 500:
+        raise HostedSpendUnavailableError(
+            "Launch evidence must contain 1-500 characters"
+        )
+    month_start(now)  # Refuse naive timestamps before any state change.
+    if apply:
+        lock_account(db, account_id)
+    wallet = _wallet(db, account_id)
+    if wallet is not None:
+        if wallet.coverage_start is None or wallet.lifetime_spent is None:
+            return "existing_state_requires_review"
+        period = _month(db, account_id, month_start(now))
+        if (period is not None and period.spent is None) or (
+            period is None and month_start(wallet.coverage_start) >= month_start(now)
+        ):
+            return "existing_state_requires_review"
+        return "already_initialized"
+    # Even an orphan historical month or settled operation means this is not
+    # an empty wallet. Do not repair it by silently giving fresh credit.
+    for model in (models.HostedSpendMonth, models.HostedSpendReservation):
+        present = db.scalar(
+            select(model.id).where(model.account_id == account_id).limit(1)
+        )
+        if present is not None:
+            return "existing_state_requires_review"
+    if not apply:
+        return "would_initialize"
+    establish_baseline(
+        db,
+        account_id=account_id,
+        lifetime_spent=ZERO,
+        month_spent=ZERO,
+        now=now,
+        evidence=evidence,
+    )
+    return "initialized"
+
+
+def launch_system_models(db: Session, *, limit: int = 101) -> list[models.AIModel]:
+    """Read a bounded system-model set for operator tariff readiness checks."""
+    if not 1 <= limit <= 501:
+        raise ValueError("Model readiness limit must be between 1 and 501")
+    return list(
+        db.scalars(
+            select(models.AIModel)
+            .where(models.AIModel.account_id.is_(None))
+            .order_by(models.AIModel.id)
+            .limit(limit)
+        )
+    )
