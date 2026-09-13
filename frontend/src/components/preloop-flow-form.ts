@@ -385,6 +385,9 @@ export class PreloopFlowForm extends LitElement {
         triggerType: this.triggerType,
         flowExecutionPath: this.flowExecutionPath,
         targetAgentId: this.targetAgentId,
+        customImage: this._customImageValue,
+        approvalWindowAmount: this._approvalWindowAmount,
+        approvalWindowUnit: this._approvalWindowUnit,
       })
     );
   };
@@ -423,6 +426,22 @@ export class PreloopFlowForm extends LitElement {
           this.triggerType = saved.triggerType || 'webhook';
           this.flowExecutionPath = saved.flowExecutionPath || 'ephemeral';
           this.targetAgentId = saved.targetAgentId || '';
+          if (typeof saved.customImage === 'string') {
+            this._customImageValue = saved.customImage;
+          }
+          if (
+            saved.approvalWindowAmount === null ||
+            typeof saved.approvalWindowAmount === 'number'
+          ) {
+            this._approvalWindowAmount = saved.approvalWindowAmount;
+          }
+          if (
+            saved.approvalWindowUnit === 'minutes' ||
+            saved.approvalWindowUnit === 'hours' ||
+            saved.approvalWindowUnit === 'days'
+          ) {
+            this._approvalWindowUnit = saved.approvalWindowUnit;
+          }
           restoredFromOAuth = true;
         }
       } catch (e) {

@@ -44,6 +44,7 @@ describe('PreloopFlowForm custom container image', () => {
   beforeEach(() => {
     localStorage.setItem('accessToken', 'test-access-token');
     localStorage.setItem('refreshToken', 'test-refresh-token');
+    sessionStorage.clear();
     apiState.runners = [
       {
         id: '11111111-1111-4111-8111-111111111111',
@@ -81,6 +82,7 @@ describe('PreloopFlowForm custom container image', () => {
     fixtureCleanup();
     sandbox.restore();
     localStorage.clear();
+    sessionStorage.clear();
   });
 
   const mount = async (flow: Record<string, unknown>) => {
@@ -318,6 +320,37 @@ describe('PreloopFlowForm custom container image', () => {
     const agentConfig = (await submit(element)).agent_config;
     expect(agentConfig.image).to.equal('registry.example.com/team/new:2');
     expect('docker_image' in agentConfig).to.equal(false);
+  });
+
+  it('keeps a typed image draft across a GitHub OAuth round-trip', async () => {
+    const typed = 'registry.example.com/team/oauth-draft:1';
+    const element = await mount(flow({ agent_config: { image: CANONICAL } }));
+    await typeImage(element, typed);
+
+    element.dispatchEvent(new CustomEvent('github-oauth-starting'));
+    const snapshot = JSON.parse(
+      sessionStorage.getItem('preloop_flow_form_state') || '{}'
+    );
+    expect(snapshot.customImage).to.equal(typed);
+    expect(snapshot.flow?.agent_config?.image).to.equal(CANONICAL);
+
+    fixtureCleanup();
+    const restored = await mount(flow({ agent_config: { image: CANONICAL } }));
+    expect(imageInput(restored)?.value).to.equal(typed);
+    const agentConfig = (await submit(restored)).agent_config;
+    expect(agentConfig.image).to.equal(typed);
+  });
+
+  it('keeps an explicit clear across a GitHub OAuth round-trip', async () => {
+    const element = await mount(flow({ agent_config: { image: CANONICAL } }));
+    await typeImage(element, '');
+
+    element.dispatchEvent(new CustomEvent('github-oauth-starting'));
+    fixtureCleanup();
+    const restored = await mount(flow({ agent_config: { image: CANONICAL } }));
+    expect(imageInput(restored)?.value).to.equal('');
+    const agentConfig = (await submit(restored)).agent_config;
+    expect('image' in agentConfig).to.equal(false);
   });
 
   it('does not rewrite aliases when a hidden field is saved unchanged', async () => {
