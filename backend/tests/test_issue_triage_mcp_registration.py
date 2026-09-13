@@ -158,7 +158,7 @@ async def test_triage_approval_uses_same_arguments_as_execution(
 async def test_triage_endpoint_rejects_unauthenticated_call(
     monkeypatch: pytest.MonkeyPatch, name: str, headers: dict[str, str]
 ) -> None:
-    monkeypatch.setattr(mcp_router, "_get_tool_db", lambda: MagicMock())
+    monkeypatch.setattr(mcp_router, "_get_tool_db", MagicMock)
     monkeypatch.setattr(
         mcp_router, "get_http_request", lambda: SimpleNamespace(headers=headers)
     )

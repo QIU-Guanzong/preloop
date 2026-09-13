@@ -78,7 +78,7 @@ class CancelScopeErrorFilter(logging.Filter):
 def initialize_mcp_with_tools() -> DynamicFastMCP:
     """Initialize DynamicFastMCP and register all default tools.
 
-    This function creates a DynamicFastMCP instance and registers all 6 default
+    This function creates a DynamicFastMCP instance and registers all 8 default
     tools from the current MCP implementation.
 
     Returns:

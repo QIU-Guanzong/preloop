@@ -653,6 +653,8 @@ async def _apply_authorized_issue_triage(
                         result.issue.updated_at.replace("Z", "+00:00")
                     )
                 except ValueError:
+                    # Skip last_updated_external when the provider timestamp
+                    # is not ISO-8601; the rest of the cache update still applies.
                     pass
             crud_issue.update(db, db_obj=issue_obj, obj_in=values)
             result.cache_updated = True

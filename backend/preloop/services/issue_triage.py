@@ -339,6 +339,8 @@ async def apply_triage(
         try:
             latest = await provider.read_issue()
         except (ValueError, TrackerError, TimeoutError):
+            # Keep the last snapshot; a second provider error must not replace
+            # the original write-failure reason.
             pass
         return IssueTriageResult(
             status="partial" if operations else "failed",
