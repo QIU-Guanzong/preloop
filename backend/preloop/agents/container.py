@@ -219,10 +219,19 @@ elif execution_link:
     # Compatibility for callers predating the explicit published SHA argument.
     body += f"\n\nAutomated changes from Preloop flow: [{flow_name}]({execution_link})"
 reason = result_failure_reason(raw_result)
+applied = False
 if reason and execution_link:
-    body = merge_failure_notice(body, failure_notice(reason, execution_link))
-elif reason:
-    body += "\n\nExecution incomplete: " + reason
+    try:
+        body = merge_failure_notice(body, failure_notice(reason, execution_link))
+        applied = True
+    except ValueError:
+        pass
+if reason and not applied:
+    extra = "\n\nExecution incomplete: " + reason
+    budget = 65536 - len(body.encode("utf-8"))
+    if budget > 0:
+        encoded = extra.encode("utf-8")
+        body += extra if len(encoded) <= budget else encoded[:budget].decode("utf-8", "ignore")
 if kind == "gitlab":
     payload = {"title": title, "description": body, "source_branch": head, "target_branch": base}
 else:

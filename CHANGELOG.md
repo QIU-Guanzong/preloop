@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Issue-triage builtin tools `get_issue_triage_context` and
+  `apply_issue_triage`. They are GitHub and GitLab only, require
+  `edit_issues`, and follow the existing MCP approval path. Context reads
+  a fresh provider snapshot and the permitted complexity scheme; apply
+  writes the managed assessment and an exact complexity label. Docs at
+  `docs/guide/flows/issue-triage.md`.
 - DORA agent-slice exports. `GET /api/v1/exports/asset-register` lists agents,
   tools, MCP servers, models, providers and runner hosts as one flat table
   with owners, first and last seen, and attached policies; it feeds an Art. 8
@@ -40,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Preset 001 (Issue Triage Assistant) writes remaining scope, acceptance
+  and readiness onto the issue body and applies a complexity label.
+  Operators who sync this preset to linked flows move from a
+  proposals-only assessor to an issue writer.
+- Failed implementation publication keeps the configured PR/MR when
+  commits were already pushed. A failed `result.json` no longer refuses
+  publication: the publisher opens a disclosed, non-closing PR/MR with
+  `Refs` and the execution link. Configured verification still gates new
+  pushes.
 - **CRA VEX suppressions are applied before the severity gate, not after it**:
   preset 006 asked for VEX and the gate in one breath, so a run could escalate
   a finding to a human and then annotate it as `not_affected`, which made

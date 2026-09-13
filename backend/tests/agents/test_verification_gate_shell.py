@@ -613,6 +613,45 @@ class TestLegacyReportedOutcome:
         assert (repo.repo.parent / "provider-calls").read_text().strip() == "POST"
 
     @pytest.mark.parametrize("provider", ["github", "gitlab"])
+    def test_near_limit_pr_body_with_long_reason_still_publishes(
+        self,
+        repo: GateRepo,
+        monkeypatch: pytest.MonkeyPatch,
+        provider: str,
+    ) -> None:
+        repo.add_file("feature.py")
+        repo.commit()
+        reason = "*" * 4000
+        result = self.run_generated(
+            repo,
+            monkeypatch,
+            json.dumps(
+                {
+                    "status": "failure",
+                    "reason": reason,
+                    "pr_body": "x" * 59000,
+                }
+            ).encode(),
+            provider=provider,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        payload_path = repo.repo.parent / "workspace/evidence/pr-payload.json"
+        assert payload_path.is_file()
+        payload = json.loads(payload_path.read_text())
+        body = payload["body" if provider == "github" else "description"]
+        assert len(body.encode("utf-8")) <= 65536
+        assert "Execution incomplete:" in body
+        assert "<!-- preloop:failure:" not in body
+        assert "Refs #1" in body and "Closes #1" not in body
+        assert (
+            json.loads((repo.repo.parent / "workspace/result.json").read_text())[
+                "status"
+            ]
+            == "failure"
+        )
+        assert (repo.repo.parent / "provider-calls").read_text().strip() == "POST"
+
+    @pytest.mark.parametrize("provider", ["github", "gitlab"])
     @pytest.mark.parametrize("resume", [False, True])
     def test_already_pushed_commits_refresh_existing_failure_notice(
         self,
