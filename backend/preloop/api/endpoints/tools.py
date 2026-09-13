@@ -1205,12 +1205,14 @@ def _empty_human_approver_default(
     """Default empty human routing to the actor.
 
     ``approval_type`` is the notification mechanism (default slack). Human vs
-    AI is ``approval_mode``. Keep ``manual``/``standard`` mechanism values so
-    callers that conflate the fields still get an approver instead of hanging.
+    AI is ``approval_mode``: the runtime routes every value except ``ai_driven``
+    to human approval, including legacy/unknown values. Keep the same rule here.
+    Also retain ``manual``/``standard`` mechanism compatibility for callers that
+    conflate the fields.
     """
     if approver_user_ids or approver_team_ids:
         return None
-    if approval_mode == "standard" or approval_type in {"standard", "manual"}:
+    if approval_mode != "ai_driven" or approval_type in {"standard", "manual"}:
         return [actor_id]
     return None
 

@@ -319,8 +319,9 @@ def test_import_new_default_unmarks_existing_without_partial_flush(
 @pytest.mark.parametrize(
     "mechanism", [None, "standard", "manual", "slack", "mattermost", "webhook"]
 )
+@pytest.mark.parametrize("mode", ["standard", "manual", "legacy-human"])
 async def test_update_empty_human_routing_keeps_actor_as_approver(
-    db_session, import_account, monkeypatch, mechanism
+    db_session, import_account, monkeypatch, mechanism, mode
 ):
     from preloop.api.endpoints.tools import (
         create_approval_workflow,
@@ -336,7 +337,9 @@ async def test_update_empty_human_routing_keeps_actor_as_approver(
     account, users = import_account
     created = await create_approval_workflow(
         workflow_data=ApprovalWorkflowCreate(
-            name="Actor default", **({"approval_type": mechanism} if mechanism else {})
+            name="Actor default",
+            approval_mode=mode,
+            **({"approval_type": mechanism} if mechanism else {}),
         ),
         account=account,
         current_user=users[0],
@@ -377,3 +380,67 @@ async def test_ai_driven_empty_routing_is_not_defaulted_to_actor(
     )
     assert not created.approver_user_ids
     assert not created.approver_team_ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recipient_kind", ["user", "team"])
+@pytest.mark.parametrize("mode", ["standard", "manual", "legacy-human", "ai_driven"])
+async def test_create_and_update_preserve_explicit_approval_recipients(
+    db_session, import_account, monkeypatch, recipient_kind, mode
+):
+    from preloop.api.endpoints.tools import (
+        create_approval_workflow,
+        update_approval_workflow,
+    )
+    from preloop.models import models
+    from preloop.models.schemas.tool_configuration import (
+        ApprovalWorkflowCreate,
+        ApprovalWorkflowUpdate,
+    )
+    from preloop.utils import permissions
+
+    monkeypatch.setattr(permissions, "_plugin_require_permission", None)
+    register_configuration_authorizer(lambda *_: None)
+    account, users = import_account
+    team = models.Team(account_id=account.id, name="Reviewers")
+    db_session.add(team)
+    db_session.flush()
+    recipients = {
+        "approver_user_ids": [users[1].id] if recipient_kind == "user" else [],
+        "approver_team_ids": [team.id] if recipient_kind == "team" else [],
+    }
+    created = await create_approval_workflow(
+        workflow_data=ApprovalWorkflowCreate(
+            name="Explicit recipients",
+            approval_mode=mode,
+            approval_type="slack",
+            **recipients,
+        ),
+        account=account,
+        current_user=users[0],
+        db=db_session,
+    )
+    for key, expected in recipients.items():
+        assert list(map(str, getattr(created, key) or [])) == list(map(str, expected))
+    updated = await update_approval_workflow(
+        workflow_id=created.id,
+        workflow_update=ApprovalWorkflowUpdate(description="Keep routing"),
+        account=account,
+        current_user=users[0],
+        db=db_session,
+    )
+    for key, expected in recipients.items():
+        assert list(map(str, getattr(updated, key) or [])) == list(map(str, expected))
+
+
+def test_missing_mode_uses_runtime_human_default():
+    from preloop.api.endpoints.tools import _empty_human_approver_default
+
+    actor = uuid4()
+    assert _empty_human_approver_default(
+        approval_mode=None,
+        approval_type="slack",
+        approver_user_ids=None,
+        approver_team_ids=None,
+        actor_id=actor,
+    ) == [actor]

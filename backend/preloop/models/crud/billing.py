@@ -399,6 +399,8 @@ class CRUDBilling:
         authenticated account reference may fill a NULL customer mapping.
         Conflicts never change ownership, entitlements or provider objects.
         Repeated deliveries retain one auditable reconciliation result.
+        The EE checkout-completion webhook calls this with ``allow_association``
+        only for a server-generated authenticated account reference.
         """
         db.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:customer, 0))"),
@@ -462,6 +464,8 @@ class CRUDBilling:
         Provider webhook processing may acknowledge this exact pair without
         retrying a permanent conflict. Unrelated unlinked subscriptions must
         still retry until checkout establishes their account.
+        The EE subscription-webhook reconciler consumes this result to acknowledge
+        an identity hold without applying subscription entitlements.
         """
         return (
             db.query(models.BillingOperation)
