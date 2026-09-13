@@ -156,3 +156,40 @@ def test_unrelated_stale_metadata_write_cannot_erase_floor(db_engine, promise):
                 delete(models.Account).where(models.Account.id == account_id)
             )
             cleanup.commit()
+
+
+@pytest.mark.parametrize("previous_floor,expected", [(None, 730), (900, 900), (-1, -1)])
+def test_reconciliation_separates_audit_and_preserves_materialized_floor(
+    db_session, test_user, previous_floor, expected
+):
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4
+    from preloop.models.crud.billing import billing
+
+    account = db_session.get(models.Account, test_user.account_id)
+    account.subscription_history_retention_days = previous_floor
+    account.meta_data = {HISTORY_RETENTION_KEY: previous_floor}
+    plan_id = "history-" + uuid4().hex
+    db_session.add(
+        models.Plan(
+            id=plan_id,
+            name=plan_id,
+            features={"retention_days": 730, "audit_logs_retention_days": -1},
+        )
+    )
+    db_session.flush()
+    now = datetime.now(UTC)
+    billing.reconcile_subscription(
+        db_session,
+        account_id=str(account.id),
+        stripe_id="sub_" + uuid4().hex,
+        values={
+            "plan_id": plan_id,
+            "status": "past_due",
+            "current_period_start": now,
+            "current_period_end": now + timedelta(days=30),
+            "billing_state": {},
+        },
+    )
+    assert account.subscription_history_retention_days == expected
+    assert account.meta_data[HISTORY_RETENTION_KEY] == expected

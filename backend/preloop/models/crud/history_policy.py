@@ -68,6 +68,22 @@ def longest_history_promise(*values: Any) -> int:
     return -1 if -1 in valid else max([0, *valid])
 
 
+def analytics_plan_retention(features: dict[str, Any] | None) -> int | None:
+    """Prefer explicit analytics terms, retaining the legacy audit-only fallback.
+
+    Older plans expressed their history promise only through the audit field.
+    When analytics is explicit, audit storage is a separate policy and cannot
+    make analytics unlimited. Already materialized account floors are never
+    reinterpreted or reduced by this helper.
+    """
+    values = features or {}
+    key = (
+        "retention_days" if "retention_days" in values else "audit_logs_retention_days"
+    )
+    days = values.get(key)
+    return days if type(days) is int and (days == -1 or days > 0) else None
+
+
 def subscription_history_retention(db: Session, *, account_id: Any) -> int:
     """Read persisted plan promises for a standalone purge without EE hooks.
 
@@ -84,15 +100,9 @@ def subscription_history_retention(db: Session, *, account_id: Any) -> int:
         .scalars()
         .all()
     )
-    longest = 0
-    for values in features:
-        for key in ("retention_days", "audit_logs_retention_days"):
-            days = (values or {}).get(key)
-            if days == -1:
-                return -1
-            if isinstance(days, int) and not isinstance(days, bool) and days > 0:
-                longest = max(longest, days)
-    return longest
+    return longest_history_promise(
+        *(analytics_plan_retention(value) for value in features)
+    )
 
 
 def lock_account_for_retention(

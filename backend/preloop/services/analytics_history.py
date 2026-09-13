@@ -127,12 +127,13 @@ def storage_history_days(db: Session, *, account: models.Account) -> int | None:
     )
     if stored == -1:
         return None
-    previous = stored if isinstance(stored, int) and stored > 0 else 0
     current = _configured_history_days(db, account=account)
-    if current is None:
-        persisted = subscription_history_retention(db, account_id=account.id)
-        return None if persisted == -1 else max(previous, persisted)
-    return None if current == -1 else max(current, previous)
+    # Reporting may legitimately fall back to Free after entitlement ends.
+    # Existing subscriptions can predate Account's durable floor and must
+    # still protect physical rows even while the billing plugin is enabled.
+    persisted = subscription_history_retention(db, account_id=account.id)
+    promised = longest_history_promise(stored, current, persisted)
+    return None if promised == -1 else promised
 
 
 def require_session_history(

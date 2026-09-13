@@ -205,7 +205,7 @@ class CRUDBilling:
         )
         if row is not None and str(row.account_id) != str(account_id):
             raise ValueError("Subscription belongs to a different account")
-        from .history_policy import preserve_history_retention
+        from .history_policy import analytics_plan_retention, preserve_history_retention
 
         plan_ids = {values["plan_id"]}
         if row is not None:
@@ -213,18 +213,11 @@ class CRUDBilling:
         for plan_id in plan_ids:
             plan = db.query(models.Plan).filter(models.Plan.id == plan_id).one_or_none()
             if plan is not None:
-                features = plan.features or {}
-                days = [
-                    features.get("retention_days"),
-                    features.get("audit_logs_retention_days"),
-                ]
-                configured = [day for day in days if isinstance(day, int)]
-                if configured:
-                    preserve_history_retention(
-                        db,
-                        account_id=account_id,
-                        days=-1 if -1 in configured else max(configured),
-                    )
+                preserve_history_retention(
+                    db,
+                    account_id=account_id,
+                    days=analytics_plan_retention(plan.features),
+                )
         if row is None:
             row = models.Subscription(
                 account_id=account_id, stripe_subscription_id=stripe_id, **values

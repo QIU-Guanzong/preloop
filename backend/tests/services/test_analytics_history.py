@@ -607,3 +607,60 @@ def test_later_activity_protects_even_a_previously_ended_session(
         dry_run=False,
     )
     assert result.deleted == 0
+
+
+@pytest.mark.parametrize("status", ["past_due", "unpaid", "canceled"])
+@pytest.mark.parametrize(
+    "features,expected",
+    [
+        ({"retention_days": 730}, 730),
+        ({"audit_logs_retention_days": 900}, 900),
+        ({"audit_logs_retention_days": -1}, -1),
+        ({"retention_days": 730, "audit_logs_retention_days": -1}, 730),
+    ],
+)
+def test_purge_preserves_unmaterialized_plan_promise_even_with_free_access(
+    policy, db_session, create_account, status, features, expected
+):
+    """A reporting downgrade cannot silently erase a persisted storage promise."""
+    account = create_account()
+    now = datetime.now(UTC)
+    plan_id = "history-" + uuid4().hex
+    db_session.add(models.Plan(id=plan_id, name=plan_id, features=features))
+    db_session.flush()
+    db_session.add(
+        models.Subscription(
+            account_id=account.id,
+            plan_id=plan_id,
+            status=status,
+            current_period_start=now,
+            current_period_end=now + timedelta(days=30),
+        )
+    )
+    session = make_session(db_session, account, now)
+    keep_id = make_usage(db_session, account, session, now - timedelta(days=500)).id
+    expired_id = make_usage(db_session, account, session, now - timedelta(days=1000)).id
+    db_session.commit()
+    assert account.subscription_history_retention_days is None
+    assert history.history_cutoff(
+        db_session, account=account, now=now
+    ) == now - timedelta(days=183)
+    result = purge.purge_class(
+        db_session,
+        account=account,
+        record_class=CLASS_USAGE,
+        now=now,
+        batch_size=100,
+        max_batches=1,
+        dry_run=False,
+    )
+    assert result.retention_days == expected
+    remaining = set(
+        db_session.execute(
+            select(models.ApiUsage.id).where(
+                models.ApiUsage.id.in_([keep_id, expired_id])
+            )
+        ).scalars()
+    )
+    assert keep_id in remaining
+    assert (expired_id in remaining) == (expected == -1)
