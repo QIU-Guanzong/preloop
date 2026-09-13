@@ -39,6 +39,7 @@ import {
   executionModelCss,
   executionStatusLabel,
   executionStatusVariant,
+  isExecutionRequestFailureStatus,
   parkWaitingSummary,
   type ExecutionPark,
   formatEstimatedCost,
@@ -1512,14 +1513,15 @@ export class FlowExecutionView extends LitElement {
   }
 
   /**
-   * The failing model call, oldest first: the one that broke the run.
+   * The first failed model call, excluding request cancellations. A cancelled
+   * stream can belong to background work even when the review completed.
    */
   private firstFailedGatewayEvent(): FlowGatewayEvent | null {
     const failed = this.gatewayEvents
       .filter((event) => {
         if (!isModelGatewayCall(event)) return false;
         const status = event.payload.status_code;
-        return typeof status === 'number' && status >= 400;
+        return typeof status === 'number' && status >= 400 && status !== 499;
       })
       .sort(
         (a, b) =>
@@ -1593,6 +1595,12 @@ export class FlowExecutionView extends LitElement {
   }
 
   private errorLineText(execution: FlowExecution): string {
+    // Individual model requests can fail or be cancelled while the execution
+    // continues successfully. Only a terminal execution failure owns this
+    // banner; request diagnostics remain in the timeline.
+    if (!isExecutionRequestFailureStatus(execution.status)) {
+      return '';
+    }
     const failed = this.firstFailedGatewayEvent();
     if (failed) {
       const message = providerErrorMessage(

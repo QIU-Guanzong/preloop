@@ -41,6 +41,47 @@ export function executionStatusLabel(
 }
 
 /**
+ * Terminal statuses that own the execution-page failure banner.
+ *
+ * Includes operator-stopped runs (`STOPPED` / `CANCELLED`) so the page still
+ * explains why the run ended, plus backend spellings (`TIMED_OUT`,
+ * `ABORTED`, `ERROR`) that are not the chip's current danger set.
+ */
+const EXECUTION_REQUEST_FAILURE_STATUSES: ReadonlySet<string> = new Set([
+  'FAILED',
+  'TIMEOUT',
+  'TIMED_OUT',
+  'ABORTED',
+  'ERROR',
+  'STOPPED',
+  'CANCELLED',
+]);
+
+/**
+ * Statuses whose chip is red: the run actually broke. `STOPPED` and
+ * `CANCELLED` stay neutral even though they still get the banner.
+ */
+const EXECUTION_DANGER_STATUSES: ReadonlySet<string> = new Set([
+  'FAILED',
+  'TIMEOUT',
+  'TIMED_OUT',
+  'ABORTED',
+  'ERROR',
+]);
+
+/**
+ * Whether the execution-page error banner should fire for this status.
+ *
+ * Individual model requests can fail while the run continues. Only these
+ * terminal statuses own the banner; request diagnostics stay in the timeline.
+ */
+export function isExecutionRequestFailureStatus(
+  status: string | null | undefined
+): boolean {
+  return EXECUTION_REQUEST_FAILURE_STATUSES.has((status || '').toUpperCase());
+}
+
+/**
  * One taxonomy for every execution chip: green finished, red failed, blue
  * still going, amber waiting on a person, neutral for the rest (pending,
  * cancelled, stopped). Red is reserved for a run that actually broke.
@@ -51,12 +92,13 @@ export function executionStatusLabel(
 export function executionStatusVariant(
   status: string | null | undefined
 ): 'success' | 'danger' | 'primary' | 'warning' | 'neutral' {
-  switch ((status || '').toUpperCase()) {
+  const normalized = (status || '').toUpperCase();
+  if (EXECUTION_DANGER_STATUSES.has(normalized)) {
+    return 'danger';
+  }
+  switch (normalized) {
     case 'SUCCEEDED':
       return 'success';
-    case 'FAILED':
-    case 'TIMEOUT':
-      return 'danger';
     case 'RUNNING':
     case 'STARTING':
     case 'INITIALIZING':
