@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -150,5 +151,141 @@ func TestRunnerStreamsLogsBeforeAgentCanFinish(t *testing.T) {
 		case <-deadline:
 			t.Fatal("agent could not finish because its early log was never streamed")
 		}
+	}
+}
+
+func TestRunnerLogsRetainBatchUntilServerAcknowledges(t *testing.T) {
+	var buffer runnerLogBuffer
+	buffer.setLogAcknowledgements(true)
+	_, _ = buffer.Write([]byte("native session\nPR created\n"))
+	batch, err := buffer.nextBatch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batch == nil || len(batch.lines) != 2 {
+		t.Fatal("missing initial batch")
+	}
+	buffer.markBatchSent(batch.id)
+	if next, err := buffer.nextBatch(); err != nil || next != nil {
+		t.Fatal("sent batch should await acknowledgment")
+	}
+	buffer.resetDelivery()
+	replay, err := buffer.nextBatch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay == nil || replay.id != batch.id {
+		t.Fatal("reconnect lost stable batch identity")
+	}
+	buffer.acknowledgeBatch(batch.id)
+	if next, err := buffer.nextBatch(); err != nil || next != nil || buffer.pendingBytes != 0 {
+		t.Fatal("acknowledged batch was retained")
+	}
+}
+
+func TestRunnerWriteDeadlineInterruptsBackpressure(t *testing.T) {
+	oldWait := runnerWriteWait
+	runnerWriteWait = 50 * time.Millisecond
+	t.Cleanup(func() { runnerWriteWait = oldWait })
+	release := make(chan struct{})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close() //nolint:errcheck
+	start := time.Now()
+	err = writeRunnerJSON(conn, map[string]any{"lines": strings.Repeat("x", 16*1024*1024)})
+	if err == nil || time.Since(start) > time.Second {
+		t.Fatalf("blocked writer did not time out promptly: %v", err)
+	}
+}
+
+func TestRunnerFinalLogFloodReplaysAfterLostAcknowledgements(t *testing.T) {
+	var buffer runnerLogBuffer
+	buffer.setLogAcknowledgements(true)
+	for i := 0; i < 4096; i++ {
+		_, _ = buffer.Write([]byte(fmt.Sprintf("line-%04d\n", i)))
+	}
+	completed := make(chan map[string]int, 1)
+	var connections atomic.Int32
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+		n := connections.Add(1)
+		_ = conn.WriteJSON(map[string]any{"type": "hello", "log_acknowledgements": true})
+		seen := map[string]int{}
+		batches := 0
+		for {
+			var message map[string]any
+			if conn.ReadJSON(&message) != nil {
+				return
+			}
+			if message["type"] == "logs" {
+				batches++
+				if n == 1 { // Lose the connection before acknowledging its first frame.
+					return
+				}
+				for _, line := range message["lines"].([]any) {
+					seen[line.(string)]++
+				}
+				if err := conn.WriteJSON(map[string]any{"type": "logs_ack", "execution_id": "execution-flood", "batch_id": message["batch_id"]}); err != nil {
+					return
+				}
+			}
+			if message["type"] == "complete" {
+				if n == 2 && batches > 8 {
+					completed <- seen
+				}
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	finished := make(chan leasedJobOutcome, 1)
+	finished <- leasedJobOutcome{executionID: "execution-flood", status: "SUCCEEDED", result: map[string]any{"status": "success"}, logBuffer: &buffer}
+	var jobDone <-chan leasedJobOutcome = finished
+	var running *exec.Cmd
+	var executionID string
+	var last *leasedJobOutcome
+	halt := false
+	interrupt := make(chan os.Signal, 1)
+	for i := 0; i < 2; i++ {
+		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = runRunnerSession(conn, interrupt, io.Discard, &running, &executionID, &jobDone, &halt, &atomic.Bool{}, &last)
+		_ = conn.Close()
+		if err == nil {
+			t.Fatal("expected disconnect")
+		}
+	}
+	select {
+	case seen := <-completed:
+		if len(seen) != 4096 {
+			t.Fatalf("reconnect recovered %d of 4096 log lines", len(seen))
+		}
+		for line, count := range seen {
+			if count != 1 {
+				t.Fatalf("duplicate %s: %d", line, count)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("terminal result did not survive final-log backlog and reconnect")
 	}
 }

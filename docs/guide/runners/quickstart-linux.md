@@ -298,3 +298,20 @@ socket gives the agent the same privileges as the runner user.
 | Execution FAILED after ~15 min queued | No runner matching `runner_pool` was online; check `preloop runner status` and labels. |
 | Service dies after SSH logout | `sudo loginctl enable-linger $USER`. |
 | Runner shows offline after IP change | Restart: `preloop runner restart` — registration resumes from `~/.preloop/runner.json`. |
+
+## Runner connection recovery
+
+The runner reconnects when a WebSocket read or write times out. With a server
+that supports log acknowledgments, it retains unacknowledged log batches and
+replays their stable IDs after reconnecting, so the server stores each line
+once. Terminal reports are also retained for reconnect, and execution completion
+is committed together with releasing its runner lease. A late report cannot
+replace a timeout or cancellation that the server has already recorded.
+
+The pending batches and terminal report are held in the CLI process's memory.
+They do not survive stopping or restarting the CLI process. Servers without log
+acknowledgment support retain the older best-effort log delivery behavior.
+The server records received PR and native-session handoff markers before final
+completion, which preserves that metadata if a later terminal report is lost.
+A created PR by itself does not mean the agent process has finished or that the
+execution succeeded.

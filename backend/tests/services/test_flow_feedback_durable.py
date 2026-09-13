@@ -1006,7 +1006,11 @@ async def test_native_repair_resolves_encrypted_workspace_and_selected_session(
         }
 
         def store(
-            session: Session, *, values: dict[str, Any], quota_bytes: int
+            session: Session,
+            *,
+            values: dict[str, Any],
+            quota_bytes: int,
+            require_execution_open: bool = True,
         ) -> models.FlowArtifact:
             # This fixture's minimal account table omits unrelated account fields.
             # Exercise real encrypted artifact service plus real scoped rows.
@@ -1184,3 +1188,90 @@ def test_reservation_waits_for_parent_before_locking_thread(database: Engine) ->
             future.result(timeout=5)
     finally:
         sql_event.remove(database, "before_cursor_execute", before_execute)
+
+
+@pytest.mark.parametrize(
+    "incoming",
+    [None, {"summary": "finished"}, {"pr_url": "https://github.com/other/repo/pull/1"}],
+)
+def test_early_pr_binding_survives_stale_terminal_result(
+    database: Engine, incoming: dict | None
+) -> None:
+    from preloop.models.crud import crud_flow_execution
+    from preloop.models.schemas.flow_execution import FlowExecutionUpdate
+
+    with Session(database, expire_on_commit=False) as stale:
+        thread = create_thread(stale)
+        source = stale.get(models.FlowExecution, thread.latest_execution_id)
+        assert source.result is None
+        with Session(database) as writer:
+            crud_flow_execution.bind_publication(
+                writer,
+                execution_id=source.id,
+                pr_url=thread.pr_url,
+                source_branch=thread.branch,
+            )
+        # This ORM object predates the log frame. The final completion cannot
+        # drop the publication even if its report is missing or claims another PR.
+        crud_flow_execution.update(stale, source, FlowExecutionUpdate(result=incoming))
+        stale.commit()
+        stale.refresh(source)
+        assert source.result["pr_url"] == thread.pr_url
+        assert source.result["pr_source_branch"] == thread.branch
+        if incoming and "summary" in incoming:
+            assert source.result["summary"] == "finished"
+
+
+def test_publication_binding_refreshes_stale_state_and_rejects_other_pr(
+    database: Engine,
+) -> None:
+    from preloop.models.crud import crud_flow_execution
+
+    with Session(database, expire_on_commit=False) as stale:
+        thread = create_thread(stale)
+        source = stale.get(models.FlowExecution, thread.latest_execution_id)
+        with Session(database) as writer:
+            row = writer.get(models.FlowExecution, source.id)
+            row.result = {"verification": {"status": "passed"}}
+            writer.commit()
+        crud_flow_execution.bind_publication(
+            stale,
+            execution_id=source.id,
+            pr_url=thread.pr_url,
+            source_branch=thread.branch,
+        )
+        assert source.result["verification"] == {"status": "passed"}
+        with pytest.raises(ValueError, match="binding changed"):
+            crud_flow_execution.bind_publication(
+                stale,
+                execution_id=source.id,
+                pr_url="https://github.com/example/repo/pull/999",
+            )
+        stale.rollback()
+        assert source.result["pr_url"] == thread.pr_url
+
+
+def test_plain_native_marker_replay_preserves_uploaded_artifact(
+    database: Engine,
+) -> None:
+    from preloop.models.crud import crud_flow_execution
+
+    with Session(database, expire_on_commit=False) as stale:
+        thread = create_thread(stale)
+        source = stale.get(models.FlowExecution, thread.latest_execution_id)
+        plain = dict(source.cli_session)
+        with Session(database) as writer:
+            row = writer.get(models.FlowExecution, source.id)
+            crud_flow_execution.set_cli_session(
+                writer,
+                db_obj=row,
+                cli_session={
+                    **plain,
+                    "artifact_reference": {"artifact_id": "captured"},
+                },
+            )
+            writer.commit()
+        crud_flow_execution.set_cli_session(stale, db_obj=source, cli_session=plain)
+        stale.commit()
+        stale.refresh(source)
+        assert source.cli_session["artifact_reference"] == {"artifact_id": "captured"}

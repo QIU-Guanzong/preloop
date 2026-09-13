@@ -9513,6 +9513,22 @@ paths:
           type: string
           format: uuid
           title: Execution Id
+      - name: pr_url
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Pr Url
+      - name: branch
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Branch
       responses:
         '200':
           description: Successful Response
@@ -15844,6 +15860,20 @@ components:
           type: boolean
           title: Acknowledge Fresh Conversation
           default: false
+        pr_url:
+          anyOf:
+          - type: string
+            maxLength: 2048
+            minLength: 1
+          - type: 'null'
+          title: Pr Url
+        branch:
+          anyOf:
+          - type: string
+            maxLength: 255
+            minLength: 1
+          - type: 'null'
+          title: Branch
       type: object
       required:
       - recovery_mode
@@ -16383,9 +16413,11 @@ components:
           enum:
           - private
           - hosted
+          - unknown
           title: Kind
           description: private when the run was leased to a self-hosted CLI runner;
-            hosted when it used the built-in Preloop executor
+            hosted when it used the built-in Preloop executor; unknown when no runtime
+            assignment is recorded
         id:
           anyOf:
           - type: string
@@ -16413,9 +16445,9 @@ components:
 
         Derived at read time from ``FlowExecution.runner_id`` and
 
-        ``agent_session_reference`` ``runner:...`` forms. Hosted is the default
+        ``agent_session_reference`` ``runner:...`` forms. An absent runtime
 
-        so the console can always name the executor.'
+        assignment is unknown until an executor actually starts.'
     ExecutionRunnerSummary:
       properties:
         kind:
@@ -16423,8 +16455,10 @@ components:
           enum:
           - private
           - hosted
+          - unknown
           title: Kind
-          description: private for a self-hosted CLI runner; hosted otherwise
+          description: private for a CLI runner; hosted for built-in compute; unknown
+            when unassigned
         name:
           type: string
           title: Name
@@ -17046,7 +17080,7 @@ components:
         runner:
           $ref: '#/components/schemas/ExecutionRunner'
           description: Where this execution ran. Hosted when the built-in executor
-            ran it; private when a self-hosted CLI runner did.
+            ran it; private when a self-hosted CLI runner did; unknown until assigned.
       type: object
       required:
       - flow_id

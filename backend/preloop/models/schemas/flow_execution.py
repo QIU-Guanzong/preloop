@@ -66,15 +66,16 @@ class ExecutionRunner(BaseModel):
     """Where an execution ran: a private CLI runner or Preloop hosted.
 
     Derived at read time from ``FlowExecution.runner_id`` and
-    ``agent_session_reference`` ``runner:...`` forms. Hosted is the default
-    so the console can always name the executor.
+    ``agent_session_reference`` ``runner:...`` forms. An absent runtime
+    assignment is unknown until an executor actually starts.
     """
 
-    kind: Literal["private", "hosted"] = Field(
+    kind: Literal["private", "hosted", "unknown"] = Field(
         ...,
         description=(
             "private when the run was leased to a self-hosted CLI runner; "
-            "hosted when it used the built-in Preloop executor"
+            "hosted when it used the built-in Preloop executor; "
+            "unknown when no runtime assignment is recorded"
         ),
     )
     id: Optional[uuid.UUID] = Field(
@@ -96,9 +97,9 @@ class ExecutionRunner(BaseModel):
 class ExecutionRunnerSummary(BaseModel):
     """List-row runner: kind and name only."""
 
-    kind: Literal["private", "hosted"] = Field(
+    kind: Literal["private", "hosted", "unknown"] = Field(
         ...,
-        description="private for a self-hosted CLI runner; hosted otherwise",
+        description="private for a CLI runner; hosted for built-in compute; unknown when unassigned",
     )
     name: str = Field(
         ...,
@@ -108,12 +109,12 @@ class ExecutionRunnerSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-def _hosted_runner() -> ExecutionRunner:
-    return ExecutionRunner(kind="hosted", name="Preloop hosted")
+def _unknown_runner() -> ExecutionRunner:
+    return ExecutionRunner(kind="unknown", name="Not recorded")
 
 
-def _hosted_runner_summary() -> ExecutionRunnerSummary:
-    return ExecutionRunnerSummary(kind="hosted", name="Preloop hosted")
+def _unknown_runner_summary() -> ExecutionRunnerSummary:
+    return ExecutionRunnerSummary(kind="unknown", name="Not recorded")
 
 
 class ExecutionPark(BaseModel):
@@ -285,10 +286,10 @@ class FlowExecutionResponse(FlowExecutionBase, ExecutionModelProjection):
         ),
     )
     runner: ExecutionRunner = Field(
-        default_factory=_hosted_runner,
+        default_factory=_unknown_runner,
         description=(
             "Where this execution ran. Hosted when the built-in executor "
-            "ran it; private when a self-hosted CLI runner did."
+            "ran it; private when a self-hosted CLI runner did; unknown until assigned."
         ),
     )
 
@@ -349,7 +350,7 @@ class FlowExecutionListResponse(ExecutionModelProjection):
         ),
     )
     runner: ExecutionRunnerSummary = Field(
-        default_factory=_hosted_runner_summary,
+        default_factory=_unknown_runner_summary,
         description=(
             "Where this execution ran. List rows carry kind and name; "
             "detail adds id and pool."

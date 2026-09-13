@@ -24,12 +24,12 @@ from preloop.services.runner_service import (
 )
 
 
-def test_hosted_when_no_runner_signal() -> None:
+def test_unknown_when_no_runner_signal() -> None:
     payload = derive_execution_runner()
     runner = ExecutionRunner.model_validate(payload)
 
-    assert runner.kind == "hosted"
-    assert runner.name == HOSTED_RUNNER_NAME
+    assert runner.kind == "unknown"
+    assert runner.name == "Not recorded"
     assert runner.id is None
     assert runner.pool is None
 
@@ -88,12 +88,12 @@ def test_list_schema_carries_kind_and_name_only() -> None:
     assert not hasattr(summary, "id") or "id" not in summary.model_fields
 
 
-def test_response_schemas_default_to_hosted() -> None:
+def test_response_schemas_default_to_unknown() -> None:
     assert "runner" in FlowExecutionResponse.model_fields
     assert "runner" in FlowExecutionListResponse.model_fields
     default_detail = FlowExecutionResponse.model_fields["runner"].default_factory()
     default_list = FlowExecutionListResponse.model_fields["runner"].default_factory()
-    assert default_detail.kind == "hosted"
-    assert default_detail.name == HOSTED_RUNNER_NAME
-    assert default_list.kind == "hosted"
-    assert default_list.name == HOSTED_RUNNER_NAME
+    assert default_detail.kind == "unknown"
+    assert default_detail.name == "Not recorded"
+    assert default_list.kind == "unknown"
+    assert default_list.name == "Not recorded"

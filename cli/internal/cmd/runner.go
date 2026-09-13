@@ -35,6 +35,7 @@ var (
 	runnerReconnectMin = time.Second
 	runnerReconnectMax = 30 * time.Second
 	runnerReadWait     = 45 * time.Second
+	runnerWriteWait    = 5 * time.Second
 	runnerHasDocker    = dockerAvailable
 	newRunnerJobCmd    = defaultNewRunnerJobCmd
 )
@@ -123,6 +124,9 @@ type runnerAPIRecord struct {
 }
 
 type runnerWSMessage struct {
+	LogAcknowledgements bool   `json:"log_acknowledgements,omitempty"`
+	BatchID             string `json:"batch_id,omitempty"`
+
 	Version       int                `json:"version,omitempty"`
 	ExecutionID   string             `json:"execution_id,omitempty"`
 	Nonce         string             `json:"nonce,omitempty"`
@@ -254,6 +258,15 @@ func dialRunnerWebsocket(wsURL, token string) (*websocket.Conn, error) {
 	return conn, nil
 }
 
+// All application frames share a bounded write deadline. A read timeout alone
+// cannot interrupt the session loop while it is blocked writing a log frame.
+func writeRunnerJSON(conn *websocket.Conn, message any) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(runnerWriteWait)); err != nil {
+		return err
+	}
+	return conn.WriteJSON(message)
+}
+
 func writeJobOutcome(conn *websocket.Conn, outcome leasedJobOutcome) error {
 	if outcome.publicationRequired && !outcome.publicationAcknowledged && outcome.status == "SUCCEEDED" {
 		outcome.status = "FAILED"
@@ -265,11 +278,15 @@ func writeJobOutcome(conn *websocket.Conn, outcome leasedJobOutcome) error {
 	if err := flushRunnerLogs(conn, outcome.executionID, outcome.logBuffer, true); err != nil {
 		return err
 	}
-	if len(outcome.lines) > 0 {
-		if err := conn.WriteJSON(map[string]any{
+	for offset := 0; offset < len(outcome.lines); offset += 128 {
+		end := offset + 128
+		if end > len(outcome.lines) {
+			end = len(outcome.lines)
+		}
+		if err := writeRunnerJSON(conn, map[string]any{
 			"type":         "logs",
 			"execution_id": outcome.executionID,
-			"lines":        outcome.lines,
+			"lines":        outcome.lines[offset:end],
 		}); err != nil {
 			return err
 		}
@@ -289,7 +306,7 @@ func writeJobOutcome(conn *websocket.Conn, outcome leasedJobOutcome) error {
 	if outcome.evidenceUpload != "" {
 		message["evidence_upload"] = outcome.evidenceUpload
 	}
-	return conn.WriteJSON(message)
+	return writeRunnerJSON(conn, message)
 }
 
 func rememberOutcome(dst **leasedJobOutcome, outcome leasedJobOutcome) {
@@ -309,9 +326,9 @@ func applyJobOutcome(
 	halt *bool,
 	halted *atomic.Bool,
 	lastComplete **leasedJobOutcome,
-) {
+) error {
 	rememberOutcome(lastComplete, outcome)
-	_ = writeJobOutcome(conn, outcome)
+	err := writeJobOutcome(conn, outcome)
 	if runningCmd != nil {
 		*runningCmd = nil
 	}
@@ -327,6 +344,7 @@ func applyJobOutcome(
 	if halted != nil {
 		halted.Store(false)
 	}
+	return err
 }
 
 func flushPendingOutcome(
@@ -337,17 +355,18 @@ func flushPendingOutcome(
 	halt *bool,
 	halted *atomic.Bool,
 	lastComplete **leasedJobOutcome,
-) {
+) error {
 	if jobDone == nil || *jobDone == nil {
-		return
+		return nil
 	}
 	select {
 	case outcome := <-*jobDone:
-		applyJobOutcome(
+		return applyJobOutcome(
 			conn, outcome, runningCmd, runningExecID, jobDone, halt, halted, lastComplete,
 		)
 	default:
 	}
+	return nil
 }
 
 func runnerForegroundLoop(state *runnerState, interrupt <-chan os.Signal, out io.Writer) error {
@@ -488,13 +507,19 @@ func runRunnerSession(
 		}
 	}()
 
-	if err := conn.WriteJSON(runnerHeartbeatMessage()); err != nil {
+	if err := writeRunnerJSON(conn, runnerHeartbeatMessage()); err != nil {
 		return fmt.Errorf("initial heartbeat: %w", err)
 	}
 
-	flushPendingOutcome(
-		conn, jobDone, runningCmd, runningExecID, halt, halted, lastComplete,
-	)
+	if *runningCmd != nil {
+		if buffer, ok := (*runningCmd).Stdout.(*runnerLogBuffer); ok {
+			buffer.resetDelivery()
+		}
+	}
+	if *lastComplete != nil && (*lastComplete).logBuffer != nil {
+		(*lastComplete).logBuffer.resetDelivery()
+	}
+	logAcknowledgements := false
 
 	killRunning := func() {
 		if !requestJobHalt(halted, *runningCmd) {
@@ -502,7 +527,7 @@ func runRunnerSession(
 		}
 	}
 
-	logTicker := time.NewTicker(time.Second)
+	logTicker := time.NewTicker(100 * time.Millisecond)
 	defer logTicker.Stop()
 	ticker := time.NewTicker(runnerHeartbeatEvery)
 	defer ticker.Stop()
@@ -512,7 +537,7 @@ func runRunnerSession(
 		case <-interrupt:
 			fmt.Fprintf(out, "Unregistering...\n")
 			killRunning()
-			_ = conn.WriteJSON(map[string]any{"type": "unregister"})
+			_ = writeRunnerJSON(conn, map[string]any{"type": "unregister"})
 			return nil
 		case <-logTicker.C:
 			if *runningCmd != nil {
@@ -524,12 +549,15 @@ func runRunnerSession(
 			}
 		case event := <-publicationEvents:
 			if event.outcome != nil {
-				applyJobOutcome(conn, *event.outcome, runningCmd, runningExecID, jobDone, halt, halted, lastComplete)
+				deliveryErr := applyJobOutcome(conn, *event.outcome, runningCmd, runningExecID, jobDone, halt, halted, lastComplete)
 				publication.cancel()
 				publication = nil
 				publicationEvents = nil
+				if deliveryErr != nil {
+					return deliveryErr
+				}
 			} else if event.message != nil {
-				if err := conn.WriteJSON(event.message); err != nil {
+				if err := writeRunnerJSON(conn, event.message); err != nil {
 					return err
 				}
 			}
@@ -547,7 +575,7 @@ func runRunnerSession(
 			_ = conn.WriteControl(
 				websocket.PingMessage, nil, time.Now().Add(runnerPingWait),
 			)
-			if err := conn.WriteJSON(runnerHeartbeatMessage()); err != nil {
+			if err := writeRunnerJSON(conn, runnerHeartbeatMessage()); err != nil {
 				return fmt.Errorf("heartbeat: %w", err)
 			}
 		case err := <-readErr:
@@ -560,10 +588,42 @@ func runRunnerSession(
 				publication.start(outcome)
 				continue
 			}
-			applyJobOutcome(
+			if err := applyJobOutcome(
 				conn, outcome, runningCmd, runningExecID, jobDone, halt, halted, lastComplete,
-			)
+			); err != nil {
+				return err
+			}
 		case msg := <-incoming:
+			if msg.Type == "hello" {
+				logAcknowledgements = msg.LogAcknowledgements
+				if *runningCmd != nil {
+					if b, ok := (*runningCmd).Stdout.(*runnerLogBuffer); ok {
+						b.setLogAcknowledgements(logAcknowledgements)
+					}
+				}
+				if err := flushPendingOutcome(conn, jobDone, runningCmd, runningExecID, halt, halted, lastComplete); err != nil {
+					return err
+				}
+				if *lastComplete != nil {
+					if b := (*lastComplete).logBuffer; b != nil {
+						b.setLogAcknowledgements(logAcknowledgements)
+					}
+					if err := writeJobOutcome(conn, **lastComplete); err != nil {
+						return err
+					}
+				}
+			}
+			if msg.Type == "logs_ack" {
+				if *runningCmd != nil && *runningExecID == msg.ExecutionID {
+					if b, ok := (*runningCmd).Stdout.(*runnerLogBuffer); ok {
+						b.acknowledgeBatch(msg.BatchID)
+					}
+				}
+				if *lastComplete != nil && (*lastComplete).executionID == msg.ExecutionID && (*lastComplete).logBuffer != nil {
+					(*lastComplete).logBuffer.acknowledgeBatch(msg.BatchID)
+				}
+				continue
+			}
 			if strings.HasPrefix(msg.Type, "publication_") {
 				if publication == nil {
 					return errors.New("unexpected publication message without active lease")
@@ -600,7 +660,9 @@ func runRunnerSession(
 			jobID, _ := msg.Job["execution_id"].(string)
 			if lastComplete != nil && *lastComplete != nil &&
 				jobID != "" && (*lastComplete).executionID == jobID {
-				_ = writeJobOutcome(conn, **lastComplete)
+				if err := writeJobOutcome(conn, **lastComplete); err != nil {
+					return err
+				}
 				continue
 			}
 			if *runningExecID != "" {
@@ -610,10 +672,12 @@ func runRunnerSession(
 			if err := beginLeasedJob(
 				conn, msg.Job, *halt, out, runningCmd, runningExecID, jobDone, halted, lastComplete, &publication,
 			); err != nil {
-				fmt.Fprintf(out, "Job error: %v\n", err)
-				*runningCmd = nil
-				*runningExecID = ""
-				*jobDone = nil
+				return fmt.Errorf("job delivery: %w", err)
+			}
+			if *runningCmd != nil {
+				if b, ok := (*runningCmd).Stdout.(*runnerLogBuffer); ok {
+					b.setLogAcknowledgements(logAcknowledgements)
+				}
 			}
 			if publication != nil {
 				publicationEvents = publication.events
@@ -648,12 +712,12 @@ func beginLeasedJob(
 		halted.Store(false)
 	}
 	fmt.Fprintf(out, "Leased execution %s\n", executionID)
-	_ = conn.WriteJSON(map[string]any{
+	_ = writeRunnerJSON(conn, map[string]any{
 		"type":         "status",
 		"execution_id": executionID,
 		"status":       "RUNNING",
 	})
-	_ = conn.WriteJSON(map[string]any{
+	_ = writeRunnerJSON(conn, map[string]any{
 		"type":         "logs",
 		"execution_id": executionID,
 		"lines":        []string{"runner leased job " + executionID},

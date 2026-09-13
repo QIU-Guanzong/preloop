@@ -142,9 +142,9 @@ def derive_execution_runner(
     """Where an execution ran, derived from the row rather than a new column.
 
     Private when ``runner_id`` is set or ``agent_session_reference`` uses a
-    ``runner:...`` form (assigned or queued). Everything else is the built-in
-    hosted executor, which the console still names so the page is never
-    silent about where the work ran.
+    ``runner:...`` form (assigned or queued). A non-runner runtime reference
+    identifies the built-in hosted executor. An execution
+    without an assignment is unknown, including newly created retries.
     """
     resolved_id = runner_id or runner_id_from_session_reference(agent_session_reference)
     resolved_pool = pool or pool_from_session_reference(agent_session_reference)
@@ -160,6 +160,11 @@ def derive_execution_runner(
             "name": name or PRIVATE_RUNNER_FALLBACK_NAME,
             "pool": resolved_pool,
         }
+    if (
+        not isinstance(agent_session_reference, str)
+        or not agent_session_reference.strip()
+    ):
+        return {"kind": "unknown", "id": None, "name": "Not recorded", "pool": None}
     return {
         "kind": "hosted",
         "id": None,

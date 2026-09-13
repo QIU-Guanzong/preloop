@@ -311,19 +311,23 @@ export function renderExecutionModel(
 
 /** Where a run executed, as both execution endpoints project it. */
 export interface ExecutionRunner {
-  kind: 'private' | 'hosted';
+  kind: 'private' | 'hosted' | 'unknown';
   id?: string | null;
   name: string;
   pool?: string | null;
 }
 
-/** Hosted is the default so an older payload still names the executor. */
+/** Missing assignment data must not imply the run used hosted compute. */
 export function executionRunner(
   runner?: ExecutionRunner | null
 ): ExecutionRunner {
-  if (runner && (runner.kind === 'private' || runner.kind === 'hosted')) {
+  if (runner && ['private', 'hosted', 'unknown'].includes(runner.kind)) {
     const fallback =
-      runner.kind === 'hosted' ? 'Preloop hosted' : 'Private runner';
+      runner.kind === 'hosted'
+        ? 'Preloop hosted'
+        : runner.kind === 'private'
+          ? 'Private runner'
+          : 'Not recorded';
     return {
       kind: runner.kind,
       id: runner.id ?? null,
@@ -331,7 +335,7 @@ export function executionRunner(
       pool: runner.pool ?? null,
     };
   }
-  return { kind: 'hosted', id: null, name: 'Preloop hosted', pool: null };
+  return { kind: 'unknown', id: null, name: 'Not recorded', pool: null };
 }
 
 /**
@@ -357,7 +361,12 @@ export function renderExecutionRunnerKind(
   runner?: ExecutionRunner | null
 ): TemplateResult {
   const resolved = executionRunner(runner);
-  const label = resolved.kind === 'private' ? 'Private' : 'Hosted';
+  const label =
+    resolved.kind === 'private'
+      ? 'Private'
+      : resolved.kind === 'hosted'
+        ? 'Hosted'
+        : 'Unknown';
   return html`<sl-badge
     class="chip runner-kind-badge"
     pill

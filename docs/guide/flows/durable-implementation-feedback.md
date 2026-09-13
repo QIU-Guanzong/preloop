@@ -44,8 +44,16 @@ preserved when editing these controls. A compatible saved checkpoint is required
 for native conversation resume. An existing publication without that state
 requires explicit permission to start a fresh conversation. Turning on the option does not merge a PR.
 
-For an existing PR, open the successful execution that published it and choose
-**Set up PR follow-up**. This fetches a read-only preview of the exact PR, branch,
+For an existing PR, open the finished execution that published it and choose
+**Set up PR follow-up**. Failed, timed-out and cancelled executions can also be
+selected when they produced a PR before reporting stopped. If the execution has
+no recorded publication, enter the existing PR URL and its source branch.
+The server reads that exact PR through the execution's original tracker and
+requires both sides of the PR to belong to its original repository. It checks
+the source branch and current head; a recorded PR association cannot be replaced
+with another one. No branch search or new PR creation is performed.
+
+This fetches a read-only preview of the exact PR, branch,
 current head and recovery options. Confirm a fresh conversation explicitly if its
 saved state cannot be resumed. If the head changes, review the refreshed preview
 and confirm again. The action requires enabled flow feedback and deployment
@@ -55,12 +63,34 @@ second adoption request.
 
 Enabling feedback applies to future executions. The server records opt-in when
 an execution starts; turning the setting on does not discover and repair an old
-PR backlog. An older successful publication requires explicit adoption below.
+PR backlog. An older publication requires explicit adoption.
 Turning feedback off pauses future repairs without cancelling a running turn.
 Re-enabling keeps consumed turns, cost, no-progress history and the deadline.
 Current reviewer trust and budget settings apply on every reconciliation and are
 checked again when reserving a repair. Reducing the maximum age can shorten the
 original deadline; increasing it never extends an existing subscription.
+
+### Upgrade an older issue-only flow
+
+An older saved implementation flow may listen only to `issue_labeled`. Updating
+the installation or retrying that execution does not add review triggers. To
+continue its PR:
+
+1. Edit the saved flow, enable PR review and CI follow-up, and add the review
+   integration's numeric actor ID to **Trusted reviewer IDs**. This subscription
+   handles review and CI events independently of the flow's issue trigger types.
+2. Keep `agent-ready` as the intake filter; do not add that label to the PR just
+   to make review feedback work.
+3. Open the original finished execution and preview PR follow-up. If reporting
+   was lost, supply its existing PR URL and source branch. Check the current head
+   and explicitly acknowledge a fresh conversation when recovery files are
+   unavailable, then adopt that publication.
+
+A fresh conversation uses the published branch and original issue criteria. It
+does not restore missing native session files or change the failed execution to
+successful. An older execution without a subscription needs this explicit
+adoption; turning feedback on alone does not restart it. Read-only preview and a failed
+adoption do not change the PR association or create a subscription.
 
 Use the actual reviewer integration's actor ID in `trusted_reviewer_ids`.
 Unlisted bots and the configured implementer actor are ignored. A copied HTML

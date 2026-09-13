@@ -1,6 +1,6 @@
 """Tests for flow PR binding used by issue-implementation resume."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 from preloop.services.flow_pr_binding import (
@@ -204,7 +204,12 @@ class TestFindAndBind:
         mod.crud_flow_execution.get_by_result_pr_url = MagicMock(return_value=None)
         mod.crud_flow_execution.get_by_flow = MagicMock(return_value=[])
         try:
-            with caplog.at_level("INFO"):
+            with (
+                caplog.at_level("INFO"),
+                patch.object(
+                    mod.logger, "handlers", [*mod.logger.handlers, caplog.handler]
+                ),
+            ):
                 found = find_bound_execution(
                     db,
                     flow_id="flow-1",
@@ -251,22 +256,27 @@ class TestFindAndBind:
         event = {"payload": {"issue": {"number": 1}}}
         assert bind_resume_or_skip(MagicMock(), flow, event) is None
 
-    def test_record_opened_pr_merges_result(self):
-        execution = MagicMock()
-        execution.result = {"other": 1}
-        db = MagicMock()
+    def test_record_opened_pr_uses_atomic_crud_binding(self):
+        from unittest.mock import patch
         from preloop.services import flow_pr_binding as mod
 
-        original = mod.crud_flow_execution.get
-        mod.crud_flow_execution.get = MagicMock(return_value=execution)
-        try:
-            record_opened_pr(db, "exec-1", "https://github.com/a/b/pull/1", "feat/x")
-            assert execution.result["pr_url"] == "https://github.com/a/b/pull/1"
-            assert execution.result["pr_source_branch"] == "feat/x"
-            assert execution.result["other"] == 1
-            db.commit.assert_called_once()
-        finally:
-            mod.crud_flow_execution.get = original
+        execution, db = MagicMock(), MagicMock()
+        with (
+            patch.object(
+                mod.crud_flow_execution, "bind_publication", return_value=execution
+            ) as bind,
+            patch("preloop.services.flow_feedback.register_thread") as register,
+        ):
+            record_opened_pr(db, "exec-1", "https://github.com/a/b/pull/1/", "feat/x")
+        bind.assert_called_once_with(
+            db,
+            execution_id="exec-1",
+            pr_url="https://github.com/a/b/pull/1",
+            source_branch="feat/x",
+        )
+        register.assert_called_once_with(
+            db, execution, "https://github.com/a/b/pull/1", "feat/x"
+        )
 
 
 class TestRecordCliSession:

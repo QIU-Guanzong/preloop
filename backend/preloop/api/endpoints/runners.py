@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import socket
@@ -10,10 +11,11 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from string import ascii_letters, digits
 from typing import Any, Dict, List, Mapping, Optional
-from uuid import UUID
+from uuid import UUID, uuid4, uuid5
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from preloop.agents.runner_launch import (
     prepare_runner_delivery,
@@ -30,6 +32,7 @@ from preloop.models.crud import (
 from preloop.models.crud.flow_runner import crud_flow_runner
 from preloop.models.db.session import get_db_session as get_db
 
+from preloop.services.flow_pr_binding import record_runner_handoff_markers
 from preloop.services.runner_service import (
     derive_execution_runner,
     emit_runner_updated,
@@ -61,6 +64,7 @@ logger = logging.getLogger(__name__)
 
 # runner_id -> live websocket (this process only)
 _live: Dict[str, WebSocket] = {}
+RUNNER_LOG_BROADCAST_TIMEOUT = 1.0
 
 
 def _valid_publication_helper_image(value: object) -> bool:
@@ -209,6 +213,65 @@ async def _publish_flow_update(execution_id: str, payload: Dict[str, Any]) -> No
         logger.debug("runner log NATS publish skipped: %s", exc)
 
 
+async def persist_runner_logs(
+    db: Session,
+    execution_id: UUID,
+    lines: list[str],
+    batch_id: str | None,
+) -> None:
+    """Commit one bounded batch before acknowledgment; replay IDs are stable.
+
+    Database work runs off the event loop, using this connection's session
+    sequentially. Live broadcasts are best effort and share one short budget;
+    clients can recover committed lines from the execution log API.
+    """
+    # Older runners send their bounded terminal log buffer in one frame.
+    # Acknowledged peers use small batches; preserve legacy delivery without
+    # permitting unbounded inserts or per-line commits.
+    if batch_id is not None and not isinstance(batch_id, str):
+        raise ValueError("Invalid runner log batch identity")
+    limit = 128 if batch_id else 8192
+    if (
+        not isinstance(lines, list)
+        or len(lines) > limit
+        or any(
+            not isinstance(line, str) or len(line.encode("utf-8")) > 66 * 1024
+            for line in lines
+        )
+        or sum(len(line.encode("utf-8")) for line in lines) > 4 * 1024 * 1024
+    ):
+        raise ValueError("Invalid runner log batch")
+    identity = UUID(batch_id) if batch_id else uuid4()
+    entries = [
+        (
+            str(execution_id),
+            {
+                "_persistence_id": str(uuid5(execution_id, f"{identity}:{index}")),
+                "type": "agent_log_line",
+                "payload": {"line": line},
+            },
+        )
+        for index, line in enumerate(lines)
+    ]
+    await run_in_threadpool(crud_flow_execution_log.append_logs, db, entries)
+
+    async def broadcast() -> None:
+        for line in lines:
+            await _publish_flow_update(
+                str(execution_id),
+                {
+                    "execution_id": str(execution_id),
+                    "type": "agent_log_line",
+                    "payload": {"line": line},
+                },
+            )
+
+    try:
+        await asyncio.wait_for(broadcast(), timeout=RUNNER_LOG_BROADCAST_TIMEOUT)
+    except TimeoutError:
+        logger.debug("runner live log broadcast timed out for %s", execution_id)
+
+
 def _authenticate_runner(db: Session, runner_id: UUID, token: str) -> FlowRunner:
     row = crud_flow_runner.get(db, id=runner_id)
     if not row or row.token_hash != hash_runner_token(token):
@@ -332,7 +395,11 @@ async def runner_ws(
         publication.execution_id = runner.current_execution_id
         publication.nonce = runner.pending_job["_publication"]["nonce"]
     crud_flow_runner.touch_heartbeat(db, runner, status="online")
-    hello: Dict[str, Any] = {"type": "hello", "runner_id": runner_key}
+    hello: Dict[str, Any] = {
+        "type": "hello",
+        "runner_id": runner_key,
+        "log_acknowledgements": True,
+    }
     db.refresh(runner)
     emit_runner_updated(runner, db)
     if runner.pending_job and not runner.pending_job.get("_publication"):
@@ -452,24 +519,38 @@ async def runner_ws(
                     execution_id is not None
                     and execution_id == runner.current_execution_id
                 ):
-                    for line in lines:
-                        crud_flow_execution_log.append_log(
-                            db,
-                            str(execution_id),
-                            {
-                                "type": "agent_log_line",
-                                "payload": {"line": str(line)},
-                            },
+                    try:
+                        await persist_runner_logs(
+                            db, execution_id, lines, raw.get("batch_id")
                         )
-                        await _publish_flow_update(
-                            str(execution_id),
-                            {
-                                "execution_id": str(execution_id),
-                                "type": "agent_log_line",
-                                "payload": {"line": str(line)},
-                            },
+                    except (ValueError, TypeError):
+                        await websocket.send_json(
+                            {"type": "error", "error": "Invalid runner log batch"}
                         )
-                await websocket.send_json({"type": "ack"})
+                        continue
+                    execution = crud_flow_execution.get(
+                        db, id=execution_id, account_id=str(runner.account_id)
+                    )
+                    if execution is not None:
+                        for line in lines:
+                            record_runner_handoff_markers(
+                                db,
+                                execution,
+                                line,
+                                isolated_publication=bool(
+                                    (runner.pending_job or {}).get("_publication")
+                                ),
+                            )
+                # Marker helpers may flush or commit. End even a read-only
+                # lookup transaction before waiting on network input again.
+                db.commit()
+                await websocket.send_json(
+                    {
+                        "type": "logs_ack" if raw.get("batch_id") else "ack",
+                        "execution_id": raw.get("execution_id"),
+                        "batch_id": raw.get("batch_id"),
+                    }
+                )
                 continue
 
             if msg_type == "unregister":
@@ -560,6 +641,29 @@ async def runner_ws(
                                 "Private publication completion was not acknowledged"
                             )
                     await publication.close()
+                # The monitor may have timed out or cancelled this execution
+                # before its owner finally reports exit. Confirm termination
+                # and release the lease without replacing that terminal result.
+                execution = crud_flow_execution.lock_for_runner_completion(
+                    db, execution_id=execution_id, account_id=runner.account_id
+                )
+                if execution is None:
+                    db.rollback()
+                    await websocket.send_json(
+                        {"type": "error", "error": "Runner execution no longer exists"}
+                    )
+                    break
+                already_terminal = execution.status in {
+                    "SUCCEEDED",
+                    "FAILED",
+                    "STOPPED",
+                    "CANCELLED",
+                    "TIMEOUT",
+                    "TIMED_OUT",
+                    "ABORTED",
+                }
+                if already_terminal:
+                    status = execution.status
                 if not crud_flow_runner.set_publication_capabilities(
                     db,
                     runner_id=runner.id,
@@ -568,10 +672,15 @@ async def runner_ws(
                     clear_lease=True,
                     execution_id=execution_id,
                     reported_status=status,
+                    commit=False,
                 ):
+                    db.rollback()
                     break
-                execution = crud_flow_execution.get(db, id=execution_id)
-                if execution:
+                if already_terminal:
+                    crud_flow_execution.confirm_stop(
+                        db, execution_id=execution_id, commit=False
+                    )
+                else:
                     apply_runner_completion_to_execution(
                         db,
                         execution,
@@ -582,12 +691,12 @@ async def runner_ws(
                         message=raw,
                         pending_job=leased_job,
                     )
-                    crud_api_key.deactivate_runtime_keys_for_flow_execution(
-                        db,
-                        account_id=runner.account_id,
-                        execution_id=execution_id,
-                        commit=False,
-                    )
+                crud_api_key.deactivate_runtime_keys_for_flow_execution(
+                    db,
+                    account_id=runner.account_id,
+                    execution_id=execution_id,
+                    commit=False,
+                )
                 db.commit()
                 fresh_runner = crud_flow_runner.get_fresh(db, runner_id=runner_id)
                 if fresh_runner is not None:
@@ -597,7 +706,11 @@ async def runner_ws(
 
             await websocket.send_json({"type": "error", "error": f"unknown {msg_type}"})
     except WebSocketDisconnect:
+        db.rollback()
         logger.info("runner %s disconnected", runner_id)
+    except Exception:
+        db.rollback()
+        raise
     finally:
         try:
             await publication.close()

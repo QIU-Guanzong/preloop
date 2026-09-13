@@ -238,6 +238,19 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
                     and existing.get("trusted_publication") == state["receipt"]
                 ):
                     incoming["trusted_publication"] = state["receipt"]
+            if isinstance(existing, dict):
+                for key in (
+                    "pr_url",
+                    "pr_source_branch",
+                    "native_resume",
+                    "continuation",
+                    "pending_followup",
+                    "pending_followup_comment_url",
+                    "resume_count",
+                ):
+                    if key in existing:
+                        incoming = dict(incoming) if isinstance(incoming, dict) else {}
+                        incoming[key] = existing[key]
             update_data["result"] = incoming
 
         # Debug logging for metrics updates
@@ -410,6 +423,64 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             raise
         return db_obj
 
+    def lock_for_runner_completion(
+        self, db: Session, *, execution_id: uuid.UUID, account_id: uuid.UUID
+    ) -> Optional[FlowExecution]:
+        """Refresh and lock one owned execution without committing its transaction."""
+        with db.no_autoflush:
+            return (
+                db.query(FlowExecution)
+                .join(Flow, Flow.id == FlowExecution.flow_id)
+                .filter(FlowExecution.id == execution_id, Flow.account_id == account_id)
+                .populate_existing()
+                .with_for_update(of=FlowExecution)
+                .one_or_none()
+            )
+
+    def bind_publication(
+        self,
+        db: Session,
+        *,
+        execution_id: uuid.UUID,
+        pr_url: str,
+        source_branch: Optional[str] = None,
+        commit: bool = True,
+    ) -> Optional[FlowExecution]:
+        """Merge one publication under a row lock; never replace a different PR.
+
+        The caller resolves ownership before calling this internal write. The
+        lock protects concurrent result writers and refreshes stale ORM state.
+        Explicit adoption can defer commit to its thread-registration boundary.
+        """
+        with db.no_autoflush:
+            execution = (
+                db.query(FlowExecution)
+                .filter(FlowExecution.id == execution_id)
+                .populate_existing()
+                .with_for_update()
+                .one_or_none()
+            )
+        if execution is None:
+            return None
+        current = execution.result if isinstance(execution.result, dict) else {}
+        if current.get("pr_url") and current["pr_url"] != pr_url:
+            raise ValueError("Publishing execution binding changed")
+        if (
+            source_branch
+            and current.get("pr_source_branch")
+            and current["pr_source_branch"] != source_branch
+        ):
+            raise ValueError("Publishing execution binding changed")
+        execution.result = {
+            **current,
+            "pr_url": pr_url,
+            **({"pr_source_branch": source_branch} if source_branch else {}),
+        }
+        db.flush()
+        if commit:
+            db.commit()
+        return execution
+
     def set_cli_session(
         self, db: Session, *, db_obj: FlowExecution, cli_session: Optional[dict]
     ) -> FlowExecution:
@@ -420,6 +491,20 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         rescan fallback), outside any FlowExecutionUpdate round trip. Shape:
         ``{"agent_type": "opencode", "session_id": "ses_..."}``.
         """
+        with db.no_autoflush:
+            stored = (
+                db.query(FlowExecution.cli_session)
+                .filter(FlowExecution.id == db_obj.id)
+                .with_for_update()
+                .first()
+            )
+        existing = stored[0] if stored is not None else None
+        if (
+            isinstance(existing, dict)
+            and isinstance(cli_session, dict)
+            and existing.get("session_id") == cli_session.get("session_id")
+        ):
+            cli_session = {**existing, **cli_session}
         db_obj.cli_session = cli_session  # type: ignore[assignment]
         db.flush()
         return db_obj

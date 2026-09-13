@@ -251,6 +251,7 @@ async def test_completion_confirms_stop_only_on_terminal_owner_ack(
         clear_lease: bool = False,
         execution_id: UUID | None = None,
         reported_status: str | None = None,
+        commit: bool = True,
     ) -> bool:
         """In-memory stand-in for the compare-and-swap capability write."""
         current = (runner.publication_capabilities or {}).get("connection_id")
@@ -294,6 +295,11 @@ async def test_completion_confirms_stop_only_on_terminal_owner_ack(
     )
     monkeypatch.setattr(
         runners.crud_flow_execution, "get", lambda *args, **kwargs: execution
+    )
+    monkeypatch.setattr(
+        runners.crud_flow_execution,
+        "lock_for_runner_completion",
+        lambda *args, **kwargs: execution,
     )
     monkeypatch.setattr(runners.crud_flow, "get", lambda *args, **kwargs: None)
     confirm = MagicMock()
@@ -351,6 +357,7 @@ async def test_invalid_cra_completion_keeps_original_error_and_contract(
         clear_lease: bool = False,
         execution_id: UUID | None = None,
         reported_status: str | None = None,
+        commit: bool = True,
     ) -> bool:
         current = (runner.publication_capabilities or {}).get("connection_id")
         if expected_connection_id is not None and current != expected_connection_id:
@@ -418,6 +425,11 @@ async def test_invalid_cra_completion_keeps_original_error_and_contract(
     monkeypatch.setattr(
         runners.crud_flow_execution, "get", lambda *args, **kwargs: execution
     )
+    monkeypatch.setattr(
+        runners.crud_flow_execution,
+        "lock_for_runner_completion",
+        lambda *args, **kwargs: execution,
+    )
     monkeypatch.setattr(runners.crud_flow, "get", lambda *args, **kwargs: flow)
     monkeypatch.setattr(runners.crud_flow_execution, "confirm_stop", MagicMock())
     monkeypatch.setattr(
@@ -444,3 +456,56 @@ async def test_invalid_cra_completion_keeps_original_error_and_contract(
     result = recorded["result"]
     assert isinstance(result, dict)
     assert result.get("error") in {"cra_result_invalid", "cra_result_missing"}
+
+
+@pytest.mark.asyncio
+async def test_runner_log_batch_replay_has_stable_persistence_ids(monkeypatch) -> None:
+    """A lost acknowledgment can replay logs without duplicating stored markers."""
+    db = MagicMock()
+    execution_id, batch_id = uuid4(), uuid4()
+    append = MagicMock()
+    monkeypatch.setattr(runners.crud_flow_execution_log, "append_logs", append)
+    monkeypatch.setattr(runners, "_publish_flow_update", AsyncMock())
+    await runners.persist_runner_logs(
+        db, execution_id, ["session", "PR"], str(batch_id)
+    )
+    await runners.persist_runner_logs(
+        db, execution_id, ["session", "PR"], str(batch_id)
+    )
+    first, replay = [call.args[1] for call in append.call_args_list]
+    assert first == replay
+    assert len({entry[1]["_persistence_id"] for entry in first}) == 2
+
+
+@pytest.mark.asyncio
+async def test_runner_log_broadcast_timeout_does_not_block_control(monkeypatch) -> None:
+    """Raw logs stay durable even when their best-effort live broadcast stalls."""
+    import asyncio
+
+    async def stalled(*args, **kwargs) -> None:
+        await asyncio.Event().wait()
+
+    append = MagicMock()
+    monkeypatch.setattr(runners.crud_flow_execution_log, "append_logs", append)
+    monkeypatch.setattr(runners, "_publish_flow_update", stalled)
+    monkeypatch.setattr(runners, "RUNNER_LOG_BROADCAST_TIMEOUT", 0.01)
+    await asyncio.wait_for(
+        runners.persist_runner_logs(MagicMock(), uuid4(), ["critical marker"], None),
+        timeout=0.5,
+    )
+    append.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_legacy_terminal_log_frame_remains_bounded_and_supported(
+    monkeypatch,
+) -> None:
+    append = MagicMock()
+    monkeypatch.setattr(runners.crud_flow_execution_log, "append_logs", append)
+    monkeypatch.setattr(runners, "_publish_flow_update", AsyncMock())
+    await runners.persist_runner_logs(MagicMock(), uuid4(), ["progress"] * 512, None)
+    assert len(append.call_args.args[1]) == 512
+    with pytest.raises(ValueError, match="Invalid runner log batch"):
+        await runners.persist_runner_logs(
+            MagicMock(), uuid4(), ["progress"] * 512, str(uuid4())
+        )

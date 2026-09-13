@@ -17,6 +17,7 @@ from preloop.models.crud import (
     crud_tracker,
 )
 from preloop.models.crud import flow_artifact
+from preloop.models.crud.flow_feedback import TERMINAL
 from preloop.models.db.session import get_session_factory
 from preloop.schemas.flow_continuation import (
     ContinuationAdoptRequest,
@@ -25,6 +26,7 @@ from preloop.schemas.flow_continuation import (
 )
 from preloop.services.flow_artifacts import artifact_thread_id, artifact_reference
 from preloop.services.flow_feedback import feedback_policy, register_thread
+from preloop.services.flow_pr_binding import normalize_pr_url
 from preloop.services.flow_feedback_provider import (
     FeedbackProvider,
     feedback_tracker_options,
@@ -40,7 +42,13 @@ class ContinuationAdoptionError(ValueError):
         self.status_code = status_code
 
 
-def _load_source(account_id: UUID, execution_id: UUID) -> dict[str, Any]:
+def _load_source(
+    account_id: UUID,
+    execution_id: UUID,
+    *,
+    pr_url: str | None = None,
+    branch: str | None = None,
+) -> dict[str, Any]:
     """Materialize only the selected source, then release DB before provider I/O."""
     with get_session_factory()() as db:
         execution = crud_flow_execution.get(db, id=execution_id, account_id=account_id)
@@ -49,18 +57,40 @@ def _load_source(account_id: UUID, execution_id: UUID) -> dict[str, Any]:
         flow = crud_flow.get(db, id=execution.flow_id)
         if flow is None or flow.account_id != account_id:
             raise ContinuationAdoptionError("Flow execution not found", 404)
-        if execution.status != "SUCCEEDED":
+        if execution.status not in TERMINAL:
             raise ContinuationAdoptionError(
-                "Only a successful publishing execution can be adopted"
+                "Only a finished execution can be selected for PR follow-up"
             )
         details = execution.trigger_event_details or {}
         if details.get("_thread_id"):
             raise ContinuationAdoptionError("Select the original publishing execution")
         result = execution.result or {}
-        pr_url, branch = result.get("pr_url"), result.get("pr_source_branch")
+        recorded_url, recorded_branch = (
+            result.get("pr_url"),
+            result.get("pr_source_branch"),
+        )
+        if pr_url:
+            pr_url = normalize_pr_url(pr_url) or pr_url
+        if bool(pr_url) != bool(branch):
+            raise ContinuationAdoptionError(
+                "Provide both the published PR URL and source branch"
+            )
+        if pr_url and (
+            (recorded_url and recorded_url != pr_url)
+            or (recorded_branch and recorded_branch != branch)
+        ):
+            raise ContinuationAdoptionError(
+                "Selected PR conflicts with the execution's recorded binding"
+            )
+        selected_publication = not (recorded_url and recorded_branch)
+        pr_url, branch = recorded_url or pr_url, recorded_branch or branch
         if not isinstance(pr_url, str) or not isinstance(branch, str) or not branch:
             raise ContinuationAdoptionError(
-                "Execution has no recorded PR and source branch"
+                "Execution has no recorded publication. Provide its published PR URL and source branch to preview recovery."
+            )
+        if len(pr_url) > 2048 or len(branch) > 255:
+            raise ContinuationAdoptionError(
+                "Published PR URL or source branch is too long"
             )
         payload = details.get("payload") or {}
         repository = payload.get("repository") or payload.get("project") or {}
@@ -141,7 +171,8 @@ def _load_source(account_id: UUID, execution_id: UUID) -> dict[str, Any]:
         )
         existing = next((row for row in bindings if row.flow_id == flow.id), None)
         native_resume_available = bool(
-            valid_session_id(cli.get("agent_type", ""), cli.get("session_id", ""))
+            not selected_publication
+            and valid_session_id(cli.get("agent_type", ""), cli.get("session_id", ""))
             and available(workspace)
             and native is not None
             and available(native)
@@ -280,10 +311,16 @@ async def _read_publication(source: dict[str, Any]) -> dict[str, Any]:
     return await _feedback_preflight(client, source, publication)
 
 
-def preview_continuation(account_id: UUID, execution_id: UUID) -> ContinuationPreview:
+def preview_continuation(
+    account_id: UUID,
+    execution_id: UUID,
+    *,
+    pr_url: str | None = None,
+    branch: str | None = None,
+) -> ContinuationPreview:
     """Preview one source in a FastAPI worker; no activation or provider writes."""
     try:
-        source = _load_source(account_id, execution_id)
+        source = _load_source(account_id, execution_id, pr_url=pr_url, branch=branch)
     except ContinuationAdoptionError:
         raise
     except ValueError as exc:
@@ -363,7 +400,10 @@ def adopt_continuation(
     account_id: UUID, execution_id: UUID, request: ContinuationAdoptRequest
 ) -> ContinuationAdoptResponse:
     """Revalidate the selected PR and atomically register one bounded thread."""
-    preview = preview_continuation(account_id, execution_id)
+    selected_pr_url = normalize_pr_url(request.pr_url) or request.pr_url
+    preview = preview_continuation(
+        account_id, execution_id, pr_url=selected_pr_url, branch=request.branch
+    )
     if not preview.feedback_readable:
         raise ContinuationAdoptionError(
             "Tracker cannot read the required feedback and repository gates"
@@ -384,25 +424,59 @@ def adopt_continuation(
             "Acknowledge starting a fresh conversation from the published branch"
         )
     with get_session_factory()() as db:
-        execution = crud_flow_execution.get(db, id=execution_id, account_id=account_id)
-        if execution is None or execution.status != "SUCCEEDED":
+        execution = crud_flow_execution.lock_for_runner_completion(
+            db, execution_id=execution_id, account_id=account_id
+        )
+        if execution is None or execution.status not in TERMINAL:
             raise ContinuationAdoptionError(
                 "Publishing execution is no longer available"
             )
         result = execution.result or {}
         if (
-            result.get("pr_url") != preview.pr_url
-            or result.get("pr_source_branch") != preview.branch
+            (result.get("pr_url") and result["pr_url"] != preview.pr_url)
+            or (
+                result.get("pr_source_branch")
+                and result["pr_source_branch"] != preview.branch
+            )
+            or (
+                not (result.get("pr_url") and result.get("pr_source_branch"))
+                and (
+                    selected_pr_url != preview.pr_url
+                    or request.branch != preview.branch
+                )
+            )
         ):
             raise ContinuationAdoptionError("Publishing execution binding changed")
         flow = crud_flow.get(db, id=execution.flow_id)
-        if flow is None or not flow.is_enabled or not feedback_policy(flow):
+        if (
+            flow is None
+            or flow.account_id != account_id
+            or not flow.is_enabled
+            or not feedback_policy(flow)
+        ):
             raise ContinuationAdoptionError("Flow feedback is no longer enabled")
+        # Persist the selected association and subscription atomically. A second
+        # adoption cannot race this row into a different PR or recovery mode.
+        try:
+            execution = crud_flow_execution.bind_publication(
+                db,
+                execution_id=execution_id,
+                pr_url=preview.pr_url,
+                source_branch=preview.branch,
+                commit=False,
+            )
+        except ValueError as exc:
+            raise ContinuationAdoptionError(str(exc)) from exc
+        if execution is None:
+            raise ContinuationAdoptionError(
+                "Publishing execution is no longer available"
+            )
         thread = register_thread(
             db,
             execution,
             preview.pr_url,
             preview.branch,
+            commit=False,
             adoption={
                 "source_execution_id": str(execution_id),
                 "recovery_mode": request.recovery_mode,
@@ -426,6 +500,7 @@ def adopt_continuation(
                 "PR already has a continuation thread; adoption cannot change "
                 "its source or recovery mode"
             )
+        db.commit()
         return ContinuationAdoptResponse(
             thread_id=thread.id,
             state=thread.state,

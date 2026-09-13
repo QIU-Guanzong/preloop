@@ -61,6 +61,7 @@ def register_thread(
     branch: str,
     *,
     adoption: dict[str, Any] | None = None,
+    commit: bool = True,
 ) -> models.FlowThread | None:
     """Register after trusted publication; initial reconciliation recovers races."""
     flow = crud_flow.get(db, id=execution.flow_id)
@@ -126,6 +127,7 @@ def register_thread(
     }
     return crud_flow_feedback.register(
         db,
+        commit=commit,
         values={
             "id": session_thread_id,
             "account_id": flow.account_id,

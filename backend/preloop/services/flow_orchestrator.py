@@ -3584,6 +3584,15 @@ class FlowExecutionOrchestrator:
         if self._opened_pr is not None:
             return
         self._opened_pr = parsed
+        if self.execution_log is not None:
+            # Persist while the publication marker is available. A lost final
+            # runner report must not erase the PR's continuation binding.
+            record_opened_pr(
+                self.db,
+                self.execution_log.id,
+                parsed["url"],
+                source_branch=parsed.get("branch"),
+            )
         logger.info("Wrapper opened a pull request for this execution")
         self.execution_logger.log_milestone(
             "pull_request_opened",
