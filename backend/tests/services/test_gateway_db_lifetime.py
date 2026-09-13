@@ -1,6 +1,7 @@
 """Real local pool checks for gateway policy, retry and bookkeeping boundaries."""
 
 from collections.abc import Iterator
+from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -13,7 +14,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import QueuePool
 
 from preloop.models import models
-from preloop.models.crud import crud_ai_model
+from preloop.models.crud import crud_ai_model, crud_user
+from preloop.services.gateway_execution import GatewayModelSnapshot
 from preloop.services.model_content_policy import (
     ModelIODecision,
     enforce_request_policy,
@@ -60,6 +62,20 @@ def _model() -> models.AIModel:
 
 def _checkout(service: OpenAIGatewayService) -> None:
     service.db.execute(text("SELECT 1"))
+
+
+def test_execution_settings_are_independent_immutable_values() -> None:
+    """Neither ORM mutation nor a nested settings edit can change execution."""
+    model = _model()
+    model.model_parameters = {"reasoning": {"effort": "low"}}
+    snapshot = GatewayModelSnapshot.from_model(model)
+    model.model_parameters["reasoning"]["effort"] = "high"
+    snapshot.model_parameters["reasoning"]["effort"] = "medium"
+    assert snapshot.model_parameters == {"reasoning": {"effort": "low"}}
+    with pytest.raises(FrozenInstanceError):
+        snapshot.name = "changed"
+    assert snapshot.api_key is None
+    assert snapshot.credentials_secret is None
 
 
 def test_caller_owned_transaction_is_untouched() -> None:
@@ -285,7 +301,7 @@ def test_accounting_closes_fresh_transaction_after_outcome(
     assert service.db.get_transaction() is None
 
 
-def test_owned_prepare_preserves_detached_orm_values_and_writes(
+def test_owned_prepare_copies_values_and_commits_only_worker_writes(
     db_session: Session, test_user: models.User
 ) -> None:
     service = OpenAIGatewayService(
@@ -293,8 +309,14 @@ def test_owned_prepare_preserves_detached_orm_values_and_writes(
         ModelGatewayAuthContext(token="synthetic", user=test_user),
         owns_db_session=True,
     )
+    user_id = test_user.id
+    test_user.full_name = "Uncommitted caller work"
+    transaction = db_session.get_transaction()
+    preparing = service.db
+    worker_user = crud_user.get(preparing, id=user_id)
+    worker_user.full_name = "Persisted worker preparation"
     model = crud_ai_model.create_with_account(
-        db_session,
+        preparing,
         account_id=test_user.account_id,
         obj_in={
             "name": "boundary",
@@ -303,22 +325,24 @@ def test_owned_prepare_preserves_detached_orm_values_and_writes(
             "api_key": "synthetic",
         },
     )
-    user_id, model_id = test_user.id, model.id
-    test_user.full_name = "Saved at request preparation"
-    service.release_db_for_wait(model)
-    assert inspect(test_user).detached
+    snapshot = GatewayModelSnapshot.from_model(model)
+    service.release_db_for_wait(snapshot)
     assert inspect(model).detached
-    assert test_user.id == user_id
-    assert test_user.full_name == "Saved at request preparation"
-    assert model.id == model_id
-    assert model.credential_type == "api_key"
-    assert inspect(model.credentials_secret).detached
-    assert model.credentials_secret.backend_type == "local_encrypted"
-    assert db_session.get_transaction() is None
-    refreshed = service._reattach_for_recording(test_user)
-    assert refreshed.full_name == "Saved at request preparation"
-    assert refreshed is not test_user
-    service.release_db_for_wait(model)
+    assert inspect(snapshot, raiseerr=False) is None
+    assert snapshot.credentials_secret is None
+    assert snapshot.api_key is None
+    assert snapshot.credential_type == "api_key"
+    assert service.auth_context.user.id == user_id
+    assert service.auth_context.token == ""
+    assert inspect(service.auth_context.user, raiseerr=False) is None
+    assert db_session.get_transaction() is transaction
+    assert test_user in db_session.dirty
+    assert not inspect(test_user).detached
+    assert preparing.get_transaction() is None
+    assert service.db is not preparing
+    refreshed = crud_user.get(service.db, id=user_id)
+    assert refreshed.full_name == "Persisted worker preparation"
+    service.release_db_for_wait()
 
 
 def test_release_gateway_session_commits_preparation_unlike_embedding_guard(
@@ -333,7 +357,7 @@ def test_release_gateway_session_commits_preparation_unlike_embedding_guard(
     # HTTP-owned gateway sessions disable expire-on-commit so detached
     # snapshots keep materialized preparation values across this boundary.
     db_session.expire_on_commit = False
-    release_gateway_session(db_session, preserve=(test_user,))
+    release_gateway_session(db_session)
     assert inspect(test_user).detached
     assert test_user.full_name == "preparation write must persist"
     refreshed = db_session.get(models.User, user_id)
@@ -466,12 +490,15 @@ def test_oauth_rotation_survives_repeated_detached_credential_phases(
         ModelGatewayAuthContext(token="synthetic", user=test_user),
         owns_db_session=True,
     )
+    model = GatewayModelSnapshot.from_model(model)
+    db_session.close()
     secret_service = SecretService()
 
     def rotate(_token: str) -> dict[str, Any]:
         # The OAuth row lock deliberately spans this bounded 30-second HTTP
         # call. The completion/stream boundary happens after persisted rotation.
-        assert db_session.in_transaction()
+        assert service.db.in_transaction()
+        assert service.db is not db_session
         return {
             "access": "new",
             "refresh": "rotated",
@@ -494,22 +521,59 @@ def test_oauth_rotation_survives_repeated_detached_credential_phases(
         second = service._resolve_openai_codex_credentials(model)
         service.release_db_for_wait(model)
     assert first.value == second.value == "new"
-    assert first.payload["refresh"] == second.payload["refresh"] == "rotated"
+    assert first.payload == second.payload == {"account_id": "account"}
+    assert "single-use" not in repr(first)
+    assert "new" not in repr(first)
     refresh.assert_called_once_with("single-use")
     assert db_session.get_transaction() is None
 
 
-def test_failed_materialization_still_returns_pool_connection(
-    local_gateway: Any,
-) -> None:
+def test_failed_commit_still_returns_pool_connection(local_gateway: Any) -> None:
     service, engine = local_gateway
     _checkout(service)
+    session = service.db
     with (
-        patch(
-            "preloop.models.db.gateway_session.inspect",
-            side_effect=RuntimeError("synthetic snapshot failure"),
-        ),
-        pytest.raises(RuntimeError, match="synthetic snapshot failure"),
+        patch.object(session, "commit", side_effect=RuntimeError("synthetic failure")),
+        pytest.raises(RuntimeError, match="synthetic failure"),
     ):
-        service.release_db_for_wait(_model())
+        service.release_db_for_wait()
     assert engine.pool.checkedout() == 0
+    assert service.db is not session
+
+
+def test_summary_credential_failure_closes_child_worker(local_gateway: Any) -> None:
+    service, engine = local_gateway
+    _checkout(service)
+    parent_session = service.db
+    seen = []
+
+    def fail(gateway: OpenAIGatewayService, *_args: Any, **_kwargs: Any) -> Any:
+        assert engine.pool.checkedout() == 0
+        _checkout(gateway)
+        seen.append(gateway.db)
+        raise RuntimeError("synthetic credential failure")
+
+    usage = SimpleNamespace(
+        model_alias="synthetic",
+        provider_name="openai",
+        status_code=200,
+        prompt_tokens=1,
+        completion_tokens=2,
+        total_tokens=3,
+        estimated_cost=0,
+    )
+    with (
+        patch.object(OpenAIGatewayService, "_build_completion_kwargs", fail),
+        pytest.raises(RuntimeError, match="synthetic credential failure"),
+    ):
+        service._generate_runtime_session_summary(
+            summary_model=_model(),
+            existing_summary=None,
+            usage=usage,
+            request_payload={},
+            response_payload={},
+        )
+    assert len(seen) == 1
+    assert seen[0] is not parent_session
+    assert engine.pool.checkedout() == 0
+    assert seen[0].get_transaction() is None

@@ -15,7 +15,7 @@ from preloop.services.model_gateway_auth import ModelGatewayAuthContext
 from preloop.services.model_gateway_errors import ModelGatewayAPIError
 from preloop.services.model_gateway_stream_observer import ObservedGatewayStream
 from preloop.services.model_runtime_resolver import resolve_ai_model_runtime
-from preloop.services.openai_gateway import OpenAIGatewayService
+from preloop.services.openai_gateway import OpenAIGatewayService, gateway_database_scope
 
 
 class _GeminiClosingStream:
@@ -73,6 +73,7 @@ class GeminiGatewayService(OpenAIGatewayService):
             owns_db_session=owns_db_session,
         )
 
+    @gateway_database_scope
     def list_models(self) -> Dict[str, Any]:
         """List Gemini-compatible model descriptors."""
         openai_payload = super().list_models()
@@ -84,11 +85,13 @@ class GeminiGatewayService(OpenAIGatewayService):
             models.append(self._to_gemini_model_metadata(model_alias))
         return {"models": models}
 
+    @gateway_database_scope
     def get_model(self, model_name: str) -> Dict[str, Any]:
         """Return Gemini-compatible metadata for one model alias."""
         resolved_model_alias = self._resolve_gemini_model_alias(model_name)
         return self._to_gemini_model_metadata(resolved_model_alias)
 
+    @gateway_database_scope
     def generate_content(
         self, model_name: str, payload: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -99,6 +102,7 @@ class GeminiGatewayService(OpenAIGatewayService):
             model_name, response_payload=response_payload
         )
 
+    @gateway_database_scope
     def stream_generate_content(
         self, model_name: str, payload: Dict[str, Any]
     ) -> Iterator[str]:

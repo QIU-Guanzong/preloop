@@ -18,6 +18,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import StringIO
+from functools import wraps
+from dataclasses import replace
 from itertools import chain
 from uuid import uuid4
 from typing import (
@@ -47,6 +49,8 @@ from preloop.config import settings
 from preloop.utils.sentry_filters import gateway_upstream_call
 from preloop.models.crud import (
     crud_ai_model,
+    crud_user,
+    crud_api_key,
     crud_api_usage,
     crud_managed_agent,
     crud_managed_agent_ai_model_binding,
@@ -68,7 +72,13 @@ from preloop.services.codex_tool_compat import (
     restore_namespace_tool_calls,
     sanitize_codex_tools,
 )
-from preloop.models.models.ai_model import AIModel
+from preloop.models import models
+from preloop.services.gateway_execution import (
+    GatewayModelSnapshot,
+    GatewayModel,
+    GatewayCodexCredentials,
+)
+
 from preloop.services.account_realtime import (
     ACCOUNT_TOPIC_MANAGED_AGENTS,
     ACCOUNT_TOPIC_RUNTIME_SESSIONS,
@@ -301,7 +311,7 @@ def _close_anthropic_passthrough_http_client() -> None:
 
 
 def _openai_passthrough_http_client(
-    ai_model: Optional[AIModel] = None,
+    ai_model: Optional[GatewayModel] = None,
 ) -> httpx.Client:
     """Return the process-level OpenAI Responses passthrough httpx client.
 
@@ -364,7 +374,7 @@ def _submit_gateway_started_emit(event: Dict[str, Any]) -> None:
             _GATEWAY_STARTED_EMIT_PENDING -= 1
 
 
-def _supports_ambient_provider_credentials(ai_model: AIModel) -> bool:
+def _supports_ambient_provider_credentials(ai_model: GatewayModel) -> bool:
     provider = (ai_model.provider_name or "").strip().lower()
     return provider in {"bedrock", "amazon-bedrock"}
 
@@ -386,12 +396,12 @@ def _openrouter_usage_accounting_enabled() -> bool:
     }
 
 
-def _is_openrouter_upstream(ai_model: AIModel) -> bool:
+def _is_openrouter_upstream(ai_model: GatewayModel) -> bool:
     """Whether this model's traffic terminates at OpenRouter."""
     return is_openrouter_model(ai_model)
 
 
-def _bedrock_region(ai_model: AIModel) -> Optional[str]:
+def _bedrock_region(ai_model: GatewayModel) -> Optional[str]:
     raw_meta_data = getattr(ai_model, "meta_data", None)
     meta_data = raw_meta_data if isinstance(raw_meta_data, dict) else {}
     provider_runtime = (
@@ -765,6 +775,21 @@ def _session_id_from_openai_payload(
 _GatewayCallPurpose = Literal["gateway", "runtime_session_summary"]
 
 
+def gateway_database_scope(operation: Callable[..., Any]) -> Callable[..., Any]:
+    """Close an HTTP entry phase even if preparation fails before provider I/O."""
+
+    @wraps(operation)
+    def scoped(self: OpenAIGatewayService, *args: Any, **kwargs: Any) -> Any:
+        try:
+            result = operation(self, *args, **kwargs)
+            self.release_db_for_wait()
+            return result
+        finally:
+            self._close_owned_db()
+
+    return scoped
+
+
 class OpenAIGatewayService:
     """Service for Preloop's OpenAI-compatible gateway."""
 
@@ -783,24 +808,15 @@ class OpenAIGatewayService:
         owns_db_session: bool = False,
         client_identity_headers: Optional[Mapping[str, str]] = None,
     ) -> None:
-        self.db = db
-        self.auth_context = auth_context
+        self._owns_db_session = owns_db_session
+        # The request dependency supplies a binding only. Every owned Session
+        # is created, used and closed by the worker performing that DB phase.
+        self._db_bind = db.get_bind() if owns_db_session else None
+        self._db: Optional[Session] = None if owns_db_session else db
+        self.auth_context = auth_context.snapshot() if owns_db_session else auth_context
         self._client_identity_headers = _bounded_client_identity_headers(
             client_identity_headers
         )
-        self._owns_db_session = owns_db_session
-        self._wait_model: Optional[AIModel] = None
-        self._wait_preserve: tuple[Any, ...] = ()
-        if owns_db_session:
-            # Only HTTP request-owned sessions can end a transaction here.
-            # Internal replay/optimization callers retain their own boundary.
-            self.db.expire_on_commit = False
-            self.auth_context = ModelGatewayAuthContext(
-                token=auth_context.token,
-                user=auth_context.user,
-                api_key=auth_context.api_key,
-                oauth_access_token=auth_context.oauth_access_token,
-            )
         self.upstream_backend = upstream_backend or get_model_gateway_backend()
         self.budget_enforcer = budget_enforcer
         # Per-run session id supplied by the client (X-Preloop-Session-Id, or
@@ -866,34 +882,34 @@ class OpenAIGatewayService:
         # is still mid-stream or recording already ran.
         self._deferred_stream_record: Optional[Callable[[], None]] = None
 
-    def release_db_for_wait(self, ai_model: Optional[AIModel] = None) -> None:
-        """Release an owned request transaction before external or stream waits.
+    @property
+    def db(self) -> Session:
+        """Return this worker's current unit, opening a fresh one when needed."""
+        if self._db is None:
+            self._db = Session(bind=self._db_bind, expire_on_commit=False)
+        return self._db
 
-        The same Session starts a fresh transaction on the next CRUD operation.
-        Retained model/auth objects are fully loaded detached snapshots, so
-        rendering a chunk cannot reacquire a connection by implicit ORM I/O.
-        Caller-owned internal sessions are deliberately unaffected.
+    @db.setter
+    def db(self, session: Session) -> None:
+        """Support caller-owned construction and existing service factories."""
+        self._db = session
 
-        Alongside the HTTP authentication boundary, invoke this only after
-        HTTP request preparation (or after persisted accounting) so any pending
-        state is that request's unit of work, never an unrelated mid-request
-        transaction. Provider waits, streams, retries, approval holds, and
-        accounting cleanup all share this boundary.
+    def _close_owned_db(self) -> None:
+        """Roll back unfinished work without allocating another Session."""
+        if self._owns_db_session and self._db is not None:
+            session, self._db = self._db, None
+            session.close()
+
+    def release_db_for_wait(self, ai_model: Optional[GatewayModel] = None) -> None:
+        """Finish a worker-owned DB phase before provider, retry or stream waits.
+
+        The next database phase gets a different Session. Model and auth values
+        retained by HTTP stream callbacks are immutable snapshots. Internal
+        caller-owned transactions remain untouched.
         """
-        if not self._owns_db_session:
-            return
-        if ai_model is not None:
-            self._wait_model = ai_model
-        release_gateway_session(
-            self.db,
-            preserve=(
-                self._wait_model,
-                self.auth_context.user,
-                self.auth_context.api_key,
-                self.auth_context.oauth_access_token,
-                *self._wait_preserve,
-            ),
-        )
+        if self._owns_db_session and self._db is not None:
+            session, self._db = self._db, None
+            release_gateway_session(session)
 
     def _begin_request_accounting(self) -> None:
         """Re-arm per-request counters at the start of a gateway request.
@@ -1178,7 +1194,7 @@ class OpenAIGatewayService:
 
     def _emit_gateway_request_started(
         self,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         requested_model: Optional[str],
         request_payload: Dict[str, Any],
         endpoint_kind: str,
@@ -1216,6 +1232,7 @@ class OpenAIGatewayService:
             )
         )
 
+    @gateway_database_scope
     def list_models(self) -> Dict[str, Any]:
         """List gateway-enabled models available to this gateway principal."""
         data = []
@@ -1257,6 +1274,7 @@ class OpenAIGatewayService:
             logger.debug("OTLP list_models export failed", exc_info=True)
         return payload
 
+    @gateway_database_scope
     def create_chat_completion(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Handle OpenAI-compatible chat completions."""
         self._begin_request_accounting()
@@ -1437,6 +1455,7 @@ class OpenAIGatewayService:
             )
             raise
 
+    @gateway_database_scope
     def create_response(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Handle OpenAI Responses API-compatible requests."""
         self._begin_request_accounting()
@@ -1583,6 +1602,7 @@ class OpenAIGatewayService:
             )
             raise
 
+    @gateway_database_scope
     def create_message(
         self,
         payload: Dict[str, Any],
@@ -1761,6 +1781,7 @@ class OpenAIGatewayService:
             )
             raise
 
+    @gateway_database_scope
     def stream_message(
         self,
         payload: Dict[str, Any],
@@ -2223,6 +2244,7 @@ class OpenAIGatewayService:
             closes=(upstream_stream,),
         )
 
+    @gateway_database_scope
     def stream_chat_completion(self, payload: Dict[str, Any]) -> Iterator[str]:
         """Handle streaming OpenAI-compatible chat completions."""
         self._begin_request_accounting()
@@ -2543,6 +2565,7 @@ class OpenAIGatewayService:
             closes=(upstream_stream,),
         )
 
+    @gateway_database_scope
     def stream_response(self, payload: Dict[str, Any]) -> Iterator[str]:
         """Handle streaming OpenAI Responses API-compatible requests."""
         self._begin_request_accounting()
@@ -3127,20 +3150,22 @@ class OpenAIGatewayService:
             closes=(upstream_stream,),
         )
 
-    def _get_account_models(self) -> List[AIModel]:
+    def _get_account_models(self) -> List[models.AIModel]:
         account_id = self.auth_context.user.account_id
         from preloop.models.crud.ai_model import ai_model as crud_ai_model
 
         return crud_ai_model.get_all_for_account(self.db, account_id=account_id)
 
-    def _authorized_model_ids(self, account_models: List[AIModel]) -> frozenset[str]:
+    def _authorized_model_ids(
+        self, account_models: List[models.AIModel]
+    ) -> frozenset[str]:
         """Return the model-id set this principal may use (memoized per request).
 
         Args:
             account_models: Full account model inventory.
 
         Returns:
-            Frozen set of authorized ``AIModel`` id strings computed once per
+            Frozen set of authorized ``models.AIModel`` id strings computed once per
             service instance so every surface (listing, alias resolution,
             default selection) consumes the same set.
         """
@@ -3152,13 +3177,22 @@ class OpenAIGatewayService:
 
     def _resolve_requested_model(
         self, requested_model: Optional[str], *, provider: GatewayProvider
-    ) -> AIModel:
-        models = self._get_account_models()
-        authorized_ids = self._authorized_model_ids(models)
-        gateway_enabled_models: List[tuple[AIModel, str]] = []
-        unauthorized_gateway_models: List[tuple[AIModel, str]] = []
-        default_gateway_model: Optional[AIModel] = None
-        for ai_model in models:
+    ) -> GatewayModel:
+        """Resolve authorization and copy only immutable execution values."""
+        model = self._resolve_requested_model_row(requested_model, provider=provider)
+        return (
+            GatewayModelSnapshot.from_model(model) if self._owns_db_session else model
+        )
+
+    def _resolve_requested_model_row(
+        self, requested_model: Optional[str], *, provider: GatewayProvider
+    ) -> models.AIModel:
+        account_models = self._get_account_models()
+        authorized_ids = self._authorized_model_ids(account_models)
+        gateway_enabled_models: List[tuple[models.AIModel, str]] = []
+        unauthorized_gateway_models: List[tuple[models.AIModel, str]] = []
+        default_gateway_model: Optional[models.AIModel] = None
+        for ai_model in account_models:
             runtime = resolve_ai_model_runtime(ai_model)
             if runtime.model_gateway_enabled and runtime.model_gateway_model_alias:
                 if str(ai_model.id) not in authorized_ids:
@@ -3208,8 +3242,8 @@ class OpenAIGatewayService:
             spellings, suffix_tail = self._gateway_request_spellings(
                 str(requested_model)
             )
-            exact_matches: List[AIModel] = []
-            suffix_matches: List[AIModel] = []
+            exact_matches: List[models.AIModel] = []
+            suffix_matches: List[models.AIModel] = []
             for ai_model, alias in gateway_enabled_models:
                 if alias in spellings:
                     exact_matches.append(ai_model)
@@ -3318,8 +3352,8 @@ class OpenAIGatewayService:
         requested_model: Optional[str],
         *,
         provider: GatewayProvider,
-        gateway_enabled_models: List[tuple[AIModel, str]],
-    ) -> Optional[AIModel]:
+        gateway_enabled_models: List[tuple[models.AIModel, str]],
+    ) -> Optional[models.AIModel]:
         """Auto-register an unknown ``claude-*`` model for subscription OAuth.
 
         Claude Code updates ship new built-in dated model identifiers (and the
@@ -3328,7 +3362,7 @@ class OpenAIGatewayService:
         until the user re-onboards — even though Anthropic itself authorizes
         whatever the subscription may use. When this account already holds an
         authorized Anthropic subscription-OAuth model, an unknown ``claude-*``
-        request lazily creates a sibling ``AIModel`` row sharing the same
+        request lazily creates a sibling ``models.AIModel`` row sharing the same
         credential secret (one live OAuth token lineage — never a copy), binds
         it to the requesting managed agent so principal-bound authorization
         admits it, and serves the request. Mirrors the self-healing price
@@ -3367,7 +3401,7 @@ class OpenAIGatewayService:
         if not base_requested.lower().startswith("claude-"):
             return None
 
-        template: Optional[AIModel] = None
+        template: Optional[models.AIModel] = None
         for ai_model, _alias in gateway_enabled_models:
             if (
                 (ai_model.provider_name or "").strip().lower() == "anthropic"
@@ -3446,8 +3480,8 @@ class OpenAIGatewayService:
         requested_model: Optional[str],
         *,
         provider: GatewayProvider,
-        gateway_enabled_models: List[tuple[AIModel, str]],
-    ) -> Optional[AIModel]:
+        gateway_enabled_models: List[tuple[models.AIModel, str]],
+    ) -> Optional[models.AIModel]:
         """Auto-register an unknown Codex/OpenAI model for ChatGPT OAuth.
 
         Codex CLI ships a built-in picker (``gpt-6-astra``, dated gpt-5.6
@@ -3457,7 +3491,7 @@ class OpenAIGatewayService:
         OpenAI itself authorizes whatever the subscription may use. When this
         account already holds an authorized openai-codex subscription-OAuth
         model, an unknown Codex-shaped request lazily creates a sibling
-        ``AIModel`` sharing the same credential secret (one live OAuth token
+        ``models.AIModel`` sharing the same credential secret (one live OAuth token
         lineage — never a copy), binds it to the requesting managed agent,
         and serves the request.
 
@@ -3483,7 +3517,7 @@ class OpenAIGatewayService:
         if base_requested is None:
             return None
 
-        template: Optional[AIModel] = None
+        template: Optional[models.AIModel] = None
         for ai_model, _alias in gateway_enabled_models:
             if (
                 (ai_model.provider_name or "").strip().lower() == "openai-codex"
@@ -3515,15 +3549,15 @@ class OpenAIGatewayService:
         *,
         identifier: str,
         alias: str,
-        template: AIModel,
+        template: models.AIModel,
         provider_name: str,
         source_agent: str,
         managed_by: str,
         name_prefix: str,
         description: str,
         log_label: str,
-    ) -> Optional[AIModel]:
-        """Create a sibling AIModel + agent binding under a savepoint.
+    ) -> Optional[models.AIModel]:
+        """Create a sibling models.AIModel + agent binding under a savepoint.
 
         A failure here must undo ONLY the auto-registration writes. A
         session-level rollback would also discard unrelated pending state
@@ -3656,18 +3690,18 @@ class OpenAIGatewayService:
         )
         return created
 
-    def _is_openai_codex_model(self, ai_model: AIModel) -> bool:
+    def _is_openai_codex_model(self, ai_model: GatewayModel) -> bool:
         return (ai_model.provider_name or "").strip().lower() == "openai-codex"
 
     def _resolve_openai_codex_credentials(
-        self, ai_model: AIModel
-    ) -> ResolvedModelCredentials:
+        self, ai_model: GatewayModel
+    ) -> ResolvedModelCredentials | GatewayCodexCredentials:
         # Reset per request (mirrors _build_completion_kwargs) so an errored
         # resolution never leaves a stale value on the usage row.
         self._last_upstream_credential_type = None
         self._last_alibaba_cache_mode = None
         if self._owns_db_session:
-            ai_model = self._reattach_for_recording(ai_model)
+            ai_model = self._model_for_credentials(ai_model)
         try:
             resolved = get_secret_service().resolve_ai_model_credentials(
                 ai_model,
@@ -3709,6 +3743,10 @@ class OpenAIGatewayService:
                 provider="openai",
                 status_code=400,
                 message="OpenAI Codex OAuth credentials are incomplete",
+            )
+        if self._owns_db_session:
+            return GatewayCodexCredentials(
+                value=str(resolved.value), account_id=str(payload["account_id"])
             )
         return resolved
 
@@ -3782,7 +3820,7 @@ class OpenAIGatewayService:
         return sanitized
 
     def _build_openai_codex_payload(
-        self, ai_model: AIModel, payload: Dict[str, Any], *, stream: bool = False
+        self, ai_model: GatewayModel, payload: Dict[str, Any], *, stream: bool = False
     ) -> Dict[str, Any]:
         upstream_payload = self._sanitize_openai_codex_payload(
             json.loads(json.dumps(payload))
@@ -3806,7 +3844,7 @@ class OpenAIGatewayService:
         *,
         payload: Dict[str, Any],
         messages: List[Dict[str, Any]],
-        ai_model: Optional[AIModel] = None,
+        ai_model: Optional[GatewayModel] = None,
     ) -> Dict[str, Any]:
         """Translate a chat-completions payload into a Codex Responses-API one.
 
@@ -4132,7 +4170,7 @@ class OpenAIGatewayService:
         }
 
     def _create_openai_codex_response(
-        self, ai_model: AIModel, payload: Dict[str, Any]
+        self, ai_model: GatewayModel, payload: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Call the Codex Responses backend and return the final response dict.
 
@@ -4415,7 +4453,7 @@ class OpenAIGatewayService:
     def _stream_openai_codex_response(
         self,
         *,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         payload: Dict[str, Any],
         started_at: float,
         budget_result: Optional[BudgetCheckResult],
@@ -4618,7 +4656,7 @@ class OpenAIGatewayService:
     def _stream_openai_codex_chat_completion(
         self,
         *,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         payload: Dict[str, Any],
         messages: List[Dict[str, Any]],
         started_at: float,
@@ -4868,7 +4906,7 @@ class OpenAIGatewayService:
     def _build_responses_api_payload(
         self,
         *,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         requested_model: str,
         response_dict: Dict[str, Any],
     ) -> Dict[str, Any]:
@@ -4941,7 +4979,9 @@ class OpenAIGatewayService:
     # governance tool-stripping, attribution, and usage recording keep
     # running exactly as on the litellm path.
     # ------------------------------------------------------------------
-    def _anthropic_oauth_passthrough_token(self, ai_model: AIModel) -> Optional[str]:
+    def _anthropic_oauth_passthrough_token(
+        self, ai_model: GatewayModel
+    ) -> Optional[str]:
         """Resolve the Claude Code subscription-OAuth token for ``ai_model``.
 
         Args:
@@ -4960,7 +5000,7 @@ class OpenAIGatewayService:
             return None
         self._last_upstream_credential_type = None
         if self._owns_db_session:
-            ai_model = self._reattach_for_recording(ai_model)
+            ai_model = self._model_for_credentials(ai_model)
         try:
             resolved = get_secret_service().resolve_ai_model_credentials(
                 ai_model,
@@ -5060,7 +5100,7 @@ class OpenAIGatewayService:
             return payload
 
     def _passthrough_upstream_model_ref(
-        self, ai_model: AIModel, requested_model: Any
+        self, ai_model: GatewayModel, requested_model: Any
     ) -> str:
         """Choose the upstream model string for the OAuth passthrough.
 
@@ -5156,7 +5196,7 @@ class OpenAIGatewayService:
     def _prepare_anthropic_passthrough(
         self,
         *,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         payload: Dict[str, Any],
         oauth_token: str,
         anthropic_version: Optional[str],
@@ -5223,7 +5263,7 @@ class OpenAIGatewayService:
 
     @staticmethod
     def _anthropic_passthrough_upstream_error(
-        status_code: int, body_text: str, *, ai_model: Optional[AIModel] = None
+        status_code: int, body_text: str, *, ai_model: Optional[GatewayModel] = None
     ) -> ModelGatewayAPIError:
         """Map an upstream Anthropic error body to a gateway error."""
         try:
@@ -5276,7 +5316,7 @@ class OpenAIGatewayService:
         url: str,
         headers: Dict[str, str],
         body: Dict[str, Any],
-        ai_model: Optional[AIModel] = None,
+        ai_model: Optional[GatewayModel] = None,
     ) -> Dict[str, Any]:
         """Execute a non-streaming passthrough request.
 
@@ -5338,7 +5378,7 @@ class OpenAIGatewayService:
         url: str,
         headers: Dict[str, str],
         body: Dict[str, Any],
-        ai_model: Optional[AIModel] = None,
+        ai_model: Optional[GatewayModel] = None,
     ) -> tuple[httpx.Client, httpx.Response]:
         """Open a streaming passthrough request, eagerly checking the status.
 
@@ -5382,7 +5422,7 @@ class OpenAIGatewayService:
         upstream_client: httpx.Client,
         upstream_response: httpx.Response,
         *,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         payload: Dict[str, Any],
         budget_result: Optional[BudgetCheckResult],
         started_at: float,
@@ -5590,7 +5630,7 @@ class OpenAIGatewayService:
     # Responses endpoint) lives in
     # :mod:`preloop.services.openai_responses_passthrough`.
     # ------------------------------------------------------------------
-    def _resolve_openai_passthrough_api_key(self, ai_model: AIModel) -> str:
+    def _resolve_openai_passthrough_api_key(self, ai_model: GatewayModel) -> str:
         """Resolve the API key for a native Responses passthrough request.
 
         Mirrors the credential half of ``_build_completion_kwargs``, including
@@ -5608,7 +5648,7 @@ class OpenAIGatewayService:
         """
         self._last_upstream_credential_type = None
         if self._owns_db_session:
-            ai_model = self._reattach_for_recording(ai_model)
+            ai_model = self._model_for_credentials(ai_model)
         try:
             resolved = get_secret_service().resolve_ai_model_credentials(
                 ai_model,
@@ -5717,7 +5757,7 @@ class OpenAIGatewayService:
             return payload
 
     def _prepare_openai_responses_passthrough(
-        self, ai_model: AIModel, payload: Dict[str, Any], *, stream: bool
+        self, ai_model: GatewayModel, payload: Dict[str, Any], *, stream: bool
     ) -> tuple[str, Dict[str, str], Dict[str, Any]]:
         """Build the URL, headers and body for a native Responses request.
 
@@ -5794,7 +5834,9 @@ class OpenAIGatewayService:
 
         return _PassthroughUpstreamError()
 
-    def _note_responses_api_absent(self, ai_model: AIModel, status_code: int) -> None:
+    def _note_responses_api_absent(
+        self, ai_model: GatewayModel, status_code: int
+    ) -> None:
         """Remember that this upstream has no Responses endpoint."""
         mark_responses_api_absent(capability_cache_key(ai_model))
         logger.info(
@@ -5805,7 +5847,7 @@ class OpenAIGatewayService:
         )
 
     def _create_openai_responses_passthrough(
-        self, ai_model: AIModel, payload: Dict[str, Any]
+        self, ai_model: GatewayModel, payload: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
         """Execute a non-streaming native Responses request.
 
@@ -5864,7 +5906,7 @@ class OpenAIGatewayService:
         return self._run_with_upstream_retries("openai", _attempt, ai_model=ai_model)
 
     def _open_openai_responses_passthrough_stream(
-        self, ai_model: AIModel, payload: Dict[str, Any]
+        self, ai_model: GatewayModel, payload: Dict[str, Any]
     ) -> Optional[_PrefetchedPassthroughResponse]:
         """Open a streaming native Responses request, checking status eagerly.
 
@@ -5934,7 +5976,7 @@ class OpenAIGatewayService:
         self,
         upstream_response: httpx.Response | _PrefetchedPassthroughResponse,
         *,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         payload: Dict[str, Any],
         budget_result: Optional[BudgetCheckResult],
         started_at: float,
@@ -6145,7 +6187,7 @@ class OpenAIGatewayService:
 
     def _build_completion_kwargs(
         self,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         *,
         messages: List[Dict[str, Any]],
         payload: Dict[str, Any],
@@ -6157,7 +6199,7 @@ class OpenAIGatewayService:
         self._last_upstream_credential_type = None
         self._last_alibaba_cache_mode = None
         if self._owns_db_session:
-            ai_model = self._reattach_for_recording(ai_model)
+            ai_model = self._model_for_credentials(ai_model)
         try:
             resolved_credentials = get_secret_service().resolve_ai_model_credentials(
                 ai_model,
@@ -6420,7 +6462,7 @@ class OpenAIGatewayService:
         provider: GatewayProvider,
         operation: Callable[[], Any],
         *,
-        ai_model: Optional[AIModel] = None,
+        ai_model: Optional[GatewayModel] = None,
         purpose: _GatewayCallPurpose = "gateway",
     ) -> Any:
         """Run ``operation`` with bounded retries for transient upstream faults.
@@ -6490,7 +6532,7 @@ class OpenAIGatewayService:
 
     def _call_litellm(
         self,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         *,
         messages: List[Dict[str, Any]],
         payload: Dict[str, Any],
@@ -6537,7 +6579,7 @@ class OpenAIGatewayService:
 
     def _open_upstream_stream(
         self,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         *,
         messages: List[Dict[str, Any]],
         payload: Dict[str, Any],
@@ -6701,7 +6743,7 @@ class OpenAIGatewayService:
         provider: GatewayProvider,
         exc: Exception,
         *,
-        ai_model: Optional[AIModel] = None,
+        ai_model: Optional[GatewayModel] = None,
     ) -> ModelGatewayAPIError:
         """Coerce a mid-stream exception into a gateway error for SSE emission.
 
@@ -6755,7 +6797,7 @@ class OpenAIGatewayService:
         exc: Exception,
         error: ModelGatewayAPIError | None = None,
         *,
-        ai_model: Optional[AIModel] = None,
+        ai_model: Optional[GatewayModel] = None,
     ) -> str:
         """Render a mid-stream failure as an OpenAI-style SSE error event.
 
@@ -6778,7 +6820,7 @@ class OpenAIGatewayService:
         exc: Exception,
         error: ModelGatewayAPIError | None = None,
         *,
-        ai_model: Optional[AIModel] = None,
+        ai_model: Optional[GatewayModel] = None,
     ) -> str:
         """Render a mid-stream failure as a Responses-API SSE error event.
 
@@ -6808,7 +6850,7 @@ class OpenAIGatewayService:
         exc: Exception,
         error: ModelGatewayAPIError | None = None,
         *,
-        ai_model: Optional[AIModel] = None,
+        ai_model: Optional[GatewayModel] = None,
     ) -> str:
         """
         Render a mid-stream failure as an Anthropic-style SSE error event.
@@ -6955,7 +6997,7 @@ class OpenAIGatewayService:
             return messages, payload
 
     def _normalize_responses_input(
-        self, payload: Dict[str, Any], *, ai_model: Optional[AIModel] = None
+        self, payload: Dict[str, Any], *, ai_model: Optional[GatewayModel] = None
     ) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
         reasoning_bridge = (
@@ -7271,7 +7313,7 @@ class OpenAIGatewayService:
         provider: GatewayProvider,
         exc: Exception,
         *,
-        ai_model: Optional[AIModel] = None,
+        ai_model: Optional[GatewayModel] = None,
         streaming: bool = False,
         purpose: _GatewayCallPurpose = "gateway",
     ) -> ModelGatewayAPIError:
@@ -7463,7 +7505,7 @@ class OpenAIGatewayService:
         )
 
     @staticmethod
-    def _to_litellm_model(ai_model: AIModel) -> str:
+    def _to_litellm_model(ai_model: GatewayModel) -> str:
         return to_litellm_model(ai_model)
 
     @staticmethod
@@ -7919,7 +7961,7 @@ class OpenAIGatewayService:
     def _estimate_usage_fallback(
         self,
         *,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         request_payload: Optional[Dict[str, Any]],
         output_text: Optional[str],
     ) -> Optional[tuple[int, int]]:
@@ -7994,7 +8036,7 @@ class OpenAIGatewayService:
         return prompt_tokens, completion_tokens
 
     def _pricing_override_for_request(
-        self, *, ai_model: AIModel, model_alias: Optional[str]
+        self, *, ai_model: GatewayModel, model_alias: Optional[str]
     ) -> Optional[Dict[str, Any]]:
         """Resolve account-scoped pricing metadata for a gateway usage row."""
         return resolve_pricing_override(
@@ -8049,7 +8091,7 @@ class OpenAIGatewayService:
         endpoint: str,
         endpoint_kind: str,
         started_at: float,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         payload: Dict[str, Any],
         usage_details: Optional[Dict[str, Any]],
         budget_result: Optional[BudgetCheckResult],
@@ -8137,7 +8179,7 @@ class OpenAIGatewayService:
         endpoint: str,
         endpoint_kind: str,
         started_at: float,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         payload: Dict[str, Any],
         budget_result: Optional[BudgetCheckResult],
         closes: Sequence[Any] = (),
@@ -8233,7 +8275,7 @@ class OpenAIGatewayService:
         endpoint: str,
         endpoint_kind: str,
         started_at: float,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         payload: Dict[str, Any],
         budget_result: Optional[BudgetCheckResult],
     ) -> None:
@@ -8249,19 +8291,18 @@ class OpenAIGatewayService:
 
         Never raises — it runs during response teardown.
         """
-        # Teardown can outlive the request scope: by the time an abandoned
-        # stream is closed the session may be closed and ``ai_model`` detached
-        # (even the log line below would raise DetachedInstanceError).
-        # Re-fetch by identity before touching any attribute.
-        ai_model = self._reattach_for_recording(ai_model)
-        logger.warning(
-            "Gateway stream abandoned before first chunk: "
-            "endpoint=%s provider=%s model=%s",
-            endpoint,
-            getattr(ai_model, "provider_name", None),
-            payload.get("model"),
-        )
         try:
+            # HTTP callbacks retain scalar models. Internal callers may hand back
+            # detached rows after their own cleanup; recover using their transaction.
+            if not self._owns_db_session:
+                ai_model = self._reattach_for_recording(ai_model)
+            logger.warning(
+                "Gateway stream abandoned before first chunk: "
+                "endpoint=%s provider=%s model=%s",
+                endpoint,
+                getattr(ai_model, "provider_name", None),
+                payload.get("model"),
+            )
             self._record_gateway_request(
                 endpoint=endpoint,
                 method="POST",
@@ -8286,20 +8327,11 @@ class OpenAIGatewayService:
             )
 
     def _rollback_activity_recording(self, exc: Exception, *, context: str) -> None:
-        """Restore the request's db session after a failed telemetry write.
+        """Rollback the current bookkeeping unit after a failed write.
 
-        The gateway shares one SQLAlchemy session between the response path and
-        the usage/activity bookkeeping. When a bookkeeping flush fails (for
-        example Postgres rejecting a JSONB value), the session enters a
-        pending-rollback state where every subsequent statement raises. Rolling
-        back here returns the session to a usable state so the caller can still
-        return the upstream response and any later query still works.
-
-        A separate session was considered and rejected: bookkeeping reads
-        objects (usage_row) that are live in this session, so a second session
-        would need them re-fetched or merged, which adds a query per request
-        and a new class of stale-read bug. Rollback is cheap, local, and keeps
-        the existing object graph valid.
+        HTTP accounting owns this short unit independently of request cleanup;
+        internal callers deliberately retain their existing transaction. A
+        failed activity write must not poison later bookkeeping or the response.
         """
         try:
             self.db.rollback()
@@ -8318,7 +8350,7 @@ class OpenAIGatewayService:
         method: str,
         status_code: int,
         duration: float,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         requested_model: Optional[str],
         response_payload: Optional[Dict[str, Any]],
         upstream_response: Optional[Dict[str, Any]],
@@ -8332,34 +8364,25 @@ class OpenAIGatewayService:
     ) -> None:
         """Persist one usage fact for a gateway request, never fatally.
 
-        Recording usage is bookkeeping. It runs on the request path and shares
-        the request's db session, so a failure here (a rejected JSONB value, a
-        constraint violation) would otherwise poison that session and turn an
-        upstream success into a customer-visible 502. Every caller, streaming
+        HTTP bookkeeping owns a fresh short Session on its current worker.
+        Internal callers retain their transaction. A failure here (a rejected
+        JSONB value or constraint violation) must not turn upstream success
+        into a customer-visible 502. Every caller, streaming
         and non-streaming alike, gets that protection by going through this
         wrapper rather than each site wrapping itself and one being forgotten.
         """
         try:
-            # A streaming disconnect runs this during response teardown, and
-            # the request scope may already have closed the session by then:
-            # every ORM instance the service holds (the AIModel, the auth
-            # user, the ApiKey) is detached with expired attributes, and the
-            # first attribute read raises DetachedInstanceError. Before this
-            # reattachment, that skipped the whole record — tokens billed by
-            # the provider were never metered (observed in staging as
-            # "Skipped gateway usage recording after DetachedInstanceError").
-            # The identity key survives detachment, so re-fetch by primary
-            # key; the session itself stays usable after close (a new
-            # transaction begins on next use).
-            ai_model = self._reattach_for_recording(ai_model)
-            auth_context = getattr(self, "auth_context", None)
-            if auth_context is not None:
-                user = self._reattach_for_recording(auth_context.user)
-                if user is not None and user is not auth_context.user:
-                    auth_context.user = user
-                api_key = self._reattach_for_recording(auth_context.api_key)
-                if api_key is not None and api_key is not auth_context.api_key:
-                    auth_context.api_key = api_key
+            # Account using the request's scalar identity/configuration. A
+            # fresh worker Session cannot race request dependency teardown.
+            if self._owns_db_session:
+                self.release_db_for_wait()
+            else:
+                ai_model = self._reattach_for_recording(ai_model)
+                self.auth_context = replace(
+                    self.auth_context,
+                    user=self._reattach_for_recording(self.auth_context.user),
+                    api_key=self._reattach_for_recording(self.auth_context.api_key),
+                )
             self._record_gateway_request_inner(
                 endpoint=endpoint,
                 method=method,
@@ -8387,36 +8410,41 @@ class OpenAIGatewayService:
                     self._rollback_activity_recording(
                         exc, context="gateway accounting cleanup"
                     )
-                    self.db.close()
+                    self._close_owned_db()
 
     def _reattach_for_recording(self, instance: Any) -> Any:
-        """Return an attached equivalent of a possibly-detached ORM instance.
+        """Recover an internal caller's detached identity using its transaction."""
+        state = inspect(instance, raiseerr=False) if instance is not None else None
+        if state is None or not state.detached or state.identity is None:
+            return instance
+        for model_type, crud in (
+            (models.AIModel, crud_ai_model),
+            (models.User, crud_user),
+            (models.ApiKey, crud_api_key),
+        ):
+            if isinstance(instance, model_type):
+                return crud.get(self.db, id=state.identity[0]) or instance
+        return instance
 
-        Usage recording reads attributes off instances loaded earlier in the
-        request (AIModel, User, ApiKey). When it runs during response
-        teardown — a client disconnect, an abandoned stream — the request
-        session may already be closed, leaving those instances detached with
-        expired attributes; any attribute read then raises
-        DetachedInstanceError. The primary-key identity survives detachment,
-        so a detached instance is re-fetched by identity on ``self.db``.
+    def _model_for_credentials(self, instance: GatewayModel) -> models.AIModel:
+        """Resolve the current credential row inside its preparing worker.
 
-        Falls back to the original instance when nothing better exists (never
-        loaded / row since deleted); the caller's defensive except still
-        applies.
+        Refresh and its serialized OAuth lock keep their existing semantics.
+        No credential-bearing ORM object escapes this preparation phase.
         """
-        if instance is None:
-            return None
-        try:
-            state = inspect(instance)
-            if not state.detached:
-                return instance
-            identity = state.identity
-            if identity is not None:
-                refreshed = self.db.get(type(instance), identity)
-                if refreshed is not None:
-                    return refreshed
-        except SQLAlchemyError:  # pragma: no cover - defensive
-            pass
+        state = inspect(instance, raiseerr=False)
+        if isinstance(instance, GatewayModelSnapshot) or (
+            self._owns_db_session and state is not None and state.identity is not None
+        ):
+            model = crud_ai_model.get(self.db, id=instance.id)
+            if model is None or model.account_id != instance.account_id:
+                raise ModelGatewayAPIError(
+                    provider="openai",
+                    status_code=404,
+                    message="Requested model not found",
+                )
+            return model
+        # Internal callers deliberately keep their own transaction/model graph.
         return instance
 
     def _record_gateway_request_inner(
@@ -8426,7 +8454,7 @@ class OpenAIGatewayService:
         method: str,
         status_code: int,
         duration: float,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         requested_model: Optional[str],
         response_payload: Optional[Dict[str, Any]],
         upstream_response: Optional[Dict[str, Any]],
@@ -8663,7 +8691,9 @@ class OpenAIGatewayService:
             # from the live upstream map once (background thread, negative-
             # cached) and fix this row when found.
             try:
-                schedule_price_lookup(ai_model=ai_model, api_usage_id=str(usage_row.id))
+                schedule_price_lookup(
+                    ai_model_id=ai_model.id, api_usage_id=str(usage_row.id)
+                )
             except Exception:  # noqa: BLE001 - never break recording
                 logger.debug("Scheduling live price lookup failed", exc_info=True)
             # Tell an admin the catalog is missing this model. Deduplicated
@@ -8921,9 +8951,9 @@ class OpenAIGatewayService:
         )
         if default_model is None:
             return
+        if self._owns_db_session:
+            default_model = GatewayModelSnapshot.from_model(default_model)
 
-        previous_preserve = self._wait_preserve
-        self._wait_preserve = (*previous_preserve, runtime_session, usage)
         try:
             summary = self._generate_runtime_session_summary(
                 summary_model=default_model,
@@ -8950,8 +8980,6 @@ class OpenAIGatewayService:
                 exc_info=True,
             )
             return
-        finally:
-            self._wait_preserve = previous_preserve
 
         if not summary:
             return
@@ -9000,7 +9028,7 @@ class OpenAIGatewayService:
     def _generate_runtime_session_summary(
         self,
         *,
-        summary_model: AIModel,
+        summary_model: GatewayModel,
         existing_summary: Optional[str],
         usage: Any,
         request_payload: Optional[Dict[str, Any]],
@@ -9040,28 +9068,33 @@ class OpenAIGatewayService:
             skip_runtime_session_resolution=True,
             owns_db_session=self._owns_db_session,
         )
-        summary_gateway._wait_preserve = (*self._wait_preserve, self._wait_model)
-        response = summary_gateway._call_litellm(
-            summary_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Write one concise runtime session summary for a cost "
-                        "analytics table. Return only the summary text. Mention "
-                        "the agent's apparent goal and latest meaningful work. "
-                        "Keep it under 140 characters. Do not include prices."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(context, ensure_ascii=False),
-                },
-            ],
-            payload={"temperature": 0.1, "max_tokens": 80},
-            provider=summary_provider,
-            purpose="runtime_session_summary",
-        )
+        if self._owns_db_session:
+            summary_model = GatewayModelSnapshot.from_model(summary_model)
+            self.release_db_for_wait()
+        try:
+            response = summary_gateway._call_litellm(
+                summary_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Write one concise runtime session summary for a cost "
+                            "analytics table. Return only the summary text. Mention "
+                            "the agent's apparent goal and latest meaningful work. "
+                            "Keep it under 140 characters. Do not include prices."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(context, ensure_ascii=False),
+                    },
+                ],
+                payload={"temperature": 0.1, "max_tokens": 80},
+                provider=summary_provider,
+                purpose="runtime_session_summary",
+            )
+        finally:
+            summary_gateway._close_owned_db()
         content = response.choices[0].message.content if response else None
         return str(content).strip() if content else None
 
@@ -9130,7 +9163,7 @@ class OpenAIGatewayService:
         *,
         endpoint: str,
         endpoint_kind: str,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         requested_model: Optional[str],
         request_payload: Optional[Dict[str, Any]],
         started_at: float,
@@ -9176,7 +9209,7 @@ class OpenAIGatewayService:
 
     def _check_budget(
         self,
-        ai_model: AIModel,
+        ai_model: GatewayModel,
         payload: Dict[str, Any],
         *,
         gateway_provider: GatewayProvider = "openai",

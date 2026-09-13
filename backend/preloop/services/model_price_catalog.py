@@ -8,9 +8,11 @@ version happens to be installed.
 
 The snapshot is deliberately small (current chat models only), so a model can
 legitimately be missing from it. When the gateway records an ``unpriced``
-usage row, :func:`schedule_price_lookup` fetches the model's price from the
-live upstream map ONCE via a bounded background pool, registers it with
-litellm, and re-prices the triggering row. Lookups are throttled hard:
+usage row, :func:`schedule_price_lookup` is given the model id (never a
+credential-bearing snapshot), re-reads the row through CRUD on a worker
+Session, fetches the model's price from the live upstream map ONCE via a
+bounded background pool, registers it with litellm, and re-prices the
+triggering row. Lookups are throttled hard:
 
 - the downloaded upstream map is cached in-process for ``_REMOTE_TTL_SECONDS``,
 - failed downloads back off for ``_REMOTE_FAILURE_BACKOFF_SECONDS``,
@@ -28,9 +30,10 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -504,17 +507,39 @@ def lookup_model_price_now(candidates: List[str]) -> Optional[str]:
     return matched_key
 
 
-def schedule_price_lookup(*, ai_model: Any, api_usage_id: Optional[str] = None) -> bool:
+@contextmanager
+def _ai_model_price_lookup_session(ai_model_id: Any) -> Iterator[Any]:
+    """Yield the AIModel row on a worker-owned Session.
+
+    HTTP accounting passes only the model id so snapshots never carry
+    credentials into the lookup pool. The Session stays open for the
+    caller so ``credentials_secret`` can resolve, then closes.
+    """
+    from preloop.models.crud import crud_ai_model
+    from preloop.models.db.session import get_db_session
+
+    db = next(get_db_session())
+    try:
+        yield crud_ai_model.get(db, id=ai_model_id)
+    finally:
+        db.close()
+
+
+def schedule_price_lookup(
+    *, ai_model_id: Any, api_usage_id: Optional[str] = None
+) -> bool:
     """Schedule a one-shot background price lookup for an unpriced model.
 
     Fired from the gateway recording path when a usage row lands as
-    ``unpriced``. Runs off the hot path via a bounded thread pool; when the
-    lookup succeeds and ``api_usage_id`` is given, the triggering row is
-    re-priced in place. De-duplicated against in-flight lookups and the
-    negative cache.
+    ``unpriced``. Callers pass the persisted model id only. The worker
+    re-fetches the row through CRUD on its own Session so Alibaba overlay
+    refresh can resolve stored credentials. Runs off the hot path via a
+    bounded thread pool; when the lookup succeeds and ``api_usage_id`` is
+    given, the triggering row is re-priced in place. De-duplicated against
+    in-flight lookups and the negative cache.
 
     Args:
-        ai_model: The AIModel the request was routed to.
+        ai_model_id: Persisted ``AIModel.id`` the request was routed to.
         api_usage_id: The unpriced ``ApiUsage`` row to fix on success.
 
     Returns:
@@ -528,19 +553,27 @@ def schedule_price_lookup(*, ai_model: Any, api_usage_id: Optional[str] = None) 
         return False
     if os.getenv("TESTING") == "true":
         return False
+    if ai_model_id is None:
+        return False
 
     from preloop.services import alibaba_pricing
     from preloop.services.alibaba_price_catalog import native_catalog_target, region_key
     from preloop.services.model_pricing import _iter_litellm_model_candidates
 
-    if alibaba_pricing.is_alibaba(ai_model):
-        target = native_catalog_target(ai_model)
-        if target is None:
+    with _ai_model_price_lookup_session(ai_model_id) as ai_model:
+        if ai_model is None:
             return False
-        dedupe_key = (
-            f"alibaba:{region_key(target[1])}:"
-            f"{(ai_model.model_identifier or '').strip() or 'unknown'}"
+        is_alibaba_model = alibaba_pricing.is_alibaba(ai_model)
+        alibaba_target = native_catalog_target(ai_model) if is_alibaba_model else None
+        alibaba_identifier = (ai_model.model_identifier or "").strip() or "unknown"
+        candidates = (
+            [] if is_alibaba_model else list(_iter_litellm_model_candidates(ai_model))
         )
+
+    if is_alibaba_model:
+        if alibaba_target is None:
+            return False
+        dedupe_key = f"alibaba:{region_key(alibaba_target[1])}:{alibaba_identifier}"
         log_token = _model_log_token(dedupe_key)
         now = time.monotonic()
         with _lookup_lock:
@@ -560,7 +593,11 @@ def schedule_price_lookup(*, ai_model: Any, api_usage_id: Optional[str] = None) 
             )
 
             try:
-                matched = refresh_from_model(ai_model)
+                with _ai_model_price_lookup_session(ai_model_id) as live_model:
+                    if live_model is None:
+                        matched = CatalogRefreshStatus.no_target
+                    else:
+                        matched = refresh_from_model(live_model)
                 if matched is CatalogRefreshStatus.ingested and api_usage_id:
                     _reprice_usage_row(api_usage_id)
                 elif matched is not CatalogRefreshStatus.ingested:
@@ -575,7 +612,6 @@ def schedule_price_lookup(*, ai_model: Any, api_usage_id: Optional[str] = None) 
         _LOOKUP_EXECUTOR.submit(_run_alibaba)
         return True
 
-    candidates = list(_iter_litellm_model_candidates(ai_model))
     if not candidates:
         return False
 

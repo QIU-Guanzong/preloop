@@ -141,15 +141,7 @@ def test_lookup_model_price_now_registers_match(monkeypatch) -> None:
 def test_schedule_price_lookup_disabled_under_testing() -> None:
     """The background scheduler is inert in test runs (TESTING=true)."""
     model_price_catalog.reset_lookup_state_for_tests()
-    from types import SimpleNamespace
-
-    ai_model = SimpleNamespace(
-        provider_name="openai",
-        model_identifier="whatever-model",
-        meta_data=None,
-        model_parameters=None,
-    )
-    assert model_price_catalog.schedule_price_lookup(ai_model=ai_model) is False
+    assert model_price_catalog.schedule_price_lookup(ai_model_id="unused") is False
 
 
 def test_model_log_token_hides_raw_name() -> None:
@@ -161,12 +153,33 @@ def test_model_log_token_hides_raw_name() -> None:
     assert model_price_catalog._model_log_token(raw) == token
 
 
+def _yield_lookup_model(ai_model: object):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _session(_ai_model_id: object):
+        yield ai_model
+
+    return _session
+
+
+def _yield_lookup_models(models_by_id: dict):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _session(ai_model_id: object):
+        yield models_by_id[ai_model_id]
+
+    return _session
+
+
 def test_schedule_price_lookup_uses_bounded_executor(monkeypatch) -> None:
     """Live lookups submit to the shared pool instead of spawning raw threads."""
     model_price_catalog.reset_lookup_state_for_tests()
     monkeypatch.setenv("TESTING", "false")
 
     from types import SimpleNamespace
+    from uuid import uuid4
 
     class _Settings:
         model_price_live_lookup_enabled = True
@@ -189,7 +202,13 @@ def test_schedule_price_lookup_uses_bounded_executor(monkeypatch) -> None:
         meta_data=None,
         model_parameters=None,
     )
-    assert model_price_catalog.schedule_price_lookup(ai_model=ai_model) is True
+    model_id = uuid4()
+    monkeypatch.setattr(
+        model_price_catalog,
+        "_ai_model_price_lookup_session",
+        _yield_lookup_model(ai_model),
+    )
+    assert model_price_catalog.schedule_price_lookup(ai_model_id=model_id) is True
     assert len(submitted) == 1
     assert "executor-test-model" in model_price_catalog._pending_lookups
 
@@ -197,6 +216,7 @@ def test_schedule_price_lookup_uses_bounded_executor(monkeypatch) -> None:
 def test_alibaba_negative_cache_is_scoped_to_usd_region(monkeypatch) -> None:
     """A US-East miss must not suppress Singapore self-heal for the same SKU."""
     from types import SimpleNamespace
+    from uuid import uuid4
 
     from preloop.services.alibaba_price_catalog import CatalogRefreshStatus
 
@@ -222,6 +242,8 @@ def test_alibaba_negative_cache_is_scoped_to_usd_region(monkeypatch) -> None:
 
     monkeypatch.setattr(model_price_catalog._LOOKUP_EXECUTOR, "submit", _fake_submit)
 
+    us_id = uuid4()
+    sg_id = uuid4()
     us_model = SimpleNamespace(
         provider_name="qwen",
         model_identifier="qwen3.8-flash",
@@ -236,12 +258,83 @@ def test_alibaba_negative_cache_is_scoped_to_usd_region(monkeypatch) -> None:
         meta_data=None,
         model_parameters=None,
     )
-    assert model_price_catalog.schedule_price_lookup(ai_model=us_model) is True
+    monkeypatch.setattr(
+        model_price_catalog,
+        "_ai_model_price_lookup_session",
+        _yield_lookup_models({us_id: us_model, sg_id: sg_model}),
+    )
+    assert model_price_catalog.schedule_price_lookup(ai_model_id=us_id) is True
     assert "alibaba:united-states:qwen3.8-flash" in model_price_catalog._negative_cache
     submitted.clear()
-    assert model_price_catalog.schedule_price_lookup(ai_model=us_model) is False
-    assert model_price_catalog.schedule_price_lookup(ai_model=sg_model) is True
+    assert model_price_catalog.schedule_price_lookup(ai_model_id=us_id) is False
+    assert model_price_catalog.schedule_price_lookup(ai_model_id=sg_id) is True
     assert submitted  # Singapore still scheduled
+
+
+def test_schedule_price_lookup_resolves_credentials_from_persisted_model_id(
+    db_session, test_user, monkeypatch
+) -> None:
+    """HTTP snapshots are credential-free; lookup re-fetches the live row."""
+    from contextlib import contextmanager
+
+    from preloop.models.crud import crud_ai_model
+    from preloop.services.alibaba_price_catalog import CatalogRefreshStatus, _api_key
+    from preloop.services.gateway_execution import GatewayModelSnapshot
+
+    model_price_catalog.reset_lookup_state_for_tests()
+    monkeypatch.setenv("TESTING", "false")
+    monkeypatch.setattr("preloop.config.settings.model_price_live_lookup_enabled", True)
+
+    model = crud_ai_model.create_with_account(
+        db=db_session,
+        obj_in={
+            "name": "Alibaba lookup model",
+            "provider_name": "qwen",
+            "model_identifier": "qwen3.8-flash",
+            "api_endpoint": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            "api_key": "sk-persisted-alibaba",
+        },
+        account_id=test_user.account_id,
+    )
+    snapshot = GatewayModelSnapshot.from_model(model)
+    assert snapshot.api_key is None
+    assert snapshot.credentials_secret is None
+    assert _api_key(snapshot) is None
+
+    seen_keys: list[str | None] = []
+    refreshed: list[object] = []
+
+    def _refresh(ai_model):
+        refreshed.append(ai_model)
+        seen_keys.append(_api_key(ai_model))
+        return CatalogRefreshStatus.ingested
+
+    monkeypatch.setattr(
+        "preloop.services.alibaba_price_catalog.refresh_from_model",
+        _refresh,
+    )
+
+    @contextmanager
+    def _lookup_from_test_db(ai_model_id):
+        yield crud_ai_model.get(db_session, id=ai_model_id)
+
+    monkeypatch.setattr(
+        model_price_catalog,
+        "_ai_model_price_lookup_session",
+        _lookup_from_test_db,
+    )
+
+    def _fake_submit(fn):
+        fn()
+        return object()
+
+    monkeypatch.setattr(model_price_catalog._LOOKUP_EXECUTOR, "submit", _fake_submit)
+
+    assert model_price_catalog.schedule_price_lookup(ai_model_id=snapshot.id) is True
+    assert seen_keys == ["sk-persisted-alibaba"]
+    assert refreshed
+    assert not isinstance(refreshed[0], GatewayModelSnapshot)
+    assert refreshed[0].id == snapshot.id
 
 
 # ---------------------------------------------------------------------------

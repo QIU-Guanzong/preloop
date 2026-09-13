@@ -70,7 +70,7 @@ def _chars_per_token() -> float:
 DEFAULT_ESTIMATED_OUTPUT_TOKENS = 1024
 
 
-@dataclass
+@dataclass(frozen=True)
 class BudgetCheckResult:
     """Outcome of a gateway budget check."""
 
@@ -96,7 +96,12 @@ class BudgetCheckResult:
     # only for ``subject_model_not_allowed`` so renderers can name the
     # allowlist that denied it.
     requested_model: Optional[str] = None
-    allowed_models: Optional[list[str]] = None
+    allowed_models: Optional[tuple[str, ...]] = None
+
+    def __post_init__(self) -> None:
+        """Do not retain mutable allowlists supplied by callers."""
+        if self.allowed_models is not None:
+            object.__setattr__(self, "allowed_models", tuple(self.allowed_models))
 
 
 class ModelGatewayBudgetService:
@@ -252,7 +257,9 @@ class ModelGatewayBudgetService:
             pricing_available=pricing_available,
             reset_at=reset_at,
             requested_model=requested_model_label(ai_model, payload.get("model")),
-            allowed_models=denied_allowed_models,
+            allowed_models=tuple(denied_allowed_models)
+            if denied_allowed_models is not None
+            else None,
         )
 
     def enforce_or_raise(

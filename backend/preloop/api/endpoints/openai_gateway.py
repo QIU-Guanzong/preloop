@@ -97,7 +97,7 @@ def list_models(
     auth_context: ModelGatewayAuthContext = Depends(get_model_gateway_auth_context),
 ) -> Dict[str, Any]:
     """List models available via the Preloop gateway."""
-    return OpenAIGatewayService(db, auth_context).list_models()
+    return OpenAIGatewayService(db, auth_context, owns_db_session=True).list_models()
 
 
 @router.post("/chat/completions")

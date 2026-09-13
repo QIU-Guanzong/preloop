@@ -524,7 +524,7 @@ def test_allowlist_unrelated_display_name_still_denies(db_session, test_user):
 
     assert result.hard_limit_exceeded is True
     assert result.enforcement_reason == "subject_model_not_allowed"
-    assert result.allowed_models == ["Alpha Chat"]
+    assert result.allowed_models == ("Alpha Chat",)
     assert result.requested_model == "anthropic/claude-opus-4-1"
 
 
