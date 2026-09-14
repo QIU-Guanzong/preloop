@@ -67,20 +67,37 @@ def test_worker_pod_templates_copy_app_label() -> None:
         assert "app" not in dep["spec"]["selector"]["matchLabels"]
 
 
-def test_migration_job_syncs_flow_presets_after_alembic() -> None:
-    """Alembic must succeed first; preset sync uses the same container."""
-    rendered = helm_template("templates/migration-job.yaml")
-    job = _docs(rendered)[0]
-    assert job["kind"] == "Job"
+def test_upgrade_migration_is_schema_only_and_runs_before_new_pods() -> None:
+    job = _docs(
+        helm_template(
+            "templates/migration-job.yaml",
+            overrides=["database.urlFromSecret.name=existing-database"],
+        )
+    )[0]
+    assert job["metadata"]["annotations"]["helm.sh/hook"] == "pre-upgrade"
     container = job["spec"]["template"]["spec"]["containers"][0]
-    args = " ".join(container.get("args") or [])
-    assert "alembic upgrade head" in args
-    assert "python /app/scripts/sync_flow_presets.py --no-propagate" in args
-    assert args.index("alembic upgrade head") < args.index(
-        "python /app/scripts/sync_flow_presets.py --no-propagate"
-    )
+    assert container["args"] == [
+        "cd /app/backend/preloop/models && alembic upgrade head"
+    ]
+    db_env = next(item for item in container["env"] if item["name"] == "DATABASE_URL")
+    assert db_env["valueFrom"]["secretKeyRef"] == {
+        "name": "existing-database",
+        "key": "database-url",
+    }
+    assert "sync_flow_presets" not in " ".join(container["args"])
+
+
+def test_post_upgrade_init_seeds_catalog_then_presets_on_success() -> None:
+    job = _docs(helm_template("templates/init-db-job.yaml"))[0]
+    hooks = job["metadata"]["annotations"]
+    assert hooks["helm.sh/hook"] == "post-install,post-upgrade"
+    assert hooks["helm.sh/hook-weight"] == "-5"
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    args = " ".join(container["args"])
+    assert "python scripts/init_db.py --force &&" in args
+    assert "python scripts/sync_flow_presets.py --no-propagate" in args
+    assert args.index("init_db.py") < args.index("sync_flow_presets.py")
     assert "--cleanup" not in args
-    assert "init" not in (job["metadata"].get("name") or "")
 
 
 def test_console_nginx_sets_client_max_body_size_from_gateway_proxy() -> None:

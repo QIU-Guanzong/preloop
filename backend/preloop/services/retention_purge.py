@@ -43,6 +43,7 @@ from sqlalchemy.orm import Session
 
 from preloop.config import settings
 from preloop.models.crud import crud_audit_log
+from preloop.models.crud.history_policy import lock_account_for_retention
 from preloop.models.crud.legal_hold import execution_in_account
 from preloop.models.db.session import get_db_session
 from preloop.models.models.account import Account
@@ -52,6 +53,7 @@ from preloop.models.models.audit_log import AuditLog
 from preloop.models.models.flow_artifact import FlowArtifact
 from preloop.models.models.flow_execution import FlowExecution
 from preloop.models.models.runtime_session import RuntimeSession
+from preloop.services.analytics_history import storage_history_days
 from preloop.services.retention_policy import (
     CLASS_APPROVALS,
     CLASS_AUDIT,
@@ -85,12 +87,14 @@ class ClassResult:
     batches: int = 0
     #: True when the class still had matching rows when the pass stopped.
     more_remaining: bool = False
+    applied_cutoffs: list[dict[str, Any]] = field(default_factory=list)
 
     def as_details(self) -> dict[str, Any]:
         """Audit-row shape."""
         return {
             "record_class": self.record_class,
             "retention_days": self.retention_days,
+            "applied_cutoffs": list(self.applied_cutoffs),
             "cutoff": self.cutoff.isoformat(),
             "deleted": self.deleted,
             "batches": self.batches,
@@ -185,7 +189,14 @@ def _evidence_cutoff_filters(cutoff: datetime):
 def _runtime_session_cutoff_filters(cutoff: datetime):
     # A session that never ended is dated by when it started. Using ended_at
     # alone would make an abandoned session immortal.
-    return (func.coalesce(RuntimeSession.ended_at, RuntimeSession.started_at) < cutoff,)
+    return (
+        func.greatest(
+            RuntimeSession.ended_at,
+            RuntimeSession.last_activity_at,
+            RuntimeSession.started_at,
+        )
+        < cutoff,
+    )
 
 
 def _usage_cutoff_filters(cutoff: datetime):
@@ -328,17 +339,30 @@ def purge_class(
     deadline: Optional[float] = None,
 ) -> ClassResult:
     """Delete one record class for one account, in bounded batches."""
-    setting = resolve_retention(account.meta_data, record_class=record_class)
-    cutoff = now - timedelta(days=setting.days)
+    account_id = account.id
+
+    def effective_policy(current_account: Account) -> tuple[int, datetime]:
+        setting = resolve_retention(
+            current_account.meta_data, record_class=record_class
+        )
+        retained_days = setting.days
+        if record_class in (CLASS_RUNTIME_SESSIONS, CLASS_USAGE):
+            history_days = storage_history_days(db, account=current_account)
+            if history_days is None:
+                return -1, datetime.min.replace(tzinfo=UTC)
+            retained_days = max(retained_days, history_days)
+        return retained_days, now - timedelta(days=retained_days)
+
+    retained_days, cutoff = effective_policy(account)
     result = ClassResult(
-        record_class=record_class,
-        retention_days=setting.days,
-        cutoff=cutoff,
+        record_class=record_class, retention_days=retained_days, cutoff=cutoff
     )
     model = _CLASS_MODELS[record_class]
     if dry_run:
+        if retained_days == -1:
+            return result
         result.deleted = count_purgeable(
-            db, account_id=account.id, record_class=record_class, cutoff=cutoff
+            db, account_id=account_id, record_class=record_class, cutoff=cutoff
         )
         return result
     pruned_seq = 0
@@ -346,11 +370,24 @@ def purge_class(
         if deadline is not None and time.monotonic() >= deadline:
             result.more_remaining = True
             break
+        # Each commit ends the prior lock. Re-read and re-lock before the
+        # next batch so an intervening longer promise takes effect now.
+        locked_account = lock_account_for_retention(db, account_id=account_id)
+        if locked_account is None:
+            db.commit()
+            result.more_remaining = True
+            break
+        retained_days, cutoff = effective_policy(locked_account)
+        result.retention_days = retained_days
+        result.cutoff = cutoff
+        if retained_days == -1:
+            db.commit()
+            break
         ids = list(
             db.execute(
                 _candidate_ids_stmt(
                     record_class,
-                    account_id=account.id,
+                    account_id=account_id,
                     cutoff=cutoff,
                     limit=batch_size,
                 )
@@ -359,9 +396,10 @@ def purge_class(
             .all()
         )
         if not ids:
+            db.commit()
             break
         if record_class == CLASS_EVIDENCE:
-            _expire_receipts_for_artifacts(db, account_id=account.id, artifact_ids=ids)
+            _expire_receipts_for_artifacts(db, account_id=account_id, artifact_ids=ids)
         if record_class == CLASS_AUDIT:
             # Read the chain positions before the rows go. Deleting the oldest
             # sealed rows is this job doing its job, and the chain verifier has
@@ -378,19 +416,30 @@ def purge_class(
         db.commit()
         result.deleted += int(deleted.rowcount or 0)
         result.batches += 1
+        result.applied_cutoffs.append(
+            {"retention_days": retained_days, "cutoff": cutoff.isoformat()}
+        )
         if len(ids) < batch_size:
             break
     else:
         result.more_remaining = True
     if record_class == CLASS_EVIDENCE:
+        locked_account = lock_account_for_retention(db, account_id=account_id)
+        if locked_account is None:
+            db.commit()
+            result.more_remaining = True
+            return result
+        _, cutoff = effective_policy(locked_account)
         cleared = _drop_legacy_evidence_columns(
-            db, account_id=account.id, cutoff=cutoff
+            db, account_id=account_id, cutoff=cutoff
         )
         if cleared:
             db.commit()
             result.deleted += cleared
+        else:
+            db.commit()
     if pruned_seq:
-        _raise_chain_floor(db, account_id=account.id, up_to_seq=pruned_seq, now=now)
+        _raise_chain_floor(db, account_id=account_id, up_to_seq=pruned_seq, now=now)
     return result
 
 

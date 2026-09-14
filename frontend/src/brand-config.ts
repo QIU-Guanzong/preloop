@@ -110,11 +110,25 @@ export interface PricingPlan {
   price_monthly: number | null;
   price_annually: number | null;
   price_label?: string;
+  /**
+   * Secondary price line shown under the headline number, e.g. the annual
+   * equivalent of a monthly price. Free-form so a plan can say "billed
+   * annually" or "2 months free" without the card inventing arithmetic.
+   */
+  price_note?: string;
+  /** Same as `price_note` but shown when the annual interval is selected. */
+  price_note_annual?: string;
   badge?: string;
   highlight?: boolean;
   cta_text?: string;
   cta_url?: string;
   description?: string;
+  /**
+   * The single line printed on the card. The approved card shape is one
+   * number plus one line: quotas, retention, and the feature split live in
+   * the comparison table below the fold, never on the card.
+   */
+  tagline?: string;
   features: string[];
 }
 
@@ -123,12 +137,45 @@ export interface PricingFAQ {
   a: string;
 }
 
+/**
+ * One row of the below-the-fold comparison table. `values` is keyed by plan
+ * id; a missing key renders as an empty cell rather than a false claim.
+ * Values are either free text ("Up to 5", "500M tokens") or the booleans
+ * `true`/`false` which render as an included/excluded mark.
+ */
+export interface PricingComparisonRow {
+  label: string;
+  values: Record<string, string | boolean>;
+}
+
+export interface PricingComparisonGroup {
+  title: string;
+  rows: PricingComparisonRow[];
+}
+
+export interface PricingComparison {
+  title?: string;
+  note?: string;
+  groups: PricingComparisonGroup[];
+}
+
+export interface PricingDeploymentOption {
+  title: string;
+  description: string;
+  cta_text: string;
+  cta_url: string;
+}
+
 export interface PricingConfig {
+  deployment_options?: PricingDeploymentOption[];
+  /** Optional catalog path relative to brands.yaml; required for EE cloud pricing. */
+  catalog_path?: string;
   enabled?: boolean;
   title?: string;
   lead?: string;
   billing_toggle?: boolean;
   plans: PricingPlan[];
+  comparison?: PricingComparison;
   faqs?: PricingFAQ[];
 }
 

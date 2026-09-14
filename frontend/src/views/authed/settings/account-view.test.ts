@@ -9,6 +9,10 @@ import type { AccountView } from './account-view';
 describe('AccountView', () => {
   let fetchStub: sinon.SinonStub;
 
+  function copy(el: AccountView): string {
+    return (el.shadowRoot?.textContent ?? '').replace(/\s+/g, ' ').trim();
+  }
+
   function json(data: unknown, status = 200) {
     return new Response(JSON.stringify(data), {
       status,
@@ -24,6 +28,11 @@ describe('AccountView', () => {
       trial?: Record<string, unknown>;
       plans?: Record<string, unknown>[];
       extraCreditPricePerUsd?: number;
+      freeTier?: boolean;
+      ingestionQuota?: Record<string, unknown> | null;
+      seats?: Record<string, unknown> | null;
+      hostedOverrides?: Record<string, unknown>;
+      canManageBilling?: boolean;
     } = {}
   ) {
     return sinon
@@ -66,15 +75,24 @@ describe('AccountView', () => {
 
         if (url.includes('/api/v1/billing/summary')) {
           return json({
-            subscription:
-              opts.subscription === undefined
+            subscription: opts.freeTier
+              ? null
+              : opts.subscription === undefined
                 ? {
                     plan_id: 'plan-pro',
                     status: 'active',
                     current_period_end: '2026-12-31T00:00:00Z',
                   }
                 : opts.subscription,
-            plan: { id: 'plan-pro', name: 'Pro Plan' },
+            plan: opts.freeTier
+              ? { id: 'free', name: 'Free', features: { max_agents: 3 } }
+              : {
+                  id: 'plan-pro',
+                  name: 'Pro Plan',
+                  features: { max_agents: -1 },
+                },
+            ingestion_quota: opts.ingestionQuota ?? null,
+            seats: opts.seats ?? null,
             trial: opts.trial ?? {
               is_trialing: false,
               days: 0,
@@ -90,7 +108,65 @@ describe('AccountView', () => {
               remaining_limit_usd: 75,
               extra_credit_price_per_usd: opts.extraCreditPricePerUsd ?? 1.2,
               models: [],
+              ...(opts.hostedOverrides ?? {}),
             },
+          });
+        }
+
+        if (url.includes('/api/v1/billing/plan-change-options')) {
+          const legacy = opts.subscription?.plan_id === 'teams';
+          return json({
+            can_manage_billing: opts.canManageBilling ?? true,
+            switching_enabled: true,
+            current_subscription: opts.freeTier
+              ? null
+              : {
+                  id: 'subscription-local',
+                  plan_id: legacy ? 'teams' : 'plan-pro',
+                  status: 'active',
+                  interval: 'month',
+                  quantity: 1,
+                  currency: 'usd',
+                  unit_amount_cents: legacy ? 2900 : 1000,
+                  total_amount_cents: legacy ? 2900 : 1000,
+                  current_period_end: '2030-01-01T00:00:00Z',
+                  legacy,
+                  revision: 'a',
+                  pending_change: null,
+                  cancel_at_period_end: false,
+                },
+            current_plan: {
+              id: legacy ? 'teams' : 'plan-pro',
+              name: legacy ? 'Legacy Teams' : 'Pro',
+              is_legacy: legacy,
+              features: {},
+            },
+            plans: opts.plans ?? [
+              {
+                id: 'enterprise',
+                name: 'Enterprise',
+                price_monthly: null,
+                price_annually: null,
+                features: {},
+                capabilities: [],
+                purchasable: false,
+              },
+            ],
+            monthly_usage: [],
+            current_usage: {
+              active_users: 1,
+              active_agents: 1,
+              pending_invitations: 0,
+              historical_seat_peak: null,
+              historical_agent_peak: null,
+            },
+            assessments: [],
+            storage_retention: {
+              source: 'account_policy',
+              minimum_days: 183,
+              legal_holds_override: true,
+            },
+            warnings: [],
           });
         }
 
@@ -302,7 +378,7 @@ describe('AccountView', () => {
     expect(element.shadowRoot?.querySelector('.plans-grid')).to.not.exist;
   });
 
-  it('shows the interval toggle when there is a plan to upgrade to', async () => {
+  it('uses the explicit comparison panel instead of an immediate upgrade grid', async () => {
     fetchStub = createFetchStub({ billing: true });
     const element = (await fixture(
       html`<account-view></account-view>`
@@ -311,10 +387,9 @@ describe('AccountView', () => {
     await waitUntil(() => !(element as any)._loading, 'load');
     await element.updateComplete;
 
-    expect(element.shadowRoot?.querySelector('billing-toggle')).to.exist;
-    expect(
-      element.shadowRoot?.querySelectorAll('pricing-card').length
-    ).to.equal(1);
+    expect(element.shadowRoot?.querySelector('billing-plan-comparison')).to
+      .exist;
+    expect(element.shadowRoot?.querySelector('pricing-card')).not.to.exist;
   });
 
   it('does not claim a dollar costs a dollar at a 1:1 credit rate (D13)', async () => {
@@ -327,7 +402,265 @@ describe('AccountView', () => {
     await element.updateComplete;
 
     const text = element.shadowRoot?.textContent ?? '';
-    expect(text).to.contain('Usage beyond the cap is billed at cost');
+    expect(text).to.contain(
+      'Additional usage is billed at cost only when you opt in'
+    );
     expect(text).to.not.contain('$1.00 per');
+  });
+  it('keeps the sales-led plan (null price) and drops only the $0 plan', async () => {
+    fetchStub = createFetchStub({
+      billing: true,
+      plans: [
+        {
+          id: 'free',
+          name: 'Free',
+          price_monthly: 0,
+          price_annually: 0,
+          features: {},
+        },
+        {
+          id: 'pro',
+          name: 'Pro',
+          price_monthly: 10,
+          price_annually: 100,
+          features: {},
+        },
+        {
+          id: 'enterprise',
+          name: 'Enterprise',
+          price_monthly: null,
+          price_annually: null,
+          features: {},
+        },
+      ],
+    });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const ids = (element as any)._publicPlans.map((p: any) => p.id);
+    // Enterprise has no price, but it is still a plan you can move to. The
+    // old filter dropped it along with Free and left no route to sales.
+    expect(ids).to.deep.equal(['pro', 'enterprise']);
+  });
+
+  it('describes the free hosted credit as one-time, not monthly', async () => {
+    fetchStub = createFetchStub({
+      billing: true,
+      freeTier: true,
+      hostedOverrides: { one_time_credit_usd: 0.5, included_limit_usd: null },
+    });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const text = copy(element);
+    expect(text).to.contain('One-time credit');
+    expect(text).to.contain('$0.50');
+    expect(text).to.contain('does not reset');
+    // Calling a one-time grant an allowance is the specific mis-sell here.
+    expect(text).to.not.contain('Monthly allowance');
+  });
+
+  it('calls the paid hosted grant a monthly allowance', async () => {
+    fetchStub = createFetchStub({ billing: true });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const text = copy(element);
+    expect(text).to.contain('Monthly allowance');
+    expect(text).to.not.contain('One-time credit');
+  });
+
+  it('renders the analysis quota meter and never implies agents stop', async () => {
+    fetchStub = createFetchStub({
+      billing: true,
+      ingestionQuota: {
+        plan_id: 'pro',
+        quota_tokens: 100000000,
+        used_tokens: 100000000,
+        remaining_tokens: 0,
+        is_unlimited: false,
+        over_quota: true,
+        degraded_analytics: true,
+        usage_ratio: 1,
+        approaching_limit: false,
+        period_start: '2026-08-01T00:00:00Z',
+        period_end: '2026-09-01T00:00:00Z',
+      },
+    });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const text = copy(element);
+    expect(text).to.contain('Analysis quota');
+    expect(text).to.contain('100M of 100M tokens');
+    // Product-safety rule: exhausting the BYOK quota degrades analytics
+    // detail and nothing else. Copy that says otherwise is a bug.
+    expect(text).to.contain('Your agents keep running');
+    expect(text).to.contain('every policy still applies');
+    expect(text).to.not.match(/blocked|suspended|stopped|disabled/i);
+  });
+
+  it('omits the quota meter entirely when the quota is unlimited', async () => {
+    fetchStub = createFetchStub({
+      billing: true,
+      ingestionQuota: {
+        plan_id: 'enterprise',
+        quota_tokens: -1,
+        used_tokens: 5,
+        remaining_tokens: null,
+        is_unlimited: true,
+        over_quota: false,
+        degraded_analytics: false,
+        usage_ratio: 0,
+        approaching_limit: false,
+        period_start: '2026-08-01T00:00:00Z',
+        period_end: '2026-09-01T00:00:00Z',
+      },
+    });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    expect(element.shadowRoot?.querySelector('.quota-bar')).to.not.exist;
+  });
+
+  it('shows seats as capacity and quotes the add-on only when over', async () => {
+    fetchStub = createFetchStub({
+      billing: true,
+      seats: {
+        active_users: 22,
+        included_users: 20,
+        max_users: 50,
+        over_included: true,
+        seat_addon: {
+          price_per_user_monthly: 15,
+          price_per_user_annually: 150,
+          max_users: 50,
+        },
+      },
+    });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const text = copy(element);
+    expect(text).to.contain('22 of 20');
+    expect(text).to.contain('Agents are unlimited');
+    expect(text).to.contain('$15 each per month');
+  });
+
+  it('omits the seat line when the plan has no seat bracket', async () => {
+    fetchStub = createFetchStub({
+      billing: true,
+      seats: {
+        active_users: 3,
+        included_users: null,
+        max_users: null,
+        over_included: false,
+        seat_addon: null,
+      },
+    });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    expect(copy(element)).to.not.contain('included users');
+  });
+  it('explains grandfathering without automatically changing a legacy plan', async () => {
+    fetchStub = createFetchStub({
+      billing: true,
+      subscription: {
+        plan_id: 'teams',
+        status: 'active',
+        current_period_end: '2026-12-31T00:00:00Z',
+      },
+    });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+    const panel = element.shadowRoot!.querySelector(
+      'billing-plan-comparison'
+    ) as any;
+    await waitUntil(() => !panel.loading);
+    await panel.updateComplete;
+    const comparison = (panel.shadowRoot.textContent ?? '').replace(
+      /\s+/g,
+      ' '
+    );
+    expect(comparison).to.contain('Legacy Teams');
+    expect(comparison).to.contain('$29.00 per user');
+    expect(comparison).to.contain('grandfathered per-user rate stays');
+    expect(
+      fetchStub
+        .getCalls()
+        .some((call) =>
+          String(call.args[0]).includes('create-checkout-session')
+        )
+    ).to.equal(false);
+  });
+
+  it('does not label a current plan as grandfathered', async () => {
+    fetchStub = createFetchStub({ billing: true });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+    expect(element.shadowRoot?.querySelector('.legacy-plan-note')).to.not.exist;
+  });
+  it('does not synchronize or mutate subscriptions merely by opening Account', async () => {
+    fetchStub = createFetchStub({ billing: true });
+    const element = await fixture<AccountView>(
+      html`<account-view></account-view>`
+    );
+    await waitUntil(() => !(element as any)._loading);
+    await element.updateComplete;
+    expect(
+      fetchStub
+        .getCalls()
+        .some((c) => String(c.args[0]).includes('sync-subscription'))
+    ).to.equal(false);
+    expect(
+      fetchStub.getCalls().some((c) => c.args[1]?.method === 'POST')
+    ).to.equal(false);
+  });
+  it('keeps portal mutations disabled for a member without billing permission', async () => {
+    fetchStub = createFetchStub({ billing: true, canManageBilling: false });
+    const element = await fixture<AccountView>(
+      html`<account-view></account-view>`
+    );
+    await waitUntil(() => !(element as any)._loading);
+    await element.updateComplete;
+    await (element as any)._handleManageSubscription();
+    expect(
+      fetchStub
+        .getCalls()
+        .some((c) => String(c.args[0]).includes('create-portal-session'))
+    ).to.equal(false);
+    expect(
+      element
+        .shadowRoot!.querySelector('.current-plan sl-button')
+        ?.hasAttribute('disabled')
+    ).to.equal(true);
   });
 });

@@ -94,6 +94,7 @@ def run_session_optimization(
     request: RuntimeSessionOptimizationRequest,
     current_user: Any,
     budget_enforcer: Any = None,
+    owns_db_session: bool = False,
 ) -> RuntimeSessionOptimizationResponse:
     """Run one synchronous optimization pass (the shared worker function).
 
@@ -111,7 +112,9 @@ def run_session_optimization(
     Returns:
         The generated (or cached) optimization response.
     """
-    return SessionOptimizationService(db).get_account_session_optimization_suggestions(
+    return SessionOptimizationService(
+        db, owns_db_session=owns_db_session
+    ).get_account_session_optimization_suggestions(
         account=account,
         runtime_session_id=runtime_session_id,
         request=request,
@@ -307,6 +310,7 @@ def _execute_job(
             request=request,
             current_user=user,
             budget_enforcer=budget_enforcer,
+            owns_db_session=owns_session,
         )
         finished = crud_optimization_job.transition(
             db,

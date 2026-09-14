@@ -106,6 +106,8 @@ from .oauth_mcp_token import (
     OAuthMCPRefreshToken,
 )
 from .budget import BudgetPolicy, BudgetSpendActivity, BudgetPeriod
+from .billing_operation import BillingOperation
+from .hosted_spend import HostedSpendAccount, HostedSpendMonth, HostedSpendReservation
 
 from .issue_lifecycle import IssueLifecycle
 from .security_maintenance import (
@@ -117,6 +119,10 @@ from .security_maintenance import (
 )
 
 __all__ = [
+    "BillingOperation",
+    "HostedSpendAccount",
+    "HostedSpendMonth",
+    "HostedSpendReservation",
     "FlowFeedback",
     "FlowThread",
     "IssueLifecycle",

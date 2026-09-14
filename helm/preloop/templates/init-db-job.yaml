@@ -27,7 +27,8 @@ spec:
           args:
             - |
               cd /app && \
-              python scripts/init_db.py --force
+              python scripts/init_db.py --force && \
+              python scripts/sync_flow_presets.py --no-propagate
           env:
             {{- include "preloop.databaseUrlEnv" . | nindent 12 }}
             - name: OPENAI_API_KEY

@@ -76,7 +76,7 @@ def test_alembic_head_is_reachable_from_base() -> None:
 
 
 def test_flow_runners_revision_chains_onto_approval_rule_context() -> None:
-    """Each new revision parents the previous main head; single linear chain."""
+    """Preserve published chains and converge on one migration head."""
     script = _script_directory()
     runners = script.get_revision("20260817_add_flow_runners")
     assert runners.down_revision == "20260806_approval_rule_ctx"
@@ -182,4 +182,15 @@ def test_flow_runners_revision_chains_onto_approval_rule_context() -> None:
     assert control_connection.down_revision == "20260910_operator_notes"
     repricing_job = script.get_revision("20260913_repricing_job")
     assert repricing_job.down_revision == "20260912_control_connection"
-    assert script.get_heads() == ["20260913_repricing_job"]
+    billing = script.get_revision("20260912_billing_ops")
+    assert billing.down_revision == "20260910_operator_notes"
+    durable = script.get_revision("20260912_history_floor")
+    assert durable.down_revision == "20260912_billing_ops"
+    hosted = script.get_revision("20260912_hosted_spend")
+    assert hosted.down_revision == "20260912_history_floor"
+    pricing_merge = script.get_revision("20260914_pricing_merge")
+    assert set(pricing_merge.down_revision) == {
+        "20260913_repricing_job",
+        "20260912_hosted_spend",
+    }
+    assert script.get_heads() == ["20260914_pricing_merge"]

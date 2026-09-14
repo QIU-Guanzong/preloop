@@ -8,6 +8,11 @@ interface Plan {
   price_annually: number | null;
   features: { [key: string]: any } | string[];
   badge?: string;
+  price_label?: string;
+  price_note?: string;
+  price_note_annual?: string;
+  tagline?: string;
+  cta_text?: string;
 }
 
 @customElement('pricing-card')
@@ -16,37 +21,74 @@ export class PricingCard extends LitElement {
   @property({ type: String }) interval: 'month' | 'year' = 'month';
   @property({ type: Array }) featureOrder: string[] = [];
   @property({ type: Object }) featureLabels: Record<string, string> = {};
+  /**
+   * Per-key value renderers for the object-features list. Raw numbers are
+   * ambiguous once plans carry mixed units: `retention_days: 90` and
+   * `hosted_models_monthly_limit_usd: 2` both render as a bare number without
+   * one of these. Returning `null` marks the row excluded.
+   *
+   * `attribute: false` because functions cannot round-trip through an HTML
+   * attribute.
+   */
+  @property({ attribute: false }) featureFormatters: Record<
+    string,
+    (value: any) => string | null
+  > = {};
   @property({ type: Boolean }) dark = false;
 
+  /**
+   * Render the one headline number.
+   *
+   * Pricing is per BRACKET, not per seat: a plan costs the same whether one
+   * person or the whole bracket uses it, so no `/user` unit is ever printed.
+   * Seat counts belong in the comparison table, not in the price.
+   *
+   * `price_label` wins outright when set (Enterprise says "from $30k/yr"),
+   * because a plan whose price is a floor must not be rendered as if it were
+   * an exact amount.
+   */
   private formatPrice(plan: Plan) {
+    if (plan.price_label) {
+      return html`
+        <div class="price-main">${plan.price_label}</div>
+        ${
+          plan.price_note
+            ? html`<div class="price-sub">${plan.price_note}</div>`
+            : null
+        }
+      `;
+    }
+
     if (plan.id === 'enterprise') {
       return html`<div class="price-main">Custom</div>`;
     }
+
     const isMonthly = this.interval === 'month';
     const amount = isMonthly ? plan.price_monthly : plan.price_annually;
-    const unit = isMonthly ? '/user/month' : '/user/year';
+    const unit = isMonthly ? '/mo' : '/yr';
 
     if (amount === null) {
       return html`<div class="price-main">Custom</div>`;
     }
 
     if (amount === 0) {
-      return html`<div class="price-main">Free</div>`;
+      return html`<div class="price-main">$0</div>
+        ${
+          plan.price_note
+            ? html`<div class="price-sub">${plan.price_note}</div>`
+            : null
+        }`;
     }
 
-    const perMo =
-      !isMonthly && typeof plan.price_annually === 'number'
-        ? Math.round((plan.price_annually as number) / 12)
-        : null;
+    // Annual plans are prepaid at 2 months free. The saving is stated by the
+    // plan's own copy rather than derived here: a computed "~$X/mo" reads
+    // like a second, cheaper monthly price and invites the wrong comparison.
+    const note = isMonthly ? plan.price_note : plan.price_note_annual;
 
     return html`
-      <div class="price-main">$${amount}</div>
+      <div class="price-main">$${amount.toLocaleString('en-US')}</div>
       <div class="unit">${unit}</div>
-      ${
-        !isMonthly && perMo !== null
-          ? html`<div class="price-sub">~$${perMo}/mo billed annually</div>`
-          : null
-      }
+      ${note ? html`<div class="price-sub">${note}</div>` : null}
     `;
   }
 
@@ -64,6 +106,13 @@ export class PricingCard extends LitElement {
     let included = false;
     let displayValue: string | null = null;
 
+    const formatter = this.featureFormatters[key];
+    if (formatter) {
+      displayValue = formatter(value);
+      included = displayValue !== null;
+      return this._featureRow(label, included, displayValue);
+    }
+
     if (value === true) {
       included = true;
     } else if (value === false) {
@@ -76,6 +125,14 @@ export class PricingCard extends LitElement {
       displayValue = this._formatNumber(value);
     }
 
+    return this._featureRow(label, included, displayValue);
+  }
+
+  private _featureRow(
+    label: string,
+    included: boolean,
+    displayValue: string | null
+  ) {
     return html`
       <li class=${included ? 'feature included' : 'feature excluded'}>
         <span class="feat-icon"
@@ -188,6 +245,17 @@ export class PricingCard extends LitElement {
       color: var(--sl-color-text-secondary);
       font-size: 0.95rem;
       margin-top: 0.25rem;
+      text-align: center;
+    }
+
+    /* The single line under the price. Grows to fill so every card's CTA
+       sits on the same baseline regardless of how long the line is. */
+    .tagline {
+      margin: 0.75rem 0 1rem 0;
+      text-align: center;
+      font-size: 0.95rem;
+      line-height: 1.4;
+      flex: 1 1 auto;
     }
 
     .plan-card.popular .price-sub {
@@ -265,9 +333,41 @@ export class PricingCard extends LitElement {
     }
   `;
 
+  /** Default CTA label when the plan config does not supply one. */
+  private _ctaLabel(): string {
+    if (this.plan.cta_text) return this.plan.cta_text;
+    switch (this.plan.id) {
+      case 'enterprise':
+        return 'Contact us';
+      case 'opensource':
+        return 'View on GitHub';
+      case 'free':
+        return 'Start free';
+      default:
+        return `Get ${this.plan.name}`;
+    }
+  }
+
   render() {
-    const isPopular = this.plan.id === 'teams' || this.plan.id === 'ultra';
+    // 'pro' is the recommended plan in the 2026 ladder; 'teams' is the
+    // grandfathered legacy plan and keeps its highlight only when a config
+    // still lists it. Highlight is config-driven first so a brand can move
+    // the emphasis without a code change.
+    const isPopular =
+      (this.plan as any).highlight === true ||
+      this.plan.id === 'pro' ||
+      this.plan.id === 'teams' ||
+      this.plan.id === 'ultra';
     const hasArrayFeatures = Array.isArray(this.plan.features);
+    // The approved card shape is one number plus one line. When a plan
+    // carries a tagline we print exactly that and nothing else: the quota,
+    // retention, and feature split rows live in the comparison table so the
+    // cards stay scannable and cannot drift out of sync with the table.
+    const featureList = hasArrayFeatures
+      ? (this.plan.features as string[])
+      : null;
+    const showFeatureList =
+      !this.plan.tagline && (featureList?.length || !hasArrayFeatures);
 
     return html`
       <div
@@ -280,40 +380,39 @@ export class PricingCard extends LitElement {
             ? html`<div class="badge">${this.plan.badge}</div>`
             : null
         }
-        ${
-          this.plan.id === 'enterprise' && !this.plan.badge
-            ? html`<div class="badge alt">Enterprise</div>`
-            : null
-        }
-        ${
-          this.plan.id !== 'free'
-            ? html`<h3 class="plan-name">${this.plan.name}</h3>`
-            : ''
-        }
+        <h3 class="plan-name">${this.plan.name}</h3>
         <div class="price-wrap">${this.formatPrice(this.plan)}</div>
 
-        <hr class="divider" />
-
-        <ul class="features">
-          ${
-            hasArrayFeatures
-              ? (this.plan.features as string[]).map(
-                  (feature) =>
-                    html`<li class="feature included">
-                      <span class="feat-icon"
-                        ><sl-icon name="check-lg"></sl-icon
-                      ></span>
-                      <span class="feat-text">${feature}</span>
-                    </li>`
-                )
-              : this.featureOrder.map((key) =>
-                  this.renderFeature(
-                    (this.plan.features as { [key: string]: any })[key],
-                    key
-                  )
-                )
-          }
-        </ul>
+        ${
+          this.plan.tagline
+            ? html`<p class="tagline">${this.plan.tagline}</p>`
+            : null
+        }
+        ${showFeatureList ? html`<hr class="divider" />` : null}
+        ${
+          showFeatureList
+            ? html`<ul class="features">
+                ${
+                  featureList
+                    ? featureList.map(
+                        (feature) =>
+                          html`<li class="feature included">
+                            <span class="feat-icon"
+                              ><sl-icon name="check-lg"></sl-icon
+                            ></span>
+                            <span class="feat-text">${feature}</span>
+                          </li>`
+                      )
+                    : this.featureOrder.map((key) =>
+                        this.renderFeature(
+                          (this.plan.features as { [key: string]: any })[key],
+                          key
+                        )
+                      )
+                }
+              </ul>`
+            : null
+        }
 
         <sl-button
           class="cta"
@@ -321,17 +420,7 @@ export class PricingCard extends LitElement {
           variant="default"
           @click=${this._handleSignUp}
         >
-          ${
-            this.plan.id === 'enterprise'
-              ? 'Contact Sales'
-              : this.plan.id === 'opensource'
-                ? 'View on GitHub'
-                : this.plan.id === 'free'
-                  ? 'Get Free'
-                  : this.plan.id === 'teams'
-                    ? 'Start Free Trial'
-                    : `Get ${this.plan.name}`
-          }
+          ${this._ctaLabel()}
         </sl-button>
       </div>
     `;

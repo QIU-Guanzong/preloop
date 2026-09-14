@@ -2149,10 +2149,9 @@ export class DashboardView extends AuthedElement {
           : getFeatures().catch(() => null),
       ]);
 
-      const billingEnabled = featuresRes?.features?.billing === true;
-      const policies = billingEnabled
-        ? await getBudgetPolicies().catch(() => [] as BudgetPolicy[])
-        : [];
+      const policies = await getBudgetPolicies().catch(
+        () => [] as BudgetPolicy[]
+      );
 
       this.budgetPolicies = Array.isArray(policies) ? policies : [];
       this.budgetAgents = budgetAgents.items || [];

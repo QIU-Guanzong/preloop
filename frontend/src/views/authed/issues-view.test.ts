@@ -1,4 +1,4 @@
-import { html, fixture, expect } from '@open-wc/testing';
+import { html, fixture, expect, waitUntil } from '@open-wc/testing';
 import sinon from 'sinon';
 import '../../components/view-header.ts';
 import './issues-view';
@@ -47,7 +47,12 @@ function stubFetch(opts: StubOpts = {}) {
   return sinon
     .stub(window, 'fetch')
     .callsFake(async (input: RequestInfo | URL) => {
-      const url = String(input);
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
       const json = (data: unknown, status = 200) =>
         new Response(JSON.stringify(data), { status });
       if (url.includes('/api/v1/projects')) return json(projects);
@@ -194,8 +199,13 @@ describe('IssuesView', () => {
       },
     });
     const el = (await fixture(html`<issues-view></issues-view>`)) as IssuesView;
-    await tick(300);
-    await el.updateComplete;
+    await waitUntil(
+      () =>
+        (el as unknown as { _verdicts: Record<string, { state: string }> })
+          ._verdicts['i1a-i1b']?.state === 'timeout',
+      'timeout verdict after the check request rejects',
+      { timeout: 4000 }
+    );
     const verdicts = (
       el as unknown as { _verdicts: Record<string, { state: string }> }
     )._verdicts;

@@ -100,7 +100,7 @@ def reconcile_ai_model_gateway_settings(
 
 
 def seed_plan_catalog(db_session, project_root: str) -> None:
-    """Seed the local plan catalog from `plans.yaml` if needed."""
+    """Seed current catalog terms without rewriting grandfathered contracts."""
     plans_file = os.path.join(project_root, "plans.yaml")
     if not os.path.exists(plans_file):
         click.echo("plans.yaml not found, skipping plan catalog initialization.")
@@ -115,6 +115,13 @@ def seed_plan_catalog(db_session, project_root: str) -> None:
             continue
         plan_id = str(plan_data["id"])
         plan = db_session.query(Plan).filter(Plan.id == plan_id).first()
+        legacy = plan_data.get("legacy") is True
+        if plan is not None and legacy:
+            # Upgrade hooks run this seed repeatedly. The catalog baseline must
+            # not replace negotiated prices, features or retention promises.
+            plan.is_active = False
+            continue
+        is_active = not legacy and bool(plan_data.get("is_active", True))
         stripe_product_id = plan_data.get("stripe_product_id")
         if stripe_product_id is None and (
             plan_data.get("price_monthly") is not None
@@ -128,13 +135,14 @@ def seed_plan_catalog(db_session, project_root: str) -> None:
                 name=plan_data["name"],
                 price_monthly=plan_data.get("price_monthly"),
                 price_annually=plan_data.get("price_annually"),
-                is_active=True,
+                is_active=is_active,
                 is_custom=False,
                 features=plan_data.get("features") or {},
                 stripe_product_id=stripe_product_id,
             )
             db_session.add(plan)
         else:
+            plan.is_active = is_active
             plan.name = plan_data["name"]
             plan.price_monthly = plan_data.get("price_monthly")
             plan.price_annually = plan_data.get("price_annually")

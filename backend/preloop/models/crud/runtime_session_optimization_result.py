@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import uuid
 from typing import Any, Optional, Union
 
@@ -21,6 +23,7 @@ class CRUDRuntimeSessionOptimizationResult(CRUDBase[RuntimeSessionOptimizationRe
         self,
         db: Session,
         *,
+        start_date: Optional[datetime] = None,
         account_id: Union[uuid.UUID, str],
         runtime_session_id: Union[uuid.UUID, str],
         scope_hash: str,
@@ -40,6 +43,7 @@ class CRUDRuntimeSessionOptimizationResult(CRUDBase[RuntimeSessionOptimizationRe
             db.query(self.model)
             .filter(
                 self.model.account_id == account_id,
+                self.model.updated_at >= start_date if start_date is not None else True,
                 self.model.runtime_session_id == runtime_session_id,
                 self.model.scope_hash == scope_hash,
             )
@@ -50,6 +54,7 @@ class CRUDRuntimeSessionOptimizationResult(CRUDBase[RuntimeSessionOptimizationRe
         self,
         db: Session,
         *,
+        start_date: Optional[datetime] = None,
         account_id: Union[uuid.UUID, str],
         runtime_session_ids: list[Union[uuid.UUID, str]],
     ) -> list[RuntimeSessionOptimizationResult]:
@@ -71,6 +76,7 @@ class CRUDRuntimeSessionOptimizationResult(CRUDBase[RuntimeSessionOptimizationRe
             db.query(self.model)
             .filter(
                 self.model.account_id == account_id,
+                self.model.updated_at >= start_date if start_date is not None else True,
                 self.model.runtime_session_id.in_(runtime_session_ids),
             )
             .order_by(self.model.updated_at.desc())

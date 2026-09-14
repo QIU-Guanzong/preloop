@@ -11,6 +11,9 @@ from preloop.api.auth.bootstrap import (
     reset_users_exist_cache,
 )
 from preloop.models.db.session import get_db_session
+from preloop.models import models
+from preloop.api.auth import get_current_active_user
+from preloop.services.configuration_gating import configuration_capabilities
 from preloop.plugins.base import get_plugin_manager
 
 __all__ = [
@@ -98,3 +101,12 @@ def get_features(db: Session = Depends(get_db_session)) -> Dict[str, Any]:
         result["features"]["passkeys"] = False
 
     return result
+
+
+@router.get("/configuration-capabilities")
+def get_configuration_capabilities(
+    db: Session = Depends(get_db_session),
+    current_user: models.User = Depends(get_current_active_user),
+) -> dict[str, bool]:
+    """Account-aware configuration choices, separate from installed plugin flags."""
+    return configuration_capabilities(db, str(current_user.account_id))

@@ -6,8 +6,8 @@ from datetime import datetime
 # Use TYPE_CHECKING to avoid circular imports
 from typing import TYPE_CHECKING, Dict, List, Optional
 
-from sqlalchemy import DateTime, func, String, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Boolean, DateTime, Integer, func, String, ForeignKey
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -90,6 +90,20 @@ class Account(Base):
 
     # Generic metadata field for extensibility
     meta_data: Mapped[Dict] = mapped_column(JSON, nullable=True, default=dict)
+    # Durable policy/billing state must survive unrelated metadata replacements.
+    subscription_history_retention_days: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
+    billing_seat_sync_pending: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    billing_seat_sync_generation: Mapped[Optional[str]] = mapped_column(
+        String(36), nullable=True
+    )
+    billing_seat_sync_attempted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    billing_pending_change: Mapped[Optional[Dict]] = mapped_column(JSONB, nullable=True)
     stripe_customer_id: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True, unique=True
     )

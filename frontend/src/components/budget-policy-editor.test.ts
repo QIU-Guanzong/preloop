@@ -19,6 +19,7 @@ describe('BudgetPolicyEditor', () => {
 
   const stubBillingFetch = (opts?: {
     failModels?: boolean;
+    advanced?: boolean;
     policies?: unknown[];
     users?: Array<{ id: string; email: string; username?: string }>;
   }) => {
@@ -27,6 +28,15 @@ describe('BudgetPolicyEditor', () => {
         const url = typeof input === 'string' ? input : input.toString();
         const method = (init?.method || 'GET').toUpperCase();
 
+        if (url.includes('/api/v1/configuration-capabilities')) {
+          return new Response(
+            JSON.stringify({
+              basic_budgets: true,
+              advanced_budget_administration: opts?.advanced ?? true,
+              advanced_approvals: opts?.advanced ?? true,
+            })
+          );
+        }
         if (url.includes('/api/v1/features')) {
           return new Response(JSON.stringify({ features: { billing: true } }), {
             status: 200,
@@ -360,6 +370,15 @@ describe('BudgetPolicyEditor', () => {
         const url = typeof input === 'string' ? input : input.toString();
         const method = (init?.method || 'GET').toUpperCase();
 
+        if (url.includes('/api/v1/configuration-capabilities')) {
+          return new Response(
+            JSON.stringify({
+              basic_budgets: true,
+              advanced_budget_administration: opts?.advanced ?? true,
+              advanced_approvals: opts?.advanced ?? true,
+            })
+          );
+        }
         if (url.includes('/api/v1/features')) {
           return new Response(JSON.stringify({ features: { billing: true } }), {
             status: 200,
@@ -581,5 +600,51 @@ describe('BudgetPolicyEditor', () => {
     ).click();
     const body = await fillHardLimitAndSave(element);
     expect(body.notification_user_ids).to.deep.equal(['owner-user-id']);
+  });
+  it('shows basic OSS budgets without billing and preserves an explicit zero limit', async () => {
+    stubBillingFetch({
+      advanced: false,
+      policies: [
+        {
+          id: 'zero',
+          subject_type: 'account',
+          subject_id: null,
+          model_alias: null,
+          period: 'monthly',
+          hard_limit_usd: 0,
+          soft_limit_usd: null,
+          notify_on_soft: false,
+          notify_on_hard: false,
+        },
+      ],
+    });
+    const element = await fixture<BudgetPolicyEditor>(
+      html`<budget-policy-editor></budget-policy-editor>`
+    );
+    await waitUntil(() =>
+      Boolean(element.shadowRoot?.querySelector('.limit-row'))
+    );
+    expect(element.shadowRoot!.textContent).to.include('Hard $0.00');
+    (element as any).startAdd();
+    await element.updateComplete;
+    expect(
+      element
+        .shadowRoot!.querySelector('sl-input[label="Hard limit (USD)"]')!
+        .getAttribute('help-text')
+    ).to.include('Blank means no hard limit');
+    expect(element.shadowRoot!.querySelector('notify-recipients-field')).to.not
+      .exist;
+    expect(element.shadowRoot!.querySelector('sl-radio-button[value="user"]'))
+      .to.not.exist;
+    (element as any).newHardLimit = '0';
+    await (element as any).handleSave();
+    const sent = fetchStub
+      .getCalls()
+      .find(
+        (call) =>
+          String(call.args[0]).includes('/budget/policies') &&
+          call.args[1]?.method === 'POST'
+      );
+    expect(JSON.parse(sent!.args[1].body).hard_limit_usd).to.equal(0);
   });
 });

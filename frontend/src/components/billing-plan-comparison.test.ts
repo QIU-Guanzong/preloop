@@ -1,0 +1,676 @@
+import { html, fixture, expect, waitUntil } from '@open-wc/testing';
+import sinon from 'sinon';
+import { invalidateApiCaches } from '../api';
+import type { PlanChangeOptions, PlanChangePreview } from '../types/billing';
+import './billing-plan-comparison';
+import type { BillingPlanComparison } from './billing-plan-comparison';
+
+const json = (value: unknown, status = 200) =>
+  new Response(JSON.stringify(value), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+const plan = (id: string, extra = {}) => ({
+  id,
+  name: id === 'teams' ? 'Legacy Teams' : id === 'pro' ? 'Pro' : 'Enterprise',
+  price_monthly: 10,
+  price_annually: 100,
+  pricing_model: 'bracket' as const,
+  legacy: false,
+  purchasable: true,
+  capabilities: ['ai_optimization'],
+  features: {
+    max_users: 1,
+    max_agents: -1,
+    byok_ingest_tokens_monthly: 100000000,
+    hosted_models_monthly_limit_usd: 2,
+    retention_days: 365,
+  },
+  ...extra,
+});
+function options(): PlanChangeOptions {
+  return {
+    can_manage_billing: true,
+    switching_enabled: true,
+    current_subscription: {
+      id: 'subscription-local',
+      plan_id: 'teams',
+      status: 'active',
+      interval: 'month',
+      quantity: 1,
+      currency: 'usd',
+      unit_amount_cents: 2900,
+      total_amount_cents: 2900,
+      current_period_end: '2030-09-18T11:00:00Z',
+      cancel_at_period_end: false,
+      legacy: true,
+      revision: 'revision-a',
+      pending_change: null,
+    },
+    current_plan: plan('teams', {
+      legacy: true,
+      pricing_model: 'per_seat',
+      features: {
+        max_users: -1,
+        max_agents: -1,
+        byok_ingest_tokens_monthly: -1,
+        hosted_models_monthly_limit_usd: 10,
+        retention_days: 365,
+      },
+      capabilities: ['ai_optimization', 'rbac'],
+    }),
+    plans: [
+      plan('pro'),
+      plan('enterprise', {
+        price_monthly: null,
+        price_annually: null,
+        purchasable: false,
+      }),
+    ],
+    monthly_usage: [6, 7, 8, 9].map((month) => ({
+      period_start: `2030-${String(month).padStart(2, '0')}-01T00:00:00Z`,
+      period_end: `2030-${String(month + 1).padStart(2, '0')}-01T00:00:00Z`,
+      is_partial: month === 9,
+      coverage: month === 9 ? 'partial' : 'complete',
+      coverage_reasons: month === 9 ? ['current_partial_month'] : [],
+      observed_byok_tokens: 5000,
+      observed_hosted_cost_usd: 0.25,
+      request_count: 10,
+    })),
+    current_usage: {
+      active_users: 1,
+      pending_invitations: 0,
+      active_agents: 2,
+      historical_seat_peak: null,
+      historical_agent_peak: null,
+    },
+    assessments: [
+      { plan_id: 'pro', fit: 'fits', blockers: [], advisories: [], months: [] },
+    ],
+    storage_retention: {
+      source: 'account_policy',
+      minimum_days: 183,
+      legal_holds_override: true,
+    },
+    warnings: [],
+  };
+}
+function preview(): PlanChangePreview {
+  return {
+    preview_id: 'signed-quote-a',
+    expires_at: '2035-01-01T00:00:00Z',
+    current: {
+      plan_id: 'teams',
+      name: 'Legacy Teams',
+      interval: 'month',
+      quantity: 1,
+      unit_amount_cents: 2900,
+      total_amount_cents: 2900,
+      currency: 'usd',
+      features: {},
+    },
+    target: {
+      plan_id: 'pro',
+      name: 'Pro',
+      interval: 'month',
+      quantity: 1,
+      unit_amount_cents: 1000,
+      total_amount_cents: 1000,
+      currency: 'usd',
+      features: {},
+      addon_quantity: 0,
+    },
+    timing: 'period_end',
+    effective_at: '2030-09-18T11:00:00Z',
+    proration_amount_cents: 0,
+    amount_due_now_cents: 0,
+    currency: 'usd',
+    assessment: options().assessments[0],
+    blockers: [],
+    advisories: [],
+    confirmation_required: true,
+  };
+}
+
+describe('Billing plan comparison', () => {
+  let stub: sinon.SinonStub;
+  let data: PlanChangeOptions;
+  let quote: PlanChangePreview;
+  let previewResponse: (() => Promise<Response>) | undefined;
+  let confirmResponse: (() => Promise<Response>) | undefined;
+  const text = (el: BillingPlanComparison) =>
+    (el.shadowRoot?.textContent ?? '').replace(/\s+/g, ' ');
+  const calls = (suffix: string) =>
+    stub.getCalls().filter((c) => String(c.args[0]).endsWith(suffix));
+  const button = (el: BillingPlanComparison, id: string) =>
+    el.shadowRoot!.querySelector(`[data-testid="${id}"]`) as HTMLButtonElement;
+  async function mount() {
+    const el = await fixture<BillingPlanComparison>(
+      html`<billing-plan-comparison></billing-plan-comparison>`
+    );
+    await waitUntil(() => !(el as any).loading);
+    await el.updateComplete;
+    return el;
+  }
+  async function request(el: BillingPlanComparison) {
+    button(el, 'preview').click();
+    await waitUntil(() => !(el as any).busy);
+    await el.updateComplete;
+  }
+  async function consent(el: BillingPlanComparison) {
+    const checkbox = el.shadowRoot!.querySelector(
+      '[data-testid="consent"]'
+    ) as HTMLInputElement;
+    checkbox.click();
+    await el.updateComplete;
+  }
+  beforeEach(() => {
+    invalidateApiCaches();
+    localStorage.setItem('accessToken', 'test-access-token');
+    data = options();
+    quote = preview();
+    previewResponse = undefined;
+    confirmResponse = undefined;
+    stub = sinon
+      .stub(window, 'fetch')
+      .callsFake(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/plan-change-options')) return json(data);
+        if (url.endsWith('/plan-change-preview'))
+          return previewResponse ? previewResponse() : json(quote);
+        if (url.endsWith('/plan-change-confirm'))
+          return confirmResponse
+            ? confirmResponse()
+            : json({
+                status: 'scheduled',
+                plan_id: 'pro',
+                effective_at: quote.effective_at,
+                operation_id: 'change-a',
+              });
+        if (url.endsWith('/create-checkout-session'))
+          return json({
+            action: 'redirect',
+            url: 'https://checkout.stripe.com/example',
+          });
+        return json({ detail: 'Unexpected request' }, 500);
+      });
+  });
+  afterEach(() => {
+    stub.restore();
+    localStorage.clear();
+    invalidateApiCaches();
+  });
+
+  it('only reads on load and compares three completed months plus current partial', async () => {
+    const el = await mount();
+    expect(calls('/plan-change-options')).to.have.length(1);
+    expect(
+      stub
+        .getCalls()
+        .every((c) => !c.args[1]?.method || c.args[1]?.method === 'GET')
+    ).to.equal(true);
+    expect(text(el))
+      .to.include('June 2030')
+      .and.include('August 2030')
+      .and.include('Current partial month');
+    expect(text(el)).to.include('Within the recorded monthly limits');
+    expect(text(el))
+      .to.include('Historical user peak: Unknown')
+      .and.include('Current counts do not establish past peaks');
+  });
+  it('does not turn partial or missing history into a fit even if assessment says fits', async () => {
+    data.monthly_usage[0].coverage = 'unknown';
+    data.monthly_usage[0].coverage_reasons = ['account_created_during_period'];
+    data.monthly_usage[0].observed_byok_tokens = null;
+    data.monthly_usage[0].observed_hosted_cost_usd = null;
+    const el = await mount();
+    expect(text(el)).to.include('Not enough evidence to confirm a fit');
+    expect(text(el)).to.include('account was created during this month');
+    expect(text(el)).to.include('Missing records are not zero usage');
+  });
+  it('shows observed overage even when the full month is incomplete', async () => {
+    data.monthly_usage[0].coverage = 'unknown';
+    data.monthly_usage[0].observed_byok_tokens = 101000000;
+    data.monthly_usage[0].observed_hosted_cost_usd = 4;
+    data.assessments[0].fit = 'exceeds';
+    const el = await mount();
+    expect(text(el))
+      .to.include('Above selected quota')
+      .and.include('Above included allowance')
+      .and.include('Observed only');
+  });
+  it('shows catalog history separately from stored evidence and feature loss', async () => {
+    data.plans[0].features.retention_days = 730;
+    const el = await mount();
+    expect(text(el))
+      .to.include('2 years')
+      .and.include('Older analytics are periodically removed')
+      .and.include('longer grandfathered commitments remain protected')
+      .and.include('minimum retention of 183 days')
+      .and.include('Legal holds');
+    expect(text(el))
+      .to.include('Role-based access control')
+      .and.include('Not included');
+    expect(text(el)).to.include(
+      'gateway, firewall, approvals and budgets continue'
+    );
+  });
+  it('shows legacy unit rate but never offers the legacy plan as a candidate', async () => {
+    data.plans.push(data.current_plan);
+    const el = await mount();
+    expect(text(el)).to.include('Legacy Teams').and.include('$29.00 per user');
+    const select = el.shadowRoot!.querySelector(
+      '[data-testid="plan"]'
+    ) as HTMLSelectElement;
+    expect([...select.options].map((o) => o.value)).to.not.include('teams');
+  });
+  it('keeps member actions disabled including direct handler calls', async () => {
+    data.can_manage_billing = false;
+    const el = await mount();
+    expect(button(el, 'preview').disabled).to.equal(true);
+    await (el as any).requestPreview();
+    expect(calls('/plan-change-preview')).to.have.length(0);
+    expect(text(el)).to.include(
+      'Only a billing owner or account administrator'
+    );
+  });
+  it('keeps actions disabled when live switching is disabled', async () => {
+    data.switching_enabled = false;
+    const el = await mount();
+    expect(button(el, 'preview').disabled).to.equal(true);
+    expect(text(el)).to.include('Your existing subscription is unchanged');
+  });
+  it('does not silently replace an already scheduled cancellation', async () => {
+    data.current_subscription!.cancel_at_period_end = true;
+    const el = await mount();
+    expect(button(el, 'preview').disabled).to.equal(true);
+    expect(text(el)).to.include('already scheduled');
+  });
+  it('requires a real preview then explicit consent before confirming once', async () => {
+    const el = await mount();
+    await request(el);
+    expect(
+      JSON.parse(calls('/plan-change-preview')[0].args[1].body)
+    ).to.deep.equal({ target_plan_id: 'pro', interval: 'month' });
+    expect(calls('/plan-change-confirm')).to.have.length(0);
+    expect(button(el, 'confirm').disabled).to.equal(true);
+    expect(text(el))
+      .to.include('at the end of your current billing period')
+      .and.include('Returning to this withdrawn plan');
+    await consent(el);
+    expect(button(el, 'confirm').disabled).to.equal(false);
+    button(el, 'confirm').click();
+    button(el, 'confirm').click();
+    await waitUntil(() => !(el as any).busy);
+    await el.updateComplete;
+    expect(calls('/plan-change-confirm')).to.have.length(1);
+    expect(
+      JSON.parse(calls('/plan-change-confirm')[0].args[1].body)
+    ).to.deep.equal({ preview_id: 'signed-quote-a' });
+    expect(text(el)).to.include('Plan change scheduled');
+    expect(button(el, 'preview').disabled).to.equal(true);
+  });
+  it('does not let an expired preview be confirmed', async () => {
+    quote.expires_at = '2020-01-01T00:00:00Z';
+    const el = await mount();
+    await request(el);
+    (el as any).accepted = true;
+    await (el as any).confirm();
+    expect(calls('/plan-change-confirm')).to.have.length(0);
+    expect(text(el)).to.include('preview has expired');
+  });
+  it('does not permit confirmation if the provider price is unknown', async () => {
+    quote.amount_due_now_cents = null;
+    const el = await mount();
+    await request(el);
+    expect(button(el, 'confirm').disabled).to.equal(true);
+    expect(text(el)).to.include(
+      'complete price and effective date could not be verified'
+    );
+  });
+  it('rejects a quote for a different target and clears consent on interval changes', async () => {
+    const el = await mount();
+    await request(el);
+    await consent(el);
+    const select = el.shadowRoot!.querySelector(
+      '[data-testid="interval"]'
+    ) as HTMLSelectElement;
+    select.value = 'year';
+    select.dispatchEvent(new Event('change'));
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('[data-testid="confirm"]')).not.to
+      .exist;
+    await request(el); // fixture still returns monthly quote
+    expect(button(el, 'confirm').disabled).to.equal(true);
+  });
+  it('ignores a late quote after the target changes', async () => {
+    let resolve!: (response: Response) => void;
+    previewResponse = () =>
+      new Promise((r) => {
+        resolve = r;
+      });
+    const el = await mount();
+    button(el, 'preview').click();
+    await waitUntil(() => calls('/plan-change-preview').length === 1);
+    (el as any).choose('enterprise');
+    resolve(json(quote));
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('[data-testid="confirm"]')).not.to
+      .exist;
+    expect(text(el)).to.include('Contact us about Enterprise');
+  });
+  it('requires refresh after a stale409 and never retries confirmation automatically', async () => {
+    confirmResponse = async () =>
+      json(
+        {
+          detail: {
+            code: 'subscription_changed',
+            operation_started: false,
+            message: 'The subscription changed.',
+          },
+        },
+        409
+      );
+    const el = await mount();
+    await request(el);
+    await consent(el);
+    button(el, 'confirm').click();
+    await waitUntil(() => !(el as any).busy);
+    await el.updateComplete;
+    expect(text(el))
+      .to.include('subscription changed')
+      .and.include('Refresh subscription status');
+    expect(button(el, 'preview').disabled).to.equal(true);
+    expect(calls('/plan-change-confirm')).to.have.length(1);
+    await el.refresh();
+    await el.updateComplete;
+    expect(button(el, 'preview').disabled).to.equal(false);
+  });
+  it('treats a lost confirmation response as uncertain, not a failed subscription', async () => {
+    confirmResponse = async () => {
+      throw new TypeError('Network unavailable');
+    };
+    const el = await mount();
+    await request(el);
+    await consent(el);
+    button(el, 'confirm').click();
+    await waitUntil(() => !(el as any).busy);
+    await el.updateComplete;
+    expect(button(el, 'preview').disabled).to.equal(true);
+    expect(calls('/plan-change-confirm')).to.have.length(1);
+    expect(text(el)).not.to.include('Plan changed:');
+  });
+  it('blocks quotes with capacity blockers even after manual consent', async () => {
+    quote.blockers = [
+      { code: 'seats', message: 'Reduce active users before switching.' },
+    ];
+    const el = await mount();
+    await request(el);
+    (el as any).accepted = true;
+    await (el as any).confirm();
+    expect(calls('/plan-change-confirm')).to.have.length(0);
+    expect(text(el)).to.include('Reduce active users');
+  });
+  it('keeps Enterprise sales-led without requesting a checkout or quote', async () => {
+    const el = await mount();
+    (el as any).choose('enterprise');
+    await el.updateComplete;
+    expect(
+      el.shadowRoot!.querySelector('a.contact')?.getAttribute('href')
+    ).to.equal('/request-demo');
+    await (el as any).checkout();
+    await (el as any).requestPreview();
+    expect(calls('/create-checkout-session')).to.have.length(0);
+    expect(calls('/plan-change-preview')).to.have.length(0);
+  });
+  it('uses checkout only for a free account and keeps subscription changes on preview', async () => {
+    data.current_subscription = null;
+    data.current_plan = plan('free');
+    const el = await mount();
+    const navigate = sinon.stub(el as any, 'navigate');
+    button(el, 'checkout').click();
+    await waitUntil(() => !(el as any).busy);
+    expect(calls('/create-checkout-session')).to.have.length(1);
+    expect(calls('/plan-change-confirm')).to.have.length(0);
+    expect(navigate).to.have.been.calledOnce;
+    expect(text(el)).to.include('final amount and any taxes');
+    expect(text(el)).to.include('self-hosted edition');
+  });
+  it('allows a current nonlegacy plan with a different billing interval', async () => {
+    data.current_subscription!.plan_id = 'pro';
+    data.current_subscription!.legacy = false;
+    data.current_plan = plan('pro');
+    const el = await mount();
+    const select = el.shadowRoot!.querySelector(
+      '[data-testid="plan"]'
+    ) as HTMLSelectElement;
+    expect([...select.options].map((o) => o.value)).to.include('pro');
+    select.value = 'pro';
+    select.dispatchEvent(new Event('change'));
+    await el.updateComplete;
+    expect(button(el, 'preview').disabled).to.equal(true);
+    const interval = el.shadowRoot!.querySelector(
+      '[data-testid="interval"]'
+    ) as HTMLSelectElement;
+    interval.value = 'year';
+    interval.dispatchEvent(new Event('change'));
+    await el.updateComplete;
+    expect(button(el, 'preview').disabled).to.equal(false);
+    quote.target.interval = 'year';
+    quote.target.total_amount_cents = 10000;
+    await request(el);
+    expect(
+      JSON.parse(calls('/plan-change-preview')[0].args[1].body)
+    ).to.deep.equal({ target_plan_id: 'pro', interval: 'year' });
+  });
+  it('explains held hosted credit and disabled extra spending', async () => {
+    data.hosted_credit = {
+      one_time_credit_usd: 0.5,
+      lifetime_usage_usd: 0,
+      lifetime_reserved_usd: 0.2,
+      remaining_credit_usd: 0.3,
+      coverage: 'known',
+      extra_spending_enabled: false,
+    };
+    const el = await mount();
+    expect(text(el)).to.include('Available one-time credit: $0.30');
+    expect(text(el)).to.include('$0.20 is reserved for calls in progress');
+    expect(text(el)).to.include('Extra spending is off');
+    expect(text(el)).to.include('Calls using your own provider keys continue');
+  });
+
+  it('does not invent a fresh hosted grant from unknown history', async () => {
+    data.hosted_credit = {
+      one_time_credit_usd: 0.5,
+      lifetime_usage_usd: null,
+      remaining_credit_usd: null,
+      coverage: 'unknown',
+    };
+    const el = await mount();
+    expect(text(el)).to.include(
+      'historical hosted balance has not been verified'
+    );
+    expect(text(el)).not.to.include('Available one-time credit: $0.50');
+  });
+
+  it('compares Free lifetime credit without granting it again each month', async () => {
+    data.plans.unshift(
+      plan('free', {
+        name: 'Free',
+        price_monthly: 0,
+        price_annually: 0,
+        features: {
+          max_users: 1,
+          max_agents: 3,
+          byok_ingest_tokens_monthly: 10000000,
+          hosted_models_monthly_limit_usd: null,
+          hosted_credit_one_time_usd: 0.5,
+          retention_days: 183,
+        },
+      })
+    );
+    data.hosted_credit = {
+      one_time_credit_usd: 0.5,
+      lifetime_usage_usd: 0.5,
+      remaining_credit_usd: 0,
+    };
+    const el = await mount();
+    expect(text(el))
+      .to.include('$0.50 one-time credit')
+      .and.include('Remaining lifetime credit: $0.00');
+    expect(text(el)).to.include('Lifetime credit, not a monthly allowance');
+    expect(text(el)).not.to.include('$0.50 / month');
+    quote.target = {
+      ...quote.target,
+      plan_id: 'free',
+      name: 'Free',
+      total_amount_cents: 0,
+      unit_amount_cents: 0,
+    };
+    await request(el);
+    await consent(el);
+    expect(button(el, 'confirm').disabled).to.equal(false);
+    expect(text(el)).to.include('at the end of your current billing period');
+  });
+  it('labels recurring subtotals as excluding tax and discounts', async () => {
+    const el = await mount();
+    await request(el);
+    expect(text(el)).to.include(
+      'Recurring subtotals exclude discounts and tax'
+    );
+    expect(text(el)).to.include('Due now');
+  });
+
+  it('allows an exact immediate amount due without a separately itemized proration', async () => {
+    quote.timing = 'immediate';
+    quote.amount_due_now_cents = 1700;
+    quote.proration_amount_cents = null;
+    const el = await mount();
+    await request(el);
+    await consent(el);
+    expect(button(el, 'confirm').disabled).to.equal(false);
+    expect(text(el))
+      .to.include('Not separately itemized')
+      .and.include('$17.00');
+  });
+  it('allows paid cancellation to Free despite current overcapacity', async () => {
+    data.plans.unshift(
+      plan('free', { name: 'Free', price_monthly: 0, price_annually: 0 })
+    );
+    data.assessments.unshift({
+      plan_id: 'free',
+      fit: 'blocked',
+      blockers: [
+        { code: 'seats', message: 'Current users exceed Free capacity.' },
+      ],
+      advisories: [],
+      months: [],
+    });
+    quote.target.plan_id = 'free';
+    quote.target.name = 'Free';
+    quote.target.total_amount_cents = 0;
+    quote.advisories = [
+      { code: 'seats', message: 'Current users exceed Free capacity.' },
+    ];
+    const el = await mount();
+    expect(button(el, 'preview').disabled).to.equal(false);
+    await request(el);
+    await consent(el);
+    expect(button(el, 'confirm').disabled).to.equal(false);
+    expect(text(el)).to.include('Current users exceed Free capacity.');
+  });
+  it('retains and explicitly retries the original operation after a lost response and refresh', async () => {
+    confirmResponse = async () => {
+      throw new TypeError('Network unavailable');
+    };
+    const el = await mount();
+    await request(el);
+    await consent(el);
+    button(el, 'confirm').click();
+    await waitUntil(() => !(el as any).busy);
+    await el.updateComplete;
+    await el.refresh();
+    await el.updateComplete;
+    expect(button(el, 'preview').disabled).to.equal(true);
+    expect(calls('/plan-change-confirm')).to.have.length(1);
+    confirmResponse = undefined;
+    button(el, 'recover').click();
+    await waitUntil(() => !(el as any).busy);
+    await el.updateComplete;
+    expect(
+      calls('/plan-change-confirm').map((c) => JSON.parse(c.args[1].body))
+    ).to.deep.equal([
+      { preview_id: 'signed-quote-a' },
+      { preview_id: 'signed-quote-a' },
+    ]);
+    expect(text(el)).to.include('Plan change scheduled');
+  });
+  it('recovers the same actor and subscription command after component remount without an automatic write', async () => {
+    localStorage.setItem(
+      'accessToken',
+      `header.${btoa(JSON.stringify({ sub: 'owner-a' }))}.signature`
+    );
+    confirmResponse = async () => {
+      throw new TypeError('Network unavailable');
+    };
+    const first = await mount();
+    await request(first);
+    await consent(first);
+    button(first, 'confirm').click();
+    await waitUntil(() => !(first as any).busy);
+    first.remove();
+    const second = await mount();
+    expect(calls('/plan-change-confirm')).to.have.length(1);
+    expect(button(second, 'recover')).to.exist;
+    expect(button(second, 'preview').disabled).to.equal(true);
+    sessionStorage.clear();
+  });
+  it('holds conflicting changes for operator recovery instead of discarding the operation', async () => {
+    confirmResponse = async () =>
+      json(
+        {
+          detail: {
+            code: 'recovery_required',
+            message: 'Provider state needs reconciliation.',
+          },
+        },
+        409
+      );
+    const el = await mount();
+    await request(el);
+    await consent(el);
+    button(el, 'confirm').click();
+    await waitUntil(() => !(el as any).busy);
+    await el.updateComplete;
+    expect(text(el)).to.include('Billing reconciliation is required');
+    expect(el.shadowRoot!.querySelector('[data-testid="recover"]')).not.to
+      .exist;
+    await el.refresh();
+    await el.updateComplete;
+    expect(button(el, 'preview').disabled).to.equal(true);
+  });
+  it('allows a fresh quote after a definitive catalog failure before any operation started', async () => {
+    confirmResponse = async () =>
+      json(
+        {
+          detail: {
+            code: 'catalog_changed',
+            operation_started: false,
+            message: 'Plan terms changed.',
+          },
+        },
+        409
+      );
+    const el = await mount();
+    await request(el);
+    await consent(el);
+    button(el, 'confirm').click();
+    await waitUntil(() => !(el as any).busy);
+    await el.refresh();
+    await el.updateComplete;
+    expect(button(el, 'preview').disabled).to.equal(false);
+    expect(el.shadowRoot!.querySelector('[data-testid="recover"]')).not.to
+      .exist;
+  });
+});

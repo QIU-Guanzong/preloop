@@ -358,6 +358,13 @@ async def upload_policy(
     Raises:
         HTTPException: If validation fails or application fails.
     """
+    from starlette.concurrency import run_in_threadpool
+    from preloop.utils.permissions import ensure_permission_in_oss
+
+    await run_in_threadpool(
+        ensure_permission_in_oss, db, current_user, "manage_policies"
+    )
+
     # Read file content
     try:
         content = await file.read()
@@ -393,8 +400,9 @@ async def upload_policy(
         )
 
     # Apply the policy
-    applier = PolicyApplier(db, account_id=account.id)
-    result = applier.apply(
+    applier = PolicyApplier(db, account_id=account.id, actor_id=current_user.id)
+    result = await run_in_threadpool(
+        applier.apply,
         policy,
         dry_run=dry_run,
         resolve_env=resolve_env,

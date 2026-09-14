@@ -613,10 +613,6 @@ export class CostView extends AuthedElement {
   }
 
   private async loadBudgetPolicies() {
-    if (!this.billingEnabled) {
-      this.budgetPolicies = [];
-      return;
-    }
     this.budgetPolicies = await getBudgetPolicies().catch(
       () => [] as BudgetPolicy[]
     );
@@ -2461,7 +2457,7 @@ export class CostView extends AuthedElement {
       <budget-health-card
         .summary=${this.summary}
         .policies=${this.budgetPolicies}
-        .configurable=${this.billingEnabled}
+        .configurable=${true}
         .timeRange=${'month'}
         @configure=${() => (this.budgetDialogOpen = true)}
       ></budget-health-card>
@@ -2499,7 +2495,7 @@ export class CostView extends AuthedElement {
   private renderControls() {
     return html`
       <div class="actions-stack">
-        ${this.billingEnabled ? this.renderBudgets() : null}
+        ${this.renderBudgets()}
         ${this.modelPriceOverridesEnabled ? this.renderPricing() : null}
       </div>
     `;
@@ -2757,37 +2753,33 @@ export class CostView extends AuthedElement {
 
   private renderDialogs() {
     return html`
-      ${
-        this.billingEnabled
-          ? html`
-              <sl-dialog
-                label="Configure budget limits"
-                ?open=${this.budgetDialogOpen}
-                @sl-after-hide=${(event: Event) => {
-                  if (event.target === event.currentTarget) {
-                    this.budgetDialogOpen = false;
-                  }
-                }}
-              >
-                ${
-                  this.budgetDialogOpen
-                    ? html`
-                        <budget-policy-editor
-                          billingEnabled
-                          @budget-policies-changed=${this.handleBudgetPoliciesChanged}
-                        ></budget-policy-editor>
-                      `
-                    : nothing
-                }
-                <div slot="footer">
-                  <sl-button @click=${() => (this.budgetDialogOpen = false)}>
-                    Close
-                  </sl-button>
-                </div>
-              </sl-dialog>
-            `
-          : null
-      }
+      ${html`
+        <sl-dialog
+          label="Configure budget limits"
+          ?open=${this.budgetDialogOpen}
+          @sl-after-hide=${(event: Event) => {
+            if (event.target === event.currentTarget) {
+              this.budgetDialogOpen = false;
+            }
+          }}
+        >
+          ${
+            this.budgetDialogOpen
+              ? html`
+                  <budget-policy-editor
+                    billingEnabled
+                    @budget-policies-changed=${this.handleBudgetPoliciesChanged}
+                  ></budget-policy-editor>
+                `
+              : nothing
+          }
+          <div slot="footer">
+            <sl-button @click=${() => (this.budgetDialogOpen = false)}>
+              Close
+            </sl-button>
+          </div>
+        </sl-dialog>
+      `}
       ${
         this.modelPriceOverridesEnabled
           ? this.renderPriceOverrideDialog()

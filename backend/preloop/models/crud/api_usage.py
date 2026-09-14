@@ -2223,6 +2223,7 @@ class CRUDApiUsage(CRUDBase[ApiUsage]):
         *,
         account_id: Union[uuid.UUID, str],
         runtime_session_id: Union[uuid.UUID, str],
+        start_date: Optional[datetime] = None,
         limit: int = 100,
         offset: int = 0,
         failed_only: bool = False,
@@ -2251,6 +2252,7 @@ class CRUDApiUsage(CRUDBase[ApiUsage]):
             self.model.action_type == "model_gateway",
             self.model.account_id == account_id,
             self.model.runtime_session_id == runtime_session_id,
+            self.model.timestamp >= start_date if start_date is not None else True,
         )
         if failed_only:
             query = query.filter(self.model.status_code >= 400)
@@ -2275,6 +2277,7 @@ class CRUDApiUsage(CRUDBase[ApiUsage]):
         *,
         account_id: Union[uuid.UUID, str],
         runtime_session_id: Union[uuid.UUID, str],
+        start_date: Optional[datetime] = None,
     ) -> List[SimpleNamespace]:
         """List the cache-accounting columns for every request in a session.
 
@@ -2311,6 +2314,7 @@ class CRUDApiUsage(CRUDBase[ApiUsage]):
                 self.model.action_type == "model_gateway",
                 self.model.account_id == account_id,
                 self.model.runtime_session_id == runtime_session_id,
+                self.model.timestamp >= start_date if start_date is not None else True,
             )
             .limit(self.SESSION_CACHE_ROWS_LIMIT + 1)
             .all()
@@ -2345,6 +2349,7 @@ class CRUDApiUsage(CRUDBase[ApiUsage]):
         *,
         account_id: Union[uuid.UUID, str],
         runtime_session_id: Union[uuid.UUID, str],
+        start_date: Optional[datetime] = None,
         failed_only: bool = False,
         event_ids: Optional[List[str]] = None,
     ) -> int:
@@ -2364,6 +2369,7 @@ class CRUDApiUsage(CRUDBase[ApiUsage]):
             self.model.action_type == "model_gateway",
             self.model.account_id == account_id,
             self.model.runtime_session_id == runtime_session_id,
+            self.model.timestamp >= start_date if start_date is not None else True,
         )
         if failed_only:
             query = query.filter(self.model.status_code >= 400)

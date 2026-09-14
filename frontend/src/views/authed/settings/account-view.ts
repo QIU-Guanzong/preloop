@@ -16,8 +16,7 @@ import '@shoelace-style/shoelace/dist/components/textarea/textarea.js';
 import '@shoelace-style/shoelace/dist/components/details/details.js';
 import consoleStyles from '../../../styles/console-styles.css?inline';
 import pricingStyles from '../../../styles/pricing-styles.css?inline';
-import '../../../components/billing-toggle';
-import '../../../components/pricing-card';
+import '../../../components/billing-plan-comparison';
 import '@shoelace-style/shoelace/dist/components/input/input.js';
 import '@shoelace-style/shoelace/dist/components/button/button.js';
 import '@shoelace-style/shoelace/dist/components/card/card.js';
@@ -30,6 +29,41 @@ interface Plan {
   price_monthly: number | null;
   price_annually: number | null;
   features: { [key: string]: any };
+}
+
+/**
+ * BYOK ingestion quota, from GET /api/v1/billing/summary (`ingestion_quota`).
+ *
+ * Exhausting this NEVER stops anything: the gateway keeps proxying and the
+ * firewall, approvals and budgets keep enforcing. Only the detail of derived
+ * analytics thins out. Any copy here that implies agents stop is a
+ * product-safety bug, not a wording preference.
+ */
+interface IngestionQuota {
+  plan_id: string;
+  quota_tokens: number;
+  used_tokens: number;
+  remaining_tokens: number | null;
+  is_unlimited: boolean;
+  over_quota: boolean;
+  degraded_analytics: boolean;
+  usage_ratio: number;
+  approaching_limit: boolean;
+  period_start: string;
+  period_end: string;
+}
+
+/** Seat usage against the plan's included bracket. */
+interface SeatSummary {
+  active_users: number;
+  included_users: number | null;
+  max_users: number | null;
+  over_included: boolean;
+  seat_addon: {
+    price_per_user_monthly: number;
+    price_per_user_annually: number;
+    max_users: number;
+  } | null;
 }
 
 interface Subscription {
@@ -67,7 +101,12 @@ interface BillingSummary {
     remaining_limit_usd: number | null;
     extra_credit_price_per_usd: number;
     models: HostedModelUsageRow[];
+    /** One-time credit granted to card-free free accounts. Never resets. */
+    one_time_credit_usd?: number | null;
+    lifetime_usage_usd?: number | null;
   };
+  ingestion_quota?: IngestionQuota | null;
+  seats?: SeatSummary | null;
 }
 
 @customElement('account-view')
@@ -84,7 +123,7 @@ export class AccountView extends LitElement {
   @state() private _customPlans: Plan[] = [];
   @state() private _loading = true;
   @state() private _error: string | null = null;
-  @state() private _interval: 'month' | 'year' = 'month';
+  @state() private _canManageBilling = false;
 
   // ── Emergency controls (account kill switch, #157) ─────────────────────
   @state() private _haltStatus: KillSwitchStatus | null = null;
@@ -98,21 +137,38 @@ export class AccountView extends LitElement {
     flows: 'Flow executions',
   };
 
+  // The 2026 ladder's limits, in the order a buyer weighs them. The legacy
+  // keys (api_calls_monthly, ai_calls_monthly, issues_ingested_monthly,
+  // custom_*_enabled) still exist on the plan rows because the shared
+  // PlanFeatures schema requires them, but they are unlimited everywhere and
+  // describe nothing, so they are deliberately not listed.
   private _featureOrder = [
-    'api_calls_monthly',
-    'ai_calls_monthly',
-    'issues_ingested_monthly',
-    'custom_ai_models_enabled',
-    'custom_compliance_metrics_enabled',
+    'max_users',
+    'max_agents',
+    'byok_ingest_tokens_monthly',
+    'hosted_models_monthly_limit_usd',
+    'retention_days',
   ];
 
-  // Human-readable labels for common feature keys
   private _featureLabels: Record<string, string> = {
-    api_calls_monthly: 'API calls / month',
-    ai_calls_monthly: 'AI calls / month',
-    issues_ingested_monthly: 'Issues ingested / month',
-    custom_ai_models_enabled: 'Custom AI models',
-    custom_compliance_metrics_enabled: 'Custom compliance metrics',
+    max_users: 'Users included',
+    max_agents: 'Agents',
+    byok_ingest_tokens_monthly: 'Analysis quota',
+    hosted_models_monthly_limit_usd: 'Built-in model allowance',
+    retention_days: 'Analytics history',
+  };
+
+  // Bare numbers are ambiguous once units are mixed: 90 could be dollars,
+  // days, or seats. Each limit states its own unit.
+  private _featureFormatters: Record<string, (value: any) => string | null> = {
+    max_users: (v) => (v === -1 ? 'Unlimited' : v ? `${v}` : null),
+    max_agents: (v) => (v === -1 ? 'Unlimited' : v ? `${v}` : null),
+    byok_ingest_tokens_monthly: (v) =>
+      v === -1 ? 'Unlimited' : v ? `${this._formatTokens(v)} / month` : null,
+    hosted_models_monthly_limit_usd: (v) =>
+      v === null || v === undefined ? null : `${this._formatUsd(v)} / month`,
+    retention_days: (v) =>
+      v === -1 ? 'Custom' : v === 365 ? '1 year' : v ? `${v} days` : null,
   };
 
   async connectedCallback() {
@@ -190,10 +246,6 @@ export class AccountView extends LitElement {
       const isProprietary = features.features['billing'] === true;
 
       if (isProprietary) {
-        await fetchWithAuth('/api/v1/billing/sync-subscription', {
-          method: 'POST',
-        });
-
         const [summaryRes, publicPlansRes, customPlansRes] = await Promise.all([
           fetchWithAuth('/api/v1/billing/summary'),
           fetchWithAuth('/api/v1/billing/plans'),
@@ -209,8 +261,12 @@ export class AccountView extends LitElement {
 
         if (publicPlansRes.ok) {
           const allPlans = await publicPlansRes.json();
+          // Hide only the $0 plan: it is what you already have when you have
+          // no subscription, and it is not something you can check out. A
+          // null price means sales-led (Enterprise), which must stay visible
+          // so the card can offer a contact route.
           this._publicPlans = allPlans.filter(
-            (p: Plan) => p.price_monthly !== null && p.price_monthly > 0
+            (p: Plan) => p.price_monthly === null || p.price_monthly > 0
           );
         } else {
           throw new Error('Failed to load public plans.');
@@ -242,6 +298,16 @@ export class AccountView extends LitElement {
     }).format(value);
   }
 
+  /** Token counts, compacted: 10000000 becomes "10M". */
+  private _formatTokens(value: number): string {
+    if (value === -1) return 'Unlimited';
+    return new Intl.NumberFormat('en-US', {
+      notation: 'compact',
+      compactDisplay: 'short',
+      maximumFractionDigits: 1,
+    }).format(value);
+  }
+
   private _formatExtraCreditPrice(value: number | null | undefined) {
     if (value === null || value === undefined) {
       return 'Not configured';
@@ -249,9 +315,9 @@ export class AccountView extends LitElement {
     // "$1.00 per additional $1.00 of built-in model usage" says a dollar costs
     // a dollar. At a 1:1 rate the honest sentence is that there is no markup.
     if (value === 1) {
-      return 'Usage beyond the cap is billed at cost';
+      return 'Additional usage is billed at cost only when you opt in';
     }
-    return `${this._formatUsd(value)} per $1.00 of usage beyond the cap`;
+    return `${this._formatUsd(value)} per $1.00 of additional usage when you opt in`;
   }
 
   /** "Jul 27", or "Jul 27, 2025" when the year is not the current one. */
@@ -300,6 +366,7 @@ export class AccountView extends LitElement {
   }
 
   private async _handleManageSubscription() {
+    if (!this._canManageBilling) return;
     this._error = null;
     try {
       const response = await fetchWithAuth(
@@ -331,42 +398,106 @@ export class AccountView extends LitElement {
     }
   }
 
-  private _handleUpgradeRequest(e: CustomEvent) {
-    this._handleUpgrade(e.detail.planId);
+  /**
+   * Seats used against the plan's included bracket.
+   *
+   * Bracket pricing means the price does not move with the seat count, so
+   * this is a capacity readout, never a running bill. Business is the one
+   * plan that can buy past its bracket, so it is the one plan that gets an
+   * add-on price quoted here.
+   */
+  private _renderSeats(seats: SeatSummary | null) {
+    if (!seats || seats.included_users === null) return '';
+    const addon = seats.seat_addon;
+    const agentLimit = this._billingSummary?.plan?.features?.max_agents;
+    return html`
+      <div class="date">
+        ${seats.active_users} of ${seats.included_users} included
+        ${seats.included_users === 1 ? 'user' : 'users'} in use.
+        ${agentLimit === -1 ? 'Agents are unlimited.' : typeof agentLimit === 'number' ? `Agent allowance: ${agentLimit}.` : ''}
+        ${
+          seats.over_included && addon
+            ? html`<span class="seat-warning"
+                >Extra users are $${addon.price_per_user_monthly} each per
+                month, up to ${addon.max_users}.</span
+              >`
+            : seats.over_included
+              ? html`<span class="seat-warning"
+                  >You are over the included seats. Upgrade to add more.</span
+                >`
+              : ''
+        }
+      </div>
+    `;
   }
 
-  private async _handleUpgrade(planId: string) {
-    this._error = null;
+  /**
+   * BYOK analysis quota meter.
+   *
+   * The copy must never suggest that agents stop. They do not: over quota,
+   * the gateway keeps proxying and every policy keeps enforcing, and the only
+   * consequence is thinner analytics detail. This is a product-safety rule
+   * from the canonical pricing spec, not a tone preference.
+   */
+  private _renderIngestionQuota(quota: IngestionQuota | null) {
+    if (!quota || quota.is_unlimited) return '';
+    const percent = Math.min(Math.round(quota.usage_ratio * 100), 100);
+    return html`
+      <div class="card">
+        <div class="current-row">
+          <span class="plan-name">Analysis quota</span>
+          <span class="quota-figures">
+            ${this._formatTokens(quota.used_tokens)} of
+            ${this._formatTokens(quota.quota_tokens)} tokens
+          </span>
+        </div>
+        <div
+          class="quota-bar"
+          role="progressbar"
+          aria-valuenow=${percent}
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-label="Analysis quota used"
+        >
+          <div
+            class="quota-fill ${
+              quota.over_quota ? 'over' : quota.approaching_limit ? 'warn' : ''
+            }"
+            style="width: ${percent}%"
+          ></div>
+        </div>
+        <div class="usage-note">
+          ${
+            quota.over_quota
+              ? html`You have used this month's analysis quota. Your agents keep
+                running and every policy still applies. New traffic is recorded
+                with less analysis detail until the quota resets on
+                ${new Date(quota.period_end).toLocaleDateString()}. Upgrade to
+                restore full detail sooner.`
+              : quota.approaching_limit
+                ? html`You have used most of this month's analysis quota. Agents
+                  and policies are unaffected either way. Upgrade for a larger
+                  quota.`
+                : html`Tokens we analyze from your own provider keys. Resets
+                  ${new Date(quota.period_end).toLocaleDateString()}. Your
+                  provider tokens are never billed or marked up by Preloop.`
+          }
+        </div>
+      </div>
+    `;
+  }
+
+  private async _refreshBillingSummary(): Promise<void> {
     try {
-      const response = await fetchWithAuth(
-        '/api/v1/billing/create-checkout-session',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            plan_id: planId,
-            interval: this._interval,
-          }),
-        }
-      );
-
-      if (!response.ok) {
-        const errorData = await response
-          .json()
-          .catch(() => ({ detail: 'Failed to process subscription change.' }));
-        throw new Error(errorData.detail);
+      const response = await fetchWithAuth('/api/v1/billing/summary', {
+        cache: 'no-store',
+      });
+      if (response.ok) {
+        this._billingSummary = await response.json();
+        this.subscription = this._billingSummary?.subscription ?? null;
       }
-
-      const result = await response.json();
-
-      if (result.action === 'redirect') {
-        window.location.href = result.url;
-      } else if (result.action === 'refresh') {
-        await this._fetchData();
-      }
-    } catch (error) {
-      this._error = (error as Error).message;
-      console.error('Failed to change subscription:', error);
+    } catch {
+      // The comparison keeps its explicit result and offers a status refresh.
     }
   }
 
@@ -542,6 +673,41 @@ export class AccountView extends LitElement {
         color: var(--sl-color-neutral-900);
         white-space: nowrap;
       }
+
+      .seat-warning {
+        color: var(--sl-color-warning-700);
+        font-weight: 600;
+      }
+
+      .quota-figures {
+        color: var(--sl-color-neutral-700);
+        font-size: 0.9rem;
+        white-space: nowrap;
+      }
+
+      .quota-bar {
+        height: 8px;
+        border-radius: 999px;
+        background: var(--sl-color-neutral-200);
+        overflow: hidden;
+        margin: 0.75rem 0 0.5rem 0;
+      }
+
+      .quota-fill {
+        height: 100%;
+        background: var(--sl-color-primary-600);
+        transition: width 0.2s ease-in-out;
+      }
+
+      .quota-fill.warn {
+        background: var(--sl-color-warning-600);
+      }
+
+      /* Over quota is amber, never red: nothing has broken and nothing has
+         stopped, so the meter must not read as an outage. */
+      .quota-fill.over {
+        background: var(--sl-color-warning-700);
+      }
     `,
   ];
 
@@ -601,12 +767,11 @@ export class AccountView extends LitElement {
         : isTrialing
           ? 'Trial ends on'
           : 'Renews on';
-    // The plans grid drops the plan the account is already on, which can leave
-    // nothing to show: a Monthly / Yearly toggle over an empty grid is a
-    // control with no subject.
-    const upgradePlans = availablePlans.filter(
-      (plan) => plan.id !== this.subscription?.plan_id
-    );
+    const quota = this._billingSummary?.ingestion_quota ?? null;
+    const seats = this._billingSummary?.seats ?? null;
+    // No subscription row means the card-free free tier, which carries a
+    // ONE-TIME hosted credit rather than a monthly allowance.
+    const onFreePlan = !this.subscription;
 
     return html`
       <view-header headerText="Account" width="narrow"></view-header>
@@ -841,9 +1006,11 @@ export class AccountView extends LitElement {
                             </div>
                           `
                         : html`<div class="date">
-                            You are currently on the Free plan.
+                            You are on the Free plan. It does not expire and
+                            needs no card.
                           </div>`
                     }
+                    ${this._renderSeats(seats)}
                     ${
                       trialSummary?.is_trialing
                         ? html`
@@ -860,7 +1027,7 @@ export class AccountView extends LitElement {
                       <sl-button
                         size="medium"
                         variant="primary"
-                        ?disabled=${!this.subscription}
+                        ?disabled=${!this.subscription || !this._canManageBilling}
                         @click=${this._handleManageSubscription}
                       >
                         Manage in Stripe
@@ -868,6 +1035,7 @@ export class AccountView extends LitElement {
                     </div>
                   </div>
 
+                  ${this._renderIngestionQuota(quota)}
                   ${
                     hostedSummary
                       ? html`
@@ -889,10 +1057,19 @@ export class AccountView extends LitElement {
                             </div>
                             <div class="usage-grid">
                               <div class="usage-metric">
-                                <div class="usage-label">Plan limit</div>
+                                <div class="usage-label">
+                                  ${
+                                    onFreePlan
+                                      ? 'One-time credit'
+                                      : 'Monthly allowance'
+                                  }
+                                </div>
                                 <div class="usage-value">
                                   ${this._formatUsd(
-                                    hostedSummary.included_limit_usd
+                                    onFreePlan
+                                      ? (hostedSummary.one_time_credit_usd ??
+                                          hostedSummary.included_limit_usd)
+                                      : hostedSummary.included_limit_usd
                                   )}
                                 </div>
                               </div>
@@ -932,8 +1109,20 @@ export class AccountView extends LitElement {
                               </div>
                             </div>
                             <div class="usage-note">
-                              Built-in models are Preloop-managed hosted models.
-                              BYOK usage is not counted here.
+                              ${
+                                onFreePlan
+                                  ? html`Built-in models are Preloop-managed
+                                    hosted models. The free credit is a one-time
+                                    grant, not a monthly allowance, so it does
+                                    not reset. When it runs out you can add your
+                                    own provider key and keep going, or upgrade
+                                    for a monthly allowance. Your own keys are
+                                    never metered or billed here.`
+                                  : html`Built-in models are Preloop-managed
+                                    hosted models. Usage on your own provider
+                                    keys is never billed and is not counted
+                                    here.`
+                              }
                             </div>
                             <div class="usage-models">
                               ${
@@ -976,35 +1165,13 @@ export class AccountView extends LitElement {
                         `
                       : ''
                   }
-                  ${
-                    upgradePlans.length > 0
-                      ? html`
-                          <div>
-                            <billing-toggle
-                              .interval=${this._interval}
-                              @interval-change=${(e: CustomEvent) =>
-                                (this._interval = e.detail.value)}
-                            ></billing-toggle>
-
-                            <div
-                              class="plans-grid"
-                              @signup-requested=${this._handleUpgradeRequest}
-                            >
-                              ${upgradePlans.map(
-                                (plan) => html`
-                                  <pricing-card
-                                    .plan=${plan}
-                                    .interval=${this._interval}
-                                    .featureOrder=${this._featureOrder}
-                                    .featureLabels=${this._featureLabels}
-                                  ></pricing-card>
-                                `
-                              )}
-                            </div>
-                          </div>
-                        `
-                      : ''
-                  }
+                  <billing-plan-comparison
+                    @billing-permission-changed=${(event: CustomEvent) => {
+                      this._canManageBilling =
+                        event.detail.canManageBilling === true;
+                    }}
+                    @billing-subscription-changed=${this._refreshBillingSummary}
+                  ></billing-plan-comparison>
                 `
               : ''
           }

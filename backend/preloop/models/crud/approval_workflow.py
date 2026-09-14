@@ -214,6 +214,141 @@ class CRUDApprovalWorkflow(CRUDBase[models.ApprovalWorkflow]):
                 missing.append(account_id)
         return broken, missing
 
+    def resolve_import_recipients(
+        self,
+        db: Session,
+        *,
+        account_id: str,
+        data: Dict[str, Any],
+        existing: Optional[models.ApprovalWorkflow] = None,
+        actor_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Resolve YAML names within the account before any import mutation."""
+        resolved: Dict[str, Any] = {}
+        for source, target, model, name_field in (
+            ("approver_users", "approver_user_ids", models.User, models.User.username),
+            ("approver_teams", "approver_team_ids", models.Team, models.Team.name),
+            (
+                "escalation_users",
+                "escalation_user_ids",
+                models.User,
+                models.User.username,
+            ),
+            ("escalation_teams", "escalation_team_ids", models.Team, models.Team.name),
+        ):
+            names = data.get(source)
+            if names is None:
+                resolved[target] = list(getattr(existing, target, None) or [])
+                continue
+            rows = (
+                db.query(model.id, name_field)
+                .filter(model.account_id == account_id, name_field.in_(names))
+                .all()
+            )
+            by_name = {name: str(identifier) for identifier, name in rows}
+            missing = set(names) - by_name.keys()
+            if missing:
+                raise ValueError(
+                    f"Unknown account {source}: {', '.join(sorted(missing))}"
+                )
+            resolved[target] = list(dict.fromkeys(by_name[name] for name in names))
+        if data.get("approval_type", "standard") == "standard" and not (
+            resolved["approver_user_ids"] or resolved["approver_team_ids"]
+        ):
+            if actor_id is None:
+                account = (
+                    db.query(models.Account)
+                    .filter(models.Account.id == account_id)
+                    .one()
+                )
+                actor_id = (
+                    str(account.primary_user_id) if account.primary_user_id else None
+                )
+            if actor_id is None:
+                raise ValueError(
+                    "A human approval workflow requires an account approver"
+                )
+            resolved["approver_user_ids"] = [str(actor_id)]
+        self.validate_configuration_references(db, account_id=account_id, data=resolved)
+        return resolved
+
+    def export_recipient_names(
+        self, db: Session, *, workflow: models.ApprovalWorkflow
+    ) -> Dict[str, Any]:
+        """Export portable account-scoped recipient names without dropping routing."""
+        result: Dict[str, Any] = {}
+        for source, target, model, name_field in (
+            ("approver_user_ids", "approver_users", models.User, models.User.username),
+            ("approver_team_ids", "approver_teams", models.Team, models.Team.name),
+            (
+                "escalation_user_ids",
+                "escalation_users",
+                models.User,
+                models.User.username,
+            ),
+            ("escalation_team_ids", "escalation_teams", models.Team, models.Team.name),
+        ):
+            ids = getattr(workflow, source) or []
+            rows = (
+                db.query(model.id, name_field)
+                .filter(model.account_id == workflow.account_id, model.id.in_(ids))
+                .all()
+                if ids
+                else []
+            )
+            by_id = {str(identifier): name for identifier, name in rows}
+            result[target] = [
+                by_id[str(identifier)] for identifier in ids if str(identifier) in by_id
+            ]
+        return result
+
+    def stage_import(
+        self,
+        db: Session,
+        *,
+        account_id: str,
+        workflow_id: UUID,
+        data: Dict[str, Any],
+    ) -> models.ApprovalWorkflow:
+        """Stage an imported workflow in the caller's transaction."""
+        workflow = self.get(db, id=workflow_id, account_id=account_id)
+        if data.get("is_default"):
+            self._unmark_default(db, account_id)
+        if workflow is None:
+            workflow = self.model(
+                id=workflow_id, account_id=account_id, approval_type="manual"
+            )
+            db.add(workflow)
+        for field, value in data.items():
+            setattr(workflow, field, value)
+        db.flush()
+        return workflow
+
+    def validate_configuration_references(
+        self, db: Session, *, account_id: str, data: Dict[str, Any]
+    ) -> None:
+        """Only account members and workflows may receive approval routing."""
+        for field, model in (
+            ("approver_user_ids", models.User),
+            ("escalation_user_ids", models.User),
+            ("approver_team_ids", models.Team),
+            ("escalation_team_ids", models.Team),
+        ):
+            ids = set(data.get(field) or [])
+            if not ids:
+                continue
+            found = {
+                str(row[0])
+                for row in db.query(model.id)
+                .filter(model.id.in_(ids), model.account_id == account_id)
+                .all()
+            }
+            if found != set(map(str, ids)):
+                raise ValueError("Approval recipients must belong to this account")
+        escalation = data.get("escalation_workflow_id")
+        if escalation and self.get(db, id=escalation, account_id=account_id) is None:
+            raise ValueError("Escalation workflow must belong to this account")
+
     def create(
         self,
         db: Session,

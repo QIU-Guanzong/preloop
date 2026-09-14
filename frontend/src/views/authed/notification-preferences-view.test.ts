@@ -187,7 +187,12 @@ describe('NotificationPreferencesView', () => {
       testPushStatus?: number;
     }) {
       return sinon.stub(window, 'fetch').callsFake(async (input, init) => {
-        const url = String(input);
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
         if (url.includes('/auth/users/me')) {
           return new Response(
             JSON.stringify({ id: 'u1', is_superuser: opts.isSuperuser }),
@@ -222,6 +227,11 @@ describe('NotificationPreferencesView', () => {
     it('shows the test-send controls to admins', async () => {
       fetchStub = stubAdminAndTestPush({ isSuperuser: true });
       const el = await mount();
+      await waitUntil(
+        () => (el as any).isAdmin === true,
+        'admin profile should resolve before the test-send card',
+        { timeout: 4000 }
+      );
       expect((el as any).isAdmin).to.be.true;
       expect(el.shadowRoot?.querySelector('.test-send-card')).to.exist;
       expect(el.shadowRoot?.textContent).to.contain('Send test approval');

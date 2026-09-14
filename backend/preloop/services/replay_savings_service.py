@@ -596,6 +596,8 @@ def _default_gateway_factory(
     db: Session,
     current_user: Any,
     budget_enforcer: Optional[GatewayBudgetEnforcer] = None,
+    *,
+    owns_db_session: bool = False,
 ) -> Any:
     """Build a gateway service for replay, with session attribution suppressed.
 
@@ -624,6 +626,7 @@ def _default_gateway_factory(
         auth_context,
         budget_enforcer=budget_enforcer,
         skip_runtime_session_resolution=True,
+        owns_db_session=owns_db_session,
     )
 
 
@@ -638,6 +641,7 @@ def run_session_replay(
     n_runs: int = 3,
     suggestion_id: Optional[str] = None,
     budget_enforcer: Optional[GatewayBudgetEnforcer] = None,
+    owns_db_session: bool = False,
     gateway_factory: Optional[Callable[[], Any]] = None,
     events_loader: Optional[Callable[..., Sequence[Any]]] = None,
     ai_model_resolver: Optional[Callable[..., Optional[AIModel]]] = None,
@@ -729,7 +733,9 @@ def run_session_replay(
             db, account=account, ai_model=ai_model, feature="replay_verification"
         )
         factory = gateway_factory or (
-            lambda: _default_gateway_factory(db, current_user, budget_enforcer)
+            lambda: _default_gateway_factory(
+                db, current_user, budget_enforcer, owns_db_session=owns_db_session
+            )
         )
         reexecute = build_gateway_reexecute(factory(), ai_model=ai_model)
         outcome = execute_replay(

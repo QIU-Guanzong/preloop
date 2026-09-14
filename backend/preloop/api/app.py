@@ -40,6 +40,7 @@ from preloop.api.endpoints import (
     audit_chain,
     approval_requests,
     comments,
+    budget,
     cost,
     event_webhooks,
     exports,
@@ -1196,6 +1197,12 @@ def create_app() -> FastAPI:
             audio.router,
             prefix="/api/v1",
             tags=["Audio"],
+            dependencies=[Depends(get_current_active_user)],
+        )
+        app.include_router(
+            budget.router,
+            prefix="/api/v1",
+            tags=["Budget"],
             dependencies=[Depends(get_current_active_user)],
         )
         app.include_router(

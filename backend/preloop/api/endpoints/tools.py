@@ -1194,6 +1194,29 @@ async def list_approval_workflows(
     return [ApprovalWorkflowResponse.model_validate(p) for p in policies]
 
 
+def _empty_human_approver_default(
+    *,
+    approval_mode: str | None,
+    approval_type: str | None,
+    approver_user_ids: Optional[List[UUID]],
+    approver_team_ids: Optional[List[UUID]],
+    actor_id: UUID,
+) -> Optional[List[UUID]]:
+    """Default empty human routing to the actor.
+
+    ``approval_type`` is the notification mechanism (default slack). Human vs
+    AI is ``approval_mode``: the runtime routes every value except ``ai_driven``
+    to human approval, including legacy/unknown values. Keep the same rule here.
+    Also retain ``manual``/``standard`` mechanism compatibility for callers that
+    conflate the fields.
+    """
+    if approver_user_ids or approver_team_ids:
+        return None
+    if approval_mode != "ai_driven" or approval_type in {"standard", "manual"}:
+        return [actor_id]
+    return None
+
+
 @router.post("/approval-workflows", status_code=status.HTTP_201_CREATED)
 @require_permission("manage_approval_workflows")
 async def create_approval_workflow(
@@ -1215,6 +1238,42 @@ async def create_approval_workflow(
     Raises:
         HTTPException: If workflow with same name already exists or creation fails
     """
+    from starlette.concurrency import run_in_threadpool
+    from preloop.services.configuration_gating import (
+        authorize_team_approval_configuration,
+    )
+
+    from preloop.utils.permissions import ensure_permission_in_oss
+
+    await run_in_threadpool(
+        ensure_permission_in_oss, db, current_user, "manage_approval_workflows"
+    )
+    default_approvers = _empty_human_approver_default(
+        approval_mode=workflow_data.approval_mode,
+        approval_type=workflow_data.approval_type,
+        approver_user_ids=workflow_data.approver_user_ids,
+        approver_team_ids=workflow_data.approver_team_ids,
+        actor_id=current_user.id,
+    )
+    if default_approvers is not None:
+        workflow_data = workflow_data.model_copy(
+            update={"approver_user_ids": default_approvers}
+        )
+    await run_in_threadpool(
+        authorize_team_approval_configuration,
+        db,
+        str(account.id),
+        workflow_data.model_dump(),
+    )
+    try:
+        await run_in_threadpool(
+            crud_approval_workflow.validate_configuration_references,
+            db,
+            account_id=str(account.id),
+            data=workflow_data.model_dump(),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     # Check if workflow with same name already exists
     existing_workflow = crud_approval_workflow.get_by_name(
         db, account_id=str(account.id), name=workflow_data.name
@@ -1328,6 +1387,45 @@ async def update_approval_workflow(
 
     # Update fields
     update_data = workflow_update.model_dump(exclude_unset=True)
+    from starlette.concurrency import run_in_threadpool
+    from preloop.utils.permissions import ensure_permission_in_oss
+
+    await run_in_threadpool(
+        ensure_permission_in_oss, db, current_user, "manage_approval_workflows"
+    )
+    default_approvers = _empty_human_approver_default(
+        approval_mode=update_data.get("approval_mode", workflow.approval_mode),
+        approval_type=update_data.get("approval_type", workflow.approval_type),
+        approver_user_ids=update_data.get(
+            "approver_user_ids", workflow.approver_user_ids
+        ),
+        approver_team_ids=update_data.get(
+            "approver_team_ids", workflow.approver_team_ids
+        ),
+        actor_id=current_user.id,
+    )
+    if default_approvers is not None:
+        update_data["approver_user_ids"] = default_approvers
+    try:
+        await run_in_threadpool(
+            crud_approval_workflow.validate_configuration_references,
+            db,
+            account_id=str(account.id),
+            data=update_data,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    from preloop.services.configuration_gating import (
+        authorize_team_approval_configuration,
+    )
+
+    await run_in_threadpool(
+        authorize_team_approval_configuration,
+        db,
+        str(account.id),
+        update_data,
+        workflow,
+    )
 
     try:
         # Check if name is being updated and if it conflicts
@@ -1343,7 +1441,7 @@ async def update_approval_workflow(
 
         # Use CRUD layer for proper default workflow handling
         updated_workflow = crud_approval_workflow.update(
-            db, db_obj=workflow, obj_in=workflow_update
+            db, db_obj=workflow, obj_in=update_data
         )
 
         log_config_change(
@@ -1399,6 +1497,13 @@ async def delete_approval_workflow(
     Raises:
         HTTPException: If workflow not found or deletion fails
     """
+    from starlette.concurrency import run_in_threadpool
+    from preloop.utils.permissions import ensure_permission_in_oss
+
+    await run_in_threadpool(
+        ensure_permission_in_oss, db, current_user, "manage_approval_workflows"
+    )
+
     workflow = crud_approval_workflow.get(
         db, id=workflow_id, account_id=str(account.id)
     )
