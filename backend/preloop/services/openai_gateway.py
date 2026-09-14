@@ -6712,31 +6712,42 @@ class OpenAIGatewayService:
         if not isinstance(chunks, list):
             return {}
         recovered: Dict[str, Any] = {}
-        for chunk in chunks:
-            usage = getattr(chunk, "usage", None)
-            if usage is None and isinstance(chunk, dict):
-                usage = chunk.get("usage")
-            if usage is None:
-                continue
-            if hasattr(usage, "model_dump"):
-                usage = usage.model_dump()
-            if not isinstance(usage, dict):
-                continue
-            for key in ("cost", "cost_details", "is_byok"):
-                value = usage.get(key)
-                if value is not None:
-                    recovered[key] = value
-        if not recovered:
-            # A litellm stream retained chunks but none carried cost fields.
-            # Either the upstream did not return usage accounting, or a
-            # litellm upgrade changed the retained-chunk shape - log so the
-            # invisible-failure mode #219 fixed cannot silently return.
-            logger.debug(
-                "Provider cost recovery found no cost fields in %d retained "
-                "stream chunks",
-                len(chunks),
-            )
-        return recovered
+        try:
+            for chunk in chunks:
+                usage = getattr(chunk, "usage", None)
+                if usage is None and isinstance(chunk, dict):
+                    usage = chunk.get("usage")
+                if usage is None:
+                    continue
+                if hasattr(usage, "model_dump"):
+                    usage = usage.model_dump()
+                if not isinstance(usage, dict):
+                    continue
+                for key in ("cost", "cost_details", "is_byok"):
+                    value = usage.get(key)
+                    if value is not None:
+                        recovered[key] = value
+            if not recovered:
+                # A litellm stream retained chunks but none carried cost fields.
+                # Either the upstream did not return usage accounting, or a
+                # litellm upgrade changed the retained-chunk shape - log so the
+                # invisible-failure mode #219 fixed cannot silently return.
+                logger.debug(
+                    "Provider cost recovery found no cost fields in %d "
+                    "retained stream chunks",
+                    len(chunks),
+                )
+            return recovered
+        finally:
+            # CustomStreamWrapper keeps every pre-strip chunk on ``.chunks``.
+            # After cost fields are copied that list is only RSS.
+            try:
+                chunks.clear()
+            except Exception:  # noqa: BLE001 - chunk list may be immutable
+                logger.debug(
+                    "Could not release retained litellm stream chunks",
+                    exc_info=True,
+                )
 
     def _stream_error(
         self,

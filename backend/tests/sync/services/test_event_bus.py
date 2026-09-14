@@ -79,6 +79,7 @@ async def test_publish_task_success(mock_nats_connect, event_bus: EventBus):
 
     # Assert
     mock_js.publish.assert_called_once()
+    assert mock_js.publish.call_args.kwargs == {}
     call_args = mock_js.publish.call_args
 
     # Check subject and payload
@@ -240,3 +241,31 @@ async def test_close_connection(event_bus: EventBus):
     mock_nc.drain.assert_called_once()
     assert event_bus.nc is None
     assert event_bus.js is None
+
+
+@pytest.mark.asyncio
+async def test_execute_flow_publish_sets_nats_msg_id(event_bus: EventBus):
+    """Reaper republish of the same execution collapses in the 2m duplicate window."""
+    event_bus.js = AsyncMock()
+    ack = Mock(stream="tasks", seq=2)
+    event_bus.js.publish.return_value = ack
+    execution_id = "11111111-2222-3333-4444-555555555555"
+
+    result = await event_bus.publish_task("execute_flow", execution_id=execution_id)
+
+    assert result is ack
+    headers = event_bus.js.publish.call_args.kwargs["headers"]
+    assert headers["Nats-Msg-Id"] == f"execute_flow:{execution_id}"
+
+
+@pytest.mark.asyncio
+async def test_resume_flow_publish_sets_nats_msg_id(event_bus: EventBus):
+    event_bus.js = AsyncMock()
+    ack = Mock(stream="tasks", seq=3)
+    event_bus.js.publish.return_value = ack
+    execution_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    await event_bus.publish_task("resume_flow_execution", execution_id=execution_id)
+
+    headers = event_bus.js.publish.call_args.kwargs["headers"]
+    assert headers["Nats-Msg-Id"] == f"resume_flow_execution:{execution_id}"

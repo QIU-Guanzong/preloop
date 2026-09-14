@@ -59,11 +59,13 @@ class PreloopSyncNatsWorker:
         queue_name: str,
         tasks_allowlist: Optional[List[str]] = None,
         tasks_excludelist: Optional[List[str]] = None,
+        max_inflight: Optional[int] = None,
     ):
         self.nats_url = nats_url
         self.queue_name = queue_name
         self.tasks_allowlist = tasks_allowlist or []
         self.tasks_excludelist = tasks_excludelist or []
+        self._max_inflight_override = max_inflight
         self.nc: NATSClient = None
         self.js = None
         self.subs: List[Tuple[str, nats.aio.client.Subscription]] = []
@@ -71,6 +73,7 @@ class PreloopSyncNatsWorker:
         # When False, stop fetching new JetStream messages (deploy drain).
         self._accepting = True
         self._inflight: Set[asyncio.Task] = set()
+        self._run_slots: Optional[asyncio.Semaphore] = None
         self._reclaim_task: Optional[asyncio.Task] = None
         self._pull_tasks: List[asyncio.Task] = []
 
@@ -148,6 +151,29 @@ class PreloopSyncNatsWorker:
         if not self.tasks_allowlist:
             return True
         return bool(FLOW_ORCHESTRATION_TASKS.intersection(self.tasks_allowlist))
+
+    def handler_concurrency(self) -> int:
+        """How many task handlers this process may run at once.
+
+        Flow-execution workers babysit hosted agent Jobs. The monitor loop is
+        wait-bound (poll/heartbeat/logs), so one process can own several
+        claims. Other pools stay serial: webhook embedding and polling are
+        heavier per message and were not sized for fan-out.
+
+        Shared across every pull subscription on this process so
+        execute_flow + resume_flow_execution cannot each take the cap.
+        """
+        if self._max_inflight_override is not None:
+            return max(1, int(self._max_inflight_override))
+        if not self.handles_flow_orchestration:
+            return 1
+        from preloop.config import settings
+
+        raw = getattr(settings, "flow_execution_max_inflight", 10)
+        try:
+            return max(1, int(raw or 10))
+        except (TypeError, ValueError):
+            return 10
 
     async def connect(self):
         if self.nc and self.nc.is_connected:
@@ -403,6 +429,12 @@ class PreloopSyncNatsWorker:
             )
 
         self._pull_tasks = []
+        self._run_slots = asyncio.Semaphore(self.handler_concurrency())
+        logger.info(
+            "Worker '%s' handler concurrency cap is %s",
+            self.connection_name,
+            self.handler_concurrency(),
+        )
         for _, sub in self.subs:
             task = asyncio.create_task(
                 self._process_pull_messages(sub, message_handler)
@@ -415,39 +447,21 @@ class PreloopSyncNatsWorker:
         await asyncio.gather(*self._pull_tasks)
 
     async def _process_pull_messages(self, sub, handler):
+        """Fetch JetStream messages and run their handlers.
+
+        Flow-execution workers take a slot from ``_run_slots`` (default 10)
+        after a message arrives and do not wait for the hosted-agent monitor
+        to finish before fetching the next one. Idle fetches do not consume
+        a slot, so the cap is ten running monitors, not eight plus two waits.
+        Other pools keep concurrency 1 and await each handler so drain stays
+        one-in-flight.
         """
-        Continuously fetches and processes messages from a pull subscription.
-        """
+        slots = self._run_slots or asyncio.Semaphore(self.handler_concurrency())
+        serial = self.handler_concurrency() == 1
         while self._accepting:
             try:
-                # Fetch a single message, waiting up to 60 seconds.
                 msgs = await sub.fetch(batch=1, timeout=60)
-                for msg in msgs:
-                    if not self._accepting:
-                        try:
-                            await msg.nak()
-                        except Exception:  # noqa: BLE001 - shutdown nak is best-effort
-                            logger.debug(
-                                "Failed to nak message during fetch shutdown",
-                                exc_info=True,
-                            )
-                        return
-                    # Track the handler for SIGTERM drain, but await it so we
-                    # process one message at a time (fetch batch=1). Concurrency
-                    # stays capped at 1 per pull subscription.
-                    task = asyncio.create_task(handler(msg))
-                    self._inflight.add(task)
-
-                    def _done(t: asyncio.Task, *, _tasks=self._inflight) -> None:
-                        _tasks.discard(t)
-
-                    task.add_done_callback(_done)
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        raise
             except nats.errors.TimeoutError:
-                # This is expected when no messages are available. Continue polling.
                 continue
             except asyncio.CancelledError:
                 raise
@@ -458,8 +472,48 @@ class PreloopSyncNatsWorker:
                     f"Error fetching/processing messages from subscription '{sub.subject}': {e}",
                     exc_info=True,
                 )
-                # Avoid a tight loop on persistent errors.
                 await asyncio.sleep(1)
+                continue
+
+            for msg in msgs:
+                if not self._accepting:
+                    try:
+                        await msg.nak()
+                    except Exception:  # noqa: BLE001 - shutdown nak is best-effort
+                        logger.debug(
+                            "Failed to nak message during fetch shutdown",
+                            exc_info=True,
+                        )
+                    return
+                await slots.acquire()
+                if not self._accepting:
+                    slots.release()
+                    try:
+                        await msg.nak()
+                    except Exception:  # noqa: BLE001 - shutdown nak is best-effort
+                        logger.debug(
+                            "Failed to nak message during fetch shutdown",
+                            exc_info=True,
+                        )
+                    return
+                task = asyncio.create_task(handler(msg))
+                self._inflight.add(task)
+
+                def _done(
+                    t: asyncio.Task,
+                    *,
+                    _tasks: Set[asyncio.Task] = self._inflight,
+                    _slots: asyncio.Semaphore = slots,
+                ) -> None:
+                    _tasks.discard(t)
+                    _slots.release()
+
+                task.add_done_callback(_done)
+                if serial:
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        raise
 
     async def _stale_claim_reaper_loop(self) -> None:
         """Periodically re-dispatch stale/unclaimed active flow executions."""

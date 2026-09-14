@@ -20,6 +20,7 @@ from preloop.services.subject_governance import normalize_subject_governance_sto
 _NEGATIVE = object()
 _CACHE: dict[str, tuple[Any, float]] = {}
 _TTL_SECONDS = 30.0
+_MAX_CACHE_ENTRIES = 4096
 _LOCK = Lock()
 
 
@@ -47,6 +48,19 @@ def clear_account_governance_cache() -> None:
     """Clear the entire cache (for tests)."""
     with _LOCK:
         _CACHE.clear()
+
+
+def _store_cache_entry(key: str, cached: Any, expires_at: float) -> None:
+    """Remember one account entry, evicting expired/oldest rows if full."""
+    if len(_CACHE) >= _MAX_CACHE_ENTRIES:
+        now = time.monotonic()
+        expired = [cached_key for cached_key, (_, exp) in _CACHE.items() if exp <= now]
+        for cached_key in expired:
+            _CACHE.pop(cached_key, None)
+        while len(_CACHE) >= _MAX_CACHE_ENTRIES:
+            oldest = min(_CACHE, key=lambda cached_key: _CACHE[cached_key][1])
+            _CACHE.pop(oldest, None)
+    _CACHE[key] = (cached, expires_at)
 
 
 def get_cached_account_meta_data(
@@ -91,5 +105,5 @@ def get_cached_account_meta_data(
         result = meta_data
 
     with _LOCK:
-        _CACHE[key] = (cached, now + _TTL_SECONDS)
+        _store_cache_entry(key, cached, now + _TTL_SECONDS)
     return result

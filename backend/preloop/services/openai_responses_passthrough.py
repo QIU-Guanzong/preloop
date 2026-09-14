@@ -89,6 +89,7 @@ RESPONSES_API_ABSENT_STATUS_CODES = frozenset({404, 405, 501})
 # gateway probes once, short enough that an upstream which ships Responses
 # support is picked up the same day without a restart.
 CAPABILITY_CACHE_TTL_SECONDS = 900.0
+CAPABILITY_CACHE_MAX_ENTRIES = 4096
 
 _CAPABILITY_CACHE: Dict[str, float] = {}
 _CAPABILITY_CACHE_LOCK = threading.Lock()
@@ -192,7 +193,19 @@ def mark_responses_api_absent(cache_key: str, *, now: Optional[float] = None) ->
     expiry = (
         now if now is not None else time.monotonic()
     ) + CAPABILITY_CACHE_TTL_SECONDS
+    current = now if now is not None else time.monotonic()
     with _CAPABILITY_CACHE_LOCK:
+        if len(_CAPABILITY_CACHE) >= CAPABILITY_CACHE_MAX_ENTRIES:
+            expired = [
+                key
+                for key, cached_expiry in _CAPABILITY_CACHE.items()
+                if cached_expiry <= current
+            ]
+            for key in expired:
+                _CAPABILITY_CACHE.pop(key, None)
+            while len(_CAPABILITY_CACHE) >= CAPABILITY_CACHE_MAX_ENTRIES:
+                oldest = min(_CAPABILITY_CACHE, key=_CAPABILITY_CACHE.get)  # type: ignore[arg-type]
+                _CAPABILITY_CACHE.pop(oldest, None)
         _CAPABILITY_CACHE[cache_key] = expiry
 
 

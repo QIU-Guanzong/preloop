@@ -19,8 +19,6 @@ from fastapi.responses import JSONResponse
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, RedirectResponse
-from pyinstrument import Profiler
-from pyinstrument.renderers import SpeedscopeRenderer
 from sqlalchemy.exc import TimeoutError as SQLAlchemyPoolTimeout
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.websockets import WebSocketState
@@ -28,57 +26,7 @@ from starlette.websockets import WebSocketState
 from preloop import __version__
 from fastapi.encoders import jsonable_encoder
 from preloop.config import settings
-from preloop.api.auth import auth_router, get_current_active_user
-from preloop.api.endpoints import (
-    account,
-    issue_lifecycle,
-    agent_control,
-    agent_permission,
-    anthropic_gateway,
-    audio,
-    approval_bypass,
-    audit_chain,
-    approval_requests,
-    comments,
-    cost,
-    event_webhooks,
-    exports,
-    features,
-    gemini_gateway,
-    health,
-    issues,
-    kill_switch,
-    mcp_servers,
-    notification_preferences,
-    operator_notes,
-    organizations,
-    policies,
-    projects,
-    public_approval,
-    pull_requests,
-    retention,
-    roles,
-    search as search_router,
-    security_maintenance,
-    security_screen,
-    session_optimization,
-    tools,
-    trackers,
-    usage_import,
-    version,
-    embedding as embedding_router,
-    webhooks,
-    flows,
-    runners,
-    ai_models,
-    openai_gateway,
-    websockets,
-)
-
-# Enterprise endpoints (impersonation, issue_compliance, issue_duplicates, issue_dependencies)
-# are now loaded exclusively via the plugin system - see plugins/admin and plugins/analytics
-
-from preloop.services.mcp_http import setup_mcp_routes
+from preloop.services.litellm_cost_map import pin_local_litellm_cost_map
 from preloop.services.model_gateway_errors import ModelGatewayAPIError
 from preloop.models.sentry import init_sentry
 from preloop.models.db.session import get_db_session
@@ -89,6 +37,12 @@ from preloop.services.api_usage_recorder import (
     shutdown_api_usage_recorder,
 )
 from preloop.sync.services.event_bus import connect_nats, close_nats  # NATS integration
+
+# Pin before create_app's role-gated imports can pull litellm.
+pin_local_litellm_cost_map()
+
+# Enterprise endpoints (impersonation, issue_compliance, issue_duplicates, issue_dependencies)
+# are now loaded exclusively via the plugin system - see plugins/admin and plugins/analytics
 
 
 logger = logging.getLogger(__name__)
@@ -108,6 +62,8 @@ class PyinstrumentMiddleware(BaseHTTPMiddleware):
         profiling_enabled = os.getenv("PROFILING_ENABLED", "false").lower() == "true"
         if not profiling_enabled or not request.url.path.startswith("/api/v1"):
             return await call_next(request)
+
+        from pyinstrument import Profiler
 
         profiler = Profiler()
         start_time = time.time()
@@ -133,6 +89,8 @@ class PyinstrumentMiddleware(BaseHTTPMiddleware):
             f.write(profiler.output_html())
 
         # Save speedscope report
+        from pyinstrument.renderers import SpeedscopeRenderer
+
         speedscope_path = output_dir / f"{filename_base}.speedscope.json"
         renderer = SpeedscopeRenderer()
         with open(speedscope_path, "w", encoding="utf-8") as f:
@@ -727,6 +685,388 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Application shutdown complete.")
 
 
+def _register_gateway_routes(app: FastAPI) -> None:
+    """Mount OpenAI/Anthropic/Gemini gateway routers."""
+    from preloop.api.endpoints import anthropic_gateway, gemini_gateway, openai_gateway
+
+    app.include_router(
+        openai_gateway.router,
+        prefix="/openai/v1",
+        tags=["OpenAI Gateway"],
+        include_in_schema=False,
+    )
+    app.include_router(
+        anthropic_gateway.router,
+        prefix="/anthropic/v1",
+        tags=["Anthropic Gateway"],
+        include_in_schema=False,
+    )
+    app.include_router(
+        gemini_gateway.router,
+        prefix="/gemini/v1beta",
+        tags=["Gemini Gateway"],
+        include_in_schema=False,
+    )
+
+
+def _register_control_plane_routes(
+    app: FastAPI, *, plugin_manager: Any, base_dir: Path
+) -> None:
+    """Import and mount API-only routers, MCP, and auth.
+
+    Kept out of module import so ``PRELOOP_SERVICE_ROLE=gateway`` does not
+    pay for flow orchestration, MCP HTTP, or the control-plane surface.
+    """
+    from preloop.api.auth import auth_router, get_current_active_user
+    from preloop.api.endpoints import (
+        account,
+        issue_lifecycle,
+        agent_control,
+        agent_permission,
+        audio,
+        approval_bypass,
+        audit_chain,
+        approval_requests,
+        comments,
+        cost,
+        event_webhooks,
+        exports,
+        features,
+        issues,
+        kill_switch,
+        mcp_servers,
+        notification_preferences,
+        operator_notes,
+        organizations,
+        policies,
+        projects,
+        public_approval,
+        pull_requests,
+        retention,
+        roles,
+        search as search_router,
+        security_maintenance,
+        security_screen,
+        session_optimization,
+        tools,
+        trackers,
+        usage_import,
+        embedding as embedding_router,
+        webhooks,
+        flows,
+        runners,
+        ai_models,
+        websockets,
+    )
+    from preloop.services.mcp_http import setup_mcp_routes
+
+    # OAuth consent page (login form for CLI and MCP OAuth flows)
+    from preloop.api.endpoints.oauth_consent import router as oauth_consent_router
+
+    app.include_router(oauth_consent_router)
+    logger.info("OAuth consent routes registered")
+
+    # OAuth server endpoints (authorize, token, register, well-known metadata)
+    from preloop.api.endpoints.oauth_server import router as oauth_server_router
+
+    app.include_router(oauth_server_router)
+    logger.info("OAuth server routes registered")
+
+    # Setup MCP routes with DynamicMCPServer (MUST be before SPA mount)
+    setup_mcp_routes(app)
+    logger.info("MCP routes configured with DynamicMCPServer")
+
+    # Register plugin routes
+    # This allows plugins (both builtin and proprietary) to add their own endpoints
+    # We do this before adding standard routers to ensure plugins can override if needed
+    # or just be registered alongside
+    plugin_manager.register_routes(app)
+
+    # Core API routers
+    app.include_router(auth_router, prefix="/api/v1/auth", tags=["Auth"])
+    # WebAuthn passkey ceremonies. Mounted WITHOUT an auth dependency:
+    # the authentication ceremony must run before the user has a token.
+    # Endpoints that need a signed-in user declare it themselves.
+    from preloop.api.auth.webauthn_router import router as webauthn_router
+
+    app.include_router(
+        webauthn_router,
+        prefix="/api/v1/auth/webauthn",
+        tags=["Auth", "Passkeys"],
+    )
+    app.include_router(
+        account.router,
+        prefix="/api/v1",
+        tags=["Account"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        account.public_router,
+        prefix="/api/v1",
+        tags=["Account"],
+    )  # Public account endpoints (no auth required)
+    app.include_router(
+        public_approval.router, tags=["Public Approval"], include_in_schema=False
+    )  # No auth required, mounted at /approval (not /api/v1/approval)
+    app.include_router(
+        features.router,
+        prefix="/api/v1",
+        tags=["Features"],
+        include_in_schema=False,
+    )  # No auth required
+    app.include_router(
+        trackers.router,
+        prefix="/api/v1",
+        tags=["Trackers"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        mcp_servers.router,
+        prefix="/api/v1",
+        tags=["MCP Servers"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    # Public MCP OAuth callback (no auth — user is redirected by external server)
+    app.include_router(mcp_servers.oauth_callback_router)
+    app.include_router(
+        tools.router,
+        prefix="/api/v1",
+        tags=["Tools"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        approval_requests.router,
+        prefix="/api/v1",
+        tags=["Approval Requests"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        approval_bypass.router,
+        prefix="/api/v1",
+        tags=["Approval Bypasses"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        kill_switch.router,
+        prefix="/api/v1",
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        exports.router,
+        prefix="/api/v1",
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        event_webhooks.router,
+        prefix="/api/v1",
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        retention.router,
+        prefix="/api/v1",
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        audit_chain.router,
+        prefix="/api/v1",
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        audit_chain.signing_router,
+        prefix="/api/v1",
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        notification_preferences.router,
+        prefix="/api/v1/notification-preferences",
+        tags=["Notification Preferences"],
+        # No router-level auth - individual endpoints handle their own auth
+        # /register-device and /register-via-token are public (token-based)
+    )
+    # Note: Issue dependencies endpoint is now loaded via plugins/analytics
+    app.include_router(
+        organizations.router,
+        prefix="/api/v1",
+        tags=["Organizations"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        projects.router,
+        prefix="/api/v1",
+        tags=["Projects"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        pull_requests.router,
+        prefix="/api/v1",
+        tags=["Projects"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        issues.router,
+        prefix="/api/v1",
+        tags=["Issues"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        issue_lifecycle.router,
+        prefix="/api/v1",
+        tags=["Issues"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        security_maintenance.router,
+        prefix="/api/v1",
+        tags=["Security Maintenance"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    # Note: Issue compliance endpoint is now loaded via plugins/analytics
+    app.include_router(
+        comments.router,
+        prefix="/api/v1",
+        tags=["Comments"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        search_router.router,
+        prefix="/api/v1",
+        tags=["Search"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        embedding_router.router,
+        prefix="/api/v1",
+        tags=["Embeddings"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        ai_models.router,
+        prefix="/api/v1",
+        tags=["AI Models"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        audio.router,
+        prefix="/api/v1",
+        tags=["Audio"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        cost.router,
+        prefix="/api/v1",
+        tags=["Cost Analytics"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        usage_import.router,
+        prefix="/api/v1",
+        tags=["Usage Import"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        session_optimization.router,
+        prefix="/api/v1",
+        tags=["Session Optimization"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    # Note: Issue duplicates endpoint is now loaded via plugins/analytics
+    app.include_router(webhooks.router, prefix="/api/v1", tags=["Webhooks"])
+    from preloop.api.endpoints import flow_artifacts
+
+    app.include_router(flow_artifacts.router, prefix="/api/v1", tags=["Flow artifacts"])
+    app.include_router(
+        flows.router,
+        prefix="/api/v1",
+        tags=["Flows"],
+        # dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        runners.router,
+        prefix="/api/v1",
+        tags=["Runners"],
+    )
+
+    # Policies router for policy-as-code YAML import/export
+    app.include_router(
+        policies.router,
+        prefix="/api/v1",
+        tags=["Policies"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+
+    # Security-screen scoring endpoint (QM external proxy contract).
+    # Auth is handled in-endpoint: callers send an API key in x-api-key.
+    app.include_router(
+        security_screen.router,
+        prefix="/api/v1",
+        tags=["Security Screen"],
+    )
+
+    # WebSocket router
+    app.include_router(websockets.router, prefix="/api/v1", tags=["WebSockets"])
+    app.include_router(
+        agent_control.router,
+        prefix="/api/v1",
+        tags=["Agent Control"],
+    )
+    app.include_router(
+        agent_permission.router,
+        prefix="/api/v1",
+        tags=["Agent Permissions"],
+    )
+    # Operator notes: authored on the console/CLI half (session auth), and
+    # pulled on the harness half (runtime bearer, authenticated in-route).
+    app.include_router(
+        operator_notes.router,
+        prefix="/api/v1",
+        tags=["Operator Notes"],
+    )
+
+    # Impersonation router - Enterprise feature (loaded via admin plugin)
+    # No longer loaded from core - handled by plugins/admin
+
+    app.include_router(
+        roles.router,
+        prefix="/api/v1",
+        tags=["Roles"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+
+    # --- Public Approval Page ---
+    @app.get("/approval/{request_id}", include_in_schema=False, response_model=None)
+    async def serve_approval_page(
+        request: Request, request_id: str
+    ) -> FileResponse | RedirectResponse:
+        """Serve the tokenized public page, or send bare links to console.
+
+        Email/Slack links include ``?token=`` and must keep working
+        without a login. MCP and in-session notices are token-free and
+        used to hit this path; without a token the HTML page always
+        404s on ``/data``. Redirect those to the authed SPA route.
+        """
+        token = (request.query_params.get("token") or "").strip()
+        if not token:
+            try:
+                approval_id = str(UUID(request_id))
+            except ValueError:
+                raise HTTPException(status_code=404, detail="Not found") from None
+            return RedirectResponse(
+                url=f"/console/approval/{quote(approval_id, safe='')}",
+                status_code=302,
+            )
+        approval_html_path = base_dir / "preloop" / "templates" / "approval.html"
+        return FileResponse(str(approval_html_path), media_type="text/html")
+
+    # --- Public Invitation Accept Page ---
+    @app.get("/invitations/accept", include_in_schema=False)
+    async def serve_invitation_accept_page() -> FileResponse:
+        """Serve the public invitation accept page."""
+        invitation_html_path = (
+            base_dir / "preloop" / "templates" / "invitation-accept.html"
+        )
+        return FileResponse(str(invitation_html_path), media_type="text/html")
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -992,6 +1332,8 @@ def create_app() -> FastAPI:
     app.openapi = custom_openapi  # type: ignore
 
     # Health/version remain available on every role for container probes.
+    from preloop.api.endpoints import health, version
+
     app.include_router(
         health.router, prefix="/api/v1", tags=["Health"], include_in_schema=False
     )
@@ -999,6 +1341,7 @@ def create_app() -> FastAPI:
         version.router, prefix="/api/v1", tags=["Version"], include_in_schema=False
     )
 
+    plugin_manager = None
     if is_api_role or is_gateway_role:
         from preloop.plugins import get_plugin_manager
 
@@ -1007,334 +1350,13 @@ def create_app() -> FastAPI:
             app.dependency_overrides.update(plugin.get_dependencies())
 
     if is_api_role:
-        # OAuth consent page (login form for CLI and MCP OAuth flows)
-        from preloop.api.endpoints.oauth_consent import router as oauth_consent_router
+        if plugin_manager is None:
+            raise RuntimeError("plugin manager required for the api role")
+        _register_control_plane_routes(
+            app, plugin_manager=plugin_manager, base_dir=base_dir
+        )
 
-        app.include_router(oauth_consent_router)
-        logger.info("OAuth consent routes registered")
-
-        # OAuth server endpoints (authorize, token, register, well-known metadata)
-        from preloop.api.endpoints.oauth_server import router as oauth_server_router
-
-        app.include_router(oauth_server_router)
-        logger.info("OAuth server routes registered")
-
-        # Setup MCP routes with DynamicMCPServer (MUST be before SPA mount)
-        setup_mcp_routes(app)
-        logger.info("MCP routes configured with DynamicMCPServer")
-
-        # Register plugin routes
-        # This allows plugins (both builtin and proprietary) to add their own endpoints
-        # We do this before adding standard routers to ensure plugins can override if needed
-        # or just be registered alongside
-        plugin_manager.register_routes(app)
-
-        # Core API routers
-        app.include_router(auth_router, prefix="/api/v1/auth", tags=["Auth"])
-        # WebAuthn passkey ceremonies. Mounted WITHOUT an auth dependency:
-        # the authentication ceremony must run before the user has a token.
-        # Endpoints that need a signed-in user declare it themselves.
-        from preloop.api.auth.webauthn_router import router as webauthn_router
-
-        app.include_router(
-            webauthn_router,
-            prefix="/api/v1/auth/webauthn",
-            tags=["Auth", "Passkeys"],
-        )
-        app.include_router(
-            account.router,
-            prefix="/api/v1",
-            tags=["Account"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            account.public_router,
-            prefix="/api/v1",
-            tags=["Account"],
-        )  # Public account endpoints (no auth required)
-        app.include_router(
-            public_approval.router, tags=["Public Approval"], include_in_schema=False
-        )  # No auth required, mounted at /approval (not /api/v1/approval)
-        app.include_router(
-            features.router,
-            prefix="/api/v1",
-            tags=["Features"],
-            include_in_schema=False,
-        )  # No auth required
-        app.include_router(
-            trackers.router,
-            prefix="/api/v1",
-            tags=["Trackers"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            mcp_servers.router,
-            prefix="/api/v1",
-            tags=["MCP Servers"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        # Public MCP OAuth callback (no auth — user is redirected by external server)
-        app.include_router(mcp_servers.oauth_callback_router)
-        app.include_router(
-            tools.router,
-            prefix="/api/v1",
-            tags=["Tools"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            approval_requests.router,
-            prefix="/api/v1",
-            tags=["Approval Requests"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            approval_bypass.router,
-            prefix="/api/v1",
-            tags=["Approval Bypasses"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            kill_switch.router,
-            prefix="/api/v1",
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            exports.router,
-            prefix="/api/v1",
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            event_webhooks.router,
-            prefix="/api/v1",
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            retention.router,
-            prefix="/api/v1",
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            audit_chain.router,
-            prefix="/api/v1",
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            audit_chain.signing_router,
-            prefix="/api/v1",
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            notification_preferences.router,
-            prefix="/api/v1/notification-preferences",
-            tags=["Notification Preferences"],
-            # No router-level auth - individual endpoints handle their own auth
-            # /register-device and /register-via-token are public (token-based)
-        )
-        # Note: Issue dependencies endpoint is now loaded via plugins/analytics
-        app.include_router(
-            organizations.router,
-            prefix="/api/v1",
-            tags=["Organizations"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            projects.router,
-            prefix="/api/v1",
-            tags=["Projects"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            pull_requests.router,
-            prefix="/api/v1",
-            tags=["Projects"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            issues.router,
-            prefix="/api/v1",
-            tags=["Issues"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            issue_lifecycle.router,
-            prefix="/api/v1",
-            tags=["Issues"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            security_maintenance.router,
-            prefix="/api/v1",
-            tags=["Security Maintenance"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        # Note: Issue compliance endpoint is now loaded via plugins/analytics
-        app.include_router(
-            comments.router,
-            prefix="/api/v1",
-            tags=["Comments"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            search_router.router,
-            prefix="/api/v1",
-            tags=["Search"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            embedding_router.router,
-            prefix="/api/v1",
-            tags=["Embeddings"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            ai_models.router,
-            prefix="/api/v1",
-            tags=["AI Models"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            audio.router,
-            prefix="/api/v1",
-            tags=["Audio"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            cost.router,
-            prefix="/api/v1",
-            tags=["Cost Analytics"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            usage_import.router,
-            prefix="/api/v1",
-            tags=["Usage Import"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            session_optimization.router,
-            prefix="/api/v1",
-            tags=["Session Optimization"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-    # AI Model Gateway routers
     if is_gateway_role:
-        app.include_router(
-            openai_gateway.router,
-            prefix="/openai/v1",
-            tags=["OpenAI Gateway"],
-            include_in_schema=False,
-        )
-        app.include_router(
-            anthropic_gateway.router,
-            prefix="/anthropic/v1",
-            tags=["Anthropic Gateway"],
-            include_in_schema=False,
-        )
-        app.include_router(
-            gemini_gateway.router,
-            prefix="/gemini/v1beta",
-            tags=["Gemini Gateway"],
-            include_in_schema=False,
-        )
-
-    if is_api_role:
-        # Note: Issue duplicates endpoint is now loaded via plugins/analytics
-        app.include_router(webhooks.router, prefix="/api/v1", tags=["Webhooks"])
-        from preloop.api.endpoints import flow_artifacts
-
-        app.include_router(
-            flow_artifacts.router, prefix="/api/v1", tags=["Flow artifacts"]
-        )
-        app.include_router(
-            flows.router,
-            prefix="/api/v1",
-            tags=["Flows"],
-            # dependencies=[Depends(get_current_active_user)],
-        )
-        app.include_router(
-            runners.router,
-            prefix="/api/v1",
-            tags=["Runners"],
-        )
-
-        # Policies router for policy-as-code YAML import/export
-        app.include_router(
-            policies.router,
-            prefix="/api/v1",
-            tags=["Policies"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-
-        # Security-screen scoring endpoint (QM external proxy contract).
-        # Auth is handled in-endpoint: callers send an API key in x-api-key.
-        app.include_router(
-            security_screen.router,
-            prefix="/api/v1",
-            tags=["Security Screen"],
-        )
-
-        # WebSocket router
-        app.include_router(websockets.router, prefix="/api/v1", tags=["WebSockets"])
-        app.include_router(
-            agent_control.router,
-            prefix="/api/v1",
-            tags=["Agent Control"],
-        )
-        app.include_router(
-            agent_permission.router,
-            prefix="/api/v1",
-            tags=["Agent Permissions"],
-        )
-        # Operator notes: authored on the console/CLI half (session auth), and
-        # pulled on the harness half (runtime bearer, authenticated in-route).
-        app.include_router(
-            operator_notes.router,
-            prefix="/api/v1",
-            tags=["Operator Notes"],
-        )
-
-        # Impersonation router - Enterprise feature (loaded via admin plugin)
-        # No longer loaded from core - handled by plugins/admin
-
-        app.include_router(
-            roles.router,
-            prefix="/api/v1",
-            tags=["Roles"],
-            dependencies=[Depends(get_current_active_user)],
-        )
-
-        # --- Public Approval Page ---
-        @app.get("/approval/{request_id}", include_in_schema=False, response_model=None)
-        async def serve_approval_page(
-            request: Request, request_id: str
-        ) -> FileResponse | RedirectResponse:
-            """Serve the tokenized public page, or send bare links to console.
-
-            Email/Slack links include ``?token=`` and must keep working
-            without a login. MCP and in-session notices are token-free and
-            used to hit this path; without a token the HTML page always
-            404s on ``/data``. Redirect those to the authed SPA route.
-            """
-            token = (request.query_params.get("token") or "").strip()
-            if not token:
-                try:
-                    approval_id = str(UUID(request_id))
-                except ValueError:
-                    raise HTTPException(status_code=404, detail="Not found") from None
-                return RedirectResponse(
-                    url=f"/console/approval/{quote(approval_id, safe='')}",
-                    status_code=302,
-                )
-            approval_html_path = base_dir / "preloop" / "templates" / "approval.html"
-            return FileResponse(str(approval_html_path), media_type="text/html")
-
-        # --- Public Invitation Accept Page ---
-        @app.get("/invitations/accept", include_in_schema=False)
-        async def serve_invitation_accept_page() -> FileResponse:
-            """Serve the public invitation accept page."""
-            invitation_html_path = (
-                base_dir / "preloop" / "templates" / "invitation-accept.html"
-            )
-            return FileResponse(str(invitation_html_path), media_type="text/html")
+        _register_gateway_routes(app)
 
     return app

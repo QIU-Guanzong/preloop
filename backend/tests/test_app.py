@@ -33,7 +33,7 @@ def test_pyinstrument_middleware_disabled_by_default(client):
     """
     Tests that the Pyinstrument middleware is disabled by default.
     """
-    with patch("preloop.api.app.Profiler") as mock_profiler:
+    with patch("pyinstrument.Profiler") as mock_profiler:
         response = client.get("/api/v1/health")
         assert response.status_code == 200
         mock_profiler.assert_not_called()
@@ -45,8 +45,8 @@ def test_pyinstrument_middleware_enabled(client):
     Tests that the Pyinstrument middleware is enabled when PROFILING_ENABLED is true.
     """
     with (
-        patch("preloop.api.app.Profiler") as mock_profiler_cls,
-        patch("preloop.api.app.SpeedscopeRenderer") as mock_renderer_cls,
+        patch("pyinstrument.Profiler") as mock_profiler_cls,
+        patch("pyinstrument.renderers.SpeedscopeRenderer") as mock_renderer_cls,
     ):
         mock_profiler_instance = MagicMock()
         mock_profiler_cls.return_value = mock_profiler_instance
@@ -75,7 +75,7 @@ def test_pyinstrument_middleware_non_api_route(client):
     """
     Tests that the Pyinstrument middleware does not profile non-API routes.
     """
-    with patch("preloop.api.app.Profiler") as mock_profiler:
+    with patch("pyinstrument.Profiler") as mock_profiler:
         # Test a non-API route - the middleware should not profile it
         response = client.get("/some/non-api/route")
         # The response might be 200 (UI), 403 (RBAC), or 404 depending on test order

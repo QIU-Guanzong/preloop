@@ -3871,6 +3871,24 @@ def test_provider_cost_fields_recovery_is_fail_open():
     )
 
 
+def test_provider_cost_fields_releases_retained_chunks():
+    """LiteLLM's wrapper retains every stream chunk; drop them after cost copy."""
+    chunks = [
+        SimpleNamespace(usage={"cost": 0.12, "cost_details": {"upstream": 0.1}}),
+        {"usage": {"is_byok": True}},
+        object(),
+    ]
+    recovered = OpenAIGatewayService._provider_cost_fields(
+        SimpleNamespace(chunks=chunks)
+    )
+    assert recovered == {
+        "cost": 0.12,
+        "cost_details": {"upstream": 0.1},
+        "is_byok": True,
+    }
+    assert chunks == []
+
+
 # ---------------------------------------------------------------------------
 # Codex turn-1 round-trip with MCP namespace tools declared (#289 follow-up).
 #

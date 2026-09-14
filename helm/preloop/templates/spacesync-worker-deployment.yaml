@@ -65,9 +65,17 @@ spec:
               value: {{ $.Values.environment.debug | quote }}
             {{- include "preloop.databaseUrlEnv" $ | nindent 12 }}
             - name: DATABASE_POOL_SIZE
+              {{- if eq .name "flow-execution" }}
+              value: {{ $.Values.flowExecution.databasePool.size | default $.Values.database.pool.worker.size | quote }}
+              {{- else }}
               value: {{ $.Values.database.pool.worker.size | quote }}
+              {{- end }}
             - name: DATABASE_MAX_OVERFLOW
+              {{- if eq .name "flow-execution" }}
+              value: {{ $.Values.flowExecution.databasePool.maxOverflow | default $.Values.database.pool.worker.maxOverflow | quote }}
+              {{- else }}
               value: {{ $.Values.database.pool.worker.maxOverflow | quote }}
+              {{- end }}
             - name: PRELOOP_API_SERVICE_HTTP_ENDPOINT
               value: "http://{{ include "preloop.fullname" $ }}-api:80"
             - name: AGENT_EXECUTION_NAMESPACE
@@ -132,6 +140,10 @@ spec:
               value: {{ $.Values.flowExecution.claimStaleSeconds | default 120 | quote }}
             - name: FLOW_EXECUTION_RECLAIM_INTERVAL_SECONDS
               value: {{ $.Values.flowExecution.reclaimIntervalSeconds | default 30 | quote }}
+            {{- if eq .name "flow-execution" }}
+            - name: FLOW_EXECUTION_MAX_INFLIGHT
+              value: {{ $.Values.flowExecution.maxInflight | default 10 | quote }}
+            {{- end }}
             - name: FLOW_EXECUTION_MAX_WAIT_SECONDS
               value: {{ $.Values.flowExecution.maxWaitSeconds | default 3600 | quote }}
             - name: FLOW_COMPLETION_NUDGE_ENABLED

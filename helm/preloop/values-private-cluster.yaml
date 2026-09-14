@@ -102,7 +102,7 @@ gateway:
   resources:
     requests:
       cpu: "100m"
-      memory: "256Mi"
+      memory: "768Mi"
     limits:
       cpu: "1"
-      memory: "1Gi"
+      memory: "2Gi"

@@ -154,3 +154,22 @@ def test_uuid_and_str_account_id_share_cache_entry(db_session, test_user):
     with patch.object(crud_account, "get", wraps=crud_account.get) as get_mock:
         get_cached_account_meta_data(db_session, test_user.account_id)
         get_mock.assert_not_called()
+
+
+def test_cache_evicts_oldest_when_full():
+    """A flood of account ids must not grow the process-level cache without bound."""
+    original_max = cache_mod._MAX_CACHE_ENTRIES
+    cache_mod._MAX_CACHE_ENTRIES = 2
+    now = cache_mod.time.monotonic()
+    try:
+        with cache_mod._LOCK:
+            cache_mod._CACHE.clear()
+            cache_mod._CACHE["a"] = ("one", now + 100.0)
+            cache_mod._CACHE["b"] = ("two", now + 200.0)
+            cache_mod._store_cache_entry("c", "three", now + 300.0)
+            assert "c" in cache_mod._CACHE
+            assert len(cache_mod._CACHE) == 2
+            assert "a" not in cache_mod._CACHE
+    finally:
+        cache_mod._MAX_CACHE_ENTRIES = original_max
+        cache_mod._CACHE.clear()

@@ -59,6 +59,8 @@ spec:
               value: "8000"
             - name: DEBUG
               value: {{ .Values.environment.debug | quote }}
+            - name: PRELOOP_SERVICE_ROLE
+              value: "api"
             - name: MODEL_GATEWAY_CAPTURE_CONTENT
               value: {{ .Values.environment.modelGatewayCaptureContent | quote }}
             {{- include "preloop.databaseUrlEnv" . | nindent 12 }}

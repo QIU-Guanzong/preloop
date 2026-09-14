@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Flow-execution workers run up to `FLOW_EXECUTION_MAX_INFLIGHT` hosted
+  monitors per process (default 10). The monitor loop is wait-bound; other
+  worker pools stay serial. Helm sets `flowExecution.maxInflight` and a
+  dedicated `flowExecution.databasePool` on the flow-execution pool.
 - Issue-triage builtin tools `get_issue_triage_context` and
   `apply_issue_triage`. They are GitHub and GitLab only, require
   `edit_issues`, and follow the existing MCP approval path. Context reads
@@ -46,6 +50,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Helm gateway Deployments set `PRELOOP_SERVICE_ROLE=gateway` (API pods
+  set `api`). `create_app` lazy-imports control-plane routers so a gateway
+  process does not load flow orchestration or MCP HTTP. LiteLLM defaults to
+  its bundled price map (`LITELLM_LOCAL_MODEL_COST_MAP=true`) unless the
+  operator already chose otherwise. Account-governance, live-price
+  negative, and Responses-capability caches cap at 4096 entries, and
+  LiteLLM's retained stream-chunk list is dropped after cost copy.
+- Gateway memory request is 768Mi (limit 2Gi). HPA minReplicas 2 / max 8
+  with a 90% memory target. Hosted idle RSS is ~650Mi; a 256Mi request
+  made HPA report ~250% and pin at maxReplicas while CPU was idle. More
+  replicas copy that idle RSS. Use maxReplicas for real CPU/traffic, not to
+  paper over an undersized request.
+- CodeQL advanced setup uploads SARIF so Scorecard SAST sees every push and
+  pull request. Disable GitHub default CodeQL setup or the upload is
+  rejected.
+- `execute_flow` / `resume_flow_execution` NATS publishes set `Nats-Msg-Id`
+  `{task}:{execution_id}` so the 2m duplicate window collapses reaper
+  republishes of the same unclaimed execution.
 - Preset 001 (Issue Triage Assistant) writes remaining scope, acceptance
   and readiness onto the issue body and applies a complexity label.
   Operators who sync this preset to linked flows move from a

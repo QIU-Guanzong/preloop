@@ -233,6 +233,18 @@ class TestCapabilityCache:
         reset_capability_cache()
         assert is_responses_api_absent("https://example.test/v1") is False
 
+    def test_cache_evicts_oldest_when_full(self, monkeypatch):
+        from preloop.services import openai_responses_passthrough as passthrough
+
+        monkeypatch.setattr(passthrough, "CAPABILITY_CACHE_MAX_ENTRIES", 2)
+        passthrough._CAPABILITY_CACHE.clear()
+        mark_responses_api_absent("https://a.example", now=1.0)
+        mark_responses_api_absent("https://b.example", now=2.0)
+        mark_responses_api_absent("https://c.example", now=3.0)
+        assert len(passthrough._CAPABILITY_CACHE) == 2
+        assert "https://a.example" not in passthrough._CAPABILITY_CACHE
+        assert "https://c.example" in passthrough._CAPABILITY_CACHE
+
 
 class TestShouldUsePassthrough:
     def test_auto_uses_native_for_an_openai_shaped_upstream(self):
