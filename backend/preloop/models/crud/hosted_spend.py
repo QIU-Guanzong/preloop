@@ -475,3 +475,26 @@ def unresolved_reservations(
         }
         for row in db.scalars(query)
     ]
+
+
+def count_unresolved_reservations(db: Session, *, limit: int = 101) -> dict[str, Any]:
+    """Count fleet-wide unresolved hosted reservations with a truncation sentinel.
+
+    Statuses ``reserved``, ``dispatched``, and ``recovery_required`` are
+    included. This does not fan out per account or call a provider.
+    """
+    if not 1 <= limit <= 101:
+        raise ValueError("Unresolved reservation count size must be between 1 and 101")
+    ids = list(
+        db.scalars(
+            select(models.HostedSpendReservation.id)
+            .where(
+                models.HostedSpendReservation.status.in_(
+                    ("reserved", "dispatched", "recovery_required")
+                )
+            )
+            .order_by(models.HostedSpendReservation.id)
+            .limit(limit)
+        )
+    )
+    return {"count": min(len(ids), 100), "truncated": len(ids) > 100}

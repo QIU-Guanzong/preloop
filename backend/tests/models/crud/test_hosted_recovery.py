@@ -200,3 +200,85 @@ def test_account_scoped_bounded_listing_and_cursor(db_session, held):
         ledger.unresolved_reservations(db_session, account_id=held[0], limit=101)
     recover(db_session, held, apply=True)
     assert ledger.unresolved_reservations(db_session, account_id=held[0]) == []
+
+
+def _reserve(db, account_id, key):
+    return ledger.reserve(
+        db,
+        account_id=account_id,
+        operation_key=key,
+        amount="0.01",
+        lifetime_limit="50",
+        monthly_limit=None,
+        now=NOW,
+    )
+
+
+def test_fleet_unresolved_reservation_count_excludes_settled_and_does_not_mutate(
+    db_session, test_user
+):
+    account_id = test_user.account_id
+    ledger.establish_baseline(
+        db_session,
+        account_id=account_id,
+        lifetime_spent=0,
+        month_spent=0,
+        now=NOW,
+        evidence="fleet-count",
+    )
+    before = ledger.count_unresolved_reservations(db_session)
+    reserved = _reserve(db_session, account_id, "fleet-reserved")
+    dispatched = _reserve(db_session, account_id, "fleet-dispatched")
+    ledger.mark_dispatched(
+        db_session, account_id=account_id, reservation_id=dispatched.id
+    )
+    recovery = _reserve(db_session, account_id, "fleet-recovery")
+    ledger.mark_dispatched(
+        db_session, account_id=account_id, reservation_id=recovery.id
+    )
+    ledger.settle(
+        db_session, account_id=account_id, reservation_id=recovery.id, actual=None
+    )
+    settled = _reserve(db_session, account_id, "fleet-settled")
+    ledger.settle(
+        db_session, account_id=account_id, reservation_id=settled.id, actual="0.01"
+    )
+    statuses = {
+        str(row.id): row.status
+        for row in db_session.scalars(select(models.HostedSpendReservation))
+    }
+    result = ledger.count_unresolved_reservations(db_session)
+    if not before["truncated"]:
+        assert result["count"] == before["count"] + 3
+        assert result["truncated"] is False
+    assert statuses == {
+        str(row.id): row.status
+        for row in db_session.scalars(select(models.HostedSpendReservation))
+    }
+    assert reserved.status == "reserved"
+    assert dispatched.status == "dispatched"
+    assert recovery.status == "recovery_required"
+    assert settled.status == "settled"
+    with pytest.raises(ValueError):
+        ledger.count_unresolved_reservations(db_session, limit=0)
+    with pytest.raises(ValueError):
+        ledger.count_unresolved_reservations(db_session, limit=102)
+
+
+def test_fleet_unresolved_reservation_count_uses_101st_sentinel(db_session, test_user):
+    account_id = test_user.account_id
+    ledger.establish_baseline(
+        db_session,
+        account_id=account_id,
+        lifetime_spent=0,
+        month_spent=0,
+        now=NOW,
+        evidence="fleet-sentinel",
+    )
+    existing = ledger.count_unresolved_reservations(db_session)
+    needed = 0 if existing["truncated"] else max(0, 101 - existing["count"])
+    for index in range(needed):
+        _reserve(db_session, account_id, f"fleet-sentinel-{index}")
+    result = ledger.count_unresolved_reservations(db_session)
+    assert result["truncated"] is True
+    assert result["count"] == 100

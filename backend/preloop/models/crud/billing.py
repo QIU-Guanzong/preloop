@@ -481,6 +481,44 @@ class CRUDBilling:
             .first()
         )
 
+    def list_checkout_reconciliation_holds(
+        self, db: Session, *, after_id: Any = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """List parked checkout identity holds for operator drain.
+
+        Only ``kind == checkout_reconciliation`` rows whose recorded result is
+        ``reconciliation_required`` are returned. Associated checkouts are
+        excluded. Emails are never included. Listing is read-only.
+        """
+        if not 1 <= limit <= 100:
+            raise ValueError("Hold listing size must be between 1 and 100")
+        filters = [
+            models.BillingOperation.kind == "checkout_reconciliation",
+            models.BillingOperation.result["status"].as_string()
+            == "reconciliation_required",
+        ]
+        if after_id is not None:
+            filters.append(models.BillingOperation.id > after_id)
+        rows = (
+            db.query(models.BillingOperation)
+            .filter(*filters)
+            .order_by(models.BillingOperation.id)
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "account_id": str(row.account_id),
+                "operation_id": str(row.id),
+                "session_id": (row.payload or {}).get("session_id"),
+                "subscription_id": (row.payload or {}).get("subscription_id"),
+                "customer_id": (row.payload or {}).get("customer_id"),
+                "reason": (row.result or {}).get("reason"),
+                "created_at": row.created_at.isoformat(),
+            }
+            for row in rows
+        ]
+
     def create_checkout_account(
         self,
         db: Session,

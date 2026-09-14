@@ -112,3 +112,109 @@ def test_checkout_customer_owned_elsewhere_is_held(db_session, test_user):
     )
     assert hold.account_id == test_user.account_id
     assert hold.result["reason"] == "customer_owned_by_another_account"
+
+
+HOLD_FIELDS = {
+    "account_id",
+    "operation_id",
+    "session_id",
+    "subscription_id",
+    "customer_id",
+    "reason",
+    "created_at",
+}
+
+
+def test_checkout_reconciliation_hold_queue_lists_reasons_pages_and_skips_associated(
+    db_session, test_user
+):
+    owner = models.Account(
+        organization_name="hold-queue-owner", stripe_customer_id="cus_queue_owned"
+    )
+    mismatch = models.Account(
+        organization_name="hold-queue-mismatch", stripe_customer_id="cus_original"
+    )
+    collision = models.Account(organization_name="hold-queue-collision")
+    associated = models.Account(organization_name="hold-queue-associated")
+    db_session.add_all([owner, mismatch, collision, associated])
+    db_session.flush()
+    assert not billing.bind_checkout_customer(
+        db_session,
+        account_id=str(test_user.account_id),
+        customer_id="cus_unbound",
+        session_id="cs_ref",
+        subscription_id="sub_ref",
+        allow_association=False,
+    )
+    assert not billing.bind_checkout_customer(
+        db_session,
+        account_id=str(mismatch.id),
+        customer_id="cus_new",
+        session_id="cs_mismatch",
+        subscription_id="sub_mismatch",
+        allow_association=True,
+    )
+    assert not billing.bind_checkout_customer(
+        db_session,
+        account_id=str(collision.id),
+        customer_id="cus_queue_owned",
+        session_id="cs_collision_queue",
+        subscription_id="sub_collision_queue",
+        allow_association=True,
+    )
+    assert billing.bind_checkout_customer(
+        db_session,
+        account_id=str(associated.id),
+        customer_id="cus_associated",
+        session_id="cs_associated",
+        subscription_id="sub_associated",
+        allow_association=True,
+    )
+    operations = (
+        db_session.query(models.BillingOperation)
+        .order_by(models.BillingOperation.id)
+        .all()
+    )
+    before = [
+        (row.id, dict(row.result), dict(row.payload), row.lease_until, row.status)
+        for row in operations
+    ]
+    customers = {
+        str(account.id): account.stripe_customer_id
+        for account in db_session.query(models.Account).all()
+    }
+    rows = billing.list_checkout_reconciliation_holds(db_session)
+    assert {row["reason"] for row in rows} == {
+        "account_reference_required",
+        "customer_mismatch",
+        "customer_owned_by_another_account",
+    }
+    assert {row["session_id"] for row in rows} == {
+        "cs_ref",
+        "cs_mismatch",
+        "cs_collision_queue",
+    }
+    assert all(set(row) == HOLD_FIELDS for row in rows)
+    assert all("email" not in row for row in rows)
+    first = billing.list_checkout_reconciliation_holds(db_session, limit=1)
+    assert len(first) == 1
+    rest = billing.list_checkout_reconciliation_holds(
+        db_session, after_id=first[0]["operation_id"]
+    )
+    assert first[0]["operation_id"] not in {row["operation_id"] for row in rest}
+    assert len(first) + len(rest) == 3
+    with pytest.raises(ValueError):
+        billing.list_checkout_reconciliation_holds(db_session, limit=0)
+    with pytest.raises(ValueError):
+        billing.list_checkout_reconciliation_holds(db_session, limit=101)
+    after = [
+        (row.id, dict(row.result), dict(row.payload), row.lease_until, row.status)
+        for row in db_session.query(models.BillingOperation)
+        .order_by(models.BillingOperation.id)
+        .all()
+    ]
+    assert before == after
+    assert customers == {
+        str(account.id): account.stripe_customer_id
+        for account in db_session.query(models.Account).all()
+    }
