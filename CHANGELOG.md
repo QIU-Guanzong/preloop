@@ -57,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator already chose otherwise. Account-governance, live-price
   negative, and Responses-capability caches cap at 4096 entries, and
   LiteLLM's retained stream-chunk list is dropped after cost copy.
-- Gateway memory request is 768Mi (limit 2Gi). HPA minReplicas 2 / max 8
+- Gateway memory request is 768Mi (limit 2Gi). HPA minReplicas 2 / max 5
   with a 90% memory target. Hosted idle RSS is ~650Mi; a 256Mi request
   made HPA report ~250% and pin at maxReplicas while CPU was idle. More
   replicas copy that idle RSS. Use maxReplicas for real CPU/traffic, not to

@@ -254,7 +254,7 @@ helm upgrade preloop ./helm/preloop \
   --set gateway.resources.requests.memory=512Mi
 ```
 
-Gateway HPA is on by default (`gateway.autoscaling`, min 2 / max 8). Memory
+Gateway HPA is on by default (`gateway.autoscaling`, min 2 / max 5). Memory
 target is 90% of an honest 768Mi request: idle RSS on hosted clusters is
 ~650Mi, so a 256Mi request pinned HPA at maxReplicas even with idle CPU.
 API HPA is off until you set `autoscaling.enabled: true`.
