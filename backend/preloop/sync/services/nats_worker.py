@@ -147,10 +147,23 @@ class PreloopSyncNatsWorker:
 
     @property
     def handles_flow_orchestration(self) -> bool:
-        """True when this worker may run execute_flow / resume_flow_execution."""
+        """True when this worker may run execute_flow / resume_flow_execution.
+
+        Empty allowlists still return True so the default pool keeps the
+        stale-claim reaper. That pool *excludes* the flow subjects, so it
+        must not inherit flow-execution fan-out; see `_consumes_flow_tasks`.
+        """
         if not self.tasks_allowlist:
             return True
         return bool(FLOW_ORCHESTRATION_TASKS.intersection(self.tasks_allowlist))
+
+    def _consumes_flow_tasks(self) -> bool:
+        """True when this process actually subscribes to execute/resume."""
+        subjects = self._subjects_to_subscribe()
+        if "preloop.sync.tasks.*" in subjects:
+            return True
+        flow = {f"preloop.sync.tasks.{t}" for t in FLOW_ORCHESTRATION_TASKS}
+        return bool(flow.intersection(subjects))
 
     def handler_concurrency(self) -> int:
         """How many task handlers this process may run at once.
@@ -165,7 +178,7 @@ class PreloopSyncNatsWorker:
         """
         if self._max_inflight_override is not None:
             return max(1, int(self._max_inflight_override))
-        if not self.handles_flow_orchestration:
+        if not self._consumes_flow_tasks():
             return 1
         from preloop.config import settings
 

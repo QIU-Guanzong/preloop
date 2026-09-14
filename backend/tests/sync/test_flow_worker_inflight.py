@@ -101,3 +101,22 @@ def test_default_flow_inflight_is_ten() -> None:
         tasks_allowlist=list(FLOW_ORCHESTRATION_TASKS),
     )
     assert worker.handler_concurrency() == 10
+
+
+def test_exclude_only_pool_stays_serial() -> None:
+    """Helm default pool excludes flow tasks; it must not inherit fan-out."""
+    worker = PreloopSyncNatsWorker(
+        "nats://example.invalid:4222",
+        "default-pool",
+        tasks_excludelist=["execute_flow", "resume_flow_execution"],
+    )
+    assert worker.handler_concurrency() == 1
+    assert worker.handles_flow_orchestration is True
+
+
+def test_catch_all_worker_uses_flow_inflight() -> None:
+    worker = PreloopSyncNatsWorker(
+        "nats://example.invalid:4222",
+        "all-tasks",
+    )
+    assert worker.handler_concurrency() == 10
