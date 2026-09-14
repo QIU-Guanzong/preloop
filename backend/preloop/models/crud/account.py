@@ -34,7 +34,16 @@ class CRUDAccount(CRUDBase[Account]):
         obj_data.setdefault("created", current_time)
         obj_data.setdefault("last_updated", current_time)
 
-        return super().create(db=db, obj_in=obj_data, commit=commit)
+        from preloop.plugins import get_plugin_manager
+
+        account = super().create(db=db, obj_in=obj_data, commit=False)
+        meter = get_plugin_manager().get_service("hosted_spend")
+        if meter is not None:
+            meter.initialize_new_account(db, account_id=account.id)
+        if commit:
+            db.commit()
+            db.refresh(account)
+        return account
 
     def update(self, db: Session, *, db_obj: Account, obj_in: Any) -> Account:
         """Update account and its last_updated timestamp."""

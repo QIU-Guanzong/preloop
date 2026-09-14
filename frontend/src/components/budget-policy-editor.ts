@@ -10,6 +10,7 @@ import {
   getAIModels,
   getAccountAgents,
   getTeams,
+  getConfigurationCapabilities,
   fetchWithAuth,
 } from '../api.js';
 import type {
@@ -50,7 +51,7 @@ const SUBJECT_GROUPS: {
   { types: ['global', 'account'], label: 'Global', icon: 'globe' },
   { types: ['managed_agent'], label: 'Agents', icon: 'robot' },
   { types: ['ai_model'], label: 'Models', icon: 'cpu' },
-  { types: ['user'], label: 'Users', icon: 'person' },
+  { types: ['user'], label: 'Agent owners', icon: 'person' },
   { types: ['team'], label: 'Teams', icon: 'people' },
   { types: ['api_key'], label: 'API keys', icon: 'key' },
 ];
@@ -68,7 +69,7 @@ const SCOPE_CHOICES: { value: string; label: string }[] = [
   { value: 'global', label: 'Global' },
   { value: 'managed_agent', label: 'Agent' },
   { value: 'ai_model', label: 'Model' },
-  { value: 'user', label: 'User' },
+  { value: 'user', label: 'Agent owner' },
 ];
 
 /** Above this many options the subject picker grows a search box. */
@@ -263,19 +264,11 @@ export class BudgetPolicyEditor extends LitElement {
     super.connectedCallback();
     this.loadingPolicies = true;
     try {
-      if (this.billingEnabled) {
-        this.features = { billing: true };
-      } else {
-        this.loadingFeatures = true;
-        const featuresRes = await fetchWithAuth('/api/v1/features')
-          .then((r) => (r.ok ? r.json() : null))
-          .catch(() => null);
-        this.features = featuresRes?.features || {};
-        this.loadingFeatures = false;
-      }
-      if (this.features.billing !== true) {
-        return;
-      }
+      this.features = {
+        ...(await getConfigurationCapabilities().catch(() => ({
+          advanced_budget_administration: false,
+        }))),
+      };
       await this.loadPolicies();
       if (this.needsSubjectMetadata()) {
         void this.loadSubjects();
@@ -345,7 +338,10 @@ export class BudgetPolicyEditor extends LitElement {
           fetchWithAuth('/api/v1/auth/users/me').then((r) =>
             r.ok ? r.json() : null
           ),
-          fetchWithAuth('/api/v1/users?limit=100').then((r) =>
+          (this.features.advanced_budget_administration
+            ? fetchWithAuth('/api/v1/users?limit=100')
+            : Promise.resolve(new Response(JSON.stringify({ users: [] })))
+          ).then((r) =>
             r.ok
               ? r.json()
               : ({
@@ -355,7 +351,9 @@ export class BudgetPolicyEditor extends LitElement {
                   limit: 100,
                 } satisfies UserListResponse)
           ),
-          getTeams().catch(() => ({ teams: [] as Team[], total: 0 })),
+          this.features.advanced_budget_administration
+            ? getTeams().catch(() => ({ teams: [] as Team[], total: 0 }))
+            : Promise.resolve({ teams: [], total: 0 }),
         ]);
       this.models = models;
       this.agents = agentsResponse.items || [];
@@ -511,11 +509,11 @@ export class BudgetPolicyEditor extends LitElement {
     if (soft === null && hard === null) {
       return 'Set a soft limit, a hard limit, or both.';
     }
-    if (soft !== null && soft <= 0) {
-      return 'The soft limit must be greater than zero.';
+    if (soft !== null && (!Number.isFinite(soft) || soft < 0)) {
+      return 'The soft limit must be zero or greater.';
     }
-    if (hard !== null && hard <= 0) {
-      return 'The hard limit must be greater than zero.';
+    if (hard !== null && (!Number.isFinite(hard) || hard < 0)) {
+      return 'The hard limit must be zero or greater.';
     }
     if (soft !== null && hard !== null && soft > hard) {
       return 'The soft limit must be at or below the hard limit.';
@@ -616,7 +614,7 @@ export class BudgetPolicyEditor extends LitElement {
 
   private policyRowName(policy: BudgetPolicy): string {
     if (policy.subject_type === 'global' || policy.subject_type === 'account') {
-      return 'Global';
+      return policy.model_alias ? `Model: ${policy.model_alias}` : 'Global';
     }
     if (!policy.subject_id) {
       return policy.subject_type.replace(/_/g, ' ');
@@ -629,8 +627,12 @@ export class BudgetPolicyEditor extends LitElement {
     const hard = policy.hard_limit_usd || 0;
     const spend = policy.current_spend_usd || 0;
     const limits = [
-      soft > 0 ? `Soft ${this.formatCurrency(soft)}` : null,
-      hard > 0 ? `Hard ${this.formatCurrency(hard)}` : null,
+      policy.soft_limit_usd != null
+        ? `Soft ${this.formatCurrency(soft)}`
+        : null,
+      policy.hard_limit_usd != null
+        ? `Hard ${this.formatCurrency(hard)}`
+        : null,
     ].filter(Boolean);
     const notifies = policy.notify_on_soft || policy.notify_on_hard;
     const recipients = this.recipientCount(policy);
@@ -780,7 +782,7 @@ export class BudgetPolicyEditor extends LitElement {
         ? 'Model'
         : this.newSubjectType === 'managed_agent'
           ? 'Agent'
-          : 'User';
+          : 'Agent owner';
 
     return html`
       <div>
@@ -801,6 +803,7 @@ export class BudgetPolicyEditor extends LitElement {
         }
         <sl-select
           label=${label}
+          help-text=${this.newSubjectType === 'user' ? 'Applies to model spending by agents owned by this person.' : ''}
           value=${this.newSubjectId}
           hoist
           ?disabled=${this.loadingSubjects || this.editingPolicyId !== null}
@@ -853,7 +856,11 @@ export class BudgetPolicyEditor extends LitElement {
                     this.subjectFilter = '';
                   }}
                 >
-                  ${SCOPE_CHOICES.map(
+                  ${SCOPE_CHOICES.filter(
+                    (scope) =>
+                      scope.value !== 'user' ||
+                      this.features.advanced_budget_administration
+                  ).map(
                     (choice) => html`
                       <sl-radio-button
                         size="small"
@@ -891,7 +898,7 @@ export class BudgetPolicyEditor extends LitElement {
             type="number"
             step="0.0001"
             inputmode="decimal"
-            help-text="Notifies recipients"
+            help-text="Highlights spend approaching the hard limit"
             .value=${this.newSoftLimit}
             @sl-input=${(e: any) => (this.newSoftLimit = e.target.value)}
           ></sl-input>
@@ -900,7 +907,7 @@ export class BudgetPolicyEditor extends LitElement {
             type="number"
             step="0.0001"
             inputmode="decimal"
-            help-text="Blocks further model calls"
+            help-text="Blank means no hard limit. $0 blocks priced requests. Concurrent in-flight calls can exceed a limit."
             .value=${this.newHardLimit}
             @sl-input=${(e: any) => (this.newHardLimit = e.target.value)}
           ></sl-input>
@@ -913,36 +920,44 @@ export class BudgetPolicyEditor extends LitElement {
               </div>`
             : nothing
         }
-
-        <div class="switch-row">
-          <sl-switch
-            ?checked=${this.newNotifySoft}
-            @sl-change=${(e: any) => (this.newNotifySoft = e.target.checked)}
-          >
-            Notify on soft
-          </sl-switch>
-          <sl-switch
-            ?checked=${this.newNotifyHard}
-            @sl-change=${(e: any) => (this.newNotifyHard = e.target.checked)}
-          >
-            Notify on hard
-          </sl-switch>
-        </div>
-
         ${
-          this.newNotifySoft || this.newNotifyHard
+          this.features.advanced_budget_administration
             ? html`
-                <notify-recipients-field
-                  .users=${this.availableUsers}
-                  .teams=${this.teams}
-                  .userIds=${this.newNotifyUserIds}
-                  .teamIds=${this.newNotifyTeamIds}
-                  .customEmails=${this.newCustomEmails}
-                  help-text="Recipients are notified via their email and mobile app preferences. Add custom emails when needed."
-                  @notify-recipients-change=${this.handleNotifyRecipientsChange}
-                ></notify-recipients-field>
+                <div class="switch-row">
+                  <sl-switch
+                    ?checked=${this.newNotifySoft}
+                    @sl-change=${(e: any) => (this.newNotifySoft = e.target.checked)}
+                  >
+                    Notify on soft
+                  </sl-switch>
+                  <sl-switch
+                    ?checked=${this.newNotifyHard}
+                    @sl-change=${(e: any) => (this.newNotifyHard = e.target.checked)}
+                  >
+                    Notify on hard
+                  </sl-switch>
+                </div>
+
+                ${
+                  this.newNotifySoft || this.newNotifyHard
+                    ? html`
+                        <notify-recipients-field
+                          .users=${this.availableUsers}
+                          .teams=${this.teams}
+                          .userIds=${this.newNotifyUserIds}
+                          .teamIds=${this.newNotifyTeamIds}
+                          .customEmails=${this.newCustomEmails}
+                          help-text="Recipients are notified via their email and mobile app preferences. Add custom emails when needed."
+                          @notify-recipients-change=${this.handleNotifyRecipientsChange}
+                        ></notify-recipients-field>
+                      `
+                    : nothing
+                }
               `
-            : nothing
+            : html`<p class="muted">
+                Team scopes and routed budget notifications are available with
+                advanced administration.
+              </p>`
         }
 
         <div class="form-actions">
@@ -1025,10 +1040,6 @@ export class BudgetPolicyEditor extends LitElement {
           Loading budget settings…
         </div>
       `;
-    }
-
-    if (this.features.billing !== true) {
-      return nothing;
     }
 
     return html`

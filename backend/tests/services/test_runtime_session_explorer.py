@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from preloop.services import runtime_session_explorer as rse_mod
+from preloop.services.analytics_history import AnalyticsHistoryWindow
 from preloop.services.runtime_session_explorer import (
     INTERACTION_SUMMARY_ATTEMPT_TIMEOUT_SECONDS,
     MAX_TITLES_PER_LIST_REQUEST,
@@ -379,7 +380,9 @@ def test_attach_optimization_badges_sets_scores(service):
         "list_for_sessions",
         return_value=[cached_row],
     ):
-        service._attach_optimization_badges(account=account, items=[item])
+        service._attach_optimization_badges(
+            account=account, items=[item], history_window=AnalyticsHistoryWindow(None)
+        )
     assert item.optimization_waste_score == 42
     assert item.optimization_potential_savings_tokens == 1000
     assert item.optimization_potential_savings_usd == 0.5
@@ -390,7 +393,11 @@ def test_attach_optimization_badges_empty_items_noop(service):
     with patch.object(
         rse_mod.crud_runtime_session_optimization_result, "list_for_sessions"
     ) as lookup:
-        service._attach_optimization_badges(account=_make_account(), items=[])
+        service._attach_optimization_badges(
+            account=_make_account(),
+            items=[],
+            history_window=AnalyticsHistoryWindow(None),
+        )
     lookup.assert_not_called()
 
 
@@ -403,7 +410,11 @@ def test_attach_optimization_badges_swallows_db_error(service):
         "list_for_sessions",
         side_effect=SQLAlchemyError("boom"),
     ):
-        service._attach_optimization_badges(account=_make_account(), items=[item])
+        service._attach_optimization_badges(
+            account=_make_account(),
+            items=[item],
+            history_window=AnalyticsHistoryWindow(None),
+        )
     # No badge applied, no exception raised.
     assert item.optimization_waste_score is None
 
@@ -778,3 +789,79 @@ def test_default_activity_title_for_transcript_messages() -> None:
         _default_activity_title(activity("agent_control_message")) == "Operator message"
     )
     assert _default_activity_title(activity("tool_call")) == "Tool call"
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "list_account_sessions",
+        "get_account_session_detail",
+        "get_account_session_interactions",
+        "get_account_session_activity_timeline",
+        "get_account_session_summary_insight",
+    ],
+)
+@pytest.mark.parametrize("first_days", [183, None])
+def test_history_policy_is_resolved_once_per_request_and_not_cached(
+    service, monkeypatch, method, first_days
+):
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from preloop.services import analytics_history
+
+    provider = MagicMock(return_value=first_days)
+    monkeypatch.setattr(
+        analytics_history,
+        "get_plugin_manager",
+        lambda: SimpleNamespace(get_service=lambda name: provider),
+    )
+    now = datetime.now(timezone.utc)
+    row = _make_summary_row(started_at=now, last_activity_at=now, last_request_at=now)
+    summary = MagicMock(return_value=row)
+    badges = MagicMock(return_value=[])
+    monkeypatch.setattr(
+        rse_mod.crud_runtime_session, "get_account_session_summary", summary
+    )
+    monkeypatch.setattr(
+        rse_mod.crud_runtime_session,
+        "list_account_sessions",
+        MagicMock(return_value={"items": [row], "total": 1}),
+    )
+    monkeypatch.setattr(
+        rse_mod.crud_runtime_session_optimization_result, "list_for_sessions", badges
+    )
+    monkeypatch.setattr(
+        rse_mod.crud_api_usage, "get_gateway_usage_by_model", MagicMock(return_value=[])
+    )
+    monkeypatch.setattr(
+        rse_mod.crud_gateway_usage_search_document,
+        "search_account_documents",
+        MagicMock(return_value={"items": [], "total": 0}),
+    )
+    monkeypatch.setattr(
+        rse_mod.crud_ai_model, "get_default_active_model", MagicMock(return_value=None)
+    )
+    monkeypatch.setattr(service, "schedule_missing_session_titles", MagicMock())
+    monkeypatch.setattr(service, "_build_activity_timeline", MagicMock(return_value=[]))
+    account = _make_account()
+    kwargs = {"account": account}
+    if method != "list_account_sessions":
+        kwargs["runtime_session_id"] = row["id"]
+    read = getattr(service, method)
+    read(**kwargs)
+    assert provider.call_count == 1
+    lookup = badges if method == "list_account_sessions" else summary
+    first_cutoff = lookup.call_args.kwargs["start_date"]
+    if first_days is None:
+        assert first_cutoff is None
+    else:
+        assert (
+            abs((first_cutoff - (now - timedelta(days=first_days))).total_seconds()) < 2
+        )
+
+    # Reusing the Account and service for a later request must see a plan change.
+    provider.return_value = 730
+    read(**kwargs)
+    assert provider.call_count == 2
+    next_cutoff = lookup.call_args.kwargs["start_date"]
+    assert abs((next_cutoff - (now - timedelta(days=730))).total_seconds()) < 2

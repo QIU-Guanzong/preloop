@@ -24,7 +24,7 @@ somebody later mistakes for the whole period.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, time
 from typing import Annotated, List, Optional
 from uuid import UUID
 
@@ -50,6 +50,7 @@ from preloop.schemas.retention import (
     RetentionSettingsUpdate,
 )
 from preloop.services import retention_policy
+from preloop.services.analytics_history import storage_history_days
 from preloop.services.legal_hold import (
     HoldOutcome,
     LegalHoldError,
@@ -62,7 +63,6 @@ from preloop.services.retention_export import (
     audit_period_export,
     build_period_export,
 )
-from preloop.services.retention_purge import count_purgeable
 from preloop.utils.permissions import require_permission
 
 logger = logging.getLogger(__name__)
@@ -81,9 +81,22 @@ AUDIT_ACTION_SETTINGS = "retention_settings_updated"
 MAX_PERIOD_DAYS = 366
 
 
-def _settings_payload(account: Account) -> RetentionSettingsRead:
+def _settings_payload(account: Account, db: Session) -> RetentionSettingsRead:
     """Resolved retention plus the deployment facts that constrain it."""
     resolved = retention_policy.resolve_all(account.meta_data)
+    history_days = storage_history_days(db, account=account)
+    for record_class in (
+        retention_policy.CLASS_USAGE,
+        retention_policy.CLASS_RUNTIME_SESSIONS,
+    ):
+        setting = resolved[record_class]
+        if history_days is None or history_days > setting.days:
+            resolved[record_class] = retention_policy.RetentionSetting(
+                record_class=record_class,
+                days=history_days if history_days is not None else -1,
+                source="subscription_history",
+                floored=True,
+            )
     return RetentionSettingsRead(
         floor_days=retention_policy.floor_days(),
         default_days=retention_policy.default_days(),
@@ -148,7 +161,7 @@ def get_retention_settings(
     db: Session = Depends(get_db_session),
 ):
     """Return this account's retention per record class, and the floor."""
-    return _settings_payload(account)
+    return _settings_payload(account, db)
 
 
 @router.put("/settings", response_model=RetentionSettingsRead)
@@ -211,7 +224,7 @@ def update_retention_settings(
     )
     db.commit()
     db.refresh(account)
-    return _settings_payload(account)
+    return _settings_payload(account, db)
 
 
 @router.get("/purge-preview", response_model=RetentionPurgePreview)
@@ -230,21 +243,29 @@ def preview_retention_purge(
     now = datetime.now(UTC)
     rows = []
     total = 0
-    for record_class, setting in retention_policy.resolve_all(
-        account.meta_data
-    ).items():
-        cutoff = now - timedelta(days=setting.days)
-        count = count_purgeable(
-            db, account_id=account.id, record_class=record_class, cutoff=cutoff
+    from preloop.services.retention_purge import purge_class
+
+    for record_class in retention_policy.RECORD_CLASSES:
+        result = purge_class(
+            db,
+            account=account,
+            record_class=record_class,
+            now=now,
+            batch_size=1,
+            max_batches=1,
+            dry_run=True,
         )
-        total += count
+        total += result.deleted
         rows.append(
             {
                 "record_class": record_class,
                 "label": retention_policy.RECORD_CLASS_LABELS[record_class],
-                "retention_days": setting.days,
-                "cutoff": cutoff.isoformat(),
-                "purgeable": count,
+                "retention_days": result.retention_days,
+                "unlimited": result.retention_days == -1,
+                "cutoff": result.cutoff.isoformat()
+                if result.retention_days != -1
+                else None,
+                "purgeable": result.deleted,
             }
         )
     return RetentionPurgePreview(

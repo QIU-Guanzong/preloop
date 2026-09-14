@@ -1,4 +1,4 @@
-import { html, fixture, expect } from '@open-wc/testing';
+import { html, fixture, expect, waitUntil } from '@open-wc/testing';
 import sinon from 'sinon';
 
 import './approval-workflow-dialog';
@@ -63,6 +63,17 @@ describe('ApprovalWorkflowDialog', () => {
   });
 
   it('binds the approver notify field to user and team ids', async () => {
+    fetchStub.callsFake(
+      async (input: RequestInfo | URL) =>
+        new Response(
+          JSON.stringify(
+            String(input).includes('configuration-capabilities')
+              ? { advanced_approvals: true }
+              : {}
+          )
+        )
+    );
+
     const el = (await fixture(
       html`<approval-workflow-dialog
         .open=${true}
@@ -70,7 +81,8 @@ describe('ApprovalWorkflowDialog', () => {
       ></approval-workflow-dialog>`
     )) as ApprovalWorkflowDialog;
 
-    // Skip the auto-loader; we want full control over users/teams.
+    await (el as any)._loadData();
+    // Complete the account capability lookup before setting fixture users/teams.
     (el as any)._users = [
       { id: 'user-1', username: 'alice', email: 'alice@example.com' },
       { id: 'user-2', username: 'bob', email: 'bob@example.com' },
@@ -167,5 +179,30 @@ describe('ApprovalWorkflowDialog', () => {
     expect(body.approval_config.webhook_url).to.equal(
       'https://hooks.slack.com/services/test'
     );
+  });
+  it('keeps single-person workflow controls when cloud Free installs advanced plugins', async () => {
+    fetchStub.callsFake(
+      async () =>
+        new Response(
+          JSON.stringify({
+            advanced_approvals: false,
+            single_user_approvals: true,
+          })
+        )
+    );
+    const el = await fixture<ApprovalWorkflowDialog>(
+      html`<approval-workflow-dialog
+        .open=${true}
+        .features=${{ advanced_approvals: true }}
+      ></approval-workflow-dialog>`
+    );
+    await waitUntil(() => fetchStub.called);
+    await el.updateComplete;
+    expect(el.shadowRoot!.textContent).to.include(
+      'One person approves this workflow'
+    );
+    expect(el.shadowRoot!.querySelector('notify-recipients-field')).to.not
+      .exist;
+    expect((el as any)._hasAdvancedApprovals()).to.equal(false);
   });
 });

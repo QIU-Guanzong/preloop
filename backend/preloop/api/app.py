@@ -726,6 +726,7 @@ def _register_control_plane_routes(
         audio,
         approval_bypass,
         audit_chain,
+        budget,
         approval_requests,
         comments,
         cost,
@@ -949,6 +950,12 @@ def _register_control_plane_routes(
         audio.router,
         prefix="/api/v1",
         tags=["Audio"],
+        dependencies=[Depends(get_current_active_user)],
+    )
+    app.include_router(
+        budget.router,
+        prefix="/api/v1",
+        tags=["Budget"],
         dependencies=[Depends(get_current_active_user)],
     )
     app.include_router(

@@ -18,9 +18,13 @@ class RetentionClassRead(BaseModel):
 
     record_class: str
     label: str
-    days: int
+    days: int = Field(
+        ...,
+        description="Effective stored retention days; -1 means an unlimited subscription history promise prevents deletion",
+    )
     source: str = Field(
-        ..., description="'account' when this account set it, 'default' otherwise"
+        ...,
+        description="account, default, or subscription_history when a current/previous subscription requires longer storage",
     )
     floored: bool = Field(
         False, description="True when the stored value was raised to meet the floor"

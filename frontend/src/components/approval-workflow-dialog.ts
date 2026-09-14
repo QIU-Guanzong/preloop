@@ -2,6 +2,7 @@ import { LitElement, html, css, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import {
   getUsers,
+  getConfigurationCapabilities,
   getTeams,
   getAIModels,
   createApprovalWorkflow,
@@ -81,9 +82,11 @@ export class ApprovalWorkflowDialog extends LitElement {
    * This gates multi-user approvers and AI-driven approvals.
    */
   private _hasAdvancedApprovals(): boolean {
-    return this.features['advanced_approvals'] === true;
+    return this._advancedApprovalsAllowed === true;
   }
 
+  @state() private _advancedApprovalsAllowed = false;
+  @state() private _capabilitiesLoading = true;
   @state() private _loading = false;
   @state() private _error: string | null = null;
   @state() private _users: User[] = [];
@@ -231,6 +234,11 @@ export class ApprovalWorkflowDialog extends LitElement {
 
   private async _loadData() {
     try {
+      const capabilities = await getConfigurationCapabilities().catch(() => ({
+        advanced_approvals: false,
+      }));
+      this._advancedApprovalsAllowed = capabilities.advanced_approvals === true;
+      this._capabilitiesLoading = false;
       // Users, teams, and AI models are only needed for multi-user approver
       // selection and AI-driven approvals (EE features).  In OSS the
       // endpoints don't exist, so skip them to avoid 404s.
@@ -266,19 +274,14 @@ export class ApprovalWorkflowDialog extends LitElement {
     if (this.policy) {
       this._name = this.policy.name || '';
       this._description = this.policy.description || '';
-      // Fall back to standard only for truly EE-only types.
-      const eeTypes = ['ai_driven'];
+      // Preserve an existing workflow's type while loading account capabilities.
       // Older default workflows were stored with approval_type="manual"
       // (a legacy synonym for the in-UI human-approval flow). The dialog's
       // dropdown only renders "standard" for that case, so normalise here
       // — otherwise the type field appears blank in the editor.
       const rawType = this.policy.approval_type || 'standard';
       const policyType = rawType === 'manual' ? 'standard' : rawType;
-      if (eeTypes.includes(policyType) && !this._hasAdvancedApprovals()) {
-        this._approvalType = 'standard';
-      } else {
-        this._approvalType = policyType;
-      }
+      this._approvalType = policyType;
       this._timeoutSeconds = this.policy.timeout_seconds || 300;
       this._isDefault = this.policy.is_default || false;
       this._asyncApprovalEnabled = this.policy?.async_approval_enabled ?? false;
@@ -468,7 +471,10 @@ export class ApprovalWorkflowDialog extends LitElement {
     // In open-source (single-user) mode, there's no need to select
     // approvers or require multiple approvals — the sole user approves.
     if (!this._hasAdvancedApprovals()) {
-      return null;
+      return html`<p>
+        One person approves this workflow. Multiple approvers, team routing,
+        quorum and escalations require advanced approvals.
+      </p>`;
     }
 
     return html`
@@ -833,7 +839,7 @@ DENY if:
             variant="primary"
             @click=${this._handleSave}
             ?loading=${this._loading}
-            ?disabled=${!this._isFormValid()}
+            ?disabled=${this._capabilitiesLoading || !this._isFormValid()}
           >
             ${this.policy ? 'Save Changes' : 'Create Policy'}
           </sl-button>

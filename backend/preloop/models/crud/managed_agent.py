@@ -556,9 +556,28 @@ class CRUDManagedAgent(CRUDBase[ManagedAgent]):
                 f"Invalid managed agent lifecycle_state {lifecycle_state!r}; "
                 f"expected one of {sorted(MANAGED_AGENT_LIFECYCLE_STATES)}"
             )
-        db_obj = self.get_for_account(db, account_id=account_id, agent_id=agent_id)
+        if lifecycle_state is not None:
+            from .billing import billing
+
+            with db.no_autoflush:
+                billing.lock_account(db, str(account_id))
+                db_obj = (
+                    db.query(self.model)
+                    .filter(
+                        self.model.account_id == account_id, self.model.id == agent_id
+                    )
+                    .with_for_update()
+                    .populate_existing()
+                    .one_or_none()
+                )
+        else:
+            db_obj = self.get_for_account(db, account_id=account_id, agent_id=agent_id)
         if db_obj is None:
             return None
+        if lifecycle_state == "active" and db_obj.lifecycle_state != "active":
+            from .capacity import authorize_capacity
+
+            authorize_capacity(db, str(account_id), "agents")
         now = _utc_now()
         if set_owner:
             db_obj.owner_user_id = owner_user_id
@@ -708,6 +727,9 @@ class CRUDManagedAgent(CRUDBase[ManagedAgent]):
         observed_at = last_seen_at or _utc_now()
 
         if db_obj is None:
+            from .capacity import authorize_capacity
+
+            authorize_capacity(db, str(account_id), "agents")
             db_obj = ManagedAgent(
                 account_id=account_id,
                 runtime_session_id=runtime_session_id,
@@ -797,6 +819,9 @@ class CRUDManagedAgent(CRUDBase[ManagedAgent]):
         Returns:
             The newly created ManagedAgent row.
         """
+        from .capacity import authorize_capacity
+
+        authorize_capacity(db, str(account_id), "agents")
         now = _utc_now()
         normalized_name = display_name.strip()
         session_source_id = f"custom_{secrets.token_urlsafe(16)}"

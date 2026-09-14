@@ -93,6 +93,7 @@ from preloop.schemas.subject_governance import (
     SubjectGovernanceConfig,
     SubjectGovernanceResponse,
 )
+from preloop.services.analytics_history import history_cutoff
 from preloop.services.account_realtime import (
     ACCOUNT_TOPIC_MANAGED_AGENTS,
     ACCOUNT_TOPIC_AUDIT,
@@ -2642,6 +2643,7 @@ async def list_account_runtime_session_requests(
     from preloop.models.crud.api_usage import crud_api_usage
 
     def _query() -> RuntimeSessionRequestListResponse:
+        cutoff = history_cutoff(db, account=account)
         session = crud_runtime_session.get_account_session(
             db, account_id=str(account.id), runtime_session_id=runtime_session_id
         )
@@ -2653,6 +2655,7 @@ async def list_account_runtime_session_requests(
 
         rows = crud_api_usage.list_session_request_rows(
             db,
+            start_date=cutoff,
             account_id=account.id,
             runtime_session_id=runtime_session_id,
             limit=limit,
@@ -2662,6 +2665,7 @@ async def list_account_runtime_session_requests(
         )
         total = crud_api_usage.count_session_request_rows(
             db,
+            start_date=cutoff,
             account_id=account.id,
             runtime_session_id=runtime_session_id,
             failed_only=failed_only,
@@ -2669,6 +2673,7 @@ async def list_account_runtime_session_requests(
         )
         failed_count = crud_api_usage.count_session_request_rows(
             db,
+            start_date=cutoff,
             account_id=account.id,
             runtime_session_id=runtime_session_id,
             failed_only=True,
@@ -2679,6 +2684,7 @@ async def list_account_runtime_session_requests(
         cache_summary = summarize_session_cache(
             crud_api_usage.list_session_cache_rows(
                 db,
+                start_date=cutoff,
                 account_id=account.id,
                 runtime_session_id=runtime_session_id,
             )
@@ -2736,6 +2742,7 @@ async def get_account_runtime_session_gateway_events(
     )
 
     def _query() -> dict[str, Any]:
+        cutoff = history_cutoff(db, account=account)
         session = crud_runtime_session.get_account_session(
             db, account_id=str(account.id), runtime_session_id=runtime_session_id
         )
@@ -2747,6 +2754,7 @@ async def get_account_runtime_session_gateway_events(
 
         rows = crud_runtime_session_activity.list_model_gateway_calls_for_session(
             db,
+            start_date=cutoff,
             account_id=account.id,
             runtime_session_id=runtime_session_id,
             tail=tail,
@@ -2756,6 +2764,7 @@ async def get_account_runtime_session_gateway_events(
         )
         total = crud_runtime_session_activity.count_model_gateway_calls_for_session(
             db,
+            start_date=cutoff,
             account_id=account.id,
             runtime_session_id=runtime_session_id,
         )
@@ -2805,6 +2814,7 @@ async def get_account_runtime_session_gateway_event_detail(
     )
 
     def _query() -> dict[str, Any]:
+        cutoff = history_cutoff(db, account=account)
         session = crud_runtime_session.get_account_session(
             db, account_id=str(account.id), runtime_session_id=runtime_session_id
         )
@@ -2816,6 +2826,7 @@ async def get_account_runtime_session_gateway_event_detail(
 
         activity = crud_runtime_session_activity.get_model_gateway_call_for_session(
             db,
+            start_date=cutoff,
             account_id=account.id,
             runtime_session_id=runtime_session_id,
             activity_id=activity_id,
@@ -2853,7 +2864,7 @@ async def summarize_account_runtime_session_gateway_event(
 ):
     """Summarize one gateway interaction on demand using the account default model."""
     return await RuntimeSessionExplorerService(
-        db
+        db, owns_db_session=True
     ).summarize_account_runtime_session_interaction(
         account=account,
         runtime_session_id=runtime_session_id,

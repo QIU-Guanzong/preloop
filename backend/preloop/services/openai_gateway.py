@@ -608,15 +608,22 @@ class _PrefetchedUpstreamStream:
 class _PrefetchedPassthroughResponse:
     """Keep the first decoded body chunk and the original response together."""
 
-    def __init__(self, response: httpx.Response, text: Iterator[str]) -> None:
+    def __init__(
+        self, response: httpx.Response, text: Iterator[str], hosted_call: Any = None
+    ) -> None:
         self.raw = response
         self._text = text
+        self.hosted_call = hosted_call
 
     def iter_text(self) -> Iterator[str]:
         return self._text
 
     def close(self) -> None:
-        self.raw.close()
+        try:
+            self.raw.close()
+        finally:
+            if self.hosted_call is not None:
+                self.hosted_call.finish()
 
 
 def get_model_gateway_backend(
@@ -4200,6 +4207,9 @@ class OpenAIGatewayService:
             headers=headers,
             method="POST",
         )
+        from preloop.services.hosted_spend_guard import guard_unmetered_hosted_call
+
+        guard_unmetered_hosted_call(ai_model)
         self.release_db_for_wait(ai_model)
         try:
             with urllib_request.urlopen(req, timeout=600) as response:
@@ -5331,6 +5341,9 @@ class OpenAIGatewayService:
         Raises:
             ModelGatewayAPIError: On transport failure or upstream >=400.
         """
+        from preloop.services.hosted_spend_guard import guard_unmetered_hosted_call
+
+        guard_unmetered_hosted_call(ai_model)
         self.release_db_for_wait()
         try:
             response = _anthropic_passthrough_http_client().post(
@@ -5393,6 +5406,9 @@ class OpenAIGatewayService:
         Raises:
             ModelGatewayAPIError: On transport failure or upstream >=400.
         """
+        from preloop.services.hosted_spend_guard import guard_unmetered_hosted_call
+
+        guard_unmetered_hosted_call(ai_model)
         self.release_db_for_wait()
         client = _anthropic_passthrough_http_client()
         try:
@@ -5868,7 +5884,7 @@ class OpenAIGatewayService:
         )
         self.release_db_for_wait(ai_model)
 
-        def _attempt() -> Optional[Dict[str, Any]]:
+        def _perform() -> Optional[Dict[str, Any]]:
             response = _openai_passthrough_http_client(ai_model).post(
                 url,
                 headers=headers,
@@ -5903,6 +5919,27 @@ class OpenAIGatewayService:
             finally:
                 response.close()
 
+        def _attempt() -> Any:
+            from preloop.plugins import get_plugin_manager
+
+            self.release_db_for_wait(ai_model)
+            meter = get_plugin_manager().get_service("hosted_spend")
+            call = (
+                meter.prepare_native(
+                    self.db,
+                    account_id=self.auth_context.user.account_id,
+                    model=ai_model,
+                    body=body,
+                    url=url,
+                    owns_session=self._owns_db_session,
+                )
+                if meter is not None
+                else None
+            )
+            return (
+                call.invoke(_perform, stream=False) if call is not None else _perform()
+            )
+
         return self._run_with_upstream_retries("openai", _attempt, ai_model=ai_model)
 
     def _open_openai_responses_passthrough_stream(
@@ -5930,7 +5967,9 @@ class OpenAIGatewayService:
         )
         self.release_db_for_wait(ai_model)
 
-        def _attempt() -> Optional[_PrefetchedPassthroughResponse]:
+        def _perform(
+            hosted_call: Any = None,
+        ) -> Optional[_PrefetchedPassthroughResponse]:
             client = _openai_passthrough_http_client(ai_model)
             request = client.build_request(
                 "POST",
@@ -5955,7 +5994,7 @@ class OpenAIGatewayService:
                     self._close_failed_upstream_stream(response)
                     raise
                 return _PrefetchedPassthroughResponse(
-                    response, chain([first_chunk], text)
+                    response, chain([first_chunk], text), hosted_call=hosted_call
                 )
             try:
                 body_text = response.read().decode("utf-8", errors="replace")
@@ -5969,6 +6008,33 @@ class OpenAIGatewayService:
             raise self._openai_passthrough_raw_error(
                 response.status_code, body_text, response.headers
             )
+
+        def _attempt() -> Any:
+            from preloop.plugins import get_plugin_manager
+
+            self.release_db_for_wait(ai_model)
+            meter = get_plugin_manager().get_service("hosted_spend")
+            call = (
+                meter.prepare_native(
+                    self.db,
+                    account_id=self.auth_context.user.account_id,
+                    model=ai_model,
+                    body=body,
+                    url=url,
+                    owns_session=self._owns_db_session,
+                )
+                if meter is not None
+                else None
+            )
+            try:
+                response = _perform(call)
+                if response is None and call is not None:
+                    call.finish()
+                return response
+            except BaseException:
+                if call is not None:
+                    call.finish()
+                raise
 
         return self._run_with_upstream_retries("openai", _attempt, ai_model=ai_model)
 
@@ -6022,6 +6088,9 @@ class OpenAIGatewayService:
                 }:
                     response_obj = event.get("response")
                     if isinstance(response_obj, dict):
+                        hosted_call = getattr(upstream_response, "hosted_call", None)
+                        if hosted_call is not None:
+                            hosted_call.observe(response_obj, terminal=True)
                         if response_obj.get("id"):
                             state["response_id"] = response_obj["id"]
                         if isinstance(response_obj.get("usage"), dict):
@@ -6036,8 +6105,12 @@ class OpenAIGatewayService:
                     continue
                 if event_type == "response.created":
                     response_obj = event.get("response")
-                    if isinstance(response_obj, dict) and response_obj.get("id"):
-                        state["response_id"] = response_obj["id"]
+                    if isinstance(response_obj, dict):
+                        hosted_call = getattr(upstream_response, "hosted_call", None)
+                        if hosted_call is not None:
+                            hosted_call.observe(response_obj, stream=True)
+                        if response_obj.get("id"):
+                            state["response_id"] = response_obj["id"]
 
         def event_stream() -> Iterator[str]:
             state: Dict[str, Any] = {
@@ -6563,6 +6636,24 @@ class OpenAIGatewayService:
 
         def _invoke() -> Any:
             self.release_db_for_wait(ai_model)
+            from preloop.plugins import get_plugin_manager
+
+            meter = get_plugin_manager().get_service("hosted_spend")
+            reservation = (
+                meter.prepare(
+                    self.db,
+                    account_id=self.auth_context.user.account_id,
+                    model=ai_model,
+                    kwargs=kwargs,
+                    owns_session=self._owns_db_session,
+                )
+                if meter is not None
+                else None
+            )
+            if reservation is not None:
+                return reservation.invoke(
+                    lambda: self.upstream_backend.completion(**kwargs), stream=stream
+                )
             return self.upstream_backend.completion(**kwargs)
 
         if retry_transient:

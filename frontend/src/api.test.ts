@@ -3,6 +3,7 @@ import sinon from 'sinon';
 import { Router } from './router';
 import {
   fetchWithAuth,
+  invalidateApiCaches,
   AuthedElement,
   getFlowExecutions,
   uploadAvatar,
@@ -285,6 +286,33 @@ describe('api', () => {
       // A coalescer, not a cache: nothing is remembered after a response
       // lands, so nobody can read a stale body.
       expect(fetchStub.callCount).to.equal(2);
+    });
+
+    it('does not join a GET that was in flight when caches were invalidated', async () => {
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      fetchStub.callsFake(async () => {
+        await gate;
+        return new Response('stale', { status: 404 });
+      });
+
+      const first = fetchWithAuth('/api/v1/users?skip=0&limit=100');
+      invalidateApiCaches();
+      fetchStub.callsFake(async () => {
+        return new Response(JSON.stringify({ users: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      const second = fetchWithAuth('/api/v1/users?skip=0&limit=100');
+      release();
+      const [stale, fresh] = await Promise.all([first, second]);
+
+      expect(stale.status).to.equal(404);
+      expect(fresh.status).to.equal(200);
+      expect(await fresh.json()).to.eql({ users: [] });
     });
 
     it('never joins two writes to the same URL', async () => {

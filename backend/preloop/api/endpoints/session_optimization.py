@@ -34,6 +34,7 @@ from preloop.schemas.gateway_usage import (
     RuntimeSessionOptimizationRequest,
     RuntimeSessionOptimizationResponse,
 )
+from preloop.services.analytics_history import history_cutoff
 from preloop.services.example_optimization import (
     ExampleSessionUnavailableError,
     build_example_optimization_response,
@@ -115,6 +116,7 @@ def optimize_account_runtime_session(
         request=request or RuntimeSessionOptimizationRequest(),
         current_user=current_user,
         budget_enforcer=budget_enforcer,
+        owns_db_session=True,
     )
     # Cohort telemetry: record that a user actually viewed optimization results,
     # so the "reached-their-number" launch metric is queryable — in every
@@ -229,6 +231,12 @@ def get_account_runtime_session_optimization_job(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Optimization job not found",
+        )
+    cutoff = history_cutoff(db, account=account)
+    generated_at = job.finished_at or job.created_at
+    if cutoff is not None and generated_at.replace(tzinfo=cutoff.tzinfo) < cutoff:
+        raise HTTPException(
+            404, "Optimization job is outside available analytics history"
         )
     result: Optional[RuntimeSessionOptimizationResponse] = None
     if job.status == "succeeded" and job.result is not None:
@@ -358,6 +366,7 @@ def replay_account_runtime_session(
             n_runs=request.n_runs,
             suggestion_id=request.suggestion_id,
             budget_enforcer=budget_enforcer,
+            owns_db_session=True,
         )
     except ConsentRequiredError as exc:
         raise HTTPException(

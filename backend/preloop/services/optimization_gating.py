@@ -77,6 +77,13 @@ def authorize_analysis_model(
         Exception: Whatever the registered authorizer raises to deny access
             (typically an ``HTTPException`` with a 402 upgrade contract).
     """
-    if ai_model is None or _authorizer is None:
+    if ai_model is None:
         return
-    _authorizer(db, account=account, ai_model=ai_model, feature=feature)
+    from preloop.plugins import get_plugin_manager
+
+    # Workers discover services without entering an ASGI application lifespan.
+    authorizer = _authorizer or get_plugin_manager().get_service(
+        "analysis_model_authorizer"
+    )
+    if authorizer is not None:
+        authorizer(db, account=account, ai_model=ai_model, feature=feature)

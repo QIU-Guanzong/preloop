@@ -7,7 +7,11 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from preloop.models.crud import crud_api_usage, crud_gateway_usage_search_document
+from preloop.models.crud import (
+    crud_account,
+    crud_api_usage,
+    crud_gateway_usage_search_document,
+)
 from preloop.models.models.account import Account
 from preloop.models.models.ai_model import AIModel
 from preloop.models.models.flow import Flow
@@ -31,6 +35,7 @@ from preloop.schemas.gateway_usage import (
     GatewayUsageBySession,
 )
 from preloop.services.tool_usage_stats import ToolUsageStatsService
+from preloop.services.analytics_history import restrict_history_window
 
 #: Window every usage report falls back to when the caller names no dates.
 DEFAULT_USAGE_WINDOW_DAYS = 30
@@ -82,6 +87,9 @@ class ModelGatewayUsageService:
         exclude_retries: bool = False,
     ) -> AccountGatewayUsageSummaryResponse:
         start_date, end_date = self._normalize_period(start_date, end_date)
+        start_date, end_date = restrict_history_window(
+            self.db, account=account, start_date=start_date, end_date=end_date
+        )
         totals = crud_api_usage.get_gateway_usage_summary(
             self.db,
             account_id=str(account.id),
@@ -183,6 +191,9 @@ class ModelGatewayUsageService:
         end_date: Optional[datetime] = None,
     ) -> FlowGatewayUsageSummaryResponse:
         start_date, end_date = self._normalize_period(start_date, end_date)
+        start_date, end_date = restrict_history_window(
+            self.db, account=account, start_date=start_date, end_date=end_date
+        )
         totals = crud_api_usage.get_gateway_usage_summary(
             self.db,
             account_id=str(account.id),
@@ -253,7 +264,13 @@ class ModelGatewayUsageService:
         end_date: Optional[datetime] = None,
     ) -> AIModelGatewayUsageSummaryResponse:
         """Return gateway usage totals for one durable AI model."""
+        account = crud_account.get(self.db, id=ai_model.account_id)
+        if account is None:
+            raise ValueError("Account not found")
         start_date, end_date = self._normalize_period(start_date, end_date)
+        start_date, end_date = restrict_history_window(
+            self.db, account=account, start_date=start_date, end_date=end_date
+        )
         totals = crud_api_usage.get_gateway_usage_summary(
             self.db,
             account_id=str(ai_model.account_id),
@@ -301,7 +318,13 @@ class ModelGatewayUsageService:
         end_date: Optional[datetime] = None,
     ) -> Any:
         """Return gateway usage totals for one API key."""
+        account = crud_account.get(self.db, id=api_key.account_id)
+        if account is None:
+            raise ValueError("Account not found")
         start_date, end_date = self._normalize_period(start_date, end_date)
+        start_date, end_date = restrict_history_window(
+            self.db, account=account, start_date=start_date, end_date=end_date
+        )
         totals = crud_api_usage.get_gateway_usage_summary(
             self.db,
             account_id=str(api_key.account_id),
@@ -369,6 +392,9 @@ class ModelGatewayUsageService:
     ) -> AccountGatewayUsageSearchResponse:
         """Search or list indexed gateway interactions for one account."""
         start_date, end_date = self._normalize_period(start_date, end_date)
+        start_date, end_date = restrict_history_window(
+            self.db, account=account, start_date=start_date, end_date=end_date
+        )
         results = crud_gateway_usage_search_document.search_account_documents(
             self.db,
             account_id=str(account.id),
@@ -424,6 +450,9 @@ class ModelGatewayUsageService:
             The report response.
         """
         start_date, end_date = self._normalize_period(start_date, end_date)
+        start_date, end_date = restrict_history_window(
+            self.db, account=account, start_date=start_date, end_date=end_date
+        )
         summary = crud_api_usage.get_rate_limit_summary(
             self.db,
             account_id=str(account.id),

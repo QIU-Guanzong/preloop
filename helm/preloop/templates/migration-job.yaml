@@ -5,7 +5,7 @@ metadata:
   labels:
     {{- include "preloop.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-upgrade
+    "helm.sh/hook": pre-upgrade
     "helm.sh/hook-weight": "0"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
@@ -24,7 +24,7 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy | default "Always" }}
           command: ["/bin/sh", "-c"]
-          args: ["cd /app/backend/preloop/models && alembic upgrade head && python /app/scripts/sync_flow_presets.py --no-propagate"]
+          args: ["cd /app/backend/preloop/models && alembic upgrade head"]
           env:
             {{- include "preloop.databaseUrlEnv" . | nindent 12 }}
             {{- include "preloop.extraEnv" . | nindent 12 }}

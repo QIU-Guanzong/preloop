@@ -422,8 +422,14 @@ describe('FlowExecutionsView', () => {
     const el = (await fixture(
       html`<flow-executions-view></flow-executions-view>`
     )) as FlowExecutionsView;
-    await tick();
-    await el.updateComplete;
+    await waitUntil(
+      () =>
+        (
+          el.shadowRoot?.querySelector('[slot="count"]')?.textContent || ''
+        ).trim() === '2 of 1,412 executions',
+      'executions count should include the X-Total-Count header',
+      { timeout: 4000 }
+    );
 
     const count = el.shadowRoot?.querySelector('[slot="count"]');
     expect((count?.textContent || '').trim()).to.equal('2 of 1,412 executions');
@@ -684,6 +690,15 @@ describe('FlowExecutionsView', () => {
         },
       ]);
 
+      const cellText = () =>
+        (
+          el.shadowRoot?.querySelector('tbody .model-cell')?.textContent || ''
+        ).trim();
+      await waitUntil(
+        () => cellText() === '\u2014',
+        'model cell should render an em dash when the run has no model',
+        { timeout: 4000 }
+      );
       const cell = el.shadowRoot?.querySelector('tbody .model-cell');
       expect((cell?.textContent || '').trim()).to.equal('\u2014');
       expect(cell?.querySelector('.execution-model-more')).to.not.exist;

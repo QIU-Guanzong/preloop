@@ -54,6 +54,7 @@ class Subscription(Base):
     current_period_start = Column(DateTime(timezone=True), nullable=False)
     current_period_end = Column(DateTime(timezone=True), nullable=False)
     stripe_subscription_id = Column(String, nullable=True, unique=True)
+    billing_state = Column(JSONB, nullable=False, server_default="{}", default=dict)
 
     account = relationship("Account", back_populates="subscriptions")
     plan = relationship("Plan", back_populates="subscription")
