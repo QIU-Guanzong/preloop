@@ -613,6 +613,43 @@ def test_call_interaction_summary_model_bounds_provider_timeout(service):
     assert kwargs["num_retries"] == 0
 
 
+def test_owned_interaction_summary_releases_session_without_preserve():
+    db = MagicMock()
+    service = RuntimeSessionExplorerService(db, owns_db_session=True)
+    model = _make_ai_model()
+    completion = MagicMock()
+    completion.choices = [MagicMock()]
+    completion.choices[0].message.content = '{"title": "T"}'
+    meter = MagicMock()
+    meter.applies.return_value = True
+    hosted = MagicMock()
+    hosted.invoke.side_effect = lambda operation, stream: operation()
+    meter.prepare.return_value = hosted
+    plugin_manager = MagicMock()
+    plugin_manager.get_service.return_value = meter
+    released: dict[str, object] = {}
+
+    def fake_release(session, **kwargs):
+        released["session"] = session
+        released["kwargs"] = kwargs
+
+    with (
+        patch(
+            "preloop.models.db.gateway_session.release_gateway_session",
+            side_effect=fake_release,
+        ),
+        patch("preloop.plugins.get_plugin_manager", return_value=plugin_manager),
+        patch.object(rse_mod.litellm, "completion", return_value=completion),
+    ):
+        result = service._call_interaction_summary_model(
+            model, {"api_key": "sk-test"}, payload={}, account_id="acc"
+        )
+    assert result["title"] == "T"
+    assert released["session"] is db
+    assert released["kwargs"] == {}
+    meter.prepare.assert_called_once()
+
+
 # --- summarize_account_runtime_session_interaction -------------------------
 
 

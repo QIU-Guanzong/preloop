@@ -786,8 +786,11 @@ class RuntimeSessionExplorerService:
         reservation = None
         if meter is not None and meter.applies(model):
             if self._owns_db_session:
+                # Persist this owned unit, then return the pool slot before
+                # provider I/O. Loaded model values stay on the instance;
+                # release_gateway_session no longer takes preserve=.
                 self.db.expire_on_commit = False
-                release_gateway_session(self.db, preserve=(model,))
+                release_gateway_session(self.db)
             reservation = meter.prepare(
                 self.db,
                 account_id=account_id,
