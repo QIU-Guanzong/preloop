@@ -58,7 +58,7 @@ def list_models(
     auth_context: ModelGatewayAuthContext = Depends(get_gemini_gateway_auth_context),
 ) -> Dict[str, Any]:
     """List Gemini-compatible model aliases."""
-    return GeminiGatewayService(db, auth_context).list_models()
+    return GeminiGatewayService(db, auth_context, owns_db_session=True).list_models()
 
 
 @router.get("/models/{model_name:path}")
@@ -68,7 +68,9 @@ def get_model(
     auth_context: ModelGatewayAuthContext = Depends(get_gemini_gateway_auth_context),
 ) -> Dict[str, Any]:
     """Return Gemini-compatible metadata for one model alias."""
-    return GeminiGatewayService(db, auth_context).get_model(model_name)
+    return GeminiGatewayService(db, auth_context, owns_db_session=True).get_model(
+        model_name
+    )
 
 
 @router.post("/models/{model_name:path}:generateContent")

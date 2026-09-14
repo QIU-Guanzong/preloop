@@ -18,6 +18,10 @@ import { defaultFlowNotifications } from '../types';
 import { getAgentControlState } from '../utils/agent-control';
 import { getTrackerEventOptions } from '../constants/tracker-event-types';
 import { triggerIsAboutIssue } from '../utils/flow-trigger-subject';
+import {
+  resolveAccountPoolLabel,
+  runnerSelectionKind,
+} from '../utils/runner-pool';
 import consoleStyles from '../styles/console-styles.css?inline';
 import { consoleDialogStyles } from '../styles/console-dialog';
 import './add-tracker-modal';
@@ -238,6 +242,12 @@ export class PreloopFlowForm extends LitElement {
         display: flex;
         gap: var(--sl-spacing-2x-small);
       }
+
+      .custom-image-help {
+        margin: 0 0 var(--sl-spacing-medium) 0;
+        color: var(--sl-color-neutral-600);
+        font-size: var(--sl-font-size-small);
+      }
     `,
   ];
 
@@ -299,6 +309,13 @@ export class PreloopFlowForm extends LitElement {
     ai_model_id: string;
     agent_type: string;
   }> = [];
+
+  // The custom container image as typed. Undefined means "not touched on this
+  // form", in which case the saved value is read back from agent_config. This
+  // keeps a typed draft when the runner selection temporarily hides the
+  // editor, instead of dropping it on the next unrelated save.
+  @state()
+  private _customImageValue?: string;
 
   @state()
   private customEventType = '';
@@ -368,6 +385,9 @@ export class PreloopFlowForm extends LitElement {
         triggerType: this.triggerType,
         flowExecutionPath: this.flowExecutionPath,
         targetAgentId: this.targetAgentId,
+        customImage: this._customImageValue,
+        approvalWindowAmount: this._approvalWindowAmount,
+        approvalWindowUnit: this._approvalWindowUnit,
       })
     );
   };
@@ -406,6 +426,22 @@ export class PreloopFlowForm extends LitElement {
           this.triggerType = saved.triggerType || 'webhook';
           this.flowExecutionPath = saved.flowExecutionPath || 'ephemeral';
           this.targetAgentId = saved.targetAgentId || '';
+          if (typeof saved.customImage === 'string') {
+            this._customImageValue = saved.customImage;
+          }
+          if (
+            saved.approvalWindowAmount === null ||
+            typeof saved.approvalWindowAmount === 'number'
+          ) {
+            this._approvalWindowAmount = saved.approvalWindowAmount;
+          }
+          if (
+            saved.approvalWindowUnit === 'minutes' ||
+            saved.approvalWindowUnit === 'hours' ||
+            saved.approvalWindowUnit === 'days'
+          ) {
+            this._approvalWindowUnit = saved.approvalWindowUnit;
+          }
           restoredFromOAuth = true;
         }
       } catch (e) {
@@ -1417,6 +1453,7 @@ export class PreloopFlowForm extends LitElement {
     } else {
       delete base.host_exec_profile;
     }
+    this.applyCustomImageOverride(base);
     return base;
   }
 
@@ -1479,6 +1516,136 @@ export class PreloopFlowForm extends LitElement {
         .hostedMinutesLeft=${this.hostedMinutesLeft}
         @pool-change=${this.handleRunnerPoolChange}
       ></preloop-runner-pool-select>
+    `;
+  }
+
+  /**
+   * Applicability of the private custom image editor.
+   *
+   * A custom image only reaches a Docker container launch: hosted runs,
+   * persistent agents, and native host-exec profiles ignore it. Auto is not
+   * a promise of private execution because it falls back to hosted, so only
+   * an explicit private runner or a private account default qualifies.
+   */
+  private customImageContext(): {
+    visible: boolean;
+    inherited: boolean;
+    reason: string;
+  } {
+    if (this.flowExecutionPath === 'persistent') {
+      return {
+        visible: false,
+        inherited: false,
+        reason:
+          'Persistent agents keep their own environment, so a container image does not apply.',
+      };
+    }
+    if (this.isNativeHostExecFlow()) {
+      return {
+        visible: false,
+        inherited: false,
+        reason:
+          'Host execution profiles run directly on the runner host, so a container image does not apply.',
+      };
+    }
+    const flowPool = (this.flow.runner_pool || '').trim();
+    const inherited = flowPool === '';
+    const effective = inherited
+      ? (this.accountDefaultRunnerPool || '').trim()
+      : flowPool;
+    const kind = runnerSelectionKind(effective);
+    if (kind === 'private') {
+      return { visible: true, inherited, reason: '' };
+    }
+    if (kind === 'hosted') {
+      return {
+        visible: false,
+        inherited: false,
+        reason:
+          'Preloop hosted runs use the harness default image. Select a private runner to set a custom image.',
+      };
+    }
+    return {
+      visible: false,
+      inherited: false,
+      reason: inherited
+        ? 'The account default is Auto (private first, then hosted), which can fall back to Preloop hosted. Select a private runner to set a custom image.'
+        : 'Auto (private first, then hosted) can fall back to Preloop hosted. Select a private runner to set a custom image.',
+    };
+  }
+
+  /** True when the flow launches on the runner host instead of in a container. */
+  private isNativeHostExecFlow(): boolean {
+    return (
+      (this.flow.agent_type || '') === 'cursor' &&
+      this.hostExecProfileName() !== ''
+    );
+  }
+
+  /** First nonblank saved image, matching the runner's image precedence. */
+  private savedCustomImage(): string {
+    const config = this.parseAgentConfig(this.flow.agent_config);
+    for (const key of ['image', 'docker_image'] as const) {
+      const value = config[key];
+      if (typeof value === 'string' && value.trim() !== '') {
+        return value.trim();
+      }
+    }
+    return '';
+  }
+
+  private get customImageValue(): string {
+    return this._customImageValue !== undefined
+      ? this._customImageValue
+      : this.savedCustomImage();
+  }
+
+  private handleCustomImageInput = (event: Event) => {
+    this._customImageValue = (event.target as HTMLInputElement).value;
+    this.requestUpdate();
+  };
+
+  /**
+   * Round-trip the custom image keys only while the editor is applicable and
+   * visible. A hidden editor (persistent, native, hosted, or Auto runner)
+   * leaves whatever the API stored untouched instead of silently clearing an
+   * override the form cannot show.
+   */
+  private applyCustomImageOverride(config: Record<string, unknown>) {
+    if (!this.customImageContext().visible) {
+      return;
+    }
+    const value = this.customImageValue.trim();
+    if (value !== '') {
+      config.image = value;
+      delete config.docker_image;
+    } else {
+      delete config.image;
+      delete config.docker_image;
+    }
+  }
+
+  private renderCustomImageField() {
+    const context = this.customImageContext();
+    if (!context.visible) {
+      const saved = this.savedCustomImage();
+      return html`
+        <p class="custom-image-help" data-custom-image-unavailable>
+          ${context.reason}${saved !== '' ? ` Saved image ${saved} is kept.` : ''}
+        </p>
+      `;
+    }
+    const inheritedHelp = context.inherited
+      ? ` Account default: ${resolveAccountPoolLabel(this.accountDefaultRunnerPool, this.runners)}.`
+      : '';
+    return html`
+      <sl-input
+        label="Custom container image"
+        placeholder="registry.example.com/team/image:tag"
+        help-text=${`Runs this flow in a specific image on the private runner.${inheritedHelp} Leave blank to use the harness default.`}
+        .value=${this.customImageValue}
+        @sl-input=${this.handleCustomImageInput}
+      ></sl-input>
     `;
   }
 
@@ -1634,6 +1801,7 @@ export class PreloopFlowForm extends LitElement {
 
   private selectBlankFlow() {
     this.sourcePresetId = null;
+    this._customImageValue = undefined;
     this.flow = {
       allowed_mcp_servers: ['preloop-mcp'],
       allowed_mcp_tools: [],
@@ -1647,6 +1815,7 @@ export class PreloopFlowForm extends LitElement {
   }
 
   private async selectPreset(preset: any) {
+    this._customImageValue = undefined;
     const servers = Array.isArray(preset.allowed_mcp_servers)
       ? [...preset.allowed_mcp_servers]
       : [];
@@ -2530,6 +2699,7 @@ export class PreloopFlowForm extends LitElement {
 
           ${this.renderModelRoutingEditor(selectableModels)}
           ${this.renderRunnerPoolField()} ${this.renderHostExecProfileField()}
+          ${this.renderCustomImageField()}
 
           <sl-textarea
             class="prompt"

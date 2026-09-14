@@ -49,6 +49,35 @@ Dedicated `gateway` processes install plugin request dependencies and run `on_ga
 *   **Operator Actions:** Operators can end a session explicitly, which updates runtime state, emits audit and runtime-session events, and refreshes managed-agent summaries derived from the same principal.
 *   **Target Direction:** Introduce a runtime-wide session abstraction that can represent flow executions, independent CLI/desktop agent sessions, and later enrolled workforce entities without making `flow_execution` the universal long-term session model.
 
+### Gateway database ownership
+
+HTTP gateway dependencies use the request Session only as an engine binding.
+Authentication creates, uses and closes its own Session in a database worker,
+returning frozen user/key/OAuth identity values. The bearer, password/key hashes
+and OAuth MCP credentials are not retained. Each subsequent database phase
+creates a fresh worker-owned Session; request dependency cleanup cannot close it.
+
+| Boundary | Database work and values retained |
+| --- | --- |
+| Authentication and model listing | Recheck bearer validity, runtime revocation, tenant scope and model bindings; close the worker Session before returning scalar results. |
+| Preparation | Resolve model permissions, runtime identity and existing budget estimates. Copy the selected model's configuration and budget decision into immutable values. |
+| Policy evaluation | Load current rules in a fresh short unit, then close it before detectors or approval waits. Reload rules at the initial stream pull and required final buffered-output checks. |
+| Credential preparation | Re-read the selected model through CRUD, resolve its current credentials, persist refresh/rotation, and close before inference. Provider callbacks receive only the required access credentials; Codex refresh tokens stay inside this phase. |
+| Provider and stream | OpenAI Chat Completions, Responses (including native passthrough and its transcode fallback), Codex, Anthropic and Gemini retain scalar model/auth/budget values. No database Session spans inference, stream pulls or retry backoff. |
+| Completion and cancellation | Record usage and budget rollups through CRUD in a fresh accounting Session. Close on success or failure. Unpriced-model live price lookup is scheduled with the model id only; the lookup worker re-reads the row through CRUD on its own Session so Alibaba overlay refresh can resolve stored credentials without the HTTP snapshot carrying secrets. Repeated cancellation drains a running worker before teardown; deferred recording retains the existing local once-only behavior. |
+
+OAuth credential rotation deliberately retains its serialized database lock
+across the bounded refresh HTTP call, because concurrent single-use refreshes
+would invalidate credentials. That lock ends before inference. Optional runtime
+summaries release the primary accounting unit before provider I/O, use their own
+credential Session and close it even on preparation failure. Already-loaded
+usage/runtime rows remain local to the same synchronous accounting worker;
+credential-bearing model rows are replaced with snapshots before summary I/O.
+
+Internal replay, optimization and other caller-owned gateways keep their original
+Session and transaction boundaries. This ownership refactor adds neither atomic
+spend reservations nor provider-effect/retry deduplication.
+
 ### Budget enforcement across editions
 
 Basic BYOK spending policies run in the core gateway, including dedicated gateway

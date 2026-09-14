@@ -47,8 +47,12 @@ keys are present the runner checks `image` first. Omit `environment_profile` for
 this raw image path. An explicit nonempty override takes precedence over the
 operator's per-harness image environment variable and the generic fallback.
 Docker on the private host must be able to pull that image, whose entrypoint must
-consume the flow environment contract. The flow form currently has no dedicated
-image-override field; configure this through the API.
+consume the flow environment contract. The flow form offers a **Custom container
+image** field for ephemeral execution on a private runner (an explicit runner or
+label, or a private account default). It loads `image` first and falls back to
+`docker_image`, writes a trimmed `image` on save, and keeps the saved value
+untouched while the field is unavailable (hosted, Auto, persistent, or native
+host execution), so an override can still be managed through the API.
 
 Setup has its own timeout and failure marker, with output under
 `/workspace/evidence/setup.log`. Readiness runs on every attempt. Profiles may

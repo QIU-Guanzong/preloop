@@ -64,6 +64,36 @@ export function isAccountDefaultAuto(accountPool?: string | null): boolean {
   return key === '' || key === AUTO_RUNNER_POOL;
 }
 
+/** How the effective runner selection schedules a run. */
+export type RunnerSelectionKind = 'auto' | 'hosted' | 'private';
+
+/**
+ * Classify an effective runner token (a flow override or an inherited
+ * account default).
+ *
+ * Only a specific runner name, id, or label promises private execution:
+ * ``auto`` may fall back to Preloop hosted and ``server`` is hosted, so a
+ * container image override only applies to the ``private`` kind.
+ *
+ * Args:
+ *   token: Runner pool value saved on the flow or account.
+ *
+ * Returns:
+ *   ``private``, ``hosted``, or ``auto``.
+ */
+export function runnerSelectionKind(
+  token?: string | null
+): RunnerSelectionKind {
+  const key = poolKey(token);
+  if (key === '' || key === AUTO_RUNNER_POOL) {
+    return 'auto';
+  }
+  if (key === SERVER_RUNNER_POOL) {
+    return 'hosted';
+  }
+  return 'private';
+}
+
 function isAutoToken(value?: string | null): boolean {
   return poolKey(value) === AUTO_RUNNER_POOL;
 }

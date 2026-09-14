@@ -8,6 +8,11 @@ Implementation PRs can use [durable feedback subscriptions](docs/guide/flows/dur
 Private-runner log batches use stable delivery identities and acknowledgments so a reconnect can replay unconfirmed output without duplicating stored rows. Socket writes have deadlines, live log broadcasts have a bounded budget, and runner lease release shares the terminal result transaction. Publication and native-session markers are saved while output arrives. The execution console refreshes runner assignment and failure details at lifecycle transitions; an execution without an observed runtime is shown as unassigned.
 
 
+HTTP model gateways use immutable execution values and fresh worker-owned database
+units for authentication, preparation and accounting. Provider waits and stream
+pulls retain no Session. See [Gateway database ownership](docs/architecture/gateway.md#gateway-database-ownership)
+for protocol boundaries, cancellation and the serialized OAuth rotation exception.
+
 The [account kill switch](docs/guide/account-kill-switch.md) serializes halt transitions and runtime admission on the account row. Audit records and durable execution stop intent share the transition transaction. Monitors and recovery workers distinguish a stop request from confirmed runtime termination; approval deadlines recover once by their actual frozen interval.
 
 Database worker ownership, row-lock compatibility, and cancellation rules are
