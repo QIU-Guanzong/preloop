@@ -224,6 +224,42 @@ async def test_test_connection_and_list_orgs_uses_installation_for_app_tracker(
 
 @pytest.mark.asyncio
 @patch("preloop.api.endpoints.trackers.create_tracker_client")
+async def test_test_connection_and_list_orgs_rejects_app_tracker_without_installation(
+    mock_create_tracker_client, client: TestClient, db_session, test_user
+):
+    """An App tracker whose installation row was removed gets a clear 400.
+
+    The FK is ``ondelete="SET NULL"``, so a deleted installation leaves the
+    tracker with ``auth_type="github_app"`` and no ``oauth_installation``.
+    """
+    tracker = Tracker(
+        name="Orphaned GitHub App Tracker",
+        tracker_type="github",
+        url="https://github.com",
+        account_id=test_user.account_id,
+        api_key=None,
+        auth_type="github_app",
+        oauth_installation_id=None,
+    )
+    db_session.add(tracker)
+    db_session.commit()
+
+    response = client.post(
+        "/api/v1/trackers/test-and-list-orgs",
+        json={
+            "tracker_id": str(tracker.id),
+            "tracker_type": "github",
+            "url": "https://github.com",
+            "api_key": "unchanged",
+        },
+    )
+    assert response.status_code == 400
+    assert "no longer exists" in response.json()["detail"]
+    mock_create_tracker_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("preloop.api.endpoints.trackers.create_tracker_client")
 async def test_test_connection_and_list_orgs_keeps_pat_for_token_tracker(
     mock_create_tracker_client, client: TestClient, db_session, test_user
 ):

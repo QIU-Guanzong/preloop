@@ -611,6 +611,13 @@ export class AddTrackerModal extends LitElement {
           this.errorMessage = response.message.split('\n')[0];
           return;
         }
+        if (!response.orgs || response.orgs.length === 0) {
+          // An empty tree would let Save write scope_rules: [] and wipe the
+          // tracker's scope. Keep the existing rules and explain instead.
+          this.errorMessage =
+            'This installation has no accessible repositories; grant the App access on GitHub first.';
+          return;
+        }
         this.orgs = response.orgs;
         this.step = 2;
         return;

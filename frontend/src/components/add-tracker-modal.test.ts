@@ -440,6 +440,73 @@ describe('AddTrackerModal', () => {
               },
             ]);
           });
+
+          it('keeps the existing scope when the installation sees no repositories', async () => {
+            const { stubs, api: stubbedApi } = buildApi();
+            stubs.validateTrackerToken.resolves({ success: true, orgs: [] });
+
+            element = await fixture(
+              html`<add-tracker-modal
+                ._api=${stubbedApi}
+                .tracker=${appTracker}
+              ></add-tracker-modal>`
+            );
+            await element.updateComplete;
+
+            const nextButton = element.shadowRoot?.querySelector<HTMLElement>(
+              'sl-button[variant="primary"]'
+            );
+            nextButton?.click();
+            await waitUntil(
+              () => !!element.shadowRoot?.querySelector('.error'),
+              'error message did not render'
+            );
+
+            expect(stubs.validateTrackerToken).to.have.been.calledOnce;
+            const errorMessage = element.shadowRoot?.querySelector('.error');
+            expect(errorMessage?.textContent).to.contain(
+              'no accessible repositories'
+            );
+            // Still on step 1: Save is not offered, so scope_rules: [] is
+            // never written.
+            expect(element.shadowRoot?.querySelector('h2')).to.not.exist;
+            expect(
+              element.shadowRoot
+                ?.querySelector('sl-button[variant="primary"]')
+                ?.textContent?.trim()
+            ).to.equal('Next');
+            expect(stubs.updateTracker).to.not.have.been.called;
+          });
+
+          it('shows the backend error detail when listing owners fails', async () => {
+            const { stubs, api: stubbedApi } = buildApi();
+            stubs.validateTrackerToken.rejects(
+              new Error(
+                'Tracker is bound to an OAuth App installation that no longer exists.'
+              )
+            );
+
+            element = await fixture(
+              html`<add-tracker-modal
+                ._api=${stubbedApi}
+                .tracker=${appTracker}
+              ></add-tracker-modal>`
+            );
+            await element.updateComplete;
+
+            element.shadowRoot
+              ?.querySelector<HTMLElement>('sl-button[variant="primary"]')
+              ?.click();
+            await waitUntil(
+              () => !!element.shadowRoot?.querySelector('.error'),
+              'error message did not render'
+            );
+
+            expect(
+              element.shadowRoot?.querySelector('.error')?.textContent
+            ).to.contain('no longer exists');
+            expect(stubs.updateTracker).to.not.have.been.called;
+          });
         });
 
         describe('existing installation picker', () => {

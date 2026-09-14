@@ -2158,7 +2158,11 @@ export async function validateTrackerToken(
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.message || 'Failed to validate token');
+    // FastAPI HTTPException bodies carry `detail`; keep `message` for
+    // older/non-standard error shapes.
+    throw new Error(
+      errorData.detail ?? errorData.message ?? 'Failed to validate token'
+    );
   }
   return response.json();
 }
@@ -2196,7 +2200,9 @@ export async function listProjectsForOrg(
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
     throw new Error(
-      errorData.message || 'Failed to list projects for organization'
+      errorData.detail ??
+        errorData.message ??
+        'Failed to list projects for organization'
     );
   }
   return response.json();
