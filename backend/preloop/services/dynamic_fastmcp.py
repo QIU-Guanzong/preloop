@@ -12,7 +12,7 @@ import json
 import logging
 import uuid
 from contextvars import ContextVar
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
 from fastmcp import FastMCP
 from fastmcp.tools import Tool
@@ -262,6 +262,120 @@ def apply_output_filters(
             exc,
         )
         return result_items
+
+
+#: Python annotations used for the wrapped function signature of a proxied
+#: tool. FastMCP validates ``tools/call`` arguments against that signature, so
+#: entries must accept every value the upstream ``inputSchema`` allows --
+#: anything rejected here never reaches the upstream server.
+_JSON_SCHEMA_PYTHON_TYPES: Dict[str, str] = {
+    "string": "str",
+    "integer": "int",
+    "number": "float",
+    "boolean": "bool",
+    "array": "List[Any]",
+    "object": "Dict[str, Any]",
+}
+
+
+def _schema_type_names(param_def: Dict[str, Any]) -> List[str]:
+    """Collect the primitive JSON Schema type names a property allows.
+
+    Handles both ``"type": "array"`` and the union form upstream servers
+    commonly emit for nullable properties, ``"type": ["null", "array"]``, as
+    well as ``anyOf``/``oneOf`` alternatives.
+
+    Args:
+        param_def: JSON Schema fragment for a single tool parameter.
+
+    Returns:
+        De-duplicated type names in declaration order; empty when the schema
+        does not declare a primitive type.
+    """
+    raw_type = param_def.get("type")
+    if isinstance(raw_type, str):
+        return [raw_type]
+    if isinstance(raw_type, list):
+        return [t for t in raw_type if isinstance(t, str)]
+
+    # `anyOf`/`oneOf` are the other common way nullable unions are expressed.
+    for key in ("anyOf", "oneOf"):
+        alternatives = param_def.get(key)
+        if not isinstance(alternatives, list):
+            continue
+        names: List[str] = []
+        for alternative in alternatives:
+            if not isinstance(alternative, dict):
+                continue
+            alternative_type = alternative.get("type")
+            if isinstance(alternative_type, str):
+                names.append(alternative_type)
+            elif isinstance(alternative_type, list):
+                names.extend(t for t in alternative_type if isinstance(t, str))
+        if names:
+            return names
+
+    return []
+
+
+def _python_type_for_schema(param_def: Dict[str, Any]) -> str:
+    """Map a JSON Schema parameter to a Python annotation.
+
+    The annotation feeds the generated wrapper signature that FastMCP uses to
+    validate proxied ``tools/call`` arguments, so it must be at least as
+    permissive as the schema advertised in ``tools/list``. Unknown or
+    unrepresentable shapes fall back to ``Any`` (forwarded unchanged) instead
+    of the previous ``str`` default, which rejected every array argument whose
+    schema used a union type such as ``["null", "array"]``.
+
+    Args:
+        param_def: JSON Schema fragment for a single tool parameter.
+
+    Returns:
+        A Python annotation expression, e.g. ``str``, ``List[Any]`` or
+        ``Optional[List[Any]]``.
+    """
+    type_names = _schema_type_names(param_def)
+    if not type_names:
+        return "Any"
+
+    nullable = "null" in type_names
+    mapped: List[str] = []
+    for type_name in type_names:
+        if type_name == "null":
+            continue
+        python_type = _JSON_SCHEMA_PYTHON_TYPES.get(type_name)
+        if python_type is None:
+            # A shape we cannot express (e.g. a custom keyword); accept
+            # anything rather than block a call the upstream would allow.
+            return "Any"
+        if python_type not in mapped:
+            mapped.append(python_type)
+
+    if not mapped:
+        # Only `null` was declared, so any value is acceptable.
+        return "Any"
+    if len(mapped) == 1:
+        base = mapped[0]
+        return f"Optional[{base}]" if nullable else base
+    union = ", ".join(mapped)
+    return f"Optional[Union[{union}]]" if nullable else f"Union[{union}]"
+
+
+def _optional_annotation(annotation: str) -> str:
+    """Wrap an annotation in ``Optional[...]`` unless it already allows None.
+
+    Args:
+        annotation: Python annotation expression.
+
+    Returns:
+        The annotation, made nullable exactly once.
+    """
+    if annotation == "Any":
+        return annotation
+    if annotation.startswith("Optional["):
+        return annotation
+    return f"Optional[{annotation}]"
 
 
 class DynamicFastMCP(FastMCP):
@@ -700,27 +814,18 @@ class DynamicFastMCP(FastMCP):
 
         for param_name, param_def in properties.items():
             param_names.append(param_name)
-            param_type = param_def.get("type", "string")
+            if not isinstance(param_def, dict):
+                param_def = {}
 
-            # Map JSON Schema types to Python type names
-            if param_type == "string":
-                type_str = "str"
-            elif param_type == "integer":
-                type_str = "int"
-            elif param_type == "number":
-                type_str = "float"
-            elif param_type == "boolean":
-                type_str = "bool"
-            elif param_type == "array":
-                type_str = "list"
-            elif param_type == "object":
-                type_str = "dict"
-            else:
-                type_str = "str"  # Default to string
+            # Mirror the advertised JSON Schema instead of flattening complex
+            # shapes (arrays, unions, objects) to `str`.
+            type_str = _python_type_for_schema(param_def)
 
             # Add Optional if not required
             if param_name not in required_params:
-                opt_params.append(f"{param_name}: Optional[{type_str}] = None")
+                opt_params.append(
+                    f"{param_name}: {_optional_annotation(type_str)} = None"
+                )
             else:
                 req_params.append(f"{param_name}: {type_str}")
 
@@ -874,6 +979,10 @@ async def {internal_name}({params_str}) -> str:
             "get_mcp_client_pool": get_mcp_client_pool,
             "apply_output_filters": apply_output_filters,
             "Optional": Optional,
+            "Union": Union,
+            "Any": Any,
+            "List": List,
+            "Dict": Dict,
             "Context": Context,
             "_rule_workflow_id_var": _rule_workflow_id_var,
             "_correlation_id_var": _correlation_id_var,

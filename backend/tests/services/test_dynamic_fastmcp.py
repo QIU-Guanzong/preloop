@@ -10,6 +10,7 @@ from fastmcp.tools import Tool
 
 from preloop.services.dynamic_fastmcp import (
     DynamicFastMCP,
+    _python_type_for_schema,
     create_dynamic_mcp_server,
     create_user_context_from_scope,
 )
@@ -1089,6 +1090,52 @@ class TestMCPCallTool:
         assert result.content[0].text == "Paid"
 
 
+class TestPythonTypeForSchema:
+    """Test the JSON Schema -> Python annotation mapping for proxied tools."""
+
+    def test_scalar_types(self):
+        assert _python_type_for_schema({"type": "string"}) == "str"
+        assert _python_type_for_schema({"type": "integer"}) == "int"
+        assert _python_type_for_schema({"type": "number"}) == "float"
+        assert _python_type_for_schema({"type": "boolean"}) == "bool"
+
+    def test_array_and_object_types(self):
+        """Arrays (with items) and objects keep their container type."""
+        assert (
+            _python_type_for_schema({"type": "array", "items": {"type": "string"}})
+            == "List[Any]"
+        )
+        assert _python_type_for_schema({"type": "object"}) == "Dict[str, Any]"
+
+    def test_nullable_array_union(self):
+        """`["null", "array"]` (the upstream shape in issue #616) stays an array."""
+        assert (
+            _python_type_for_schema(
+                {"type": ["null", "array"], "items": {"type": "string"}}
+            )
+            == "Optional[List[Any]]"
+        )
+
+    def test_anyof_nullable_array(self):
+        assert (
+            _python_type_for_schema({"anyOf": [{"type": "array"}, {"type": "null"}]})
+            == "Optional[List[Any]]"
+        )
+
+    def test_union_of_scalars(self):
+        assert (
+            _python_type_for_schema({"type": ["string", "integer"]})
+            == "Union[str, int]"
+        )
+
+    def test_unknown_or_missing_type_is_permissive(self):
+        """Unrecognized shapes must not be narrowed to `str`."""
+        assert _python_type_for_schema({}) == "Any"
+        assert _python_type_for_schema({"type": "null"}) == "Any"
+        assert _python_type_for_schema({"type": "frobnicate"}) == "Any"
+        assert _python_type_for_schema({"type": ["null", "frobnicate"]}) == "Any"
+
+
 class TestCreateProxiedToolWrapper:
     """Test _create_proxied_tool_wrapper method."""
 
@@ -1149,6 +1196,94 @@ class TestCreateProxiedToolWrapper:
         )
 
         assert callable(wrapper)
+
+    async def test_wrapper_accepts_array_arguments(self, dynamic_mcp, user_context):
+        """Array arguments declared as `["null", "array"]` pass internal validation."""
+        wrapper = dynamic_mcp._create_proxied_tool_wrapper(
+            tool_name="example_directory_lookup",
+            server_id="server-123",
+            account_id=user_context.account_id,
+            description="Example directory lookup",
+            input_schema={
+                "properties": {
+                    "user_keys": {
+                        "type": ["null", "array"],
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["user_keys"],
+            },
+        )
+
+        tool = Tool.from_function(wrapper)
+
+        # Without a user context the wrapper short-circuits with "Access
+        # denied"; reaching that branch at all proves FastMCP accepted the
+        # array argument instead of rejecting it as an invalid string.
+        result = await tool.run({"user_keys": ["Example User"]})
+
+        assert "Access denied" in result.content[0].text
+
+    async def test_wrapper_forwards_array_arguments_unchanged(
+        self, dynamic_mcp, user_context, monkeypatch
+    ):
+        """Arrays reach the approval/upstream call with list values intact."""
+        dynamic_mcp.set_user_context_provider(lambda: user_context)
+        captured = {}
+
+        async def fake_require_approval(**kwargs):
+            captured.update(kwargs)
+            return False, "Denied by test"
+
+        monkeypatch.setattr(
+            "preloop.services.approval_helper.require_approval",
+            fake_require_approval,
+        )
+
+        wrapper = dynamic_mcp._create_proxied_tool_wrapper(
+            tool_name="example_directory_lookup",
+            server_id="server-123",
+            account_id=user_context.account_id,
+            description="Example directory lookup",
+            input_schema={
+                "properties": {
+                    "user_keys": {
+                        "type": ["null", "array"],
+                        "items": {"type": "string"},
+                    },
+                    "labels": {"type": "array", "items": {"type": "string"}},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["user_keys"],
+            },
+        )
+
+        tool = Tool.from_function(wrapper)
+        await tool.run(
+            {"user_keys": ["Example User"], "labels": ["a", "b"], "limit": 5}
+        )
+
+        assert captured["arguments"]["user_keys"] == ["Example User"]
+        assert captured["arguments"]["labels"] == ["a", "b"]
+        assert captured["arguments"]["limit"] == 5
+
+    async def test_wrapper_accepts_untyped_object_argument(
+        self, dynamic_mcp, user_context
+    ):
+        """A parameter with no declared type is forwarded instead of rejected."""
+        wrapper = dynamic_mcp._create_proxied_tool_wrapper(
+            tool_name="example_tool",
+            server_id="server-123",
+            account_id=user_context.account_id,
+            description="Example tool",
+            input_schema={
+                "properties": {"payload": {"description": "free-form"}},
+                "required": ["payload"],
+            },
+        )
+
+        tool = Tool.from_function(wrapper)
+        await tool.run({"payload": {"anything": [1, 2, 3]}})
 
 
 class TestHelperFunctions:
