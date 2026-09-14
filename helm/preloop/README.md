@@ -243,7 +243,7 @@ load with `--set` or a values overlay:
 | Component | Default request | Default limit |
 |-----------|-----------------|---------------|
 | API | `50m` CPU / `512Mi` | `2` CPU / `2Gi` |
-| Gateway | `100m` CPU / `256Mi` | `1` CPU / `1Gi` |
+| Gateway | `100m` CPU / `768Mi` | `1` CPU / `2Gi` |
 | Worker | `50m` CPU / `512Mi` | `2` CPU / `2Gi` |
 | Console | `50m` CPU / `64Mi` | `200m` CPU / `256Mi` |
 
@@ -254,8 +254,15 @@ helm upgrade preloop ./helm/preloop \
   --set gateway.resources.requests.memory=512Mi
 ```
 
-Gateway HPA is on by default (`gateway.autoscaling`). API HPA is off until
-you set `autoscaling.enabled: true`.
+Gateway HPA is on by default (`gateway.autoscaling`, min 2 / max 5). Memory
+target is 90% of an honest 768Mi request: idle RSS on hosted clusters is
+~650Mi, so a 256Mi request pinned HPA at maxReplicas even with idle CPU.
+API HPA is off until you set `autoscaling.enabled: true`.
+
+Flow-execution workers babysit hosted agent Jobs. One process may run
+`flowExecution.maxInflight` monitors at once (default 10) and uses
+`flowExecution.databasePool` so those short-lived sessions are not squeezed
+through the generic worker 2+4 pool.
 
 ## Uninstalling the Chart
 

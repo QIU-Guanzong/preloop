@@ -167,6 +167,7 @@ _openrouter_cache = _PriceMapCache("openrouter")
 
 # candidate name -> monotonic time of the failed lookup (negative cache).
 _negative_cache: Dict[str, float] = {}
+_MAX_NEGATIVE_CACHE_ENTRIES = 4096
 # candidate names with a lookup currently in flight.
 _pending_lookups: set[str] = set()
 # Bound concurrent live lookups so unknown models cannot spawn unbounded threads.
@@ -177,6 +178,23 @@ def _model_log_token(model_name: str) -> str:
     """Return a stable log token that never embeds the raw model name."""
     digest = hashlib.sha256(model_name.encode("utf-8", errors="replace")).hexdigest()
     return f"model#{digest[:12]}"
+
+
+def _remember_negative_lookup(key: str, stamp: Optional[float] = None) -> None:
+    """Record a failed lookup. Caller must hold ``_lookup_lock``."""
+    now = stamp if stamp is not None else time.monotonic()
+    if len(_negative_cache) >= _MAX_NEGATIVE_CACHE_ENTRIES:
+        expired = [
+            cached_key
+            for cached_key, cached_at in _negative_cache.items()
+            if now - cached_at >= _NEGATIVE_TTL_SECONDS
+        ]
+        for cached_key in expired:
+            _negative_cache.pop(cached_key, None)
+        while len(_negative_cache) >= _MAX_NEGATIVE_CACHE_ENTRIES:
+            oldest = min(_negative_cache, key=_negative_cache.get)  # type: ignore[arg-type]
+            _negative_cache.pop(oldest, None)
+    _negative_cache[key] = now
 
 
 def load_catalog(path: Optional[Path] = None, *, force: bool = False) -> bool:
@@ -503,7 +521,7 @@ def lookup_model_price_now(candidates: List[str]) -> Optional[str]:
         stamp = time.monotonic()
         for candidate in fresh:
             if candidate != matched_key:
-                _negative_cache[candidate] = stamp
+                _remember_negative_lookup(candidate, stamp)
     return matched_key
 
 
@@ -602,7 +620,7 @@ def schedule_price_lookup(
                     _reprice_usage_row(api_usage_id)
                 elif matched is not CatalogRefreshStatus.ingested:
                     with _lookup_lock:
-                        _negative_cache[dedupe_key] = time.monotonic()
+                        _remember_negative_lookup(dedupe_key)
             except Exception:  # noqa: BLE001 - background best-effort
                 logger.exception("Live price lookup failed for %s", log_token)
             finally:

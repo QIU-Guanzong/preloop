@@ -53,4 +53,14 @@ out=$(helm template t "$CHART" -f "$CHART/values-backup-prod.yaml" \
 echo "$out" | grep -q "endpointURL: https://minio.example.com" || fail "endpointURL not rendered"
 echo "$out" | grep -q "serverName: preloop-db-v2" || fail "serverName not rendered"
 
+echo "==> service role, flow inflight, gateway memory request"
+out=$(helm template t "$CHART")
+echo "$out" | grep -A1 'name: PRELOOP_SERVICE_ROLE' | grep -q 'value: "gateway"' \
+  || fail "PRELOOP_SERVICE_ROLE=gateway missing"
+echo "$out" | grep -A1 'name: PRELOOP_SERVICE_ROLE' | grep -q 'value: "api"' \
+  || fail "PRELOOP_SERVICE_ROLE=api missing"
+echo "$out" | grep -A1 'name: FLOW_EXECUTION_MAX_INFLIGHT' | grep -q 'value: "10"' \
+  || fail "FLOW_EXECUTION_MAX_INFLIGHT missing"
+echo "$out" | grep -q 'memory: 768Mi' || fail "gateway memory request 768Mi missing"
+
 echo "All helm render checks passed."

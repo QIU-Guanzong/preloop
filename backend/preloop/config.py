@@ -989,6 +989,14 @@ class Settings(BaseSettings):
             "active executions (deploy handoff safety net)."
         ),
     )
+    flow_execution_max_inflight: int = Field(
+        10,
+        description=(
+            "How many execute_flow / resume_flow_execution handlers one "
+            "flow-execution worker process may run at once. The monitor is "
+            "wait-bound; the cap is a semaphore, not one NATS fetch."
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -1323,6 +1331,9 @@ class Settings(BaseSettings):
             ),
             flow_execution_reclaim_interval_seconds=int(
                 os.getenv("FLOW_EXECUTION_RECLAIM_INTERVAL_SECONDS", "30")
+            ),
+            flow_execution_max_inflight=int(
+                os.getenv("FLOW_EXECUTION_MAX_INFLIGHT", "10")
             ),
             stripe_secret_key=stripe_secret_key,
             stripe_webhook_secret=stripe_webhook_secret,

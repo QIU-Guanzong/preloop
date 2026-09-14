@@ -5,7 +5,7 @@ from nats.js.api import StreamConfig
 from nats.js.errors import APIError
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 
 import json
@@ -133,7 +133,18 @@ class EventBus:
         )
 
         try:
-            ack = await self.js.publish(subject, payload_bytes)
+            publish_kwargs: dict[str, Any] = {}
+            execution_id = kwargs.get("execution_id")
+            if (
+                function_name in {"execute_flow", "resume_flow_execution"}
+                and execution_id
+            ):
+                # Workqueue duplicate window is 2m. Reaper republish of the
+                # same unclaimed execution collapses instead of stacking.
+                publish_kwargs["headers"] = {
+                    "Nats-Msg-Id": f"{function_name}:{execution_id}"
+                }
+            ack = await self.js.publish(subject, payload_bytes, **publish_kwargs)
             logger.info(
                 f"Published task '{function_name}', Stream: {ack.stream}, Seq: {ack.seq}"
             )

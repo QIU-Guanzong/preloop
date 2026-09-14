@@ -50,6 +50,16 @@ flowExecution:
   # Long enough to stop fetches, cancel in-flight monitors, and re-dispatch
   # owned claims — not to wait for agent Jobs to finish.
   terminationGracePeriodSeconds: 90
+  # How many hosted-agent monitors one flow-execution worker process may
+  # babysit at once. The loop is wait-bound (poll/heartbeat/logs); this is a
+  # semaphore, not "one NATS fetch equals one replica".
+  maxInflight: 10
+  # SQLAlchemy pool for the flow-execution pool only. Ten inflight monitors
+  # take short-lived sessions around claim/heartbeat/status writes; the
+  # generic worker 2+4 ceiling would stall the 8th concurrent monitor.
+  databasePool:
+    size: 10
+    maxOverflow: 4
   # Bounded retry around CREATING the agent Job in Kubernetes. Covers the
   # api-server being briefly unavailable (5xx/429) and name conflicts with a
   # finished-but-not-yet-collected Job from an earlier attempt. Attempts are
@@ -255,19 +265,26 @@ gateway:
   # pod still terminates in ~10s. Aligned with proxy.readTimeout above — any
   # stream the proxies are still willing to carry must be allowed to finish.
   terminationGracePeriodSeconds: 900
+  # Idle RSS on hosted clusters is ~630-700Mi (LiteLLM + price catalog +
+  # uvicorn). A 256Mi request made HPA report ~250% memory and pin at
+  # maxReplicas even though CPU was 5-55m. Request 768Mi so utilization
+  # is honest (~85% idle); limit 2Gi is spike headroom, not a reason to
+  # run more replicas. More replicas copy the same idle RSS.
   resources:
     requests:
       cpu: "100m"
-      memory: "256Mi"
+      memory: "768Mi"
     limits:
       cpu: "1"
-      memory: "1Gi"
+      memory: "2Gi"
   autoscaling:
     enabled: true
-    minReplicas: 1
+    minReplicas: 2
     maxReplicas: 5
     targetCPUUtilizationPercentage: 75
-    targetMemoryUtilizationPercentage: 80
+    # 90% of 768Mi is ~691Mi. Idle RSS sits just under that, so HPA can
+    # scale down; a real leak or capture-buffer spike still scales up.
+    targetMemoryUtilizationPercentage: 90
 
 # Autoscaling configuration (API)
 autoscaling:
@@ -379,22 +396,31 @@ database:
   #   ceiling per pod = (size + maxOverflow) * 2 + 1
   #
   # The previous comment assumed 1 api pod and 5 worker pods; production
-  # actually runs api=2, gateway=5 (HPA max), workers/monitor/scheduler=8.
+  # actually runs api=2, gateway HPA (min 2 / max 5), and several worker
+  # pools. Flow-execution pods use flowExecution.databasePool, not worker 2+4.
   #
-  # Budget with the values below (api=2, gateway=5, worker=8 pods):
-  #   api     2 x (8+12):  steady  34, ceiling  82
-  #   gateway 5 x (6+14):  steady  65, ceiling 205
-  #   worker  8 x (2+4):   steady  40, ceiling 104
-  #   TOTAL:               steady 139, ceiling 391
+  # Budget with the values below (api=2, gateway min 2, flow-execution=3,
+  # other workers=5):
+  #   api              2 x (8+12):  steady  34, ceiling  82
+  #   gateway (min 2)  2 x (6+14):  steady  26, ceiling  82
+  #   gateway (max 5)  5 x (6+14):  steady  65, ceiling 205
+  #   other workers     5 x (2+4):   steady  25, ceiling  65
+  #   flow-execution    3 x (10+4):  steady  63, ceiling  87
+  #   TOTAL at gw min 2:             steady 148, ceiling 316
+  #   TOTAL at gw max 5:             steady 187, ceiling 439
   #
-  # Steady state (139) fits inside max_connections=200 minus the 3 superuser
-  # reserved slots, with ~58 spare for jobs and psql. The absolute ceiling is
-  # deliberately oversubscribed: overflow connections are short-lived and
-  # never all claimed at once (measured production peak is ~65 total). The
-  # 2026-08-08 incident was per-pod starvation, not a global shortage -- one
-  # gateway pod exhausted its 10-connection ceiling while the server as a
-  # whole was 65/200. Raising the gateway ceiling from 10 to 20 per pod is
-  # what fixes it.
+  # Steady state at gateway min (148) and max (187) both fit inside
+  # max_connections=200 minus the 3 superuser reserved slots. The absolute
+  # ceiling is deliberately oversubscribed: overflow connections are
+  # short-lived and never all claimed at once (measured production peak is
+  # ~65 total). Do not raise gateway maxReplicas above 5 without raising
+  # max_connections or adding PgBouncer. The 2026-08-08 incident was
+  # per-pod starvation, not a global shortage -- one gateway pod exhausted
+  # its 10-connection ceiling while the server as a whole was 65/200.
+  # Raising the gateway ceiling from 10 to 20 per pod is what fixes it.
+  # Memory HPA used to pin at 5 replicas because the 256Mi request sat
+  # below idle RSS (~650Mi); the request is now 768Mi so utilization
+  # tracks real pressure.
   #
   # Approval waits no longer hold connections: the approval paths used to
   # keep one async-pool connection checked out per pending approval for the

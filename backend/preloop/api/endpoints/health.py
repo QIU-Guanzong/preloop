@@ -1,6 +1,7 @@
 """Health check endpoints."""
 
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any, Dict
 
@@ -126,6 +127,12 @@ def health_check() -> Dict[str, Any]:
     # traffic on fewer pods. So this is visible, not fatal.
     health_status["db_pool"] = _pool_health()
     health_status["api_usage_queue"] = _usage_queue_health()
+
+    # Dedicated gateway pods do not run MCP. Importing those modules on the
+    # readiness probe would undo the create_app import split.
+    if os.getenv("PRELOOP_SERVICE_ROLE", "all").lower() not in {"all", "api"}:
+        health_status["mcp_server"] = "not_applicable"
+        return health_status
 
     # Check MCP server availability
     try:

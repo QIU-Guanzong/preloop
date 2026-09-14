@@ -493,3 +493,20 @@ def test_reset_lookup_state_clears_both_caches() -> None:
     assert state["remote"]["failed_at"] == 0.0
     assert state["openrouter"]["map"] is None
     assert state["openrouter"]["failed_at"] == 0.0
+
+
+def test_negative_cache_evicts_oldest_when_full() -> None:
+    model_price_catalog.reset_lookup_state_for_tests()
+    original_max = model_price_catalog._MAX_NEGATIVE_CACHE_ENTRIES
+    model_price_catalog._MAX_NEGATIVE_CACHE_ENTRIES = 2
+    try:
+        with model_price_catalog._lookup_lock:
+            model_price_catalog._remember_negative_lookup("a", stamp=1.0)
+            model_price_catalog._remember_negative_lookup("b", stamp=2.0)
+            model_price_catalog._remember_negative_lookup("c", stamp=3.0)
+            assert "a" not in model_price_catalog._negative_cache
+            assert model_price_catalog._negative_cache["c"] == 3.0
+            assert len(model_price_catalog._negative_cache) == 2
+    finally:
+        model_price_catalog._MAX_NEGATIVE_CACHE_ENTRIES = original_max
+        model_price_catalog.reset_lookup_state_for_tests()

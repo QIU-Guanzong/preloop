@@ -7,12 +7,12 @@ metadata:
     app.kubernetes.io/component: gateway
     app: gateway
 spec:
-  {{- if not .Values.autoscaling.enabled }}
+  {{- if not .Values.gateway.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
   # Zero-downtime rollouts: never take a serving pod down before its
   # replacement is Ready (surge first, drain after). Critical for the
-  # gateway, which often runs a single replica under HPA minReplicas=1.
+  # gateway, which often runs two replicas under HPA minReplicas=2.
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -60,6 +60,8 @@ spec:
               value: "8000"
             - name: DEBUG
               value: {{ .Values.environment.debug | quote }}
+            - name: PRELOOP_SERVICE_ROLE
+              value: "gateway"
             - name: MODEL_GATEWAY_CAPTURE_CONTENT
               value: {{ .Values.environment.modelGatewayCaptureContent | quote }}
             - name: MODEL_GATEWAY_UPSTREAM_RETRY_MAX_ATTEMPTS

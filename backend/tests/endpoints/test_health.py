@@ -1,5 +1,6 @@
 """Tests for health check endpoint."""
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -282,3 +283,21 @@ class TestReadinessPoolReporting:
             "dropped",
             "failed",
         }
+
+    def test_gateway_role_skips_mcp_imports(self, mock_db_session):
+        """Readiness on a dedicated gateway must not import MCP HTTP."""
+        from preloop.api.endpoints.health import health_check
+
+        mock_db_session.execute.return_value = None
+        with patch.dict(os.environ, {"PRELOOP_SERVICE_ROLE": "gateway"}, clear=False):
+            with (
+                patch("preloop.services.mcp_http.get_mcp_lifespan_manager") as mock_mcp,
+                patch(
+                    "preloop.services.mcp_client_pool.get_mcp_client_pool"
+                ) as mock_pool,
+            ):
+                result = health_check()
+
+        assert result["mcp_server"] == "not_applicable"
+        mock_mcp.assert_not_called()
+        mock_pool.assert_not_called()
