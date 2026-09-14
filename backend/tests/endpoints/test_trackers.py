@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from preloop.api.endpoints.trackers import _unique_tracker_name
+from preloop.models.models.github_app_installation import OAuthAppInstallation
 from preloop.models.models.tracker import Tracker
 
 
@@ -147,6 +148,187 @@ async def test_list_projects_for_org_uses_correct_args(
             "project_id": "123",
         },
     )
+
+
+def _make_github_app_tracker(db_session, test_user) -> Tracker:
+    """Persist a GitHub App tracker bound to a synthetic installation."""
+    installation = OAuthAppInstallation(
+        provider="github",
+        external_id=4242,
+        target_type="Organization",
+        target_id=9001,
+        target_name="example-org",
+        account_id=test_user.account_id,
+    )
+    db_session.add(installation)
+    db_session.flush()
+    tracker = Tracker(
+        name="GitHub App Tracker",
+        tracker_type="github",
+        url="https://github.com",
+        account_id=test_user.account_id,
+        api_key=None,
+        auth_type="github_app",
+        oauth_installation_id=installation.id,
+    )
+    db_session.add(tracker)
+    db_session.commit()
+    return tracker
+
+
+@pytest.mark.asyncio
+@patch("preloop.api.endpoints.trackers.create_tracker_client")
+async def test_test_connection_and_list_orgs_uses_installation_for_app_tracker(
+    mock_create_tracker_client, client: TestClient, db_session, test_user
+):
+    """Editing a GitHub App tracker must list orgs through its installation.
+
+    The modal sends ``api_key: "unchanged"`` with the tracker id. For an App
+    tracker there is no PAT to substitute, so the client has to be built with
+    the installation binding (as the scanner does) instead of an empty token.
+    """
+    tracker = _make_github_app_tracker(db_session, test_user)
+    mock_tracker_client = AsyncMock()
+    mock_tracker_client.test_connection.return_value.connected = True
+    mock_tracker_client.get_organizations.return_value = [
+        {"id": "9001", "name": "example-org", "type": "Organization"}
+    ]
+    mock_tracker_client.get_projects.return_value = []
+    mock_create_tracker_client.return_value = mock_tracker_client
+
+    response = client.post(
+        "/api/v1/trackers/test-and-list-orgs",
+        json={
+            "tracker_id": str(tracker.id),
+            "tracker_type": "github",
+            "url": "https://github.com",
+            "api_key": "unchanged",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert [org["id"] for org in body["orgs"]] == ["9001"]
+
+    mock_create_tracker_client.assert_called_once_with(
+        tracker_type="github",
+        tracker_id="test-connection",
+        api_key="",
+        connection_details={
+            "url": "https://github.com",
+            "auth_type": "github_app",
+            "github_installation_id": 4242,
+        },
+    )
+
+
+@pytest.mark.asyncio
+@patch("preloop.api.endpoints.trackers.create_tracker_client")
+async def test_test_connection_and_list_orgs_keeps_pat_for_token_tracker(
+    mock_create_tracker_client, client: TestClient, db_session, test_user
+):
+    """PAT trackers keep substituting the stored token on edit."""
+    tracker = Tracker(
+        name="GitHub PAT Tracker",
+        tracker_type="github",
+        url="https://github.com",
+        account_id=test_user.account_id,
+        api_key="stored-token",
+    )
+    db_session.add(tracker)
+    db_session.commit()
+    mock_tracker_client = AsyncMock()
+    mock_tracker_client.test_connection.return_value.connected = True
+    mock_tracker_client.get_organizations.return_value = []
+    mock_create_tracker_client.return_value = mock_tracker_client
+
+    response = client.post(
+        "/api/v1/trackers/test-and-list-orgs",
+        json={
+            "tracker_id": str(tracker.id),
+            "tracker_type": "github",
+            "url": "https://github.com",
+            "api_key": "unchanged",
+        },
+    )
+    assert response.status_code == 200
+
+    mock_create_tracker_client.assert_called_once_with(
+        tracker_type="github",
+        tracker_id="test-connection",
+        api_key="stored-token",
+        connection_details={"url": "https://github.com"},
+    )
+
+
+@pytest.mark.asyncio
+@patch("preloop.api.endpoints.trackers.create_tracker_client")
+async def test_list_projects_for_org_uses_installation_for_app_tracker(
+    mock_create_tracker_client, client: TestClient, db_session, test_user
+):
+    """Project listing for an App tracker must also use installation auth."""
+    tracker = _make_github_app_tracker(db_session, test_user)
+    mock_tracker_client = AsyncMock()
+    mock_tracker_client.get_projects.return_value = []
+    mock_create_tracker_client.return_value = mock_tracker_client
+
+    response = client.post(
+        "/api/v1/trackers/list-projects-for-org",
+        json={
+            "tracker_id": str(tracker.id),
+            "tracker_type": "github",
+            "url": "https://github.com",
+            "api_key": "unchanged",
+            "organization_identifier": "9001",
+        },
+    )
+    assert response.status_code == 200
+
+    mock_create_tracker_client.assert_called_once_with(
+        tracker_type="github",
+        tracker_id="list-projects",
+        api_key="",
+        connection_details={
+            "url": "https://github.com/",
+            "auth_type": "github_app",
+            "github_installation_id": 4242,
+        },
+    )
+    mock_tracker_client.get_projects.assert_awaited_once_with("9001")
+
+
+def test_tracker_response_exposes_auth_binding(
+    client: TestClient, db_session, test_user
+):
+    """List and detail responses expose the auth type and installation binding."""
+    app_tracker = _make_github_app_tracker(db_session, test_user)
+    pat_tracker = Tracker(
+        name="GitHub PAT Tracker",
+        tracker_type="github",
+        url="https://github.com",
+        account_id=test_user.account_id,
+        api_key="stored-token",
+    )
+    db_session.add(pat_tracker)
+    db_session.commit()
+
+    detail = client.get(f"/api/v1/trackers/{app_tracker.id}")
+    assert detail.status_code == 200
+    detail_json = detail.json()
+    assert detail_json["auth_type"] == "github_app"
+    assert detail_json["oauth_installation_id"] == str(
+        app_tracker.oauth_installation_id
+    )
+    assert detail_json["github_installation_target_login"] == "example-org"
+    assert "api_key" not in detail_json
+
+    listing = client.get("/api/v1/trackers")
+    assert listing.status_code == 200
+    by_id = {item["id"]: item for item in listing.json()}
+    assert by_id[str(app_tracker.id)]["auth_type"] == "github_app"
+    assert by_id[str(pat_tracker.id)]["auth_type"] == "api_token"
+    assert by_id[str(pat_tracker.id)]["oauth_installation_id"] is None
+    assert by_id[str(pat_tracker.id)]["github_installation_target_login"] is None
 
 
 @pytest.mark.asyncio

@@ -26011,6 +26011,27 @@ components:
           type: array
           title: Scope Rules
           description: List of scope rules for the tracker
+        auth_type:
+          type: string
+          title: Auth Type
+          description: 'How the tracker authenticates: ''api_token'', ''github_app''
+            or ''oauth_app'''
+          default: api_token
+        oauth_installation_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Oauth Installation Id
+          description: OAuth App installation this tracker is bound to (OAuth auth
+            types only)
+        github_installation_target_login:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Github Installation Target Login
+          description: Login of the account the bound installation targets (OAuth
+            auth types only)
         degraded_projects:
           items:
             type: string
