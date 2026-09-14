@@ -832,13 +832,17 @@ def preview_execution_continuation(
     *,
     db: Session = Depends(get_db),
     execution_id: uuid.UUID,
+    pr_url: str | None = None,
+    branch: str | None = None,
     current_user: User = Depends(get_current_active_user),
 ) -> ContinuationPreview:
     """Inspect one publication without enabling repairs or holding DB during I/O."""
     account_id = current_user.account_id
     crud_flow_feedback.release_read(db)
     try:
-        return preview_continuation(account_id, execution_id)
+        return preview_continuation(
+            account_id, execution_id, pr_url=pr_url, branch=branch
+        )
     except ContinuationAdoptionError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 

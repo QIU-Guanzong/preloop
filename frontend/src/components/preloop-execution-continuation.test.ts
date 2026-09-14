@@ -14,7 +14,15 @@ const execution = {
   id: 'exec-1',
   flow_id: 'flow-1',
   status: 'SUCCEEDED',
-  result: { pr_url: 'https://github.com/team/repo/pull/7' },
+  trigger_event_details: {
+    source: 'github',
+    tracker_id: 'tracker-1',
+    payload: { repository: { id: 42 } },
+  },
+  result: {
+    pr_url: 'https://github.com/team/repo/pull/7',
+    pr_source_branch: 'fix/issue',
+  },
 };
 const initialPreview: FlowContinuationPreview = {
   execution_id: 'exec-1',
@@ -241,11 +249,156 @@ describe('Execution PR follow-up adoption', () => {
     expect(posts()).to.have.length(0);
   });
 
+  for (const status of [
+    'FAILED',
+    'TIMED_OUT',
+    'STOPPED',
+    'CANCELLED',
+    'ABORTED',
+  ]) {
+    it(`offers explicit follow-up for a ${status} publishing execution`, async () => {
+      const element = await mount();
+      element.execution = { ...execution, status };
+      await element.updateComplete;
+      await open(element);
+      expect(control(element, 'confirm').disabled).to.equal(true);
+      await acknowledge(element);
+      await confirm(element);
+      expect(posts()).to.have.length(1);
+    });
+  }
+
+  const selectPublication = async (element: PreloopExecutionContinuation) => {
+    for (const [name, value] of [
+      ['pr-url', preview.pr_url],
+      ['branch', preview.branch],
+    ]) {
+      const input = control(element, name);
+      input.value = value;
+      input.dispatchEvent(new Event('sl-input', { bubbles: true }));
+      await element.updateComplete;
+    }
+    control(element, 'reload').click();
+    await waitUntil(() => !(element as any).loading);
+    await element.updateComplete;
+  };
+
+  it('requires a selected PR and branch before previewing an unrecorded publication', async () => {
+    const element = await mount();
+    element.execution = { ...execution, status: 'FAILED', result: {} };
+    await element.updateComplete;
+    await open(element);
+    expect(fetchStub.callCount).to.equal(0);
+    expect(control(element, 'reload').disabled).to.equal(true);
+    expect(control(element, 'confirm').disabled).to.equal(true);
+    await selectPublication(element);
+    const url = new URL(
+      String(fetchStub.lastCall.args[0]),
+      window.location.origin
+    );
+    expect(url.searchParams.get('pr_url')).to.equal(preview.pr_url);
+    expect(url.searchParams.get('branch')).to.equal(preview.branch);
+    expect(posts()).to.have.length(0);
+    await acknowledge(element);
+    await confirm(element);
+    expect(JSON.parse(posts()[0].args[1].body)).to.deep.equal({
+      recovery_mode: 'published_branch_handoff',
+      expected_head_sha: preview.head_sha,
+      acknowledge_fresh_conversation: true,
+      pr_url: preview.pr_url,
+      branch: preview.branch,
+    });
+  });
+
+  it('invalidates the preview and acknowledgment when the selected publication changes', async () => {
+    const element = await mount();
+    element.execution = { ...execution, status: 'FAILED', result: {} };
+    await element.updateComplete;
+    await open(element);
+    await selectPublication(element);
+    await acknowledge(element);
+    const input = control(element, 'branch');
+    input.value = 'other-branch';
+    input.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await element.updateComplete;
+    expect((element as any).preview).to.equal(null);
+    expect((element as any).acknowledged).to.equal(false);
+    expect(control(element, 'confirm').disabled).to.equal(true);
+    await (element as any).adopt();
+    expect(posts()).to.have.length(0);
+  });
+
+  it('never treats an unrecorded selected PR as a native session continuation', async () => {
+    preview.native_resume_available = true;
+    preview.allowed_recovery_modes = [
+      'native_resume',
+      'published_branch_handoff',
+    ];
+    const element = await mount();
+    element.execution = { ...execution, status: 'FAILED', result: {} };
+    await element.updateComplete;
+    await open(element);
+    await selectPublication(element);
+    expect(control(element, 'ack')).to.exist;
+    await acknowledge(element);
+    await confirm(element);
+    expect(JSON.parse(posts()[0].args[1].body).recovery_mode).to.equal(
+      'published_branch_handoff'
+    );
+  });
+
+  it('asks for the missing branch when only the PR URL was recorded', async () => {
+    const element = await fixture<PreloopExecutionContinuation>(
+      html`<preloop-execution-continuation
+        .execution=${{ ...execution, result: { pr_url: execution.result.pr_url } }}
+      ></preloop-execution-continuation>`
+    );
+    await open(element);
+    expect(fetchStub.callCount).to.equal(0);
+    expect(control(element, 'pr-url').value).to.equal(execution.result.pr_url);
+    expect(control(element, 'branch').value).to.equal('');
+    expect(control(element, 'reload').disabled).to.equal(true);
+  });
+
+  it('discards preview responses after the element is detached and reattached', async () => {
+    let release!: (response: Response) => void;
+    fetchStub.callsFake(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        })
+    );
+    const element = await mount();
+    control(element, 'preview').click();
+    await element.updateComplete;
+    const container = element.parentElement!;
+    element.remove();
+    container.append(element);
+    release(new Response(JSON.stringify(preview)));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await element.updateComplete;
+    expect((element as any).preview).to.equal(null);
+    expect((element as any).open).to.equal(false);
+    expect(posts()).to.have.length(0);
+  });
+
+  it('hides unrecorded PR recovery for non-tracker executions', async () => {
+    const element = await mount();
+    element.execution = {
+      ...execution,
+      status: 'FAILED',
+      result: {},
+      trigger_event_details: { source: 'schedule' },
+    };
+    await element.updateComplete;
+    expect(element.shadowRoot!.querySelector('[data-continuation-preview]')).to
+      .not.exist;
+    expect(fetchStub.callCount).to.equal(0);
+  });
+
   for (const change of [
     { status: 'RUNNING' },
     { status: 'COMPLETED' },
-    { status: 'FAILED' },
-    { result: {} },
     {
       result: { ...execution.result, continuation: { thread_id: 'thread-1' } },
     },

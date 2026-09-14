@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -17,7 +19,16 @@ const runnerLogPartialLimit = 768 * 1024 // Includes a bounded base64 result env
 // Docker's copier goroutines write here; only the session's existing WebSocket
 // writer drains it. A bounded queue survives reconnects with the running Cmd.
 // Overflow is visible and prevents successful completion with missing markers.
+type runnerLogBatch struct {
+	id    string
+	lines []string
+	sent  bool
+}
+
 type runnerLogBuffer struct {
+	logAcknowledgements bool
+	inflight            []*runnerLogBatch
+
 	native        bool
 	nativeCapture cursorCapture
 	nativeResults int
@@ -115,11 +126,38 @@ func (b *runnerLogBuffer) String() string {
 	return strings.Join(b.results, "\n")
 }
 
-func (b *runnerLogBuffer) batch() []string {
+func (b *runnerLogBuffer) setLogAcknowledgements(enabled bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	size := 0
-	count := 0
+	b.logAcknowledgements = enabled
+}
+
+func (b *runnerLogBuffer) usesLogAcknowledgements() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.logAcknowledgements
+}
+
+func (b *runnerLogBuffer) resetDelivery() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, batch := range b.inflight {
+		batch.sent = false
+	}
+}
+
+func (b *runnerLogBuffer) nextBatch() (*runnerLogBatch, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, batch := range b.inflight {
+		if !batch.sent {
+			return batch, nil
+		}
+	}
+	if len(b.pending) == 0 {
+		return nil, nil
+	}
+	count, size := 0, 0
 	for count < len(b.pending) && count < 128 {
 		size += len(b.pending[count])
 		count++
@@ -127,20 +165,39 @@ func (b *runnerLogBuffer) batch() []string {
 			break
 		}
 	}
-	return append([]string(nil), b.pending[:count]...)
+	var identity [16]byte
+	if _, err := rand.Read(identity[:]); err != nil {
+		return nil, fmt.Errorf("runner log identity: %w", err)
+	}
+	batch := &runnerLogBatch{id: hex.EncodeToString(identity[:]), lines: append([]string(nil), b.pending[:count]...)}
+	b.pending = b.pending[count:]
+	b.inflight = append(b.inflight, batch)
+	return batch, nil
 }
 
-func (b *runnerLogBuffer) acknowledge(count int) {
+func (b *runnerLogBuffer) acknowledgeBatch(id string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, line := range b.pending[:count] {
-		b.pendingBytes -= len(line)
+	for i, batch := range b.inflight {
+		if batch.id == id {
+			for _, line := range batch.lines {
+				b.pendingBytes -= len(line)
+			}
+			b.inflight = append(b.inflight[:i], b.inflight[i+1:]...)
+			return
+		}
 	}
-	copy(b.pending, b.pending[count:])
-	for i := len(b.pending) - count; i < len(b.pending); i++ {
-		b.pending[i] = ""
+}
+
+func (b *runnerLogBuffer) markBatchSent(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, batch := range b.inflight {
+		if batch.id == id {
+			batch.sent = true
+			return
+		}
 	}
-	b.pending = b.pending[:len(b.pending)-count]
 }
 
 func flushRunnerLogs(conn *websocket.Conn, executionID string, buffer *runnerLogBuffer, final bool) error {
@@ -148,14 +205,25 @@ func flushRunnerLogs(conn *websocket.Conn, executionID string, buffer *runnerLog
 		return nil
 	}
 	for {
-		lines := buffer.batch()
-		if len(lines) == 0 {
+		batch, err := buffer.nextBatch()
+		if err != nil {
+			return err
+		}
+		if batch == nil {
 			return nil
 		}
-		if err := conn.WriteJSON(map[string]any{"type": "logs", "execution_id": executionID, "lines": lines}); err != nil {
+		message := map[string]any{"type": "logs", "execution_id": executionID, "lines": batch.lines}
+		if buffer.usesLogAcknowledgements() {
+			message["batch_id"] = batch.id
+		}
+		if err := writeRunnerJSON(conn, message); err != nil {
 			return fmt.Errorf("runner logs: %w", err)
 		}
-		buffer.acknowledge(len(lines))
+		if buffer.usesLogAcknowledgements() {
+			buffer.markBatchSent(batch.id)
+		} else {
+			buffer.acknowledgeBatch(batch.id)
+		}
 		if !final {
 			return nil
 		}

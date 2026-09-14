@@ -80,8 +80,8 @@ def test_cross_account_source_is_not_found() -> None:
         assert get.call_args.kwargs == {"id": execution, "account_id": account}
 
 
-@pytest.mark.parametrize("status", ["FAILED", "RUNNING", "PENDING", "TIMED_OUT"])
-def test_only_successful_publisher_can_be_selected(status: str) -> None:
+@pytest.mark.parametrize("status", ["RUNNING", "PENDING", "STARTING"])
+def test_only_finished_execution_can_be_selected(status: str) -> None:
     account, execution = uuid4(), uuid4()
     flow = SimpleNamespace(id=uuid4(), account_id=account)
     row = SimpleNamespace(flow_id=flow.id, status=status)
@@ -90,7 +90,7 @@ def test_only_successful_publisher_can_be_selected(status: str) -> None:
         patch.object(service.crud_flow_execution, "get", return_value=row),
         patch.object(service.crud_flow, "get", return_value=flow),
     ):
-        with pytest.raises(service.ContinuationAdoptionError, match="successful"):
+        with pytest.raises(service.ContinuationAdoptionError, match="finished"):
             service._load_source(account, execution)
 
 
@@ -150,7 +150,7 @@ def test_endpoints_release_auth_transaction_before_provider_and_sanitize_error(
         "preview_continuation" if route.startswith("preview") else "adopt_continuation"
     )
 
-    def call(*args: object) -> None:
+    def call(*args: object, **kwargs: object) -> None:
         db.commit.assert_called_once()
         assert args[:2] == (account, execution)
         raise service.ContinuationAdoptionError("Selected publication changed")
@@ -303,3 +303,265 @@ def test_preview_surfaces_native_checkpoint_expiry() -> None:
     assert result.native_resume_available is False
     assert result.native_resume_expires_at is None
     assert result.allowed_recovery_modes == ["published_branch_handoff"]
+
+
+@pytest.fixture
+def lost_publication(monkeypatch: pytest.MonkeyPatch) -> tuple:
+    """An owned failed execution whose local runner never uploaded its result."""
+    account, execution_id, tracker_id, flow_id = uuid4(), uuid4(), uuid4(), uuid4()
+    flow = SimpleNamespace(
+        id=flow_id,
+        account_id=account,
+        is_enabled=True,
+        agent_config={"feedback": {"enabled": True, "trusted_reviewer_ids": [42]}},
+        trigger_event_source=str(tracker_id),
+    )
+    row = SimpleNamespace(
+        id=execution_id,
+        flow_id=flow_id,
+        status="FAILED",
+        result=None,
+        cli_session=None,
+        trigger_event_details={
+            "source": "github",
+            "tracker_id": str(tracker_id),
+            "payload": {"repository": {"id": 123}, "issue": {"number": 41}},
+        },
+    )
+    tracker = SimpleNamespace(
+        account_id=account, tracker_type="github", resolved_api_key="synthetic-key"
+    )
+    factory = MagicMock()
+    monkeypatch.setattr(service, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(service.crud_flow_execution, "get", lambda *args, **kwargs: row)
+    monkeypatch.setattr(
+        service.crud_flow_execution,
+        "lock_for_runner_completion",
+        lambda *args, **kwargs: row,
+    )
+    monkeypatch.setattr(service.crud_flow, "get", lambda *args, **kwargs: flow)
+    monkeypatch.setattr(service.crud_tracker, "get", lambda *args, **kwargs: tracker)
+    monkeypatch.setattr(service, "feedback_tracker_options", lambda *args: {})
+    monkeypatch.setattr(service.flow_artifact, "latest", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service.crud_flow_feedback, "find", lambda *args, **kwargs: [])
+    monkeypatch.setattr(service.settings, "flow_artifact_direct_upload", True)
+    publication = {
+        "open": True,
+        "same_repository": True,
+        "branch": "fix/41",
+        "head_sha": "a" * 40,
+        "pr_url": "https://github.com/example/repo/pull/42",
+        "feedback_readable": True,
+    }
+    monkeypatch.setattr(
+        service, "_bounded_publication", AsyncMock(return_value=publication)
+    )
+    return account, row, flow, publication, factory
+
+
+@pytest.mark.parametrize(
+    "status", ["SUCCEEDED", "FAILED", "TIMED_OUT", "STOPPED", "CANCELLED", "ABORTED"]
+)
+def test_missing_publication_requires_selected_pr_and_honest_fresh_recovery(
+    lost_publication: tuple, status: str
+) -> None:
+    account, row, _, publication, factory = lost_publication
+    row.status = status
+    with pytest.raises(
+        service.ContinuationAdoptionError, match="Provide its published PR"
+    ):
+        service.preview_continuation(account, row.id)
+    readiness = service.preview_continuation(
+        account, row.id, pr_url=publication["pr_url"], branch="fix/41"
+    )
+    assert readiness.allowed_recovery_modes == ["published_branch_handoff"]
+    assert not readiness.native_resume_available
+    assert row.result is None  # Preview never writes a binding or starts a thread.
+    factory().commit.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("open", False),
+        ("same_repository", False),
+        ("branch", "other"),
+        ("pr_url", "https://github.com/other/repo/pull/42"),
+    ],
+)
+def test_selected_pr_provider_binding_must_match(
+    lost_publication: tuple, field: str, value: object
+) -> None:
+    account, row, _, publication, _ = lost_publication
+    selected = publication["pr_url"]
+    publication[field] = value
+    with pytest.raises(service.ContinuationAdoptionError, match="binding changed"):
+        service.preview_continuation(account, row.id, pr_url=selected, branch="fix/41")
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("pr_url", "https://github.com/example/repo/pull/99"),
+        ("pr_source_branch", "other"),
+    ],
+)
+def test_selected_pr_cannot_override_recorded_binding(
+    lost_publication: tuple, field: str, value: str
+) -> None:
+    account, row, _, publication, _ = lost_publication
+    row.result = {field: value}
+    with pytest.raises(service.ContinuationAdoptionError, match="conflicts"):
+        service.preview_continuation(
+            account, row.id, pr_url=publication["pr_url"], branch="fix/41"
+        )
+    service._bounded_publication.assert_not_called()
+
+
+def test_old_flow_upgrade_is_explicit_and_does_not_create_backlog_thread(
+    lost_publication: tuple,
+) -> None:
+    account, row, flow, publication, _ = lost_publication
+    flow.agent_config = {"execution_path": "ephemeral"}
+    readiness = service.preview_continuation(
+        account, row.id, pr_url=publication["pr_url"], branch="fix/41"
+    )
+    assert not readiness.feedback_enabled
+    assert row.result is None
+    with pytest.raises(service.ContinuationAdoptionError, match="must be enabled"):
+        service.adopt_continuation(
+            account,
+            row.id,
+            ContinuationAdoptRequest(
+                pr_url=publication["pr_url"],
+                branch="fix/41",
+                expected_head_sha="a" * 40,
+                recovery_mode="published_branch_handoff",
+                acknowledge_fresh_conversation=True,
+            ),
+        )
+
+
+def test_selected_pr_adoption_rechecks_head_and_requires_fresh_ack(
+    lost_publication: tuple,
+) -> None:
+    account, row, _, publication, _ = lost_publication
+    base = dict(
+        pr_url=publication["pr_url"],
+        branch="fix/41",
+        expected_head_sha="a" * 40,
+        recovery_mode="published_branch_handoff",
+    )
+    with pytest.raises(service.ContinuationAdoptionError, match="Acknowledge"):
+        service.adopt_continuation(account, row.id, ContinuationAdoptRequest(**base))
+    with pytest.raises(service.ContinuationAdoptionError, match="head changed"):
+        service.adopt_continuation(
+            account,
+            row.id,
+            ContinuationAdoptRequest(
+                **{**base, "expected_head_sha": "b" * 40},
+                acknowledge_fresh_conversation=True,
+            ),
+        )
+
+
+def test_selected_pr_adoption_atomically_binds_without_changing_failed_status(
+    lost_publication: tuple,
+) -> None:
+    account, row, _, publication, factory = lost_publication
+    request = ContinuationAdoptRequest(
+        pr_url=publication["pr_url"],
+        branch="fix/41",
+        expected_head_sha="a" * 40,
+        recovery_mode="published_branch_handoff",
+        acknowledge_fresh_conversation=True,
+    )
+    thread = SimpleNamespace(
+        id=uuid4(),
+        state="waiting",
+        pr_url=publication["pr_url"],
+        context={
+            "adoption": {
+                "source_execution_id": str(row.id),
+                "recovery_mode": "published_branch_handoff",
+            }
+        },
+    )
+    with (
+        patch.object(
+            service.crud_flow_execution, "bind_publication", return_value=row
+        ) as bind,
+        patch.object(service, "register_thread", return_value=thread) as register,
+    ):
+        response = service.adopt_continuation(account, row.id, request)
+    assert response.thread_id == thread.id
+    assert bind.call_args.kwargs["commit"] is False
+    assert register.call_args.kwargs["commit"] is False
+    factory().__enter__().commit.assert_called_once()
+    assert row.status == "FAILED" and row.cli_session is None
+
+
+def test_adoption_conflicting_existing_thread_does_not_commit(
+    lost_publication: tuple,
+) -> None:
+    account, row, _, publication, factory = lost_publication
+    request = ContinuationAdoptRequest(
+        pr_url=publication["pr_url"],
+        branch="fix/41",
+        expected_head_sha="a" * 40,
+        recovery_mode="published_branch_handoff",
+        acknowledge_fresh_conversation=True,
+    )
+    thread = SimpleNamespace(
+        context={
+            "adoption": {
+                "source_execution_id": str(uuid4()),
+                "recovery_mode": "published_branch_handoff",
+            }
+        }
+    )
+    with (
+        patch.object(service.crud_flow_execution, "bind_publication", return_value=row),
+        patch.object(service, "register_thread", return_value=thread),
+    ):
+        with pytest.raises(service.ContinuationAdoptionError, match="already has"):
+            service.adopt_continuation(account, row.id, request)
+    factory().__enter__().commit.assert_not_called()
+
+
+@pytest.mark.parametrize("suffix", ["pull/42/", "issues/42/"])
+def test_selected_pr_url_is_canonical_before_preview_and_adoption(
+    lost_publication: tuple, suffix: str
+) -> None:
+    account, row, _, publication, factory = lost_publication
+    selected = "https://github.com/example/repo/" + suffix
+    readiness = service.preview_continuation(
+        account, row.id, pr_url=selected, branch="fix/41"
+    )
+    assert readiness.pr_url == publication["pr_url"]
+    request = ContinuationAdoptRequest(
+        pr_url=selected,
+        branch="fix/41",
+        expected_head_sha="a" * 40,
+        recovery_mode="published_branch_handoff",
+        acknowledge_fresh_conversation=True,
+    )
+    thread = SimpleNamespace(
+        id=uuid4(),
+        state="waiting",
+        pr_url=publication["pr_url"],
+        context={
+            "adoption": {
+                "source_execution_id": str(row.id),
+                "recovery_mode": "published_branch_handoff",
+            }
+        },
+    )
+    with (
+        patch.object(
+            service.crud_flow_execution, "bind_publication", return_value=row
+        ) as bind,
+        patch.object(service, "register_thread", return_value=thread),
+    ):
+        service.adopt_continuation(account, row.id, request)
+    assert bind.call_args.kwargs["pr_url"] == publication["pr_url"]

@@ -806,6 +806,65 @@ export class FlowExecutionView extends LitElement {
   private expandedLogGroups: Set<string> = new Set();
 
   private durationTickIntervalId?: number;
+  private executionGeneration = 0;
+  private metadataRevision = 0;
+  private observedAgentStart?: string;
+  private metadataRefreshTimer?: number;
+  private metadataRefreshRunning = false;
+  private metadataRefreshPending = false;
+
+  private invalidateExecutionRequests() {
+    this.executionGeneration++;
+    this.metadataRevision++;
+    this.observedAgentStart = undefined;
+    window.clearTimeout(this.metadataRefreshTimer);
+    this.metadataRefreshTimer = undefined;
+    this.metadataRefreshRunning = false;
+    this.metadataRefreshPending = false;
+  }
+
+  /** Refresh the detail row, never logs, on lifecycle changes.
+   * Bursts share one request; changes during a request get one follow-up.
+   */
+  private scheduleMetadataRefresh() {
+    if (!this.isConnected || !this.executionId) return;
+    this.metadataRefreshPending = true;
+    if (this.metadataRefreshRunning || this.metadataRefreshTimer !== undefined)
+      return;
+    this.metadataRefreshTimer = window.setTimeout(() => {
+      this.metadataRefreshTimer = undefined;
+      void this.refreshExecutionMetadata();
+    }, 100);
+  }
+
+  private async refreshExecutionMetadata() {
+    const executionId = this.executionId;
+    const generation = this.executionGeneration;
+    const revision = this.metadataRevision;
+    if (!executionId || !this.isConnected) return;
+    this.metadataRefreshRunning = true;
+    this.metadataRefreshPending = false;
+    try {
+      const execution = await getFlowExecution(executionId);
+      if (
+        !this.isConnected ||
+        this.executionId !== executionId ||
+        this.executionGeneration !== generation ||
+        this.metadataRevision !== revision
+      )
+        return;
+      this.execution = execution;
+      this.hydrateMetricsFromExecution();
+    } catch (error) {
+      // Preserve live event details if the authoritative read fails.
+      console.error('Failed to refresh execution metadata:', error);
+    } finally {
+      if (this.executionGeneration === generation) {
+        this.metadataRefreshRunning = false;
+        if (this.metadataRefreshPending) this.scheduleMetadataRefresh();
+      }
+    }
+  }
 
   private logContainerRef?: HTMLElement;
   private wsConnected = false;
@@ -838,6 +897,8 @@ export class FlowExecutionView extends LitElement {
 
   disconnectedCallback() {
     super.disconnectedCallback();
+    this.invalidateExecutionRequests();
+    this.wsConnected = false;
     // Clean up the auto-scroll interval and its scroll listener
     this.stopAutoScrollChecker();
     // Clean up buffer flush interval
@@ -920,13 +981,17 @@ export class FlowExecutionView extends LitElement {
     }
 
     // When executionId property changes, fetch execution data
-    if (
-      changedProperties.has('executionId') &&
-      this.executionId &&
-      !this.wsConnected
-    ) {
+    if (changedProperties.has('executionId') && this.executionId) {
+      this.invalidateExecutionRequests();
+      this.unsubscribe?.();
+      this.unsubscribe = undefined;
+      this.unsubscribeState?.();
+      this.unsubscribeState = undefined;
+      this.wsConnected = false;
+      const generation = this.executionGeneration;
       // First, fetch execution data (which loads persisted logs)
       await this.fetchExecution();
+      if (!this.isConnected || generation !== this.executionGeneration) return;
 
       // Check if execution is still running
       const isRunning =
@@ -972,7 +1037,6 @@ export class FlowExecutionView extends LitElement {
         // Track connection state. The unsubscribe is kept and dropped in
         // disconnectedCallback: discarding it leaked a listener holding this
         // view for every connect.
-        this.unsubscribeState?.();
         this.unsubscribeState = unifiedWebSocketManager.onStateChange(
           (state) => {
             const wasConnected = this.wsConnected;
@@ -995,6 +1059,7 @@ export class FlowExecutionView extends LitElement {
             }
 
             if (state === 'connected') {
+              if (!wasConnected) this.scheduleMetadataRefresh();
               // A reconnect has to put back what the drop stopped, or the
               // logs stay frozen for the rest of the session: the socket is
               // delivering lines again but nothing flushes the buffer and
@@ -1107,6 +1172,31 @@ export class FlowExecutionView extends LitElement {
         if (message.payload.status) {
           this.execution.status = message.payload.status;
         }
+        // Show terminal details immediately, including when a refetch fails.
+        const fields = [
+          'error_message',
+          'end_time',
+          'failure_category',
+          'agent_session_reference',
+          'runner',
+          'result',
+          'actions_taken_summary',
+        ] as const;
+        let metadataChanged = false;
+        for (const field of fields) {
+          if (Object.prototype.hasOwnProperty.call(message.payload, field)) {
+            metadataChanged ||=
+              this.execution[field] !== message.payload[field];
+            this.execution = {
+              ...this.execution,
+              [field]: message.payload[field],
+            };
+          }
+        }
+        if (previousStatus !== this.execution.status || metadataChanged) {
+          this.metadataRevision++;
+          this.scheduleMetadataRefresh();
+        }
         // Update other fields if provided
         if (message.payload.resolved_input_prompt) {
           this.execution.resolved_input_prompt =
@@ -1151,6 +1241,17 @@ export class FlowExecutionView extends LitElement {
           }
         }
         this.requestUpdate();
+      }
+      if (message.type === 'agent_started') {
+        const reference =
+          message.payload?.agent_session_reference ||
+          message.payload?.session_reference ||
+          'started';
+        if (reference !== this.observedAgentStart) {
+          this.observedAgentStart = reference;
+          this.metadataRevision++;
+          this.scheduleMetadataRefresh();
+        }
       }
       // Handle real-time tool calls update
       if (message.type === 'tool_calls_update') {
@@ -1406,7 +1507,13 @@ export class FlowExecutionView extends LitElement {
   }
 
   async fetchExecution() {
-    if (!this.executionId) return;
+    const executionId = this.executionId;
+    const generation = this.executionGeneration;
+    const current = () =>
+      this.isConnected &&
+      this.executionId === executionId &&
+      this.executionGeneration === generation;
+    if (!executionId) return;
 
     try {
       this.isLoading = true;
@@ -1420,14 +1527,16 @@ export class FlowExecutionView extends LitElement {
       this.liveToolActivityEvents = [];
 
       // Fetch execution details
-      this.execution = await getFlowExecution(this.executionId);
+      const execution = await getFlowExecution(executionId);
+      if (!current()) return;
+      this.execution = execution;
       this.hydrateMetricsFromExecution();
 
       // Fetch logs
       const INITIAL_FETCH_LIMIT = 500;
       this.logsSkip = 0;
 
-      const logsResult = await getFlowExecutionLogs(this.executionId, {
+      const logsResult = await getFlowExecutionLogs(executionId, {
         tail: INITIAL_FETCH_LIMIT,
       }).catch((error) => {
         console.error('Failed to fetch logs:', error);
@@ -1445,6 +1554,7 @@ export class FlowExecutionView extends LitElement {
         return { logs: [], source: 'none', has_more: false };
       });
 
+      if (!current()) return;
       if (logsResult && Array.isArray(logsResult.logs)) {
         this.logs = logsResult.logs;
         this.hasMoreLogs = !!logsResult.has_more;
@@ -1460,7 +1570,9 @@ export class FlowExecutionView extends LitElement {
       // Fetch flow details
       if (this.execution && this.execution.flow_id) {
         try {
-          this.flow = await getFlow(this.execution.flow_id);
+          const flow = await getFlow(this.execution.flow_id);
+          if (!current()) return;
+          this.flow = flow;
         } catch (error) {
           console.error('Failed to fetch flow details:', error);
           // Don't fail the whole page if flow fetch fails
@@ -1470,7 +1582,8 @@ export class FlowExecutionView extends LitElement {
       // Fetch execution metrics (for completed executions)
       if (this.execution) {
         try {
-          const metrics = await getFlowExecutionMetrics(this.executionId);
+          const metrics = await getFlowExecutionMetrics(executionId);
+          if (!current()) return;
           this.toolCalls = Math.max(this.toolCalls, metrics.tool_calls);
           this.budgetUsed = Math.max(this.budgetUsed, metrics.estimated_cost);
           this.totalTokens = Math.max(
@@ -1488,8 +1601,10 @@ export class FlowExecutionView extends LitElement {
         }
       }
 
+      if (!current()) return;
       this.isLoading = false;
     } catch (error) {
+      if (!current()) return;
       console.error('Failed to fetch execution:', error);
       this.loadingError =
         error instanceof Error
@@ -3166,7 +3281,9 @@ ${log.payload.content}</pre>
 
     switch (log.type) {
       case 'status_update':
-        return `Status: ${log.payload.status}`;
+        return `Status: ${log.payload.status}${
+          log.payload.error_message ? `: ${log.payload.error_message}` : ''
+        }`;
       case 'connected':
         return log.payload.message || 'Connected to execution stream';
       case 'agent_started':

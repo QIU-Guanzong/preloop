@@ -1,8 +1,12 @@
 """Tests for flow PR binding used by issue-implementation resume."""
 
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
+import pytest
+
+from preloop.models.crud import crud_flow_execution
 from preloop.services.flow_pr_binding import (
     bind_resume_or_skip,
     extract_pr_url_from_comment_event,
@@ -204,7 +208,12 @@ class TestFindAndBind:
         mod.crud_flow_execution.get_by_result_pr_url = MagicMock(return_value=None)
         mod.crud_flow_execution.get_by_flow = MagicMock(return_value=[])
         try:
-            with caplog.at_level("INFO"):
+            with (
+                caplog.at_level("INFO"),
+                patch.object(
+                    mod.logger, "handlers", [*mod.logger.handlers, caplog.handler]
+                ),
+            ):
                 found = find_bound_execution(
                     db,
                     flow_id="flow-1",
@@ -251,22 +260,62 @@ class TestFindAndBind:
         event = {"payload": {"issue": {"number": 1}}}
         assert bind_resume_or_skip(MagicMock(), flow, event) is None
 
-    def test_record_opened_pr_merges_result(self):
-        execution = MagicMock()
-        execution.result = {"other": 1}
-        db = MagicMock()
+    def test_record_opened_pr_uses_atomic_crud_binding(self):
+        from unittest.mock import patch
         from preloop.services import flow_pr_binding as mod
 
-        original = mod.crud_flow_execution.get
-        mod.crud_flow_execution.get = MagicMock(return_value=execution)
-        try:
-            record_opened_pr(db, "exec-1", "https://github.com/a/b/pull/1", "feat/x")
-            assert execution.result["pr_url"] == "https://github.com/a/b/pull/1"
-            assert execution.result["pr_source_branch"] == "feat/x"
-            assert execution.result["other"] == 1
-            db.commit.assert_called_once()
-        finally:
-            mod.crud_flow_execution.get = original
+        execution, db = MagicMock(), MagicMock()
+        with (
+            patch.object(
+                mod.crud_flow_execution, "bind_publication", return_value=execution
+            ) as bind,
+            patch("preloop.services.flow_feedback.register_thread") as register,
+        ):
+            record_opened_pr(db, "exec-1", "https://github.com/a/b/pull/1/", "feat/x")
+        bind.assert_called_once_with(
+            db,
+            execution_id="exec-1",
+            pr_url="https://github.com/a/b/pull/1",
+            source_branch="feat/x",
+        )
+        register.assert_called_once_with(
+            db, execution, "https://github.com/a/b/pull/1", "feat/x"
+        )
+
+    def test_noncanonical_stored_url_does_not_conflict(self):
+        """Legacy trailing-slash rows stay in the same publication class."""
+        execution = SimpleNamespace(
+            result={"pr_url": "https://github.com/acme/app/issues/7/"}
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.populate_existing.return_value.with_for_update.return_value.one_or_none.return_value = execution
+
+        bound = crud_flow_execution.bind_publication(
+            db,
+            execution_id=uuid4(),
+            pr_url="https://github.com/acme/app/pull/7",
+            source_branch="feat/x",
+        )
+
+        assert bound is execution
+        assert execution.result["pr_url"] == "https://github.com/acme/app/pull/7"
+        assert execution.result["pr_source_branch"] == "feat/x"
+        db.flush.assert_called_once()
+        db.commit.assert_called_once()
+
+    def test_different_normalized_url_still_conflicts(self):
+        execution = SimpleNamespace(
+            result={"pr_url": "https://github.com/acme/app/pull/7"}
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.populate_existing.return_value.with_for_update.return_value.one_or_none.return_value = execution
+
+        with pytest.raises(ValueError, match="binding changed"):
+            crud_flow_execution.bind_publication(
+                db,
+                execution_id=uuid4(),
+                pr_url="https://github.com/acme/app/pull/8",
+            )
 
 
 class TestRecordCliSession:

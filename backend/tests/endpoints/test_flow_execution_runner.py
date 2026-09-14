@@ -60,6 +60,8 @@ async def test_execution_list_and_detail_project_hosted_and_private(
     hosted = crud_flow_execution.create(
         db_session, FlowExecutionCreate(flow_id=flow.id, status="SUCCEEDED")
     )
+    hosted.agent_session_reference = "agent-example"
+    db_session.add(hosted)
     runner = _create_runner(db_session, test_user)
     private = crud_flow_execution.create(
         db_session, FlowExecutionCreate(flow_id=flow.id, status="SUCCEEDED")
@@ -98,3 +100,28 @@ async def test_execution_list_and_detail_project_hosted_and_private(
     assert detail.runner.id == runner.id
     assert detail.runner.name == "Office Mac"
     assert detail.runner.pool == "gpu"
+
+
+@pytest.mark.asyncio
+async def test_unassigned_execution_projects_unknown_in_list_and_detail(
+    db_session, test_user
+):
+    flow = _create_flow(db_session, test_user)
+    execution = crud_flow_execution.create(
+        db_session, FlowExecutionCreate(flow_id=flow.id, status="PENDING")
+    )
+    listed = await maybe_await(
+        flows.read_flow_executions(
+            db=db_session, flow_id=flow.id, current_user=test_user
+        )
+    )
+    assert (
+        schemas.FlowExecutionListResponse.model_validate(listed[0]).runner.kind
+        == "unknown"
+    )
+    detail = await maybe_await(
+        flows.read_flow_execution(
+            db=db_session, execution_id=execution.id, current_user=test_user
+        )
+    )
+    assert schemas.FlowExecutionResponse.model_validate(detail).runner.kind == "unknown"

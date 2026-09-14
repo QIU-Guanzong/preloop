@@ -15,13 +15,26 @@ import '@shoelace-style/shoelace/dist/components/button/button.js';
 import '@shoelace-style/shoelace/dist/components/checkbox/checkbox.js';
 import '@shoelace-style/shoelace/dist/components/alert/alert.js';
 import '@shoelace-style/shoelace/dist/components/spinner/spinner.js';
+import '@shoelace-style/shoelace/dist/components/input/input.js';
 
 interface PublishedExecution {
   id: string;
   flow_id: string;
   status: string;
-  result?: { pr_url?: string; continuation?: { thread_id?: string } };
-  trigger_event_details?: { _thread_id?: string };
+  result?: {
+    pr_url?: string;
+    pr_source_branch?: string;
+    continuation?: { thread_id?: string };
+  };
+  trigger_event_details?: {
+    _thread_id?: string;
+    source?: string;
+    tracker_id?: string;
+    payload?: {
+      repository?: { id?: string | number };
+      project?: { id?: string | number };
+    };
+  };
 }
 
 @customElement('preloop-execution-continuation')
@@ -60,11 +73,19 @@ export class PreloopExecutionContinuation extends LitElement {
   @state() private acknowledged = false;
   @state() private error = '';
   @state() private adopted = false;
+  @state() private selectedPrUrl = '';
+  @state() private selectedBranch = '';
   private generation = 0;
 
   protected willUpdate(changes: PropertyValues) {
     const previous = changes.get('execution') as PublishedExecution | undefined;
-    if (changes.has('execution') && previous?.id !== this.execution?.id) {
+    if (
+      changes.has('execution') &&
+      (previous?.id !== this.execution?.id ||
+        previous?.result?.pr_url !== this.execution?.result?.pr_url ||
+        previous?.result?.pr_source_branch !==
+          this.execution?.result?.pr_source_branch)
+    ) {
       this.generation++;
       this.open = false;
       this.preview = null;
@@ -73,17 +94,83 @@ export class PreloopExecutionContinuation extends LitElement {
       this.loading = false;
       this.saving = false;
       this.adopted = false;
+      this.selectedPrUrl = this.execution?.result?.pr_url || '';
+      this.selectedBranch = this.execution?.result?.pr_source_branch || '';
     }
   }
 
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this.generation++;
+    this.open = false;
+    this.loading = false;
+    this.saving = false;
+    this.preview = null;
+    this.acknowledged = false;
+  }
+
   private eligible() {
+    const details = this.execution?.trigger_event_details;
+    const repository =
+      details?.payload?.repository || details?.payload?.project;
+    const gitSource =
+      ['github', 'gitlab'].includes(details?.source || '') &&
+      Boolean(details?.tracker_id && repository?.id);
     return (
       this.execution &&
-      this.execution.status === 'SUCCEEDED' &&
-      Boolean(this.execution.result?.pr_url) &&
+      (Boolean(this.execution.result?.pr_url) || gitSource) &&
+      [
+        'SUCCEEDED',
+        'FAILED',
+        'TIMED_OUT',
+        'STOPPED',
+        'CANCELLED',
+        'ABORTED',
+      ].includes(this.execution.status) &&
       !this.execution.result?.continuation?.thread_id &&
       !this.execution.trigger_event_details?._thread_id
     );
+  }
+
+  private needsPublication(): boolean {
+    return !(
+      this.execution?.result?.pr_url && this.execution?.result?.pr_source_branch
+    );
+  }
+
+  private publication() {
+    return this.needsPublication()
+      ? {
+          pr_url: this.selectedPrUrl.trim(),
+          branch: this.selectedBranch.trim(),
+        }
+      : undefined;
+  }
+
+  private publicationReady(): boolean {
+    const publication = this.publication();
+    if (!publication) return true;
+    try {
+      const url = new URL(publication.pr_url);
+      return (
+        ['https:', 'http:'].includes(url.protocol) &&
+        Boolean(publication.branch)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private changePublication(field: 'url' | 'branch', event: Event): void {
+    if (this.saving) return;
+    const value = (event.target as HTMLInputElement).value;
+    if (field === 'url') this.selectedPrUrl = value;
+    else this.selectedBranch = value;
+    this.generation++;
+    this.preview = null;
+    this.loading = false;
+    this.acknowledged = false;
+    this.error = '';
   }
 
   private mode(): ContinuationRecoveryMode | null {
@@ -97,6 +184,7 @@ export class PreloopExecutionContinuation extends LitElement {
     )
       return null;
     if (
+      !this.needsPublication() &&
       preview.native_resume_available &&
       preview.allowed_recovery_modes.includes('native_resume')
     )
@@ -120,12 +208,16 @@ export class PreloopExecutionContinuation extends LitElement {
     const executionId = this.execution.id;
     const generation = ++this.generation;
     this.open = true;
+    if (!this.publicationReady()) return;
     this.loading = true;
     this.preview = null;
     this.acknowledged = false;
     this.error = '';
     try {
-      const preview = await previewFlowContinuation(executionId);
+      const preview = await previewFlowContinuation(
+        executionId,
+        this.publication()
+      );
       if (generation !== this.generation) return;
       if (
         preview.execution_id !== executionId ||
@@ -163,6 +255,9 @@ export class PreloopExecutionContinuation extends LitElement {
     this.error = '';
     try {
       await adoptFlowContinuation(executionId, {
+        ...(this.needsPublication()
+          ? { pr_url: this.preview.pr_url, branch: this.preview.branch }
+          : {}),
         recovery_mode: mode,
         expected_head_sha: this.preview.head_sha,
         acknowledge_fresh_conversation:
@@ -239,6 +334,32 @@ export class PreloopExecutionContinuation extends LitElement {
         }}
       >
         ${
+          this.needsPublication()
+            ? html`
+                <p>
+                  This execution has no complete publication record. Select the
+                  PR and source branch you want to continue. Preloop will verify
+                  them before enabling follow-up.
+                </p>
+                <sl-input
+                  data-continuation-pr-url
+                  label="Pull request URL"
+                  type="url"
+                  .value=${this.selectedPrUrl}
+                  ?disabled=${this.loading || this.saving}
+                  @sl-input=${(event: Event) => this.changePublication('url', event)}
+                ></sl-input>
+                <sl-input
+                  data-continuation-branch
+                  label="Source branch"
+                  .value=${this.selectedBranch}
+                  ?disabled=${this.loading || this.saving}
+                  @sl-input=${(event: Event) => this.changePublication('branch', event)}
+                ></sl-input>
+              `
+            : nothing
+        }
+        ${
           this.loading
             ? html`<sl-spinner></sl-spinner>
                 <p>Checking this PR and its saved execution state...</p>`
@@ -310,7 +431,7 @@ export class PreloopExecutionContinuation extends LitElement {
           slot="footer"
           data-continuation-reload
           @click=${this.loadPreview}
-          ?disabled=${this.loading || this.saving}
+          ?disabled=${this.loading || this.saving || !this.publicationReady()}
           >Reload preview</sl-button
         >
         <sl-button

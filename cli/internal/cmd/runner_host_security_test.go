@@ -171,7 +171,11 @@ func TestHostExecNativeCaptureSurvivesRawFlushAndIsBounded(t *testing.T) {
 	_, _ = io.WriteString(buffer, "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"observed-local\"}\n")
 	for i := 0; i < 10000; i++ {
 		_, _ = io.WriteString(buffer, "ordinary log\n")
-		buffer.acknowledge(len(buffer.batch()))
+		batch, err := buffer.nextBatch()
+		if err != nil || batch == nil {
+			t.Fatalf("flush ordinary log: %v", err)
+		}
+		buffer.acknowledgeBatch(batch.id)
 	}
 	_, _ = io.WriteString(buffer, "{\"type\":\"result\",\"subtype\":\"success\"}\n")
 	result, err := nativeRunnerResult(buffer, nil)

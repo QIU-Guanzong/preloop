@@ -40,6 +40,7 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
         clear_lease: bool = False,
         execution_id: Optional[UUID] = None,
         reported_status: Optional[str] = None,
+        commit: bool = True,
     ) -> bool:
         """CAS readiness changes so an old socket cannot clear a replacement."""
         query = db.query(models.FlowRunner).filter(models.FlowRunner.id == runner_id)
@@ -67,7 +68,10 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
         elif offline:
             values[models.FlowRunner.status] = "offline"
         updated = query.update(values, synchronize_session=False)
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         return bool(updated)
 
     def bind_publication_lease(

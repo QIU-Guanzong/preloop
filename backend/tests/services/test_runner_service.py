@@ -11,6 +11,7 @@ from preloop.models.crud.flow_runner import crud_flow_runner, runner_matches_poo
 from preloop.services.runner_service import (
     AUTO_RUNNER_POOL,
     DEFAULT_QUEUE_TIMEOUT,
+    derive_execution_runner,
     emit_runner_updated,
     hash_runner_token,
     lease_job,
@@ -443,3 +444,24 @@ def test_emit_runner_updated_publishes_runners_topic(monkeypatch) -> None:
     assert captured["type"] == "runner_updated"
     assert captured["payload"]["name"] == "box"
     assert captured["payload"]["status"] == "online"
+
+
+def test_execution_without_assignment_does_not_claim_hosted() -> None:
+    assert derive_execution_runner() == {
+        "kind": "unknown",
+        "id": None,
+        "name": "Not recorded",
+        "pool": None,
+    }
+
+
+def test_execution_runner_preserves_known_destinations() -> None:
+    assert (
+        derive_execution_runner(agent_session_reference="agent-example")["kind"]
+        == "hosted"
+    )
+    queued = derive_execution_runner(
+        agent_session_reference="runner:queued:office:example"
+    )
+    assert queued["kind"] == "private"
+    assert queued["pool"] == "office"

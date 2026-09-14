@@ -50,7 +50,9 @@ class CRUDFlowFeedback:
             ).scalars()
         )
 
-    def register(self, db: Session, *, values: dict[str, Any]) -> models.FlowThread:
+    def register(
+        self, db: Session, *, values: dict[str, Any], commit: bool = True
+    ) -> models.FlowThread:
         values = {"id": uuid.uuid4(), **values}
         statement = insert(models.FlowThread).values(**values)
         db.execute(
@@ -69,7 +71,8 @@ class CRUDFlowFeedback:
             }
         )
         thread = db.execute(query).scalar_one()
-        db.commit()
+        if commit:
+            db.commit()
         return thread
 
     def find(

@@ -9,7 +9,7 @@ coalescing.
 import os
 import shutil
 import subprocess
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -111,14 +111,21 @@ class TestWrapperPrBinding:
         execution = MagicMock()
         execution.result = {"other": 1}
         db = MagicMock()
-        original = mod.crud_flow_execution.get
-        mod.crud_flow_execution.get = MagicMock(return_value=execution)
-        try:
+
+        def bind_publication(_db, *, pr_url, source_branch=None, **_kwargs):
+            merged = dict(execution.result)
+            merged["pr_url"] = pr_url
+            if source_branch:
+                merged["pr_source_branch"] = source_branch
+            execution.result = merged
+            return execution
+
+        with patch.object(
+            mod.crud_flow_execution, "bind_publication", side_effect=bind_publication
+        ):
             record_opened_pr(
                 db, "exec-1", marker["url"], source_branch=marker["branch"]
             )
-        finally:
-            mod.crud_flow_execution.get = original
         assert execution.result["pr_url"] == "https://github.com/acme/app/pull/7"
         assert execution.result["pr_source_branch"] == "preloop/fix-1"
 

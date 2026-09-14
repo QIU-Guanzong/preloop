@@ -432,8 +432,10 @@ def merge_result_preserving_pr_binding(
     return merged
 
 
-def record_cli_session(db: Session, execution_id: Any, cli_session: Any) -> None:
-    """Persist the agent CLI session reference on the execution. Never raises.
+def record_cli_session(
+    db: Session, execution_id: Any, cli_session: Any, *, raise_errors: bool = False
+) -> None:
+    """Persist the CLI session; runner acknowledgments require durable success.
 
     ``cli_session`` is ``{"agent_type": ..., "session_id": ...}`` as parsed
     from the PRELOOP_AGENT_SESSION marker. Overwrites so a retried attempt's
@@ -447,6 +449,8 @@ def record_cli_session(db: Session, execution_id: Any, cli_session: Any) -> None
             return
         execution = crud_flow_execution.get(db, id=execution_id)
         if execution is None:
+            if raise_errors:
+                raise ValueError("Execution is no longer available for handoff capture")
             logger.warning(
                 "Cannot record CLI session: execution %s not found", execution_id
             )
@@ -484,6 +488,8 @@ def record_cli_session(db: Session, execution_id: Any, cli_session: Any) -> None
                 "Could not roll back after a failed CLI session write",
                 exc_info=True,
             )
+        if raise_errors:
+            raise
 
 
 def resume_cli_session_of(execution: Any) -> Optional[Dict[str, Any]]:
@@ -513,30 +519,28 @@ def record_opened_pr(
     execution_id: Any,
     pr_url: str,
     source_branch: Optional[str] = None,
+    *,
+    raise_errors: bool = False,
 ) -> None:
-    """Merge the opened PR URL onto the execution result. Never raises."""
+    """Merge the PR URL; best effort except when the runner awaits acknowledgment."""
 
     try:
         if not execution_id or not pr_url:
             return
-        execution = crud_flow_execution.get(db, id=execution_id)
+        stored_url = normalize_pr_url(pr_url) or pr_url
+        execution = crud_flow_execution.bind_publication(
+            db,
+            execution_id=execution_id,
+            pr_url=stored_url,
+            source_branch=source_branch,
+        )
         if execution is None:
+            if raise_errors:
+                raise ValueError("Execution is no longer available for handoff capture")
             logger.warning(
                 "Cannot record opened PR: execution %s not found", execution_id
             )
             return
-        current: Dict[str, Any]
-        if isinstance(execution.result, dict):
-            current = dict(execution.result)
-        else:
-            current = {}
-        stored_url = normalize_pr_url(pr_url) or pr_url
-        current["pr_url"] = stored_url
-        if source_branch:
-            current["pr_source_branch"] = source_branch
-        execution.result = current
-        flag_modified(execution, "result")
-        db.commit()
         logger.info("Recorded opened PR on execution %s", execution_id)
         if source_branch:
             from preloop.services.flow_feedback import register_thread
@@ -556,6 +560,8 @@ def record_opened_pr(
                 "Could not roll back after a failed PR-binding write",
                 exc_info=True,
             )
+        if raise_errors:
+            raise
 
 
 def find_bound_execution(
@@ -600,6 +606,106 @@ def flow_requires_pr_comment_resume(flow: Any) -> bool:
     if "comment_created" not in type_set:
         return False
     return bool(type_set & {"issue_labeled", "issue_opened"})
+
+
+def is_bound_implementation_comment(
+    db: Session, flow: Any, event: dict[str, Any]
+) -> bool:
+    """Scope the issue-label exemption to an already authorized PR handoff.
+
+    Existing issue-only automations do not gain comment triggers. A comment
+    must match the original execution's account, tracker and immutable provider
+    repository identity before its originating issue's intake label is ignored.
+    """
+    if event.get("type") != "comment_created" or not flow_requires_pr_comment_resume(
+        flow
+    ):
+        return False
+    account_id = getattr(flow, "account_id", None)
+    tracker_id = getattr(flow, "trigger_event_source", None)
+    if (
+        not account_id
+        or str(event.get("account_id")) != str(account_id)
+        or not tracker_id
+        or str(event.get("tracker_id")) != str(tracker_id)
+    ):
+        return False
+    pr_url = extract_pr_url_from_comment_event(event)
+    if not pr_url:
+        return False
+    execution = find_bound_execution(db, flow.id, pr_url)
+    if execution is None or execution.flow_id != flow.id:
+        return False
+    source = execution.trigger_event_details or {}
+    if (
+        source.get("source") not in {"github", "gitlab"}
+        or source.get("source") != event.get("source")
+        or str(source.get("account_id")) != str(account_id)
+        or str(source.get("tracker_id")) != str(tracker_id)
+    ):
+        return False
+    payload = event.get("payload") or {}
+    original = source.get("payload") or {}
+    repository = payload.get("repository") or payload.get("project") or {}
+    original_repository = original.get("repository") or original.get("project") or {}
+    repository_id = repository.get("id")
+    return bool(repository_id) and str(repository_id) == str(
+        original_repository.get("id")
+    )
+
+
+def record_runner_handoff_markers(
+    db: Session, execution: Any, line: str, *, isolated_publication: bool
+) -> None:
+    """Persist handoff metadata from a log frame accepted from the owning runner.
+
+    Call only after authenticating the runner's account and current execution
+    lease. Publication in an isolated run still requires the trusted receipt;
+    native artifact references are checked again by the checkpoint resolver.
+    """
+    from preloop.agents.cli_session import parse_agent_session_marker, valid_session_id
+    from preloop.agents.session_runtime import parse_native_artifact_marker
+
+    if not isolated_publication:
+        opened = parse_pr_opened_marker(line)
+        if opened:
+            current = execution.result or {}
+            if not current.get("pr_url") or (
+                normalize_pr_url(current.get("pr_url"))
+                == normalize_pr_url(opened["url"])
+                and not current.get("pr_source_branch")
+                and opened.get("branch")
+            ):
+                record_opened_pr(
+                    db,
+                    execution.id,
+                    opened["url"],
+                    source_branch=opened.get("branch"),
+                    raise_errors=True,
+                )
+    artifact = parse_native_artifact_marker(line)
+    if artifact:
+        expected_thread = (execution.trigger_event_details or {}).get(
+            "_session_thread_id"
+        )
+        reference = artifact.get("artifact_reference") or {}
+        if (
+            expected_thread
+            and artifact.get("thread_id") == expected_thread
+            and str(reference.get("execution_id")) == str(execution.id)
+            and valid_session_id(
+                artifact.get("agent_type", ""), artifact.get("session_id", "")
+            )
+        ):
+            record_cli_session(db, execution.id, artifact, raise_errors=True)
+        return
+    parsed = parse_agent_session_marker(line)
+    if (
+        parsed
+        and valid_session_id(parsed["agent_type"], parsed["session_id"])
+        and not execution.cli_session
+    ):
+        record_cli_session(db, execution.id, parsed, raise_errors=True)
 
 
 def bind_resume_or_skip(

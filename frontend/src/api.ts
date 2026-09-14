@@ -3155,11 +3155,13 @@ async function continuationResponse<T>(response: Response): Promise<T> {
 }
 
 export async function previewFlowContinuation(
-  executionId: string
+  executionId: string,
+  publication?: { pr_url: string; branch: string }
 ): Promise<FlowContinuationPreview> {
+  const query = publication ? `?${new URLSearchParams(publication)}` : '';
   return continuationResponse(
     await fetchWithAuth(
-      `/api/v1/flows/executions/${encodeURIComponent(executionId)}/continuation`
+      `/api/v1/flows/executions/${encodeURIComponent(executionId)}/continuation${query}`
     )
   );
 }
@@ -3170,6 +3172,8 @@ export async function adoptFlowContinuation(
     recovery_mode: ContinuationRecoveryMode;
     expected_head_sha: string;
     acknowledge_fresh_conversation: boolean;
+    pr_url?: string;
+    branch?: string;
   }
 ): Promise<FlowContinuationResult> {
   return continuationResponse(

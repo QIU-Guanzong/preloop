@@ -785,8 +785,13 @@ describe('FlowExecutionView', () => {
       );
     });
 
-    it('names the hosted executor when the run has no private runner', async () => {
+    it('names an explicitly recorded hosted executor', async () => {
       const element = await load('exec-1');
+      (element as any).execution = {
+        ...(element as any).execution,
+        runner: { kind: 'hosted', name: 'Preloop hosted' },
+      };
+      await element.updateComplete;
 
       expect(stripValue(element, 'strip-runner')).to.contain('Preloop hosted');
       const badge = element.shadowRoot!.querySelector(

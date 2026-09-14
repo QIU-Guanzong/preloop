@@ -893,6 +893,14 @@ class FlowTriggerService:
 
         for key, expected_value in flattened_config.items():
             if key == "labels":
+                from preloop.services.flow_pr_binding import (
+                    is_bound_implementation_comment,
+                )
+
+                if is_bound_implementation_comment(self.db, flow, event_data):
+                    # The issue qualified at intake; its PR need not duplicate
+                    # that label. Every other configured condition still applies.
+                    continue
                 actual_value = _label_names_from_payload(payload) or payload.get(key)
             else:
                 actual_value = payload.get(key)

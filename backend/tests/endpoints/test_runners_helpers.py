@@ -251,6 +251,7 @@ async def test_completion_confirms_stop_only_on_terminal_owner_ack(
         clear_lease: bool = False,
         execution_id: UUID | None = None,
         reported_status: str | None = None,
+        commit: bool = True,
     ) -> bool:
         """In-memory stand-in for the compare-and-swap capability write."""
         current = (runner.publication_capabilities or {}).get("connection_id")
@@ -294,6 +295,11 @@ async def test_completion_confirms_stop_only_on_terminal_owner_ack(
     )
     monkeypatch.setattr(
         runners.crud_flow_execution, "get", lambda *args, **kwargs: execution
+    )
+    monkeypatch.setattr(
+        runners.crud_flow_execution,
+        "lock_for_runner_completion",
+        lambda *args, **kwargs: execution,
     )
     monkeypatch.setattr(runners.crud_flow, "get", lambda *args, **kwargs: None)
     confirm = MagicMock()
@@ -351,6 +357,7 @@ async def test_invalid_cra_completion_keeps_original_error_and_contract(
         clear_lease: bool = False,
         execution_id: UUID | None = None,
         reported_status: str | None = None,
+        commit: bool = True,
     ) -> bool:
         current = (runner.publication_capabilities or {}).get("connection_id")
         if expected_connection_id is not None and current != expected_connection_id:
@@ -418,6 +425,11 @@ async def test_invalid_cra_completion_keeps_original_error_and_contract(
     monkeypatch.setattr(
         runners.crud_flow_execution, "get", lambda *args, **kwargs: execution
     )
+    monkeypatch.setattr(
+        runners.crud_flow_execution,
+        "lock_for_runner_completion",
+        lambda *args, **kwargs: execution,
+    )
     monkeypatch.setattr(runners.crud_flow, "get", lambda *args, **kwargs: flow)
     monkeypatch.setattr(runners.crud_flow_execution, "confirm_stop", MagicMock())
     monkeypatch.setattr(
@@ -444,3 +456,132 @@ async def test_invalid_cra_completion_keeps_original_error_and_contract(
     result = recorded["result"]
     assert isinstance(result, dict)
     assert result.get("error") in {"cra_result_invalid", "cra_result_missing"}
+
+
+@pytest.mark.asyncio
+async def test_runner_log_batch_replay_has_stable_persistence_ids(monkeypatch) -> None:
+    """A lost acknowledgment can replay logs without duplicating stored markers."""
+    db = MagicMock()
+    execution_id, batch_id = uuid4(), uuid4()
+    append = MagicMock()
+    monkeypatch.setattr(runners.crud_flow_execution_log, "append_logs", append)
+    monkeypatch.setattr(runners, "_publish_flow_update", AsyncMock())
+    await runners.persist_runner_logs(
+        db, execution_id, ["session", "PR"], str(batch_id)
+    )
+    await runners.persist_runner_logs(
+        db, execution_id, ["session", "PR"], str(batch_id)
+    )
+    first, replay = [call.args[1] for call in append.call_args_list]
+    assert first == replay
+    assert len({entry[1]["_persistence_id"] for entry in first}) == 2
+
+
+@pytest.mark.asyncio
+async def test_runner_log_broadcast_timeout_does_not_block_control(monkeypatch) -> None:
+    """Raw logs stay durable even when their best-effort live broadcast stalls."""
+    import asyncio
+
+    async def stalled(*args, **kwargs) -> None:
+        await asyncio.Event().wait()
+
+    append = MagicMock()
+    monkeypatch.setattr(runners.crud_flow_execution_log, "append_logs", append)
+    monkeypatch.setattr(runners, "_publish_flow_update", stalled)
+    monkeypatch.setattr(runners, "RUNNER_LOG_BROADCAST_TIMEOUT", 0.01)
+    await asyncio.wait_for(
+        runners.persist_runner_logs(MagicMock(), uuid4(), ["critical marker"], None),
+        timeout=0.5,
+    )
+    append.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_legacy_terminal_log_frame_remains_bounded_and_supported(
+    monkeypatch,
+) -> None:
+    append = MagicMock()
+    monkeypatch.setattr(runners.crud_flow_execution_log, "append_logs", append)
+    monkeypatch.setattr(runners, "_publish_flow_update", AsyncMock())
+    await runners.persist_runner_logs(MagicMock(), uuid4(), ["progress"] * 512, None)
+    assert len(append.call_args.args[1]) == 512
+    with pytest.raises(ValueError, match="Invalid runner log batch"):
+        await runners.persist_runner_logs(
+            MagicMock(), uuid4(), ["progress"] * 512, str(uuid4())
+        )
+
+
+@pytest.mark.asyncio
+async def test_invalid_log_batch_error_echoes_batch_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI needs the rejected identity to drop inflight and reclaim budget."""
+    execution_id = uuid4()
+    batch_id = str(uuid4())
+    runner = SimpleNamespace(
+        id=uuid4(),
+        account_id=uuid4(),
+        current_execution_id=execution_id,
+        pending_job=None,
+        halt_requested=False,
+        status="busy",
+        reported_status="RUNNING",
+        publication_capabilities=None,
+    )
+
+    def set_publication_capabilities(
+        db: object,
+        *,
+        runner_id: UUID,
+        capabilities: dict | None,
+        expected_connection_id: str | None = None,
+        offline: bool = False,
+        clear_lease: bool = False,
+        execution_id: UUID | None = None,
+        reported_status: str | None = None,
+        commit: bool = True,
+    ) -> bool:
+        current = (runner.publication_capabilities or {}).get("connection_id")
+        if expected_connection_id is not None and current != expected_connection_id:
+            return False
+        runner.publication_capabilities = capabilities
+        return True
+
+    websocket = MagicMock()
+    websocket.accept = AsyncMock()
+    websocket.send_json = AsyncMock()
+    websocket.receive_json = AsyncMock(
+        side_effect=[
+            {
+                "type": "logs",
+                "execution_id": str(execution_id),
+                "batch_id": batch_id,
+                "lines": ["progress"] * 512,
+            },
+            WebSocketDisconnect(),
+        ]
+    )
+    monkeypatch.setattr(runners, "_authenticate_runner", lambda *args: runner)
+    monkeypatch.setattr(runners, "emit_runner_updated", MagicMock())
+    monkeypatch.setattr(runners.crud_flow_runner, "get", lambda *args, **kwargs: runner)
+    monkeypatch.setattr(runners.crud_flow_runner, "touch_heartbeat", MagicMock())
+    monkeypatch.setattr(
+        runners.crud_flow_runner,
+        "set_publication_capabilities",
+        set_publication_capabilities,
+    )
+
+    await runners.runner_ws(websocket, runner.id, MagicMock())
+
+    errors = [
+        call.args[0]
+        for call in websocket.send_json.call_args_list
+        if call.args and call.args[0].get("type") == "error"
+    ]
+    assert errors == [
+        {
+            "type": "error",
+            "error": "Invalid runner log batch",
+            "batch_id": batch_id,
+        }
+    ]
