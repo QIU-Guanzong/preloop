@@ -1,5 +1,6 @@
 """The purge: bounds, holds, audit rows and the off-peak window."""
 
+import inspect
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -280,6 +281,37 @@ def test_an_execution_hold_covers_that_executions_packs(db_session, test_user, a
     assert _exists(db_session, models.FlowArtifact, artifact.id) is True
 
 
+def test_a_held_execution_keeps_its_legacy_evidence_archive(
+    db_session, test_user, account
+):
+    """The legacy-column drop is not a RECORD_CLASS, but a hold still stops it."""
+    held, _held_pack = _evidence(db_session, test_user, age_days=500)
+    unheld, _unheld_pack = _evidence(db_session, test_user, age_days=500)
+    aged = datetime.now(UTC) - timedelta(days=500)
+    held.created_at = aged
+    unheld.created_at = aged
+    held.evidence_archive = b"held-archive"
+    unheld.evidence_archive = b"unheld-archive"
+    db_session.add_all([held, unheld])
+    db_session.commit()
+    place_hold(
+        db_session,
+        account_id=account.id,
+        resource_type="execution",
+        resource_id=str(held.id),
+        reason="incident review INC-114",
+        user_id=test_user.id,
+    )
+
+    purge.run_retention_purge(db_session, account_ids=[account.id], ignore_window=True)
+    db_session.expire_all()
+
+    held_archive = db_session.get(models.FlowExecution, held.id).evidence_archive
+    unheld_archive = db_session.get(models.FlowExecution, unheld.id).evidence_archive
+    assert bytes(held_archive or b"") == b"held-archive"
+    assert unheld_archive is None
+
+
 def test_a_held_runtime_session_and_its_activity_survive_the_purge(
     db_session, test_user, account
 ):
@@ -396,6 +428,18 @@ def test_every_purgeable_class_carries_a_hold_predicate():
         assert any(
             f"{model.__tablename__}.legal_hold is false" in text for text in rendered
         ), f"{record_class} is purged without a legal hold predicate"
+    for model in purge.HOLD_SIDE_MODELS:
+        rendered = [str(item).lower() for item in purge._hold_filters_for_model(model)]
+        assert any(
+            f"{model.__tablename__}.legal_hold is false" in text for text in rendered
+        ), f"{model.__name__} is written by the purge without a legal hold predicate"
+
+
+def test_legacy_evidence_drop_routes_through_the_hold_helper():
+    """The FlowExecution UPDATE must unpack the helper, not repeat the flag."""
+    source = inspect.getsource(purge._drop_legacy_evidence_columns)
+    assert "_hold_filters_for_model(FlowExecution)" in source
+    assert "legal_hold.is_(False)" not in source
 
 
 def test_hold_filters_always_returns_a_list_of_clauses():
@@ -407,6 +451,10 @@ def test_hold_filters_always_returns_a_list_of_clauses():
             assert clauses == []
         else:
             assert len(clauses) == 1
+    for model in purge.HOLD_SIDE_MODELS:
+        clauses = purge._hold_filters_for_model(model)
+        assert isinstance(clauses, list)
+        assert len(clauses) == 1
 
 
 def test_a_class_purged_without_a_hold_check_has_to_say_why():

@@ -8,9 +8,11 @@ Four properties it has to have, in order of how much they matter:
 
 **It never touches a held record.** Every statement carries the legal hold
 predicate. A hold that a purge could race past is not a hold. The predicate is
-added centrally, in :func:`class_filters`, from the flag on the class's model,
+added centrally by :func:`_hold_filters_for_model` from the flag on the model,
 so a class cannot carry a cutoff without carrying the hold check; a class whose
 model has no flag has to say so in :data:`HOLD_EXEMPT_CLASSES` and explain why.
+Statements that write a model outside :data:`RECORD_CLASSES` (the legacy
+evidence-column drop on ``FlowExecution``) unpack the same helper.
 
 **It is off by default.** ``RETENTION_PURGE_ENABLED`` is false. An operator
 upgrading to this release does not discover afterwards that a background job
@@ -239,6 +241,26 @@ HOLD_EXEMPT_CLASSES: dict[str, str] = {
     ),
 }
 
+#: Models the purge writes that are not :data:`RECORD_CLASSES`. The execution
+#: row itself is never deleted; only leftover ``evidence_archive`` bytes are
+#: cleared. They still go through :func:`_hold_filters_for_model` so a hold
+#: cannot be skipped the way runtime sessions were (issue #650).
+HOLD_SIDE_MODELS: tuple[Any, ...] = (FlowExecution,)
+
+
+def _hold_filters_for_model(model: Any) -> list[Any]:
+    """The legal hold predicate for one model, empty when it has no flag.
+
+    Always a sequence of clauses so callers unpack the same type whether the
+    model is held or has no flag. Shared by every RECORD_CLASS and by side
+    statements such as the legacy evidence-column drop.
+    """
+    clauses: list[Any] = []
+    flag = getattr(model, "legal_hold", None)
+    if flag is not None:
+        clauses.append(flag.is_(False))
+    return clauses
+
 
 def _hold_filters(record_class: str) -> list[Any]:
     """The legal hold predicate for one class, empty when it is exempt.
@@ -249,11 +271,7 @@ def _hold_filters(record_class: str) -> list[Any]:
     missing on the fourth, which is exactly how a held runtime session was
     purgeable.
     """
-    clauses: list[Any] = []
-    flag = getattr(_CLASS_MODELS[record_class], "legal_hold", None)
-    if flag is not None:
-        clauses.append(flag.is_(False))
-    return clauses
+    return _hold_filters_for_model(_CLASS_MODELS[record_class])
 
 
 def class_filters(record_class: str, cutoff: datetime):
@@ -359,7 +377,7 @@ def _drop_legacy_evidence_columns(
         .where(
             execution_in_account(account_id),
             FlowExecution.created_at < cutoff,
-            FlowExecution.legal_hold.is_(False),
+            *_hold_filters_for_model(FlowExecution),
             FlowExecution.evidence_archive.isnot(None),
         )
         .values(evidence_archive=None)
