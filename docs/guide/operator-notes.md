@@ -1,7 +1,7 @@
 # Operator notes
 
 An operator note is a short instruction from an identified human to a running
-agent. You type it in the console or the API; the agent receives it at
+agent. You type it in the console, the CLI or the API; the agent receives it at
 its next turn boundary; the note is recorded as a human decision, with who sent
 it, when it landed and on which turn. An agent can author one too, through an
 opt-in tool, and the record says so; see
@@ -37,6 +37,33 @@ themselves, which is exactly what happened.
 Console: the **Operator notes** card on the agent page and on a running flow
 execution. Enter sends, Shift+Enter is a newline. Each note shows its state, and
 an undelivered note can be withdrawn from the same card.
+
+CLI, which is where an operator running an agent already is:
+
+```bash
+preloop notes send --agent 0b0d... "Deploy to eu-west-1, not us-east-1."
+preloop notes send --session 5a3e... "Stop refactoring the tests, ship the fix."
+preloop notes send --execution 9f2b... "The deadline moved to Friday."
+```
+
+Name exactly one of `--agent`, `--session` or `--execution`; naming none or
+naming two is refused before any request is made. The body is the argument,
+and with no argument it is read from standard input, so a multi line note can
+be piped or written in a heredoc:
+
+```bash
+cat <<'NOTE' | preloop notes send --agent 0b0d...
+Two things:
+  1. the cluster is the one in eu-west-1
+  2. do not touch the tests
+NOTE
+```
+
+`--expires-in 2h` overrides the 24 hour default. `--json` emits the note id
+and the target and nothing else, for scripts. A refusal prints the server's
+reason, including an unresolvable target and the rate limit, and exits
+non-zero. The CLI sends notes and does not read them: listing a note's
+delivery state and cancelling one stay in the console and the API.
 
 API:
 

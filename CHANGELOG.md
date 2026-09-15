@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `preloop notes send` posts one operator note from the terminal to
+  `POST /api/v1/operator-notes`. Name exactly one of `--agent`,
+  `--session`, or `--execution`. The body is the argument, or stdin when
+  piped. `--expires-in` is a Go duration between 60s and 7d; omitted, the
+  server keeps the note deliverable for 24 hours. `--json` emits the note
+  id and target only.
+
 - `{{name|truncate(N)}}` prompt-template filter. `N` is a byte cap, the
   cut is on a UTF-8 boundary, and a marker names the full size so the
   agent can fetch the rest. Bare `|truncate` is 16 KiB. Preset 002
