@@ -14,6 +14,18 @@ export const RUNNING_STATUSES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The same set as the `status` query the executions list endpoint takes.
+ *
+ * The Flows page and the header bell each carried their own literal copy, so
+ * a surface could ask the server for one set of statuses and filter the
+ * answer by another. One source keeps the question and the answer about the
+ * same runs.
+ */
+export const IN_FLIGHT_EXECUTION_STATUSES: readonly string[] = [
+  ...RUNNING_STATUSES,
+];
+
+/**
  * Duration text for an execution row shared by the list views.
  *
  * Finished runs show their span, live runs show `Running · <elapsed>`

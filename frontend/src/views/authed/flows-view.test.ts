@@ -1624,4 +1624,195 @@ describe('FlowsView', () => {
     ).to.be.true;
     expect(element.shadowRoot!.textContent).to.not.include('Use template');
   });
+  /**
+   * The runs in flight on the Flows page: what is shown, what can be stopped,
+   * and whether the numbers keep up with the database.
+   */
+  describe('runs in flight', () => {
+    const FLOW = {
+      id: 'flow-1',
+      name: 'Automated runs',
+      description: '',
+      trigger_event_source: 'github',
+      trigger_event_types: ['issue_labeled'],
+      is_active: true,
+    };
+
+    const run = (id: string, status: string) => ({
+      id,
+      flow_id: 'flow-1',
+      flow_name: 'Automated runs',
+      status,
+      start_time: '2026-09-15T15:25:00Z',
+      end_time: null,
+    });
+
+    let active: unknown[];
+    let stopped: string[];
+
+    function stubWith(rows: () => unknown[]) {
+      return sinon
+        .stub(window, 'fetch')
+        .callsFake(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = typeof input === 'string' ? input : input.toString();
+          const method = (init?.method || 'GET').toUpperCase();
+          const json = (data: unknown) =>
+            new Response(JSON.stringify(data), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            });
+          if (url.includes('/command') && method === 'POST') {
+            stopped.push(url);
+            return json({ status: 'stopped' });
+          }
+          if (url.includes('/api/v1/flows/executions') && method === 'GET') {
+            return json(url.includes('status=') ? rows() : []);
+          }
+          if (url.includes('/api/v1/flows/presets')) return json([]);
+          if (url.includes('/api/v1/flows') && method === 'GET') {
+            return json([FLOW]);
+          }
+          if (url.includes('/api/v1/trackers')) return json([]);
+          return json({ detail: `Unhandled: ${method} ${url}` });
+        });
+    }
+
+    async function view(): Promise<FlowsView> {
+      const element = (await fixture(
+        html`<flows-view></flows-view>`
+      )) as FlowsView;
+      await waitUntil(
+        () => !(element as any).isLoading,
+        'Flows view did not finish loading'
+      );
+      await element.updateComplete;
+      return element;
+    }
+
+    async function confirmStop(): Promise<void> {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const dialog = document.body.querySelector('confirm-dialog') as
+        (HTMLElement & { updateComplete: Promise<unknown> }) | null;
+      expect(dialog, 'confirm-dialog is mounted').to.exist;
+      await dialog!.updateComplete;
+      const button = [
+        ...(dialog!.shadowRoot?.querySelectorAll('sl-button') || []),
+      ].find((candidate) => candidate.textContent?.trim() === 'Cancel run');
+      expect(button, 'the dialog offers Cancel run').to.exist;
+      (button as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    const items = (element: FlowsView) =>
+      Array.from(element.shadowRoot!.querySelectorAll('.execution-item'));
+
+    beforeEach(() => {
+      active = [];
+      stopped = [];
+      resetConfirmDialogForTests();
+    });
+
+    afterEach(() => {
+      resetConfirmDialogForTests();
+      document.body
+        .querySelectorAll('confirm-dialog')
+        .forEach((d) => d.remove());
+    });
+
+    it('lists a queued run, not just the ones already started', async () => {
+      active = [run('exec-pending', 'PENDING'), run('exec-running', 'RUNNING')];
+      fetchStub = stubWith(() => active);
+      const element = await view();
+
+      expect(items(element).length, 'a queued run is a run in flight').to.equal(
+        2
+      );
+      expect(element.shadowRoot!.textContent).to.contain('Pending');
+    });
+
+    it('offers Stop on a run that has not started yet', async () => {
+      active = [run('exec-pending', 'PENDING')];
+      fetchStub = stubWith(() => active);
+      const element = await view();
+
+      const ids = (
+        element as unknown as {
+          executionActions: (e: unknown) => { id: string }[];
+        }
+      )
+        .executionActions(active[0])
+        .map((action) => action.id);
+      expect(ids).to.contain('cancel');
+    });
+
+    it('reads STOPPED straight after the stop, without a reload', async () => {
+      active = [run('exec-pending', 'PENDING')];
+      fetchStub = stubWith(() => active);
+      const element = await view();
+
+      // The server now answers with nothing in flight, as the database does.
+      const stopping = (
+        element as unknown as {
+          stopExecution: (e: unknown) => Promise<void>;
+        }
+      ).stopExecution(active[0]);
+      active = [];
+      await confirmStop();
+      await stopping;
+      await element.updateComplete;
+
+      expect(stopped.length, 'the stop command was sent').to.equal(1);
+      expect(stopped[0]).to.contain('exec-pending');
+      expect(
+        (
+          element as unknown as { activeExecutions: { status: string }[] }
+        ).activeExecutions.every((e) => e.status !== 'PENDING')
+      ).to.equal(true);
+      expect(items(element).length).to.equal(0);
+    });
+
+    it('drops a finished run from the in-flight list on a status update', async () => {
+      active = [run('exec-pending', 'PENDING')];
+      fetchStub = stubWith(() => active);
+      const element = await view();
+      expect(items(element).length).to.equal(1);
+
+      (
+        element as unknown as {
+          handleWebSocketMessage: (m: unknown) => void;
+        }
+      ).handleWebSocketMessage({
+        type: 'status_update',
+        execution_id: 'exec-pending',
+        payload: { status: 'STOPPED', end_time: '2026-09-15T15:30:00Z' },
+      });
+      await element.updateComplete;
+
+      expect(
+        (element as unknown as { activeExecutions: unknown[] }).activeExecutions
+          .length,
+        'a stopped run is not in flight'
+      ).to.equal(0);
+      expect(items(element).length).to.equal(0);
+    });
+
+    it('recounts the runs in flight when the tab becomes visible again', async () => {
+      active = [run('exec-pending', 'PENDING')];
+      fetchStub = stubWith(() => active);
+      const element = await view();
+      expect(items(element).length).to.equal(1);
+
+      // Stopped from somewhere else: no websocket update ever arrives for a
+      // run that was never dispatched.
+      active = [];
+      document.dispatchEvent(new Event('visibilitychange'));
+
+      await waitUntil(
+        () =>
+          (element as unknown as { activeExecutions: unknown[] })
+            .activeExecutions.length === 0,
+        'the Flows page kept counting stopped runs'
+      );
+    });
+  });
 });

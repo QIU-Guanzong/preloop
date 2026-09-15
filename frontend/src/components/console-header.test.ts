@@ -951,3 +951,99 @@ describe('console-header approval deadlines', () => {
     expect(approvalReads).to.equal(2);
   });
 });
+
+/**
+ * The bell's in-flight count against the database.
+ *
+ * `_runningExecutions` is fetched once on connect and then maintained from
+ * websocket status updates alone. A run stopped while it was still queued is
+ * never dispatched to an orchestrator, so nothing publishes a status update
+ * for it, and the bell went on counting runs the database had already marked
+ * STOPPED: ten "pending" against zero PENDING rows, until a reload.
+ */
+describe('console-header in-flight executions', () => {
+  let restoreFetch: () => void;
+  let rows: unknown[];
+  let executionRequests: number;
+
+  const pendingRow = (n: number) => ({
+    id: `exec-${n}`,
+    flow_id: 'flow-1',
+    flow_name: 'Automated runs',
+    status: 'PENDING',
+    start_time: '2026-09-15T15:25:00Z',
+    end_time: null,
+  });
+
+  beforeEach(() => {
+    localStorage.setItem('accessToken', 'test-token');
+    rows = Array.from({ length: 10 }, (_, index) => pendingRow(index));
+    executionRequests = 0;
+    const original = window.fetch;
+    window.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/flows/executions')) {
+        executionRequests += 1;
+        return new Response(JSON.stringify(rows), { status: 200 });
+      }
+      const body = url.includes('/users/me') ? USER : [];
+      return new Response(JSON.stringify(body), { status: 200 });
+    }) as typeof window.fetch;
+    restoreFetch = () => {
+      window.fetch = original;
+    };
+  });
+
+  afterEach(() => {
+    restoreFetch();
+    localStorage.removeItem('accessToken');
+  });
+
+  function inFlight(el: ConsoleHeader): number {
+    return (el as unknown as { _runningExecutions: unknown[] })
+      ._runningExecutions.length;
+  }
+
+  async function header(): Promise<ConsoleHeader> {
+    const el = await fixture<ConsoleHeader>(
+      html`<console-header></console-header>`
+    );
+    await el.updateComplete;
+    await waitUntil(() => inFlight(el) === 10, 'in-flight runs never loaded');
+    return el;
+  }
+
+  it('recounts the runs in flight when the tab becomes visible again', async () => {
+    const el = await header();
+    rows = [];
+
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    await waitUntil(
+      () => inFlight(el) === 0,
+      'the bell kept counting stopped runs'
+    );
+  });
+
+  it('recounts the runs in flight when the window regains focus', async () => {
+    const el = await header();
+    rows = [];
+
+    window.dispatchEvent(new Event('focus'));
+
+    await waitUntil(
+      () => inFlight(el) === 0,
+      'the bell kept counting stopped runs'
+    );
+  });
+
+  it('drops a run the server no longer reports as in flight', async () => {
+    const el = await header();
+    rows = [pendingRow(0)];
+
+    window.dispatchEvent(new Event('focus'));
+
+    await waitUntil(() => inFlight(el) === 1, 'the count never narrowed');
+    expect(executionRequests).to.be.greaterThan(1);
+  });
+});
