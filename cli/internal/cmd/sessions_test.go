@@ -587,6 +587,95 @@ func TestSessionsSearchSendsTheTimeRangeWithAnOffset(t *testing.T) {
 	}
 }
 
+func TestSessionsSearchKeepsASubSecondBound(t *testing.T) {
+	fake := newSessionSearchFake(t, sessionSearchPage{body: sessionSearchFixture})
+
+	_, stderr, err := runSessionsSearchCommand(t,
+		"rolling restart", "--to", "2026-09-15T12:00:00.250Z")
+	if err != nil {
+		t.Fatalf("unexpected error: %v (stderr: %s)", err, stderr)
+	}
+	filters := fake.requests[0].body.Filters
+	if filters == nil {
+		t.Fatal("the time range must reach the filter block")
+	}
+	if filters.EndDate != "2026-09-15T12:00:00.25Z" {
+		t.Fatalf("end_date = %q, want the fractional second the operator typed", filters.EndDate)
+	}
+}
+
+// TestSessionsSearchStatusesBecomeSentences walks every branch of the refusal
+// renderer: each status gets its own sentence, a FastAPI field error list is
+// flattened with the field named, and no branch ever echoes a raw body.
+func TestSessionsSearchStatusesBecomeSentences(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		body     string
+		want     []string
+		unwanted []string
+	}{
+		{
+			name:   "unauthorized points at login",
+			status: http.StatusUnauthorized,
+			body:   `{"detail":"Not authenticated"}`,
+			want:   []string{"your session has expired or is invalid", "preloop login"},
+		},
+		{
+			name:     "not found names the deployment",
+			status:   http.StatusNotFound,
+			body:     `<html><body>404</body></html>`,
+			want:     []string{"not available on this deployment"},
+			unwanted: []string{"<html>"},
+		},
+		{
+			name:   "validation errors name their fields",
+			status: http.StatusUnprocessableEntity,
+			body: `{"detail":[
+				{"loc":["body","filters","start_date"],"msg":"must include a timezone offset"},
+				{"loc":["body","limit"],"msg":"Input should be less than or equal to 50"}
+			]}`,
+			want: []string{
+				"the session search was rejected",
+				"start_date: must include a timezone offset",
+				"limit: Input should be less than or equal to 50",
+			},
+		},
+		{
+			name:   "other statuses still say something",
+			status: http.StatusTooManyRequests,
+			body:   `{"detail":"Too many searches"}`,
+			want:   []string{"the session search failed: Too many searches"},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			newSessionSearchFake(t, sessionSearchPage{status: testCase.status, body: testCase.body})
+
+			stdout, stderr, err := runSessionsSearchCommand(t, "rolling restart")
+			if err == nil {
+				t.Fatalf("status %d must be an error", testCase.status)
+			}
+			if got := ProcessExitCode(err); got != 1 {
+				t.Fatalf("a refusal must exit 1, got %d", got)
+			}
+			if stdout != "" {
+				t.Fatalf("a refusal must write nothing to stdout, got:\n%s", stdout)
+			}
+			for _, want := range testCase.want {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("stderr must contain %q, got:\n%s", want, stderr)
+				}
+			}
+			for _, unwanted := range testCase.unwanted {
+				if strings.Contains(stderr, unwanted) {
+					t.Fatalf("stderr must not echo %q, got:\n%s", unwanted, stderr)
+				}
+			}
+		})
+	}
+}
+
 func TestSessionsSearchRejectsBadFlagsBeforeCallingTheEndpoint(t *testing.T) {
 	cases := []struct {
 		name string

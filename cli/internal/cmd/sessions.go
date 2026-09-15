@@ -319,7 +319,10 @@ func sessionSearchInstant(value, flag string) (string, error) {
 		return day.UTC().Format(time.RFC3339), nil
 	}
 	if instant, err := time.Parse(time.RFC3339, trimmed); err == nil {
-		return instant.Format(time.RFC3339), nil
+		// Nano, not plain RFC 3339: the endpoint accepts a fractional second
+		// and re-formatting without one would move the bound the operator
+		// typed. Whole second inputs are unchanged either way.
+		return instant.Format(time.RFC3339Nano), nil
 	}
 	return "", fmt.Errorf(
 		"--%s must be a date as YYYY-MM-DD or an RFC 3339 timestamp, got %q",
