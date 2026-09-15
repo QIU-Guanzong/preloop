@@ -61,6 +61,16 @@ One flow definition can drive an agent-harness × model evaluation grid without 
 *   **Observation:** `GET /api/v1/flows/batches/{batch_id}/executions` lists a batch (account-scoped, sorted by matrix index) with a rollup of status counts, tokens, tool calls, and estimated cost, so an eval matrix can be observed as a unit.
 *   **Response shape:** non-matrix triggers are wire-identical to before; matrix triggers return `batch_id` plus per-cell execution references.
 
+## Execution lineage
+
+Three additive columns on `flow_execution` record which run started which. Nothing writes a non-default value yet; `run_flow` children, park, and the console tree populate them later.
+
+*   `parent_execution_id` — this run's direct parent (a `run_flow` child, a continuation, a retry). NULL when a trigger started the run. Self-referencing FK to `flow_execution.id` with no `ON DELETE` policy; indexed so `list_children` walks one level at a time.
+*   `root_execution_id` — the top of the chain this hop belongs to. Indexed, no FK. NULL until lineage is recorded.
+*   `delegation_depth` — hops from that root (root = 0). NOT NULL with server default 0.
+
+No backfill. Pre-existing rows keep NULL parent, NULL root, and depth 0. A NULL `root_execution_id` with `delegation_depth` 0 is a trigger-started run or a pre-lineage row, not a chain.
+
 ## Label-based model routing
 
 A flow can optionally store ordered routing rules in `agent_config.model_routing` (no extra column). Each rule has a stable id, `labels.any` and/or `labels.all` against the issue's current labels, and an account-owned `ai_model_id` plus compatible `agent_type`. The first matching rule selects the model and harness for that execution. If none match, or the key is absent, the flow's selected model and harness are used. Examples in docs use operator-defined labels such as `documentation` or `bug`; there is no built-in taxonomy.
