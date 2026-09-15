@@ -1,0 +1,7 @@
+services:
+  redis:
+    image: redis:7
+  ledger:
+    build: .
+    depends_on:
+      - redis

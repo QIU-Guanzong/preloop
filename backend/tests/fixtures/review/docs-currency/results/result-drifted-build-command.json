@@ -1,0 +1,180 @@
+{
+  "schema": "preloop.review.docscurrency/v1",
+  "flow": "docs-currency-review",
+  "status": "success",
+  "run_at": "2026-09-15T09:00:00Z",
+  "git": {
+    "remote": "https://example.com/example/sample-repo.git",
+    "commit": "0000000000000000000000000000000000000000",
+    "branch": "main",
+    "dirty": false
+  },
+  "tool_versions": {
+    "git": "2.43.0"
+  },
+  "inputs_declared": {
+    "target_repo_path": "/workspace/sample-repo",
+    "project_path": "drifted-build-command",
+    "previous_result_path": "not delivered"
+  },
+  "runner": {
+    "kind": null,
+    "id": null
+  },
+  "project": {
+    "path": "drifted-build-command",
+    "documents": [
+      {
+        "path": "README.md",
+        "lines": 17,
+        "read": true
+      }
+    ]
+  },
+  "claims": [
+    {
+      "id": "docs:command:README.md:make-build",
+      "type": "command",
+      "claim": "make build",
+      "doc": "README.md:16",
+      "status": "drifted",
+      "code_shows": "Makefile defines test and lint targets only; there is no build target",
+      "evidence": "Makefile:1",
+      "search": {
+        "pattern": "^build:",
+        "scope": ".",
+        "matches": []
+      },
+      "severity": "high",
+      "reason": null
+    },
+    {
+      "id": "docs:entry_point:README.md:widget-server",
+      "type": "entry_point",
+      "claim": "python -m widget.server",
+      "doc": "README.md:17",
+      "status": "holds",
+      "code_shows": "widget/server.py exists and defines a __main__ entry point",
+      "evidence": "widget/server.py:1",
+      "search": {
+        "pattern": "filename:widget/server.py",
+        "scope": ".",
+        "matches": [
+          "widget/server.py:0"
+        ]
+      },
+      "severity": null,
+      "reason": null
+    },
+    {
+      "id": "docs:dependency:README.md:python-3-11",
+      "type": "dependency",
+      "claim": "Python 3.11 or newer",
+      "doc": "README.md:7",
+      "status": "holds",
+      "code_shows": "pyproject.toml declares requires-python \">=3.11\"",
+      "evidence": "pyproject.toml:4",
+      "search": {
+        "pattern": "requires-python",
+        "scope": "pyproject.toml",
+        "matches": [
+          "pyproject.toml:4"
+        ]
+      },
+      "severity": null,
+      "reason": null
+    },
+    {
+      "id": "docs:service:README.md:postgresql",
+      "type": "service",
+      "claim": "PostgreSQL for storage",
+      "doc": "README.md:8",
+      "status": "holds",
+      "code_shows": "a PostgreSQL client dependency is declared in pyproject.toml",
+      "evidence": "pyproject.toml:5",
+      "search": {
+        "pattern": "psycopg",
+        "scope": ".",
+        "matches": [
+          "pyproject.toml:5"
+        ]
+      },
+      "severity": null,
+      "reason": null
+    },
+    {
+      "id": "docs:env_var:README.md:widget-database-url",
+      "type": "env_var",
+      "claim": "WIDGET_DATABASE_URL",
+      "doc": "README.md:12",
+      "status": "holds",
+      "code_shows": "read by widget/config.py",
+      "evidence": "widget/config.py:5",
+      "search": {
+        "pattern": "WIDGET_DATABASE_URL",
+        "scope": "widget/",
+        "matches": [
+          "widget/config.py:5"
+        ]
+      },
+      "severity": null,
+      "reason": null
+    }
+  ],
+  "counts": {
+    "holds": 4,
+    "drifted": 1,
+    "not_checkable": 0,
+    "by_severity": {
+      "high": 1,
+      "medium": 0,
+      "low": 0
+    },
+    "by_type": {
+      "entry_point": 1,
+      "service": 1,
+      "dependency": 1,
+      "env_var": 1,
+      "command": 1
+    }
+  },
+  "coverage": {
+    "documents_total": 1,
+    "documents_read": 1,
+    "plan_completed": true,
+    "claims_extracted": 5,
+    "unsupported_statements_skipped": 1,
+    "not_reviewed": []
+  },
+  "drift": null,
+  "verdict": "fail",
+  "checks": [
+    {
+      "name": "documents_planned_all_read",
+      "passed": true,
+      "skipped": false,
+      "details": "1 of 1 documents read"
+    },
+    {
+      "name": "every_claim_has_a_recorded_search",
+      "passed": true,
+      "skipped": false,
+      "details": "5 claims, 5 recorded searches"
+    }
+  ],
+  "assessments": [
+    {
+      "topic": "documentation currency",
+      "judgment": "Agent judgment: the drift list is the whole finding set; readability is out of scope for this lens."
+    }
+  ],
+  "artifacts": {
+    "report": "evidence/docs-currency-report.md",
+    "register": "evidence/claims-register.md",
+    "findings": "evidence/findings.json",
+    "inventory": "evidence/inventory.json",
+    "drift_report": null
+  },
+  "note": "synthetic fixture",
+  "disclaimer": "Machine-generated review evidence. Not a certification, audit opinion, or legal advice."
+}
