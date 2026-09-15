@@ -1,9 +1,10 @@
 """Service for recovering orphaned flow executions after pod restarts."""
 
 import asyncio
+import inspect
 import logging
-import time
-from typing import Any, List
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable, List, Optional, Union
 
 from sqlalchemy.orm import Session
 
@@ -17,6 +18,16 @@ from preloop.sync.services.event_bus import get_nats_client
 from .flow_orchestrator import FlowExecutionOrchestrator
 
 logger = logging.getLogger(__name__)
+
+#: A pass asks this before publishing anything: "can the worker pool take
+#: more work right now?". True/False, or None when the caller cannot tell
+#: (boot recovery, tests, a NATS hiccup), in which case the pass proceeds.
+CapacityProbe = Callable[[], Union[Optional[bool], Awaitable[Optional[bool]]]]
+
+
+def _utcnow() -> datetime:
+    """Wall clock for the reaper, in one place so tests can fake it."""
+    return datetime.now(timezone.utc)
 
 
 def _exception_message(exc: BaseException) -> str:
@@ -63,23 +74,27 @@ class ExecutionRecoveryService:
     def __init__(self):
         self.recovery_tasks: List[asyncio.Task] = []
         self.shutdown_event = asyncio.Event()
-        # execution id -> monotonic clock of the last re-dispatch by THIS
-        # process. Every worker runs this loop every 30 seconds against every
-        # unclaimed execution, so without a per-execution backoff a queue of
-        # sixteen held-back executions is republished by every worker on
-        # every tick forever. Process-local on purpose: a cross-worker
-        # guarantee needs leader election, which is out of scope here.
-        self._last_redispatch: dict[str, float] = {}
 
-    async def recover_orphaned_executions(self, db: Session) -> int:
+    async def recover_orphaned_executions(
+        self,
+        db: Session,
+        *,
+        capacity_probe: Optional[CapacityProbe] = None,
+    ) -> int:
         """
         Find and resume monitoring for executions that were running when pod restarted.
 
         When ``FLOW_EXECUTION_WORKER_ENABLED`` is true, re-publishes JetStream
-        tasks instead of starting orchestrators in-process.
+        tasks instead of starting orchestrators in-process. That pass runs
+        under a lease, so with N replicas exactly one of them re-dispatches
+        per interval instead of all N publishing the same work.
 
         Args:
             db: Database session
+            capacity_probe: Optional "does the worker pool have a free slot?"
+                callable. When it answers False, executions that still need a
+                container are left queued instead of being republished into a
+                queue nobody can drain.
 
         Returns:
             Number of executions recovered
@@ -87,13 +102,27 @@ class ExecutionRecoveryService:
         from preloop.services.flow_execution_dispatcher import (
             claim_stale_after_seconds,
             flow_execution_worker_enabled,
+            get_orchestrator_worker_id,
         )
 
         if flow_execution_worker_enabled():
-            return await self._redispatch_stale_executions(
-                db,
-                stale_after_seconds=claim_stale_after_seconds(),
-            )
+            with crud_flow_execution.stale_claim_reaper_lease(
+                db, holder=get_orchestrator_worker_id()
+            ) as leased:
+                if not leased:
+                    # Debug, not info: the loser skips twice a minute per
+                    # replica, and repeated identical lines are half of what
+                    # made the original storm unreadable.
+                    logger.debug(
+                        "Stale-claim reaper: another worker holds the lease, "
+                        "skipping this pass"
+                    )
+                    return 0
+                return await self._redispatch_stale_executions(
+                    db,
+                    stale_after_seconds=claim_stale_after_seconds(),
+                    capacity_probe=capacity_probe,
+                )
 
         logger.info("Checking for orphaned flow executions to recover...")
 
@@ -141,37 +170,69 @@ class ExecutionRecoveryService:
         )
         return recovered_count
 
+    async def _pool_has_capacity(
+        self,
+        capacity_probe: Optional[CapacityProbe],
+    ) -> Optional[bool]:
+        """Ask the caller whether the worker pool can take more work.
+
+        Returns None when there is no probe or the probe failed: an unknown
+        answer must not stop the deploy-handoff safety net, it only stops the
+        optimisation.
+        """
+        if capacity_probe is None:
+            return None
+        try:
+            answer = capacity_probe()
+            if inspect.isawaitable(answer):
+                answer = await answer
+        except Exception as exc:  # noqa: BLE001 - a probe never fails a pass
+            logger.warning(
+                "Worker-pool capacity probe failed (%s); running the pass anyway",
+                _exception_message(exc),
+            )
+            return None
+        return None if answer is None else bool(answer)
+
     def _admissible_candidates(
         self,
         db: Session,
         candidates: List[models.FlowExecution],
         *,
         stale_after_seconds: int,
+        has_capacity: Optional[bool] = None,
+        summary: Optional[Any] = None,
+        now: Optional[datetime] = None,
     ) -> List[models.FlowExecution]:
         """Drop the candidates republishing would only churn.
 
-        Two filters, in this order:
+        Three filters, in this order:
 
-        * per-execution backoff: this process does not republish the same id
-          more than once per stale window, so a run that nothing can claim
-          does not get a fresh message every 30 seconds from every worker;
+        * per-execution backoff: an execution nobody claims is republished on
+          a growing delay (30s, 60s, 2m, ... up to the cap) instead of on
+          every pass. The counter and the timestamp live on the row, so the
+          schedule is the same for every replica rather than per process;
+        * worker-pool capacity: when the pool has no free slot, an execution
+          that still needs a container is left queued. Publishing into a
+          queue nobody can drain is pure load;
         * per-account admission: an execution whose account is already at its
           concurrency cap is left alone. Publishing it would have a worker
           fetch it, refuse the claim and nak it, which is exactly the storm
-          the cap is supposed to end. Only unstarted PENDING rows are
-          filtered this way: anything with a live agent session must be
-          re-dispatched whatever the cap says, or its container goes
-          unmonitored.
+          the cap is supposed to end.
 
-        The backoff is process-local. A cross-worker guarantee would need
-        leader election over the recovery loop; that is deliberately out of
-        scope here and the per-account filter is what bounds the fan-out in
-        the meantime.
+        The last two filters apply only to unstarted PENDING rows. Anything
+        with a live agent session is re-dispatched whatever the cap or the
+        capacity says: an unmonitored container is worse than being one over
+        a limit.
         """
         from preloop.services.execution_concurrency import account_running_cap
+        from preloop.services.execution_reaper import (
+            ReaperPassSummary,
+            is_redispatch_due,
+        )
 
-        now = time.monotonic()
-        window = max(1, stale_after_seconds)
+        counts = summary if summary is not None else ReaperPassSummary()
+        moment = now or _utcnow()
         admitted = crud_flow_execution.count_admitted_by_account(
             db, stale_after_seconds=stale_after_seconds
         )
@@ -181,19 +242,32 @@ class ExecutionRecoveryService:
 
         for execution in candidates:
             execution_id = str(execution.id)
-            last = self._last_redispatch.get(execution_id)
-            if last is not None and now - last < window:
+            attempts = int(getattr(execution, "redispatch_count", 0) or 0)
+            if not is_redispatch_due(
+                attempts=attempts,
+                last_redispatch_at=getattr(execution, "last_redispatch_at", None),
+                now=moment,
+            ):
+                counts.skipped_backoff += 1
                 logger.debug(
-                    "Not re-dispatching %s: published %.0fs ago, backoff is %ss",
+                    "Not re-dispatching %s: %s attempt(s) already, still inside "
+                    "its backoff",
                     execution_id,
-                    now - last,
-                    window,
+                    attempts,
                 )
                 continue
 
             needs_admission = (
                 execution.status == "PENDING" and not execution.agent_session_reference
             )
+            if needs_admission and has_capacity is False:
+                counts.skipped_no_capacity += 1
+                logger.debug(
+                    "Not re-dispatching %s: no free worker slot to run it",
+                    execution_id,
+                )
+                continue
+
             account_id = getattr(getattr(execution, "flow", None), "account_id", None)
             if needs_admission and account_id is not None:
                 if account_id not in caps:
@@ -201,7 +275,8 @@ class ExecutionRecoveryService:
                     caps[account_id] = account_running_cap(account)
                 in_flight = admitted.get(account_id, 0) + planned.get(account_id, 0)
                 if in_flight >= caps[account_id]:
-                    logger.info(
+                    counts.skipped_account_cap += 1
+                    logger.debug(
                         "Not re-dispatching %s: account %s is at its "
                         "concurrency cap (%s/%s); it stays PENDING",
                         execution_id,
@@ -212,53 +287,56 @@ class ExecutionRecoveryService:
                     continue
                 planned[account_id] = planned.get(account_id, 0) + 1
 
-            self._last_redispatch[execution_id] = now
             keep.append(execution)
 
-        self._prune_redispatch_memory(now, window)
         return keep
-
-    def _prune_redispatch_memory(self, now: float, window: int) -> None:
-        """Keep the backoff map from growing with every execution ever seen."""
-        cutoff = now - (window * 10)
-        stale = [key for key, seen in self._last_redispatch.items() if seen < cutoff]
-        for key in stale:
-            del self._last_redispatch[key]
 
     async def _redispatch_stale_executions(
         self,
         db: Session,
         *,
         stale_after_seconds: int,
+        capacity_probe: Optional[CapacityProbe] = None,
     ) -> int:
-        """Re-publish execute/resume tasks for unclaimed or stale-claim executions."""
+        """Re-publish execute/resume tasks for unclaimed or stale-claim executions.
+
+        One summary line per pass, never one line per candidate: a storm has
+        to read as a number.
+        """
+        from preloop.services.execution_reaper import ReaperPassSummary
         from preloop.services.flow_execution_dispatcher import (
             dispatch_execute,
             dispatch_resume,
         )
 
-        logger.info(
+        logger.debug(
             "Worker-mode recovery: listing stale/unclaimed active flow executions "
             "(stale_after=%ss)...",
             stale_after_seconds,
         )
+        has_capacity = await self._pool_has_capacity(capacity_probe)
         candidates = crud_flow_execution.list_stale_or_unclaimed_active(
             db,
             stale_after_seconds=stale_after_seconds,
             limit=500,
         )
+        summary = ReaperPassSummary(candidates=len(candidates))
         if not candidates:
-            logger.info("No stale/unclaimed executions to re-dispatch")
+            logger.debug("No stale/unclaimed executions to re-dispatch")
+            logger.info(summary.as_log_line())
             return 0
 
-        candidates = self._admissible_candidates(
-            db, candidates, stale_after_seconds=stale_after_seconds
+        now = _utcnow()
+        admissible = self._admissible_candidates(
+            db,
+            candidates,
+            stale_after_seconds=stale_after_seconds,
+            has_capacity=has_capacity,
+            summary=summary,
+            now=now,
         )
-        if not candidates:
-            logger.info(
-                "Every stale/unclaimed execution is held back (account cap or "
-                "re-dispatch backoff); nothing to publish this tick"
-            )
+        if not admissible:
+            logger.info(summary.as_log_line())
             return 0
 
         semaphore = asyncio.Semaphore(20)
@@ -271,7 +349,7 @@ class ExecutionRecoveryService:
                     else:
                         ok = await dispatch_execute(execution.id)
                     if ok:
-                        logger.info(
+                        logger.debug(
                             "Re-dispatched %s for execution %s (status=%s)",
                             "resume_flow_execution"
                             if execution.agent_session_reference
@@ -290,16 +368,23 @@ class ExecutionRecoveryService:
                 return False
 
         results = await asyncio.gather(
-            *(dispatch_candidate(execution) for execution in candidates)
+            *(dispatch_candidate(execution) for execution in admissible)
         )
-        dispatched = sum(1 for ok in results if ok)
+        published = [
+            execution.id
+            for execution, ok in zip(admissible, results, strict=False)
+            if ok
+        ]
+        summary.redispatched = len(published)
+        summary.failed = len(admissible) - len(published)
 
-        logger.info(
-            "Worker-mode recovery dispatched %s/%s execution(s)",
-            dispatched,
-            len(candidates),
-        )
-        return dispatched
+        if published:
+            # Count the publish against each row before the next pass reads
+            # it, so the backoff holds across workers and across restarts.
+            crud_flow_execution.record_redispatch(db, execution_ids=published, now=now)
+
+        logger.info(summary.as_log_line())
+        return summary.redispatched
 
     async def _resume_execution_monitoring(
         self,

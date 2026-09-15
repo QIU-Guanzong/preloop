@@ -110,3 +110,49 @@ describe('session-observer merge', () => {
     expect(merged[0].tokenUsage.cache_hit_ratio).to.equal(null);
   });
 });
+
+describe('session-observer notes', () => {
+  it('reads the note count and the newest author off the row', () => {
+    const session = normalizeObservedSession({
+      id: 'session-noted',
+      note_count: 2,
+      latest_note_author_display: 'Reviewer',
+      latest_note_author_auth_method: 'agent',
+      latest_note_at: '2026-03-09T20:00:00Z',
+    });
+
+    expect(session.noteCount).to.equal(2);
+    expect(session.latestNoteAuthorDisplay).to.equal('Reviewer');
+    expect(session.latestNoteAuthorAuthMethod).to.equal('agent');
+    expect(session.latestNoteAt).to.equal('2026-03-09T20:00:00Z');
+  });
+
+  it('reads a row with no note fields as a session nobody noted', () => {
+    const session = normalizeObservedSession({ id: 'session-quiet' });
+
+    expect(session.noteCount).to.equal(0);
+    expect(session.latestNoteAuthorDisplay).to.equal(null);
+    expect(session.latestNoteAuthorAuthMethod).to.equal(null);
+    expect(session.latestNoteAt).to.equal(null);
+  });
+
+  it('takes the count once when two rows describe one session', () => {
+    // Requests add across sources; a note count is already per session, so
+    // merging must not double it.
+    const merged = normalizeObservedSessions([
+      { id: 'session-3', total_requests: 1 },
+      {
+        id: 'session-3',
+        total_requests: 1,
+        note_count: 2,
+        latest_note_author_display: 'Jane Doe',
+        latest_note_author_auth_method: 'jwt',
+      },
+    ]);
+
+    expect(merged.length).to.equal(1);
+    expect(merged[0].totalRequests).to.equal(2);
+    expect(merged[0].noteCount).to.equal(2);
+    expect(merged[0].latestNoteAuthorDisplay).to.equal('Jane Doe');
+  });
+});

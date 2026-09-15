@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Callable-flows picker on the flow editor. When the delegation tool is
+  on, the form lists the account's other flows (paging past the 100-row
+  list default) and lets the operator choose which this flow may call,
+  with optional per-entry ceilings. Entries that do not name a flow in
+  the account get a row they can clear, but only once the full list has
+  loaded. The field is omitted from a save that did not edit it, and
+  from a save while the tool is off.
 - Operator notes reach hook path agents. The permission hook writes the
   rendered note block into the Claude Code `PreToolUse` and Codex CLI
   `PreToolUse` `hookSpecificOutput.additionalContext`, and into the Cursor CLI
@@ -87,6 +94,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by `FLOW_DELEGATION_MAX_DEPTH` (default 2) and
   `FLOW_DELEGATION_MAX_CHILDREN` (default 25, the matrix fan out ceiling).
   Docs at `docs/guide/flows/flow-delegation.md`.
+- Cost ceilings for delegated children. `run_flow` takes an optional
+  `max_cost_usd`, lowered to the calling flow's `max_usd_per_child` on the
+  matching `callable_flows` entry and refused with `budget_exceeded` when
+  the delegation tree cannot afford it. A ceiling covers a subtree, so it
+  cannot be avoided by delegating one level deeper, and a refusal happens
+  before the child row exists: children already running are never killed to
+  make room. What a tree may commit is bounded by
+  `FLOW_DELEGATION_MAX_TREE_USD` (default 50) and a child nobody named a
+  ceiling for takes `FLOW_DELEGATION_DEFAULT_CHILD_USD` (default 2); either
+  set to 0 removes that ceiling. Children of one execution now share a
+  `batch_id`, so `GET /api/v1/flows/batches/{batch_id}/executions` rolls up
+  a fan out's cost, tokens and tool calls with no new endpoint. Existing
+  budget policies are unchanged: this is an admission rule layered on them.
 - Execution tree on the execution page. A delegating run lists what it
   started: one row per child with the flow, the label the caller passed, the
   state, the duration and the cost, expandable to grandchildren and linked to
@@ -157,6 +177,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The stale-claim reaper no longer re-publishes every unclaimed execution
+  from every worker on every pass. One replica runs the pass per interval
+  (a database lease), an execution nobody claims is re-dispatched on a
+  doubling delay recorded on the row (30s, 60s, 2m, ... up to
+  `FLOW_EXECUTION_REDISPATCH_BACKOFF_MAX_SECONDS`, default 900), and a pass
+  that finds flow tasks already queued undelivered publishes nothing.
+  Recovery of an execution whose owner died is unchanged: a claim clears
+  the backoff, so it is adopted inside one stale window. Each pass logs one
+  summary line with its counts instead of a line per candidate.
 - Agent launch no longer fails with `exec /bin/bash: argument list too
   long` when a rendered prompt or Kubernetes inner script exceeds
   Linux `MAX_ARG_STRLEN` (131072 bytes). The prompt and script travel

@@ -117,6 +117,17 @@ export interface Flow {
   webhook_config?: FlowWebhookConfig;
   allowed_mcp_servers?: string[];
   allowed_mcp_tools?: Array<{ server_name: string; tool_name: string }>;
+  /**
+   * Delegation allowlist: the flows an execution of this flow may run, each
+   * with optional per child ceilings. Unset and `[]` are the same permission,
+   * "this flow may call nothing".
+   */
+  callable_flows?: Array<{
+    flow: string;
+    max_children?: number | null;
+    max_usd_per_child?: number | null;
+    allow_self?: boolean;
+  }> | null;
   git_clone_config?: GitCloneConfig;
   notifications?: FlowNotifications | null;
   custom_commands?: FlowCustomCommands;
@@ -464,6 +475,14 @@ export interface RuntimeSessionSummary {
   optimization_waste_score?: number | null;
   optimization_potential_savings_tokens?: number | null;
   optimization_potential_savings_usd?: number | null;
+  /**
+   * Notes on this session, carried on the row so the list can show who
+   * steered it without a second request per row.
+   */
+  note_count?: number | null;
+  latest_note_author_display?: string | null;
+  latest_note_author_auth_method?: string | null;
+  latest_note_at?: string | null;
 }
 
 export interface AccountRuntimeSessionListResponse {
@@ -615,7 +634,10 @@ export interface OperatorNote {
   runtime_session_id?: string | null;
   author: {
     user_id?: string | null;
+    /** Set instead of `user_id` when another agent wrote the note. */
+    agent_id?: string | null;
     display?: string | null;
+    /** `agent`, or the human credential: `session`, `jwt`, `api_key`. */
     auth_method?: string | null;
   };
   created_at?: string | null;

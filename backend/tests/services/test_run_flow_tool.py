@@ -99,6 +99,7 @@ async def test_the_description_names_the_refusal_reasons_an_agent_will_see():
         "depth_exceeded",
         "cycle_detected",
         "fanout_exceeded",
+        "budget_exceeded",
     ):
         assert reason in description
 

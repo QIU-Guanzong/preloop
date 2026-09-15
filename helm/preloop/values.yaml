@@ -45,8 +45,14 @@ worker:
 flowExecution:
   workerEnabled: false
   claimStaleSeconds: 120
-  # Periodic re-dispatch of stale/unclaimed actives (deploy handoff).
+  # Periodic re-dispatch of stale/unclaimed actives (deploy handoff). One
+  # replica runs the pass per interval: it is held under a database lease.
   reclaimIntervalSeconds: 30
+  # Longest gap the reaper leaves between two re-dispatches of the SAME
+  # execution. The gap doubles from reclaimIntervalSeconds (30s, 60s, 2m,
+  # ...) up to this cap, so an execution nothing can claim is republished a
+  # handful of times an hour instead of on every pass.
+  redispatchBackoffMaxSeconds: 900
   # Long enough to stop fetches, cancel in-flight monitors, and re-dispatch
   # owned claims — not to wait for agent Jobs to finish.
   terminationGracePeriodSeconds: 90

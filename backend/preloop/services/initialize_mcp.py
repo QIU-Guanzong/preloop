@@ -984,6 +984,7 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
         payload: dict[str, Any] | None = None,
         label: str | None = None,
         timeout_seconds: int | None = None,
+        max_cost_usd: float | None = None,
         wait: bool = False,
         ctx: Optional[Context] = None,
     ) -> str:
@@ -1001,6 +1002,10 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
             label: Short label recorded on the child.
             timeout_seconds: Window for the child, clamped to this
                 execution's own remaining time.
+            max_cost_usd: Cost ceiling for the child and anything it
+                delegates, lowered to the calling flow's per child ceiling
+                when that is smaller and refused when the delegation tree
+                cannot afford it.
             wait: Wait for this execution's children instead of returning
                 immediately.
             ctx: MCP context (injected by FastMCP).
@@ -1045,6 +1050,7 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
                 "payload": payload or {},
                 "label": label,
                 "timeout_seconds": timeout_seconds,
+                "max_cost_usd": max_cost_usd,
                 "wait": bool(wait),
             },
             ctx=ctx,
@@ -1065,6 +1071,7 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
                 payload=payload,
                 label=label,
                 timeout_seconds=timeout_seconds,
+                max_cost_usd=max_cost_usd,
                 correlation_id=correlation_id,
                 user_id=user_context.user_id,
                 runtime_session_id=user_context.runtime_session_id,
