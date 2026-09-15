@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
 from preloop.models.crud import crud_account, crud_flow, crud_flow_execution
@@ -228,6 +229,25 @@ class TestReaperLease:
         with crud_flow_execution.stale_claim_reaper_lease(db) as leased:
             assert leased is True
         db.execute.assert_not_called()
+
+    def test_an_aborted_pass_still_releases_the_lease(self, db_engine):
+        """A DBAPI abort mid-pass must not strand the lock on the connection."""
+        first = Session(bind=db_engine.connect())
+        second = Session(bind=db_engine.connect())
+        try:
+            with pytest.raises(ProgrammingError):
+                with crud_flow_execution.stale_claim_reaper_lease(
+                    first, holder="worker-abort"
+                ) as leased:
+                    assert leased is True
+                    first.execute(text("SELECT 1 FROM definitely_not_a_table"))
+            with crud_flow_execution.stale_claim_reaper_lease(
+                second, holder="worker-next"
+            ) as leased:
+                assert leased is True
+        finally:
+            first.close()
+            second.close()
 
     @pytest.mark.asyncio
     async def test_only_the_lease_holder_re_dispatches(

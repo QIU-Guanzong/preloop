@@ -1764,8 +1764,12 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         released by ``pg_advisory_unlock`` on the way out, and by Postgres
         itself if the holder's connection dies, so a crashed reaper cannot
         wedge every replica the way an expiring row lease would until its
-        deadline passed. Non-Postgres dialects (single-process dev, SQLite
-        tests) always win the lease: there is no second reaper to exclude.
+        deadline passed. Unlock always rolls back first: a session lock
+        survives ``ROLLBACK``, and an aborted pass would otherwise raise
+        ``PendingRollbackError`` on unlock, return the still-locked
+        connection to the pool, and starve every replica until recycle.
+        Non-Postgres dialects (single-process dev, SQLite tests) always
+        win the lease: there is no second reaper to exclude.
 
         Args:
             db: Database session; the lock lives on its connection.
@@ -1801,6 +1805,11 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             yield True
         finally:
             try:
+                # A session-level advisory lock survives rollback; this only
+                # clears the aborted state a failed pass can leave so the
+                # unlock below reaches the server instead of stranding the
+                # lock on the pooled connection.
+                db.rollback()
                 db.execute(
                     text("SELECT pg_advisory_unlock(hashtextextended(:key, 0))"),
                     {"key": STALE_CLAIM_REAPER_LOCK_KEY},
