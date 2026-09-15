@@ -169,23 +169,40 @@ export interface PricingComparison {
   groups: PricingComparisonGroup[];
 }
 
-export interface PricingDeploymentOption {
-  title: string;
-  description: string;
-  cta_text: string;
-  cta_url: string;
+/**
+ * The Dedicated tab: self-managed and quoted editions.
+ *
+ * These are not subscriptions in `plans.yaml`, so there is no catalog to
+ * generate them from and the brand states them directly. The shape is
+ * deliberately the same as the Cloud tab (cards plus one comparison table) so
+ * both tabs render through exactly the same code and cannot drift into two
+ * different layouts. Only the columns differ.
+ *
+ * No billing period applies here: an open-source edition is free and a quoted
+ * edition is agreed per year, so these plans carry a `price_label` rather
+ * than a monthly/annual pair.
+ */
+export interface PricingDedicated {
+  /** Tab and section label. Defaults to "Dedicated". */
+  label?: string;
+  /** Optional one-line intro under the section heading. */
+  lead?: string;
+  plans: PricingPlan[];
+  comparison?: PricingComparison;
 }
 
 export interface PricingConfig {
-  deployment_options?: PricingDeploymentOption[];
   /** Optional catalog path relative to brands.yaml; required for EE cloud pricing. */
   catalog_path?: string;
   enabled?: boolean;
   title?: string;
   lead?: string;
+  /** Tab and section label for the hosted ladder. Defaults to "Cloud". */
+  cloud_label?: string;
   billing_toggle?: boolean;
   plans: PricingPlan[];
   comparison?: PricingComparison;
+  dedicated?: PricingDedicated;
   faqs?: PricingFAQ[];
 }
 
