@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Operator notes reach hook path agents. The permission hook writes the
+  rendered note block into the Claude Code `PreToolUse` and Codex CLI
+  `PreToolUse` `hookSpecificOutput.additionalContext`, and into the Cursor CLI
+  `preToolUse` `additional_context`. Codex `PermissionRequest` and the Cursor
+  `before*` hooks have no field that reaches the model, so a note claimed there
+  is held for its session and rides the next tool call's carrying hook, once. A
+  turn with no pending note produces the same response as before.
+- `preloop notes send` posts one operator note from the terminal to
+  `POST /api/v1/operator-notes`. Name exactly one of `--agent`,
+  `--session`, or `--execution`. The body is the argument, or stdin when
+  piped. `--expires-in` is a Go duration between 60s and 7d; omitted, the
+  server keeps the note deliverable for 24 hours. `--json` emits the note
+  id and target only.
+
 - `{{name|truncate(N)}}` prompt-template filter. `N` is a byte cap, the
   cut is on a UTF-8 boundary, and a marker names the full size so the
   agent can fetch the rest. Bare `|truncate` is 16 KiB. Preset 002
@@ -56,12 +70,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller can tell a root run from a delegated child without reading logs.
   Executions that predate the columns, and every creation path that does
   not set lineage, read back as roots (no parent, no root id, depth 0).
+- `run_flow` builtin tool: a flow execution can start another flow of the
+  same account as a child of itself. Default off, so a flow opts in through
+  `allowed_mcp_tools`, and the target must also be named on the flow's
+  `callable_flows` allowlist. The call is asynchronous: it returns the
+  delegation task record as soon as the child row exists and never blocks
+  the calling turn. The child carries `parent_execution_id`,
+  `root_execution_id` and `delegation_depth`. Refusals come back as rejected
+  task records with a reason (`tool_not_allowed`, `flow_not_found`,
+  `flow_not_callable`, `depth_exceeded`, `cycle_detected`,
+  `fanout_exceeded`), each audited with the calling correlation id. Bounded
+  by `FLOW_DELEGATION_MAX_DEPTH` (default 2) and
+  `FLOW_DELEGATION_MAX_CHILDREN` (default 25, the matrix fan out ceiling).
+  Docs at `docs/guide/flows/flow-delegation.md`.
+- Execution tree on the execution page. A delegating run lists what it
+  started: one row per child with the flow, the label the caller passed, the
+  state, the duration and the cost, expandable to grandchildren and linked to
+  each child's own page. A failed child shows its failure category and a
+  refused one is visibly distinct, carrying no cost. The panel totals the
+  subtree (launched, succeeded, failed, refused, cost, tokens) and shows the
+  run's own cost beside that total rather than added to it. A run that
+  delegated nothing says so in one line. Behind it,
+  `GET /api/v1/flows/executions/{id}/tree` returns the execution, every
+  descendant of it and a rollup over them in the same shape the batch listing
+  uses; asking a child returns that child's subtree.
+- `get_execution` builtin tool: a flow execution can read the state, cost,
+  tokens and result of an execution it started, or of itself. Default off,
+  like `run_flow`. Scope is enforced on the server and is exactly the caller
+  and its descendants; a sibling, an unrelated execution of the same
+  account, an execution of another account and an id that names nothing are
+  all refused with the same reason (`execution_not_found`) and the same
+  message, so a refusal cannot be used to learn what exists. The answer is
+  the same task record `run_flow` returns: a failed execution carries its
+  failure category on the status message, and the result comes back as an
+  artifact only when the execution is terminal and `include_result` is set.
+  A result larger than `FLOW_DELEGATION_RESULT_MAX_BYTES` (default 16384) is
+  truncated, flagged and pointed at `GET /flows/executions/{id}/result`. One
+  audit row per call, permitted or refused.
 - Per-account flow-execution admission cap
   `FLOW_EXECUTION_MAX_RUNNING_PER_ACCOUNT` (default 3, Helm
   `flowExecution.maxRunningPerAccount`). An account may override it through
   `account.meta_data["flow_execution_max_running_per_account"]`. A refused
   execution stays PENDING with `queued_reason=account_concurrency_cap`.
   One flow also keeps at most one active run per tracker object.
+
+- Review runs can start from a previous execution. The trigger payload
+  accepts `previous_result_execution_id` (an execution id or the `last`
+  sentinel). The runner resolves that execution inside the same account
+  and writes its stored result to `previous/result.json`, or a mismatch
+  marker if it cannot. Schedules gain a bounded static `payload` (20 keys,
+  4096 UTF-8 bytes) so a weekly subscription can name the baseline without
+  a caller on the tick. Guide at `docs/guide/flows/repo-review-presets.md`.
 
 ### Removed
 

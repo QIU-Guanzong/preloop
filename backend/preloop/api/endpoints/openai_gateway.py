@@ -191,3 +191,29 @@ def create_response(
             on_complete=service.flush_deferred_stream_record,
         )
     return _with_alias_collision_warning(service.create_response(payload), service)
+
+
+@router.post("/embeddings")
+def create_embedding(
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    db: Session = Depends(get_db_session),
+    auth_context: ModelGatewayAuthContext = Depends(get_model_gateway_auth_context),
+    budget_enforcer: Any = Depends(get_budget_enforcer),
+    x_preloop_session_id: Optional[str] = Header(None, alias="X-Preloop-Session-Id"),
+) -> Any:
+    """Create OpenAI-compatible embeddings.
+
+    Same authentication, account scoping, budget preflight and usage
+    accounting as the completions routes; embeddings carry no stream, so
+    there is no SSE branch here.
+    """
+    service = OpenAIGatewayService(
+        db,
+        auth_context,
+        budget_enforcer=budget_enforcer,
+        owns_db_session=True,
+        client_session_id=x_preloop_session_id
+        or native_session_id_from_headers(request.headers, auth_context=auth_context),
+    )
+    return _with_alias_collision_warning(service.create_embedding(payload), service)

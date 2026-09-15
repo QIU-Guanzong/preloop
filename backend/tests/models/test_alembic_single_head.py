@@ -204,6 +204,10 @@ def test_flow_runners_revision_chains_onto_approval_rule_context() -> None:
     }
     callable_flows = script.get_revision("20260915_flow_callable_flows")
     assert callable_flows.down_revision == "20260915_queued_lineage_merge"
+    session_hold = script.get_revision("20260915_session_hold")
+    assert session_hold.down_revision == "20260915_flow_callable_flows"
+    note_author = script.get_revision("20260915_agent_note_author")
+    assert note_author.down_revision == "20260915_session_hold"
     session_parent = script.get_revision("20260915_session_parent")
-    assert session_parent.down_revision == "20260915_flow_callable_flows"
+    assert session_parent.down_revision == "20260915_agent_note_author"
     assert script.get_heads() == ["20260915_session_parent"]

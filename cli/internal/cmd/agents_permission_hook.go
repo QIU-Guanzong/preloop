@@ -85,6 +85,11 @@ type permissionCheckResponse struct {
 type hookDecision struct {
 	Behavior string // "allow", "deny", or "ask"
 	Reason   string
+	// OperatorNote is the rendered operator-note block this response carries
+	// back to the model, empty on the (overwhelmingly common) turn with no
+	// pending note. See agents_permission_hook_notes.go for the per-harness
+	// field it lands in.
+	OperatorNote string
 }
 
 // permissionHookCredential is the small per-agent file written at onboarding
@@ -167,7 +172,16 @@ func runAgentsPermissionHook(cmd *cobra.Command, args []string) error {
 	if hookEvent != "" && (source != permissionSourceCodexCLI || (hookEvent != "PreToolUse" && hookEvent != "PermissionRequest")) {
 		return fmt.Errorf("--hook-event is only supported for Codex PreToolUse or PermissionRequest")
 	}
+	// The event is needed to route an operator note: Cursor serves all three
+	// of its hooks from one command, so only the payload names the event.
+	var eventRaw []byte
 	writeDecision := func(decision hookDecision) error {
+		decision = applyOperatorNoteDelivery(
+			decision,
+			source,
+			hookEventNameForOperatorNotes(source, hookEvent, eventRaw),
+			eventRaw,
+		)
 		if source == permissionSourceCodexCLI && hookEvent == "PreToolUse" {
 			return writeCodexPreToolUseDecision(cmd.OutOrStdout(), decision)
 		}
@@ -177,6 +191,7 @@ func runAgentsPermissionHook(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return writeDecision(failureDecision(source, false, "failed to read hook event from stdin"))
 	}
+	eventRaw = raw
 	if source == permissionSourceCodexCLI {
 		var event map[string]interface{}
 		if err := json.Unmarshal(raw, &event); err != nil {
@@ -196,6 +211,7 @@ func runAgentsPermissionHook(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return writeDecision(failureDecision(source, false, "invalid hook event"))
 		}
+		eventRaw = raw
 	}
 	return writeDecision(resolvePermissionDecision(source, raw, failOpen))
 }
@@ -333,7 +349,14 @@ func resolvePermissionDecision(source string, raw []byte, failOpen bool) hookDec
 			reason = "Denied via Preloop."
 		}
 	}
-	return hookDecision{Behavior: behavior, Reason: reason}
+	// The permission check claims a pending operator note and marks it
+	// delivered as it answers, so the block travels with the decision whether
+	// the call was allowed or denied.
+	note := ""
+	if resp.OperatorNote != nil {
+		note = strings.TrimSpace(*resp.OperatorNote)
+	}
+	return hookDecision{Behavior: behavior, Reason: reason, OperatorNote: note}
 }
 
 // cursorPreToolUseDuplicateReason is the allow reason for a Cursor preToolUse
@@ -760,12 +783,23 @@ func callPermissionCheck(
 
 // A central allow clears only our veto. Empty output leaves Codex's native
 // permissions intact, unlike a PermissionRequest allow that approves its prompt.
+//
+// An operator note rides additionalContext on the same hookSpecificOutput,
+// which Codex delivers to the model whether or not the hook blocks the call.
 func writeCodexPreToolUseDecision(out io.Writer, decision hookDecision) error {
 	payload := map[string]interface{}{}
 	if decision.Behavior != "allow" {
 		payload["hookSpecificOutput"] = map[string]interface{}{
 			"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": decision.Reason,
 		}
+	}
+	if decision.OperatorNote != "" {
+		specific, ok := payload["hookSpecificOutput"].(map[string]interface{})
+		if !ok {
+			specific = map[string]interface{}{"hookEventName": "PreToolUse"}
+			payload["hookSpecificOutput"] = specific
+		}
+		specific["additionalContext"] = decision.OperatorNote
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -810,13 +844,15 @@ func renderHookDecision(source string, decision hookDecision) map[string]interfa
 		if ask {
 			behavior = "ask"
 		}
-		return map[string]interface{}{
-			"hookSpecificOutput": map[string]interface{}{
-				"hookEventName":            "PreToolUse",
-				"permissionDecision":       behavior,
-				"permissionDecisionReason": decision.Reason,
-			},
+		specific := map[string]interface{}{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       behavior,
+			"permissionDecisionReason": decision.Reason,
 		}
+		if decision.OperatorNote != "" {
+			specific["additionalContext"] = decision.OperatorNote
+		}
+		return map[string]interface{}{"hookSpecificOutput": specific}
 	case permissionSourceCodexCLI:
 		inner := map[string]interface{}{}
 		if allow {
@@ -832,24 +868,28 @@ func renderHookDecision(source string, decision hookDecision) map[string]interfa
 			},
 		}
 	case permissionSourceCursor:
-		if allow {
+		payload := map[string]interface{}{}
+		switch {
+		case allow:
 			// Best-effort: Cursor may still override an allow via its own
 			// in-app allowlist. Deny is the only reliably enforced verdict.
-			return map[string]interface{}{"permission": "allow"}
-		}
-		if ask {
+			payload["permission"] = "allow"
+		case ask:
 			// Cursor's hook schema accepts "ask": surface Cursor's own
 			// permission prompt instead of hard-denying.
-			return map[string]interface{}{
-				"permission":   "ask",
-				"user_message": decision.Reason,
-			}
+			payload["permission"] = "ask"
+			payload["user_message"] = decision.Reason
+		default:
+			payload["permission"] = "deny"
+			payload["agent_message"] = decision.Reason
+			payload["user_message"] = decision.Reason
 		}
-		return map[string]interface{}{
-			"permission":    "deny",
-			"agent_message": decision.Reason,
-			"user_message":  decision.Reason,
+		// Only preToolUse reaches the model, and the caller has already made
+		// sure a note is carried by that event alone.
+		if decision.OperatorNote != "" {
+			payload["additional_context"] = decision.OperatorNote
 		}
+		return payload
 	default:
 		return map[string]interface{}{"permission": "deny"}
 	}

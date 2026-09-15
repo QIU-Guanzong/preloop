@@ -1,0 +1,101 @@
+{
+  "harness": "Codex CLI",
+  "harness_version": "0.154.0",
+  "source": "codex_cli",
+  "captured_from": "codex --version reported codex-cli 0.154.0 on the machine this fixture was written on. The generated hook output schemas embedded in that binary define pre-tool-use.command.output with hookSpecificOutput.additionalContext, and permission-request.command.output without it: every level of the permission-request schema sets additionalProperties false, and its only model-visible string, decision.message, is read on deny alone. A PermissionRequest response carrying an unknown field is rejected as invalid permission-request JSON output, so the note waits for the next PreToolUse instead.",
+  "operator_note": "<operator-notes count=\"1\" source=\"preloop-control-plane\">\nThe block below is an instruction from the human operating this agent,\ndelivered out of band by the Preloop control plane at a turn boundary.\n<operator-note id=\"a1b2c3d4e5f60718\" from=\"Jane Doe\" auth=\"jwt\"\n               at=\"2026-09-15T09:14:02+00:00\">\nDeploy to eu-west-1, not us-east-1.\n</operator-note>\n</operator-notes>",
+  "cases": [
+    {
+      "name": "PreToolUse allow",
+      "hook_event": "PreToolUse",
+      "carries_note": true,
+      "hook_event_payload": {
+        "session_id": "session-fixture-codex",
+        "turn_id": "turn-fixture-codex",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "npm run build"
+        }
+      },
+      "permission_check_response": {
+        "decision": "allow",
+        "reason": "No native rule matched."
+      },
+      "without_note": {},
+      "with_note": {
+        "hookSpecificOutput": {
+          "hookEventName": "PreToolUse",
+          "additionalContext": "<operator-notes count=\"1\" source=\"preloop-control-plane\">\nThe block below is an instruction from the human operating this agent,\ndelivered out of band by the Preloop control plane at a turn boundary.\n<operator-note id=\"a1b2c3d4e5f60718\" from=\"Jane Doe\" auth=\"jwt\"\n               at=\"2026-09-15T09:14:02+00:00\">\nDeploy to eu-west-1, not us-east-1.\n</operator-note>\n</operator-notes>"
+        }
+      }
+    },
+    {
+      "name": "PreToolUse deny",
+      "hook_event": "PreToolUse",
+      "carries_note": true,
+      "hook_event_payload": {
+        "session_id": "session-fixture-codex",
+        "turn_id": "turn-fixture-codex",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "npm run deploy"
+        }
+      },
+      "permission_check_response": {
+        "decision": "deny",
+        "reason": "Denied by a native rule."
+      },
+      "without_note": {
+        "hookSpecificOutput": {
+          "hookEventName": "PreToolUse",
+          "permissionDecision": "deny",
+          "permissionDecisionReason": "Denied by a native rule."
+        }
+      },
+      "with_note": {
+        "hookSpecificOutput": {
+          "hookEventName": "PreToolUse",
+          "permissionDecision": "deny",
+          "permissionDecisionReason": "Denied by a native rule.",
+          "additionalContext": "<operator-notes count=\"1\" source=\"preloop-control-plane\">\nThe block below is an instruction from the human operating this agent,\ndelivered out of band by the Preloop control plane at a turn boundary.\n<operator-note id=\"a1b2c3d4e5f60718\" from=\"Jane Doe\" auth=\"jwt\"\n               at=\"2026-09-15T09:14:02+00:00\">\nDeploy to eu-west-1, not us-east-1.\n</operator-note>\n</operator-notes>"
+        }
+      }
+    },
+    {
+      "name": "PermissionRequest allow",
+      "hook_event": "PermissionRequest",
+      "carries_note": false,
+      "hook_event_payload": {
+        "session_id": "session-fixture-codex",
+        "turn_id": "turn-fixture-codex",
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "npm run build"
+        }
+      },
+      "permission_check_response": {
+        "decision": "allow",
+        "reason": "Approved via Preloop."
+      },
+      "without_note": {
+        "hookSpecificOutput": {
+          "hookEventName": "PermissionRequest",
+          "decision": {
+            "behavior": "allow"
+          }
+        }
+      },
+      "with_note": {
+        "hookSpecificOutput": {
+          "hookEventName": "PermissionRequest",
+          "decision": {
+            "behavior": "allow"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -333,6 +333,7 @@ class CRUDAgentControlCommand(CRUDBase[AgentControlCommand]):
         created_by_user_id: Optional[Union[uuid.UUID, str]],
         expires_at: Optional[datetime],
         source: Optional[str] = None,
+        created_by_managed_agent_id: Optional[Union[uuid.UUID, str]] = None,
         commit: bool = True,
     ) -> AgentControlCommand:
         """Persist one operator note as pending, before any delivery.
@@ -340,6 +341,10 @@ class CRUDAgentControlCommand(CRUDBase[AgentControlCommand]):
         The A2A-shaped ``envelope`` is stored verbatim so a future A2A
         endpoint can hand back exactly what was recorded, and so the delivered
         text can be rebuilt from the row alone.
+
+        ``created_by_managed_agent_id`` is the author when the author is an
+        agent (the ``send_note`` tool) rather than a person; the two author
+        columns are never both set.
         """
         record = AgentControlCommand(
             created_at=datetime.now(timezone.utc).replace(tzinfo=None),
@@ -355,6 +360,7 @@ class CRUDAgentControlCommand(CRUDBase[AgentControlCommand]):
             status="pending",
             source=source,
             created_by_user_id=created_by_user_id,
+            created_by_managed_agent_id=created_by_managed_agent_id,
             expires_at=expires_at,
         )
         db.add(record)
@@ -526,23 +532,41 @@ class CRUDAgentControlCommand(CRUDBase[AgentControlCommand]):
         db: Session,
         *,
         account_id: Union[uuid.UUID, str],
-        created_by_user_id: Union[uuid.UUID, str],
+        created_by_user_id: Optional[Union[uuid.UUID, str]] = None,
         since: datetime,
         managed_agent_id: Optional[Union[uuid.UUID, str]] = None,
         runtime_session_id: Optional[Union[uuid.UUID, str]] = None,
+        created_by_managed_agent_id: Optional[Union[uuid.UUID, str]] = None,
     ) -> int:
         """Count one author's recent notes to one agent or session.
 
         Agent scope is the default rate-limit key. When the target has no
         managed agent (a flow execution on an account credential), the count
         is per session so that path is not unlimited.
+
+        The author is either a user or, for notes written by the ``send_note``
+        tool, a managed agent. Naming neither is a programming error: the
+        count would be every author's notes, which is not a rate limit.
         """
+        if (created_by_user_id is None) == (created_by_managed_agent_id is None):
+            raise ValueError(
+                "Name exactly one author: created_by_user_id or "
+                "created_by_managed_agent_id"
+            )
         query = db.query(AgentControlCommand).filter(
             AgentControlCommand.account_id == account_id,
-            AgentControlCommand.created_by_user_id == created_by_user_id,
             AgentControlCommand.kind == "note",
             AgentControlCommand.created_at >= since,
         )
+        if created_by_user_id is not None:
+            query = query.filter(
+                AgentControlCommand.created_by_user_id == created_by_user_id
+            )
+        else:
+            query = query.filter(
+                AgentControlCommand.created_by_managed_agent_id
+                == created_by_managed_agent_id
+            )
         if managed_agent_id is not None:
             query = query.filter(
                 AgentControlCommand.managed_agent_id == managed_agent_id

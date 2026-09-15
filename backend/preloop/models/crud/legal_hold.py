@@ -19,12 +19,8 @@ from preloop.models.models.approval_request import ApprovalRequest
 from preloop.models.models.flow_artifact import FlowArtifact
 from preloop.models.models.flow import Flow
 from preloop.models.models.flow_execution import FlowExecution
-from preloop.models.models.legal_hold import (
-    HOLD_RESOURCE_APPROVAL,
-    HOLD_RESOURCE_EVIDENCE_PACK,
-    HOLD_RESOURCE_EXECUTION,
-    LegalHold,
-)
+from preloop.models.models.legal_hold import LegalHold
+from preloop.models.models.runtime_session import RuntimeSession
 
 
 def execution_in_account(account_id: Any):
@@ -197,6 +193,27 @@ def set_artifact_flag(
     return int(result.rowcount or 0)
 
 
+def set_runtime_session_flag(
+    db: Session, *, account_id: Any, runtime_session_id: Any, held: bool
+) -> int:
+    """Set the flag on one runtime session.
+
+    The session's activity rows carry no flag of their own: they are tied to
+    the session with ``ON DELETE CASCADE``, so a session the purge skips keeps
+    its activity.
+    """
+    result = db.execute(
+        update(RuntimeSession)
+        .where(
+            RuntimeSession.id == runtime_session_id,
+            RuntimeSession.account_id == account_id,
+        )
+        .values(legal_hold=held)
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount or 0)
+
+
 def set_execution_evidence_flags(
     db: Session, *, account_id: Any, execution_id: Any, held: bool
 ) -> int:
@@ -235,10 +252,3 @@ def execution_artifact_ids(
         .scalars()
         .all()
     )
-
-
-RESOURCE_FLAG_SETTERS = {
-    HOLD_RESOURCE_EXECUTION: set_execution_flag,
-    HOLD_RESOURCE_APPROVAL: set_approval_flag,
-    HOLD_RESOURCE_EVIDENCE_PACK: set_artifact_flag,
-}
