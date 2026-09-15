@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
@@ -299,6 +300,13 @@ MAX_SCHEDULE_INTERVAL = timedelta(days=366)
 # first few matched days - well inside 200 ticks.
 _SCHEDULE_CHECK_MAX_TICKS = 200
 
+# Bounds on ScheduleBase.payload, the static trigger payload a schedule
+# carries. A schedule states options (which baseline to diff against, a
+# depth knob), never data: anything larger belongs to a caller who can read
+# the trigger response.
+MAX_SCHEDULE_PAYLOAD_KEYS = 20
+MAX_SCHEDULE_PAYLOAD_BYTES = 4096
+
 
 # Canonical weekday order for weekly schedules (APScheduler abbreviations),
 # re-exported from the renderer so the order and the labels come from one place.
@@ -313,6 +321,14 @@ class ScheduleBase(BaseModel):
         default="UTC",
         description="IANA timezone name the schedule is evaluated in",
     )
+    payload: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Static trigger payload merged into every scheduled run, for "
+            "options a schedule has no other way to state (e.g. "
+            "previous_result_execution_id). Bounded and inline only."
+        ),
+    )
 
     @field_validator("timezone")
     @classmethod
@@ -322,6 +338,37 @@ class ScheduleBase(BaseModel):
             ZoneInfo(v)
         except Exception:
             raise ValueError(f"Unknown IANA timezone: '{v}'")
+        return v
+
+    @field_validator("payload")
+    @classmethod
+    def validate_payload(cls, v: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Bound the static payload and keep file seeding out of it.
+
+        A schedule config is read on every tick and rendered in the console,
+        so it carries options, not data: the cap is small on purpose, and
+        ``workspace_files`` is refused because inline file seeding belongs
+        to a caller who can see the response, not to a stored config.
+        """
+        if v is None:
+            return None
+        if MAX_SCHEDULE_PAYLOAD_KEYS < len(v):
+            raise ValueError(
+                f"schedule payload declares {len(v)} keys; max is "
+                f"{MAX_SCHEDULE_PAYLOAD_KEYS}"
+            )
+        for reserved in ("workspace_files", "schedule", "scheduled_at"):
+            if reserved in v:
+                raise ValueError(f"schedule payload may not declare '{reserved}'")
+        try:
+            encoded = len(json.dumps(v, ensure_ascii=False).encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"schedule payload must be JSON: {exc}") from exc
+        if encoded > MAX_SCHEDULE_PAYLOAD_BYTES:
+            raise ValueError(
+                f"schedule payload is {encoded} bytes, which exceeds the "
+                f"{MAX_SCHEDULE_PAYLOAD_BYTES} byte cap"
+            )
         return v
 
     def build_trigger(self):

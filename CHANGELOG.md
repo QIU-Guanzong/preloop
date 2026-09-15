@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `before*` hooks have no field that reaches the model, so a note claimed there
   is held for its session and rides the next tool call's carrying hook, once. A
   turn with no pending note produces the same response as before.
+- `preloop notes send` posts one operator note from the terminal to
+  `POST /api/v1/operator-notes`. Name exactly one of `--agent`,
+  `--session`, or `--execution`. The body is the argument, or stdin when
+  piped. `--expires-in` is a Go duration between 60s and 7d; omitted, the
+  server keeps the note deliverable for 24 hours. `--json` emits the note
+  id and target only.
+
 - `{{name|truncate(N)}}` prompt-template filter. `N` is a byte cap, the
   cut is on a UTF-8 boundary, and a marker names the full size so the
   agent can fetch the rest. Bare `|truncate` is 16 KiB. Preset 002
@@ -69,6 +76,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `account.meta_data["flow_execution_max_running_per_account"]`. A refused
   execution stays PENDING with `queued_reason=account_concurrency_cap`.
   One flow also keeps at most one active run per tracker object.
+
+- Review runs can start from a previous execution. The trigger payload
+  accepts `previous_result_execution_id` (an execution id or the `last`
+  sentinel). The runner resolves that execution inside the same account
+  and writes its stored result to `previous/result.json`, or a mismatch
+  marker if it cannot. Schedules gain a bounded static `payload` (20 keys,
+  4096 UTF-8 bytes) so a weekly subscription can name the baseline without
+  a caller on the tick. Guide at `docs/guide/flows/repo-review-presets.md`.
 
 ### Removed
 

@@ -365,6 +365,13 @@ class OpenHandsAgent(ContainerAgentExecutor):
         else:
             self.logger.debug("No git_clone_config in execution context")
 
+        # Review baseline resolved from a previous execution (see base
+        # class): before the seeds, so an explicit seed at the same path
+        # is written last and wins.
+        baseline_cmd = self._prepare_workspace_baseline_commands(execution_context)
+        if baseline_cmd:
+            commands.append(baseline_cmd)
+
         # Seed /workspace files declared on the trigger payload (see base
         # class): after git clone, before custom commands.
         seed_cmd = self._prepare_workspace_seed_commands(execution_context)

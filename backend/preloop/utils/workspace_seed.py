@@ -331,6 +331,34 @@ def attach_workspace_file_paths(
     return trigger_details
 
 
+def workspace_containment_shell_body(label: str) -> str:
+    """POSIX statements that keep ``$w/$1`` inside the workspace root.
+
+    Resolves the deepest existing ancestor physically (``cd -P`` +
+    ``pwd``) and requires it to stay under ``$w``, then refuses to write
+    through a symlink at the target itself. Sets ``$t`` to the target
+    and ``$d`` to its parent, then ``mkdir -p`` the parent.
+
+    ``label`` prefixes diagnostics. Callers wrap this in a shell
+    function and perform the write. Shared by workspace seeds and the
+    review-baseline writer so the two copies cannot drift.
+    """
+    return (
+        't="$w/$1"; d="${t%/*}"; e="$d"; '
+        'while [ ! -d "$e" ]; do e="${e%/*}"; '
+        f'[ -n "$e" ] || {{ echo "{label}: $w does not exist" >&2; exit 1; }}; '
+        "done; "
+        'r="$(cd -P "$e" && pwd)"; '
+        'case "$r" in "$w"|"$w"/*) ;; *) '
+        f'echo "{label}: $1 resolves outside $w (symlink escape)" >&2; '
+        "exit 1;; esac; "
+        'if [ -L "$t" ]; then '
+        f'echo "{label}: refusing to write through symlink: $1" >&2; '
+        "exit 1; fi; "
+        'mkdir -p "$d"'
+    )
+
+
 def build_workspace_seed_shell(
     files: List[WorkspaceSeedFile], workspace_root: str = WORKSPACE_ROOT
 ) -> str:
@@ -380,18 +408,8 @@ def build_workspace_seed_shell(
         "__pl_seed() { "
         '[ -n "$2" ] || { '
         'echo "workspace_files: no content delivered for $1" >&2; exit 1; }; '
-        't="$w/$1"; d="${t%/*}"; e="$d"; '
-        'while [ ! -d "$e" ]; do e="${e%/*}"; '
-        '[ -n "$e" ] || { echo "workspace_files: $w does not exist" >&2; exit 1; }; '
-        "done; "
-        'r="$(cd -P "$e" && pwd)"; '
-        'case "$r" in "$w"|"$w"/*) ;; *) '
-        'echo "workspace_files: $1 resolves outside $w (symlink escape)" >&2; '
-        "exit 1;; esac; "
-        'if [ -L "$t" ]; then '
-        'echo "workspace_files: refusing to write through symlink: $1" >&2; '
-        "exit 1; fi; "
-        'mkdir -p "$d"; '
+        + workspace_containment_shell_body("workspace_files")
+        + "; "
         'printf \'%s\' "$2" | base64 -d > "$t"; }'
     )
     calls = "; ".join(

@@ -2244,6 +2244,23 @@ class FlowExecutionOrchestrator:
             "trigger_project_id": self._resolve_trigger_project_id(),
         }
 
+        # Resolve a previous run's stored result into this run's workspace
+        # when the payload names one. Account-scoped, size-capped, and
+        # degrading: an id that does not resolve leaves a mismatch marker
+        # instead of failing the run. See preloop.utils.workspace_baseline.
+        from preloop.services.workspace_baseline import resolve_baseline_delivery
+
+        baseline = resolve_baseline_delivery(
+            self.db,
+            trigger_event_data=self.trigger_event_data,
+            account_id=self.flow.account_id,
+            flow_id=self.flow.id,
+            exclude_execution_id=self.execution_log.id,
+            seed_paths=[seed.path for seed in workspace_files],
+        )
+        if baseline is not None:
+            execution_context["baseline_delivery"] = baseline.model_dump()
+
         from preloop.services.flow_feedback import resolve_native_checkpoint
         from preloop.services.model_routing import validate_native_resume_identity
 
