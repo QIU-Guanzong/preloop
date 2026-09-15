@@ -1220,14 +1220,19 @@ automates a notification, never a filing.
   tool versions (`tool_versions`) and source snapshot dates
   (`db_versions`), and the payload can pin versions (e.g.
   `"tools": {"spdx-tools": "0.8.2"}`) which the prompt honors. Shipping
-  pinned tools in the runner image is the stronger fix and an open
-  platform question. For vulnerability results, database churn, not tool
+  pinned tools in the runner image is the stronger fix; what it would
+  cost, and which tool, is measured in
+  [Scanner binaries in the agent image](scanner-binaries-decision.md).
+  For vulnerability results, database churn, not tool
   versions, is the dominant source of run-to-run variance, which is why
   snapshot dates are always recorded.
 - These presets verify SBOMs. They never generate one. SBOM creation
   belongs to the build toolchain (Yocto / OpenEmbedded `create-spdx`,
   AOSP SBOM tooling, CycloneDX build plugins). If no SBOM was
-  delivered, the run errors rather than inventing one.
+  delivered, the run errors rather than inventing one. Whether an agent
+  image should carry a generator at all, and what the claim would become
+  if it did, is decided in
+  [Scanner binaries in the agent image](scanner-binaries-decision.md).
 
 ## Vulnerability sources (honest notes)
 
