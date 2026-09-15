@@ -268,6 +268,32 @@ def test_an_empty_query_is_a_validation_error(client, db_session, test_user):
     assert client.post(SEARCH_URL, json={}).status_code == 422
 
 
+def test_an_empty_string_filter_is_a_validation_error(client, db_session, test_user):
+    """An empty filter must 422, not silently widen the result set."""
+    for key in ("model_alias", "provider_name", "runtime_principal_id"):
+        response = client.post(
+            SEARCH_URL, json={"query": "ledger", "filters": {key: ""}}
+        )
+        assert response.status_code == 422, key
+
+
+def test_a_naive_date_filter_is_a_validation_error(client, db_session, test_user):
+    """A bound without an offset is not an instant."""
+    naive = client.post(
+        SEARCH_URL,
+        json={"query": "ledger", "filters": {"start_date": "2026-09-01T00:00:00"}},
+    )
+    aware = client.post(
+        SEARCH_URL,
+        json={
+            "query": "ledger",
+            "filters": {"start_date": "2026-09-01T00:00:00+00:00"},
+        },
+    )
+    assert naive.status_code == 422
+    assert aware.status_code == 200
+
+
 def test_snippet_text_can_be_withheld(client, db_session, test_user):
     """With snippet text off, no captured content is on the payload."""
     session = _session(db_session, test_user.account_id, "quiet")

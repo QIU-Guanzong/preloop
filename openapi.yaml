@@ -25619,29 +25619,34 @@ components:
             format: date-time
           - type: 'null'
           title: Start Date
-          description: Only chunks at or after this instant.
+          description: Only chunks at or after this instant. Must include a timezone
+            offset; a naive value is rejected.
         end_date:
           anyOf:
           - type: string
             format: date-time
           - type: 'null'
           title: End Date
-          description: Only chunks strictly before this instant.
+          description: Only chunks strictly before this instant. Must include a timezone
+            offset; a naive value is rejected.
         model_alias:
           anyOf:
           - type: string
+            minLength: 1
           - type: 'null'
           title: Model Alias
           description: Model alias recorded on the chunk, for example a gpt-5 alias.
         provider_name:
           anyOf:
           - type: string
+            minLength: 1
           - type: 'null'
           title: Provider Name
           description: Provider recorded on the chunk.
         runtime_principal_id:
           anyOf:
           - type: string
+            minLength: 1
           - type: 'null'
           title: Runtime Principal Id
           description: Runtime principal, the agent or user the session ran as.

@@ -57,20 +57,31 @@ class SessionSearchFilters(BaseModel):
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
     start_date: Optional[datetime] = Field(
-        None, description="Only chunks at or after this instant."
+        None,
+        description=(
+            "Only chunks at or after this instant. Must include a timezone "
+            "offset; a naive value is rejected."
+        ),
     )
     end_date: Optional[datetime] = Field(
-        None, description="Only chunks strictly before this instant."
+        None,
+        description=(
+            "Only chunks strictly before this instant. Must include a "
+            "timezone offset; a naive value is rejected."
+        ),
     )
     model_alias: Optional[str] = Field(
         None,
+        min_length=1,
         description="Model alias recorded on the chunk, for example a gpt-5 alias.",
     )
     provider_name: Optional[str] = Field(
-        None, description="Provider recorded on the chunk."
+        None, min_length=1, description="Provider recorded on the chunk."
     )
     runtime_principal_id: Optional[str] = Field(
-        None, description="Runtime principal, the agent or user the session ran as."
+        None,
+        min_length=1,
+        description="Runtime principal, the agent or user the session ran as.",
     )
     api_key_id: Optional[UUID] = Field(
         None, description="API key the traffic was attributed to."
@@ -89,6 +100,18 @@ class SessionSearchFilters(BaseModel):
             return None
         if value not in SOURCE_KINDS:
             raise ValueError("source_kind must be one of: " + ", ".join(SOURCE_KINDS))
+        return value
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def require_timezone_aware_bounds(
+        cls, value: Optional[datetime]
+    ) -> Optional[datetime]:
+        """Reject a naive bound so the same body is the same instant everywhere."""
+        if value is None:
+            return None
+        if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+            raise ValueError("start_date and end_date must include a timezone offset")
         return value
 
 
