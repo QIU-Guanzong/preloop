@@ -38,6 +38,33 @@ const FAILED_STATUSES = ['FAILED', 'TIMEOUT', 'TIMED_OUT', 'ABORTED', 'ERROR'];
 const REFUSED_STATUS = 'REFUSED';
 
 /**
+ * How deep the rows may nest before rendering stops.
+ *
+ * The server caps delegation depth well below this, so a tree that reaches
+ * here is not a deep tree, it is corrupt lineage pointing at itself. The cap
+ * keeps that a missing row rather than a hung tab.
+ */
+const MAX_RENDER_DEPTH = 32;
+
+/** Group the flat subtree by parent id, keeping the server's order. */
+function indexByParent(
+  rows: ExecutionTreeNode[]
+): Map<string, ExecutionTreeNode[]> {
+  const index = new Map<string, ExecutionTreeNode[]>();
+  for (const row of rows || []) {
+    const parentId = row.parent_execution_id;
+    if (!parentId) continue;
+    const siblings = index.get(parentId);
+    if (siblings) {
+      siblings.push(row);
+    } else {
+      index.set(parentId, [row]);
+    }
+  }
+  return index;
+}
+
+/**
  * What one run delegated, as a tree, with the cost of the subtree.
  *
  * A delegating run is otherwise invisible: its own page shows one execution
@@ -161,6 +188,15 @@ export class PreloopExecutionTree extends LitElement {
   /** Guards against a slow answer for a run the user has already left. */
   private generation = 0;
 
+  /**
+   * Children by parent id, built once per answer.
+   *
+   * The server hands over the subtree parents-first so the tree can be built
+   * in one pass; scanning the flat list per row would pay for that ordering
+   * and then ignore it.
+   */
+  private childIndex = new Map<string, ExecutionTreeNode[]>();
+
   protected willUpdate(changes: PropertyValues) {
     if (changes.has('executionId')) {
       this.tree = null;
@@ -187,10 +223,12 @@ export class PreloopExecutionTree extends LitElement {
     try {
       const tree = await getExecutionTree(executionId);
       if (generation !== this.generation) return;
+      this.childIndex = indexByParent(tree.executions);
       this.tree = tree;
       this.error = '';
     } catch (error) {
       if (generation !== this.generation) return;
+      this.childIndex = new Map();
       this.tree = null;
       this.error =
         error instanceof Error ? error.message : 'Could not load the tree';
@@ -200,8 +238,7 @@ export class PreloopExecutionTree extends LitElement {
   }
 
   private childrenOf(parentId: string): ExecutionTreeNode[] {
-    const rows = this.tree?.executions || [];
-    return rows.filter((row) => row.parent_execution_id === parentId);
+    return this.childIndex.get(parentId) || [];
   }
 
   private toggle(id: string) {
@@ -225,7 +262,11 @@ export class PreloopExecutionTree extends LitElement {
     );
   }
 
-  private renderRow(node: ExecutionTreeNode, depth: number): TemplateResult {
+  private renderRow(
+    node: ExecutionTreeNode,
+    depth: number
+  ): TemplateResult | typeof nothing {
+    if (depth > MAX_RENDER_DEPTH) return nothing;
     const children = this.childrenOf(node.id);
     const open = this.expanded.has(node.id);
     const refused = (node.status || '').toUpperCase() === REFUSED_STATUS;
@@ -353,8 +394,8 @@ export class PreloopExecutionTree extends LitElement {
                 class="truncated"
                 data-testid="execution-tree-truncated"
               >
-                This run started more than this page shows; the totals cover the
-                runs listed here.
+                The lineage behind this run is larger than one read; the totals
+                cover the runs listed here.
               </div>`
             : nothing
         }

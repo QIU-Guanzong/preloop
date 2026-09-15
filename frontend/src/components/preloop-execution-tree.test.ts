@@ -317,6 +317,23 @@ describe('Execution tree', () => {
     expect(find(element, 'execution-tree-truncated')).to.exist;
   });
 
+  it('renders a lineage that points back at itself without hanging', async () => {
+    // Corrupt parent ids are the only way to get here; a browser tab that
+    // never paints is a worse answer than a tree that stops.
+    answer.executions = [
+      node({ id: 'child-a', parent_execution_id: 'parent-1', label: 'a' }),
+      node({ id: 'child-b', parent_execution_id: 'child-a', label: 'b' }),
+      node({ id: 'child-a-again', parent_execution_id: 'child-b', label: 'a' }),
+    ];
+    answer.executions[2].id = 'child-a';
+    const element = await mount();
+    (element as any).expanded = new Set(['child-a', 'child-b']);
+    await element.updateComplete;
+
+    expect(rows(element).length).to.be.greaterThan(0);
+    expect(rows(element).length).to.be.lessThan(200);
+  });
+
   it('stays quiet and out of the way when the read fails', async () => {
     fetchStub.callsFake(async () => new Response('nope', { status: 500 }));
     const element = await mount();
