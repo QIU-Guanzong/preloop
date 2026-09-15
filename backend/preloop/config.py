@@ -1007,6 +1007,26 @@ class Settings(BaseSettings):
             "account.meta_data['flow_execution_max_running_per_account']."
         ),
     )
+    flow_delegation_max_depth: int = Field(
+        2,
+        description=(
+            "How deep a delegation tree may grow: the maximum "
+            "flow_execution.delegation_depth a run_flow call may create. A "
+            "root run is depth 0, its child 1, its grandchild 2, so the "
+            "default refuses a great grandchild and keeps a runaway tree "
+            "three levels wide instead of unbounded. Set 0 to disable "
+            "delegation on an instance."
+        ),
+    )
+    flow_delegation_max_children: int = Field(
+        25,
+        description=(
+            "How many direct children one execution may start through "
+            "run_flow. Defaults to the matrix fan out ceiling "
+            "(MATRIX_MAX_ENTRIES) so both ways of fanning out cost an "
+            "account the same at most."
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -1347,6 +1367,10 @@ class Settings(BaseSettings):
             ),
             flow_execution_max_running_per_account=int(
                 os.getenv("FLOW_EXECUTION_MAX_RUNNING_PER_ACCOUNT", "3")
+            ),
+            flow_delegation_max_depth=int(os.getenv("FLOW_DELEGATION_MAX_DEPTH", "2")),
+            flow_delegation_max_children=int(
+                os.getenv("FLOW_DELEGATION_MAX_CHILDREN", "25")
             ),
             stripe_secret_key=stripe_secret_key,
             stripe_webhook_secret=stripe_webhook_secret,

@@ -311,6 +311,74 @@ RESOLVE_SBOM_UPSTREAMS_TOOL: Dict[str, Any] = {
 }
 
 
+RUN_FLOW_TOOL: Dict[str, Any] = {
+    "name": "run_flow",
+    "description": (
+        "Run another flow of this account as a child of the current "
+        "execution. Asynchronous: the call returns as soon as the child "
+        "execution row exists and never waits for the child to finish, so "
+        "read its progress with the execution id in the returned record. "
+        "The target must be named on the calling flow's callable flows "
+        "allowlist; depth, cycles and the number of direct children are "
+        "capped server side. Returns one A2A shaped task record as JSON. A "
+        "refusal is a record too: state TASK_STATE_REJECTED with "
+        "'preloop.ai/refusalReason' naming the rule that declined the call "
+        "(flow_not_found, flow_not_callable, tool_not_allowed, "
+        "depth_exceeded, cycle_detected, fanout_exceeded), not an error to "
+        "parse out of prose."
+    ),
+    "source": "builtin",
+    # Default-off: delegation spends an account's budget from inside an
+    # agent turn, so a flow opts in by selecting the tool (cf. issue #128
+    # for the context tax argument, #630 for the authority one). A flow
+    # execution's allowed_mcp_tools allow-list bypasses the default-enable
+    # filter, which is the only way this tool is meant to be reached.
+    "default_enabled": False,
+    "requires_tracker": False,
+    "required_tracker_types": [],
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "flow": {
+                "type": "string",
+                "description": (
+                    "Slug or name of the flow to run, resolved inside this "
+                    "account. A reference naming nothing in the account is "
+                    "refused with flow_not_found."
+                ),
+            },
+            "payload": {
+                "type": "object",
+                "description": (
+                    "Trigger payload for the child. Readable in the child's "
+                    "prompt as {{trigger_event.payload.<key>}}. Model and "
+                    "harness overrides in here are stripped: a child runs on "
+                    "its own flow's routing."
+                ),
+            },
+            "label": {
+                "type": "string",
+                "description": (
+                    "Short label for this child, recorded on the child so a "
+                    "human reading the execution tree can tell siblings apart."
+                ),
+            },
+            "timeout_seconds": {
+                "type": "integer",
+                "description": (
+                    "Optional window for the child, clamped to the calling "
+                    "execution's own remaining time. Recorded on the child; "
+                    "nothing blocks this turn on it, because this tool never "
+                    "waits."
+                ),
+            },
+        },
+        "required": ["flow"],
+    },
+}
+
+
 def builtin_tools_with_ask_user(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Return ``tools`` with ``ASK_USER_TOOL`` inserted after request_approval."""
     result: List[Dict[str, Any]] = []

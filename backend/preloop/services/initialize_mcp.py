@@ -27,6 +27,7 @@ from preloop.tools.builtin_defs import (
     PERMISSION_PROMPT_TOOL,
     REQUEST_APPROVAL_TOOL,
     RESOLVE_SBOM_UPSTREAMS_TOOL,
+    RUN_FLOW_TOOL,
 )
 
 logger = logging.getLogger(__name__)
@@ -947,6 +948,111 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
         except ValueError as exc:
             return f"Error: {exc}"
         return json.dumps(report)
+
+    # Register Tool 7e: run_flow (shared metadata:
+    # tools.builtin_defs.RUN_FLOW_TOOL). Flow to flow delegation (#630):
+    # creates one child execution of an allowlisted flow and returns the A2A
+    # shaped task record frozen by #625. Every rule that can decline the call
+    # lives in preloop.services.flow_delegation_call, server side, and a
+    # refusal comes back as a record rather than as an exception.
+    async def run_flow(
+        flow: str,
+        payload: dict[str, Any] | None = None,
+        label: str | None = None,
+        timeout_seconds: int | None = None,
+        ctx: Optional[Context] = None,
+    ) -> str:
+        """Run another flow of this account as a child of this execution.
+
+        Asynchronous by design: the call returns as soon as the child row
+        exists and never blocks this turn. Waiting for a child lands with
+        issue #633, reading one with #632.
+
+        Args:
+            flow: Slug or name of the flow to run, inside this account.
+            payload: Trigger payload handed to the child.
+            label: Short label recorded on the child.
+            timeout_seconds: Window for the child, clamped to this
+                execution's own remaining time.
+            ctx: MCP context (injected by FastMCP).
+
+        Returns:
+            One A2A task record as JSON: the child execution, or a rejected
+            record naming the rule that refused the call.
+        """
+        import json
+
+        from preloop.models.db.session import get_db_session
+        from preloop.services.dynamic_fastmcp_http import get_current_user_context
+        from preloop.services.flow_delegation_call import (
+            DelegationUnavailableError,
+            RUN_FLOW_TOOL_NAME,
+            delegate_flow,
+        )
+        from preloop.services.kill_switch import FlowHaltActiveError
+
+        user_context = get_current_user_context()
+        if not user_context:
+            return "Error: No user context available"
+        if not user_context.flow_execution_id:
+            return (
+                "Error: run_flow is only available inside a flow execution; "
+                "there is no parent execution to delegate from."
+            )
+
+        correlation_id = _correlation_id_var.get(None)
+        approved, error = await require_approval(
+            tool_name=RUN_FLOW_TOOL_NAME,
+            tool_source="builtin",
+            account_id=user_context.account_id,
+            arguments={
+                "flow": flow,
+                "payload": payload or {},
+                "label": label,
+                "timeout_seconds": timeout_seconds,
+            },
+            ctx=ctx,
+            workflow_id=_rule_workflow_id_var.get(None),
+            correlation_id=correlation_id,
+            justification=_justification_var.get(None),
+        )
+        if not approved:
+            return error
+
+        db = next(get_db_session())
+        try:
+            record = await delegate_flow(
+                db,
+                account_id=user_context.account_id,
+                parent_execution_id=user_context.flow_execution_id,
+                reference=flow,
+                payload=payload,
+                label=label,
+                timeout_seconds=timeout_seconds,
+                correlation_id=correlation_id,
+                user_id=user_context.user_id,
+                runtime_session_id=user_context.runtime_session_id,
+                api_key_id=user_context.api_key_id,
+                api_key_name=user_context.api_key_name,
+            )
+        except DelegationUnavailableError as exc:
+            return f"Error: {exc}"
+        except FlowHaltActiveError as exc:
+            # The account kill switch refuses a delegated start exactly as it
+            # refuses a manual one; say so in the halt's own words.
+            return f"Error: {exc}"
+        finally:
+            db.close()
+        return json.dumps(record)
+
+    run_flow_tool = FunctionTool.from_function(
+        run_flow, description=RUN_FLOW_TOOL["description"]
+    )
+    # The catalog schema is the authority: it closes the object
+    # (additionalProperties false) and documents every argument once, so the
+    # REST catalog and the callable cannot drift.
+    run_flow_tool.parameters = deepcopy(RUN_FLOW_TOOL["schema"])
+    mcp.add_tool(run_flow_tool)
 
     # Register Tool 8: add_comment
     @mcp.tool()

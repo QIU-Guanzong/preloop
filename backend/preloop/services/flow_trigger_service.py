@@ -1860,6 +1860,10 @@ class FlowTriggerService:
         retry_of_execution_id: Optional[uuid.UUID] = None,
         triggered_by: Optional[str] = None,
         source_execution_id: Optional[uuid.UUID] = None,
+        *,
+        parent_execution_id: Optional[uuid.UUID] = None,
+        root_execution_id: Optional[uuid.UUID] = None,
+        delegation_depth: int = 0,
     ) -> Dict[str, Any]:
         """
         Manually trigger a flow execution for testing purposes or as a retry.
@@ -1874,6 +1878,13 @@ class FlowTriggerService:
                 only thing that tells two of them apart in the console list.
             source_execution_id: Controller-owned continuation of a persisted
                 execution on this flow. Never read from the trigger body.
+            parent_execution_id: Execution that started this one, for a
+                delegated child (#630). Controller owned: resolved from the
+                calling execution's own identity, never from a payload.
+            root_execution_id: First execution of the delegation tree, NULL on
+                a root run. Controller owned, as above.
+            delegation_depth: Distance from the root of the tree, 0 for a run
+                nobody delegated. Controller owned, as above.
 
         Returns:
             Dict with execution_id and status
@@ -1947,6 +1958,9 @@ class FlowTriggerService:
             status="PENDING",
             trigger_event_details=trigger_details,
             retry_of_execution_id=retry_of_execution_id,
+            parent_execution_id=parent_execution_id,
+            root_execution_id=root_execution_id,
+            delegation_depth=delegation_depth,
         )
 
         execution = crud_flow_execution.create(self.db, obj_in=execution_data)
