@@ -172,6 +172,7 @@ list:
 | `cycle_detected` | The target already appears in this call's ancestry |
 | `fanout_exceeded` | The parent has already started as many children as it may |
 | `budget_exceeded` | The remaining budget cannot cover another child |
+| `execution_not_found` | The execution asked for is not the caller's own or one of its descendants. The one reason a read is refused with: a target in another account, an unrelated one in the same account and one that never existed are all answered in these words, so a refusal cannot be used to learn what exists |
 
 <!-- validates: delegation_task -->
 ```json

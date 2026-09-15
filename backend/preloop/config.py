@@ -1027,6 +1027,15 @@ class Settings(BaseSettings):
             "account the same at most."
         ),
     )
+    flow_delegation_result_max_bytes: int = Field(
+        16384,
+        description=(
+            "Largest result payload, in bytes, that get_execution returns "
+            "whole to a calling agent. A larger result comes back truncated "
+            "and flagged, with the path that still serves the whole "
+            "document, so one read cannot fill the caller's context window."
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -1371,6 +1380,9 @@ class Settings(BaseSettings):
             flow_delegation_max_depth=int(os.getenv("FLOW_DELEGATION_MAX_DEPTH", "2")),
             flow_delegation_max_children=int(
                 os.getenv("FLOW_DELEGATION_MAX_CHILDREN", "25")
+            ),
+            flow_delegation_result_max_bytes=int(
+                os.getenv("FLOW_DELEGATION_RESULT_MAX_BYTES", "16384")
             ),
             stripe_secret_key=stripe_secret_key,
             stripe_webhook_secret=stripe_webhook_secret,
