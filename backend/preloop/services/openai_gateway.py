@@ -86,6 +86,7 @@ from preloop.services.account_realtime import (
     emit_account_event,
 )
 from preloop.services.account_governance_cache import get_cached_account_meta_data
+from preloop.services import alibaba_pricing
 from preloop.services import kill_switch as kill_switch_service
 from preloop.services.context_optimization import (
     ContextOptimizationStats,
@@ -6362,9 +6363,7 @@ class OpenAIGatewayService:
             }
         if api_base := model_api_base(ai_model):
             kwargs["api_base"] = api_base
-        if (
-            ai_model.provider_name or ""
-        ).strip().lower() == "qwen" and not is_openrouter_model(ai_model):
+        if alibaba_pricing.is_alibaba(ai_model):
             cache_markers = 0
             for message in messages:
                 content = message.get("content")
@@ -8792,30 +8791,30 @@ class OpenAIGatewayService:
         observed_at = usage_row.timestamp
 
         if cost_source == "unpriced" and (prompt_tokens or completion_tokens):
-            # The model is missing from the price snapshot: fetch its price
-            # from the live upstream map once (background thread, negative-
-            # cached) and fix this row when found.
-            try:
-                schedule_price_lookup(
-                    ai_model_id=ai_model.id, api_usage_id=str(usage_row.id)
-                )
-            except Exception:  # noqa: BLE001 - never break recording
-                logger.debug("Scheduling live price lookup failed", exc_info=True)
-            # Tell an admin the catalog is missing this model. Deduplicated
-            # per (model_alias, provider) via a persisted marker, so hot-path
-            # traffic yields one actionable alert, not one per request.
-            # Skip when usage accounting was on and the response has no
-            # completion and no cost fields (empty routed completion).
             usage_accounting_requested = (
                 _is_openrouter_upstream(ai_model)
                 and _openrouter_usage_accounting_enabled()
             )
-            if should_notify_unpriced_model(
+            should_notify = should_notify_unpriced_model(
                 usage_accounting_requested=usage_accounting_requested,
                 usage_details=usage_details,
                 completion_tokens=int(completion_tokens or 0),
                 ai_model=ai_model,
-            ):
+            )
+            recovery_scheduled = False
+            refresh_status = "not_scheduled_or_throttled"
+            try:
+                recovery_scheduled = schedule_price_lookup(
+                    ai_model_id=ai_model.id,
+                    api_usage_id=str(usage_row.id),
+                    notify_after_lookup=should_notify,
+                )
+            except Exception:  # noqa: BLE001 - never break recording
+                refresh_status = "scheduling_failed"
+                logger.debug("Scheduling live price lookup failed", exc_info=True)
+            # Recovery rechecks the persisted cost before alerting. A queued
+            # refresh is not yet evidence that catalog repair has failed.
+            if should_notify and not recovery_scheduled:
                 try:
                     notify_unpriced_model(
                         self.db,
@@ -8824,6 +8823,9 @@ class OpenAIGatewayService:
                         provider_name=ai_model.provider_name,
                         total_tokens=int(total_tokens or 0),
                         ai_model=ai_model,
+                        usage_details=usage_details,
+                        prompt_tokens=int(prompt_tokens or 0),
+                        refresh_status=refresh_status,
                     )
                 except Exception:  # noqa: BLE001 - never break recording
                     logger.debug("Unpriced-model admin alert failed", exc_info=True)

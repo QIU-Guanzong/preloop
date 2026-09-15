@@ -364,3 +364,92 @@ def test_alibaba_fetch_is_not_offered_for_beijing(db_session, test_user):
         api_endpoint="https://dashscope.aliyuncs.com/compatible-mode/v1",
     )
     assert ai_model_pricing.provider_supports_price_fetch(model) is False
+
+
+def test_workspace_catalog_does_not_advertise_unsupported_native_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = models.AIModel(
+        provider_name="qwen",
+        model_identifier="qwen3.8-flash",
+        api_endpoint=(
+            "https://tenant.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+        ),
+    )
+    monkeypatch.setattr(
+        "preloop.services.alibaba_price_catalog.refresh_from_model",
+        lambda _: pytest.fail("workspace key must not be sent to classic catalog"),
+    )
+    assert ai_model_pricing.provider_supports_price_fetch(model) is False
+    with pytest.raises(ai_model_pricing.PriceFetchUnsupportedError, match="reviewed"):
+        ai_model_pricing.fetch_provider_pricing(model)
+    # Existing regional list prices remain available without pretending a
+    # provider fetch succeeded or changing the configured credential host.
+    assert ai_model_pricing._catalog_entry(model) is not None
+
+
+def test_us_workspace_can_fetch_prices_from_its_own_native_host() -> None:
+    model = models.AIModel(
+        provider_name="custom",
+        model_identifier="example-model",
+        api_endpoint="https://tenant.us-east-1.maas.aliyuncs.com/compatible-mode/v1",
+    )
+    assert ai_model_pricing.provider_supports_price_fetch(model) is True
+
+
+def test_native_price_quote_does_not_mislabel_reviewed_prices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from preloop.services.alibaba_price_catalog import install_reviewed_catalogs
+    from preloop.services.alibaba_pricing import Tariff
+
+    reset_live_state_for_tests()
+    model = models.AIModel(
+        id="00000000-0000-0000-0000-000000000001",
+        provider_name="qwen",
+        model_identifier="example-model",
+        api_endpoint="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    )
+    now = datetime.now(timezone.utc)
+    try:
+        install_reviewed_catalogs(
+            {"singapore-international": {"example-model": Tariff(9, 10)}},
+            verified_at=now - timedelta(minutes=1),
+            expires_at=now + timedelta(days=1),
+            revision="review-quote-test",
+        )
+        ingest_native_models(
+            [
+                {
+                    "model": "example-model",
+                    "prices": [
+                        {
+                            "prices": [
+                                {
+                                    "type": "input_token",
+                                    "price": "0.15",
+                                    "price_unit": "Per 1M tokens",
+                                },
+                                {
+                                    "type": "output_token",
+                                    "price": "0.47",
+                                    "price_unit": "Per 1M tokens",
+                                },
+                            ]
+                        }
+                    ],
+                }
+            ]
+        )
+        monkeypatch.setattr(
+            "preloop.services.alibaba_price_catalog.refresh_from_model",
+            lambda _: CatalogRefreshStatus.ingested,
+        )
+        quote = ai_model_pricing.fetch_provider_pricing(model)
+        assert quote.price.input_per_1m == pytest.approx(0.15)
+        assert quote.price.output_per_1m == pytest.approx(0.47)
+        assert ai_model_pricing._catalog_entry(model)[1][
+            "input_cost_per_token"
+        ] == pytest.approx(9e-6)
+    finally:
+        reset_live_state_for_tests()

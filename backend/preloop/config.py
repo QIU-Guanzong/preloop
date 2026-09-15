@@ -506,7 +506,11 @@ class Settings(BaseSettings):
     )
     model_price_refresh_allowed_models: list[str] = Field(
         default_factory=list,
-        description="Exact catalog keys the reviewed feed may update; required when enabled.",
+        description=(
+            "Exact catalog keys or supported Alibaba regional scopes "
+            "(alibaba/singapore-international/*, alibaba/united-states/*) "
+            "the reviewed feed may update; required when enabled."
+        ),
     )
     model_price_refresh_interval_seconds: int = Field(
         21600,
