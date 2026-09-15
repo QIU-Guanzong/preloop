@@ -15,11 +15,20 @@ import '@shoelace-style/shoelace/dist/components/tree-item/tree-item.js';
 import '@shoelace-style/shoelace/dist/components/alert/alert.js';
 import '@shoelace-style/shoelace/dist/components/card/card.js';
 import { consoleDialogStyles } from '../styles/console-dialog';
+import type { Tracker } from './tracker-item.ts';
 
 @customElement('add-tracker-modal')
 export class AddTrackerModal extends LitElement {
   @property({ type: Object })
   tracker: any = null;
+
+  /**
+   * Trackers already on this account, when the parent view has them.
+   * Used to annotate installations that already back a tracker. Does not
+   * hide options or block creating a second tracker on the same installation.
+   */
+  @property({ type: Array })
+  existingTrackers: Tracker[] = [];
 
   /**
    * @internal
@@ -228,8 +237,20 @@ export class AddTrackerModal extends LitElement {
     }
   }
 
+  private installationAlreadyTracking(
+    installation: api.GitHubInstallation
+  ): boolean {
+    return this.existingTrackers.some(
+      (tracker) => tracker.oauth_installation_id === installation.id
+    );
+  }
+
   private installationLabel(installation: api.GitHubInstallation): string {
-    return `${installation.target_login} (${installation.target_type})`;
+    const label = `${installation.target_login} (${installation.target_type})`;
+    if (this.installationAlreadyTracking(installation)) {
+      return `${label} (already tracking)`;
+    }
+    return label;
   }
   firstUpdated() {
     // Reset state when modal is shown

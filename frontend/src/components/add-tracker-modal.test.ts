@@ -575,6 +575,34 @@ describe('AddTrackerModal', () => {
             ]);
           });
 
+          it('annotates installations already bound to a tracker', async () => {
+            const { api: stubbedApi } = buildApi();
+            element = await fixture(
+              html`<add-tracker-modal
+                ._api=${stubbedApi}
+                .existingTrackers=${[
+                  {
+                    id: 'tracker-1',
+                    name: 'GitHub - example-org',
+                    tracker_type: 'github',
+                    created: '2024-01-01T00:00:00Z',
+                    is_valid: true,
+                    oauth_installation_id:
+                      '11111111-1111-4111-8111-111111111111',
+                  },
+                ]}
+              ></add-tracker-modal>`
+            );
+            const picker = await waitForPicker(element);
+            const options = picker?.querySelectorAll('sl-option');
+            expect(options?.length).to.equal(2);
+            expect(options?.[0].textContent).to.contain('example-org');
+            expect(options?.[0].textContent).to.contain('already tracking');
+            expect(options?.[0].hasAttribute('disabled')).to.be.false;
+            expect(options?.[1].textContent).to.contain('jane-doe');
+            expect(options?.[1].textContent).to.not.contain('already tracking');
+          });
+
           it('is hidden when no installation is registered yet', async () => {
             const { stubs, api: stubbedApi } = buildApi();
             stubs.getGitHubInstallations.resolves([]);

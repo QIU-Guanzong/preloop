@@ -1,8 +1,11 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
+from sqlalchemy import event, inspect as sa_inspect
+from sqlalchemy.engine import Engine
 
 from preloop.api.endpoints.trackers import _unique_tracker_name
+from preloop.models.crud import crud_tracker
 from preloop.models.models.github_app_installation import OAuthAppInstallation
 from preloop.models.models.tracker import Tracker
 
@@ -150,20 +153,28 @@ async def test_list_projects_for_org_uses_correct_args(
     )
 
 
-def _make_github_app_tracker(db_session, test_user) -> Tracker:
+def _make_github_app_tracker(
+    db_session,
+    test_user,
+    *,
+    name: str = "GitHub App Tracker",
+    external_id: int = 4242,
+    target_id: int = 9001,
+    target_name: str = "example-org",
+) -> Tracker:
     """Persist a GitHub App tracker bound to a synthetic installation."""
     installation = OAuthAppInstallation(
         provider="github",
-        external_id=4242,
+        external_id=external_id,
         target_type="Organization",
-        target_id=9001,
-        target_name="example-org",
+        target_id=target_id,
+        target_name=target_name,
         account_id=test_user.account_id,
     )
     db_session.add(installation)
     db_session.flush()
     tracker = Tracker(
-        name="GitHub App Tracker",
+        name=name,
         tracker_type="github",
         url="https://github.com",
         account_id=test_user.account_id,
@@ -365,6 +376,93 @@ def test_tracker_response_exposes_auth_binding(
     assert by_id[str(pat_tracker.id)]["auth_type"] == "api_token"
     assert by_id[str(pat_tracker.id)]["oauth_installation_id"] is None
     assert by_id[str(pat_tracker.id)]["github_installation_target_login"] is None
+
+
+def test_get_for_account_eager_loads_oauth_installation(db_session, test_user):
+    """List CRUD must load the installation so TrackerResponse does not N+1."""
+    first = _make_github_app_tracker(
+        db_session,
+        test_user,
+        name="GitHub App Tracker A",
+        external_id=4242,
+        target_id=9001,
+        target_name="example-org",
+    )
+    second = _make_github_app_tracker(
+        db_session,
+        test_user,
+        name="GitHub App Tracker B",
+        external_id=4343,
+        target_id=9002,
+        target_name="other-org",
+    )
+
+    trackers = crud_tracker.get_for_account(
+        db_session, account_id=str(test_user.account_id)
+    )
+    by_id = {str(tracker.id): tracker for tracker in trackers}
+    assert "oauth_installation" not in sa_inspect(by_id[str(first.id)]).unloaded
+    assert "oauth_installation" not in sa_inspect(by_id[str(second.id)]).unloaded
+    assert by_id[str(first.id)].github_installation_target_login == "example-org"
+    assert by_id[str(second.id)].github_installation_target_login == "other-org"
+
+    detail = crud_tracker.get_by_id_and_account(
+        db_session, id=str(first.id), account_id=test_user.account_id
+    )
+    assert detail is not None
+    assert "oauth_installation" not in sa_inspect(detail).unloaded
+
+
+def test_list_trackers_does_not_n_plus_1_installations(
+    client: TestClient, db_session, test_user
+):
+    """GET /trackers must not issue a per-tracker installation SELECT."""
+    _make_github_app_tracker(
+        db_session,
+        test_user,
+        name="GitHub App Tracker A",
+        external_id=4242,
+        target_id=9001,
+        target_name="example-org",
+    )
+    _make_github_app_tracker(
+        db_session,
+        test_user,
+        name="GitHub App Tracker B",
+        external_id=4343,
+        target_id=9002,
+        target_name="other-org",
+    )
+
+    statements: list[str] = []
+
+    def _capture(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(Engine, "before_cursor_execute", _capture)
+    try:
+        response = client.get("/api/v1/trackers")
+    finally:
+        event.remove(Engine, "before_cursor_execute", _capture)
+
+    assert response.status_code == 200
+    logins = {item["github_installation_target_login"] for item in response.json()}
+    assert logins == {"example-org", "other-org"}
+
+    lazy_installation_lookups = [
+        statement
+        for statement in statements
+        if "oauth_app_installation" in statement.lower()
+        and "tracker" not in statement.lower()
+    ]
+    assert lazy_installation_lookups == []
 
 
 @pytest.mark.asyncio
