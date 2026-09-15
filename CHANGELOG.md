@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `search_sessions` built-in tool. An agent searches the runtime session
+  corpus before repeating work: ranked results, one trimmed snippet per
+  session, a match reason and the endpoint's degraded markers. Scope is the
+  calling agent's own sessions; `scope: "account"` is refused by name until an
+  operator grants it, never silently narrowed. The response is size-capped and
+  reports what it dropped. Default-off, so a flow selects it in its allow-list
+  or an account enables it on the Tools page, and an access rule that denies it
+  stops the call. Docs at `docs/guide/agent-session-search.md`.
+
 - Callable-flows picker on the flow editor. When the delegation tool is
   on, the form lists the account's other flows (paging past the 100-row
   list default) and lets the operator choose which this flow may call,
