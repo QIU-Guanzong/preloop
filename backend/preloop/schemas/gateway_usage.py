@@ -375,6 +375,13 @@ class RuntimeSessionSummary(BaseModel):
     #: (``session``, ``jwt``, ``api_key``).
     latest_note_author_auth_method: Optional[str] = None
     latest_note_at: Optional[datetime] = None
+    legal_hold: bool = Field(
+        False,
+        description=(
+            "True while a legal hold freezes this session: the retention "
+            "purge leaves it and its activity alone until the hold is released"
+        ),
+    )
 
 
 class AccountRuntimeSessionListResponse(BaseModel):

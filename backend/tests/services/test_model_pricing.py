@@ -853,6 +853,50 @@ class TestUpdateModelPriceOverlays:
         # Vision table must not leak into the overlay.
         assert "glm-5v-turbo" not in rows
 
+    def test_update_model_filter_keeps_token_priced_embedding_models(self) -> None:
+        """A refresh keeps embeddings (the gateway serves them) but not $0 rows.
+
+        Token-priced embedding entries must survive the filter or every
+        gateway vector call would record as unpriced. Multimodal embedding
+        rows priced per query/second have no per-token input price, so the
+        token ledger could only bill them as $0: they stay out.
+        """
+        script = _load_update_model_prices()
+        upstream = {
+            "text-embedding-fixture": {
+                "litellm_provider": "openai",
+                "mode": "embedding",
+                "input_cost_per_token": 2e-08,
+                "output_cost_per_token": 0.0,
+                "supports_vision": False,
+            },
+            "video-embedding-fixture": {
+                "litellm_provider": "bedrock",
+                "mode": "embedding",
+                "input_cost_per_query": 7e-05,
+                "input_cost_per_video_per_second": 0.0007,
+                "output_cost_per_token": 0.0,
+            },
+            "image-fixture": {
+                "litellm_provider": "openai",
+                "mode": "image_generation",
+                "input_cost_per_token": 1e-06,
+            },
+            "chat-fixture": {
+                "litellm_provider": "openai",
+                "mode": "chat",
+                "input_cost_per_token": 1e-06,
+                "output_cost_per_token": 4e-06,
+            },
+        }
+
+        filtered = script.filter_catalog(upstream)
+
+        assert set(filtered) == {"text-embedding-fixture", "chat-fixture"}
+        assert filtered["text-embedding-fixture"]["mode"] == "embedding"
+        # Capability flags are still stripped from the kept embedding row.
+        assert "supports_vision" not in filtered["text-embedding-fixture"]
+
     def test_update_model_moonshot_keys_survive_stub_litellm_merge(self) -> None:
         script = _load_update_model_prices()
         current = {
@@ -1127,3 +1171,111 @@ def test_estimate_external_model_usage_cost_zero_tokens_unpriced() -> None:
     )
     assert estimate.cost is None
     assert estimate.source == "unpriced"
+
+
+def test_alibaba_detailed_estimate_forwards_historical_instant_and_provenance(
+    monkeypatch,
+):
+    from datetime import datetime, timezone
+    from preloop.models import models
+    from preloop.services import alibaba_pricing, alibaba_price_catalog
+    from preloop.services.model_pricing import estimate_ai_model_usage_cost_detailed
+
+    model = models.AIModel(
+        provider_name="qwen",
+        model_identifier="qwen-provenance-example",
+        api_endpoint="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    )
+    observed = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    seen = []
+    snapshot = {
+        "provider": "alibaba",
+        "source": "reviewed",
+        "effective_from": "2026-01-01T00:00:00Z",
+    }
+
+    def estimate(ai_model, **kwargs):
+        seen.append(kwargs["observed_at"])
+        return 0.01
+
+    monkeypatch.setattr(alibaba_pricing, "estimate", estimate)
+    monkeypatch.setattr(
+        alibaba_price_catalog, "pricing_snapshot", lambda *args, **kwargs: snapshot
+    )
+    result = estimate_ai_model_usage_cost_detailed(
+        model,
+        prompt_tokens=100,
+        completion_tokens=10,
+        total_tokens=110,
+        observed_at=observed,
+    )
+    assert seen == [observed]
+    assert result.cost == 0.01
+    assert result.pricing_snapshot == snapshot
+
+
+@pytest.mark.parametrize(
+    "native_input,native_read,created,prompt_tokens,can_fallback",
+    [
+        (0.15, None, 0, 60000, True),
+        (0.2, None, 0, 60000, False),
+        (0.15, 0.02, 1000, 60000, False),
+        (0.15, None, 0, 1000001, False),
+    ],
+)
+@pytest.mark.parametrize("native_max_input", [1000000, None])
+def test_partial_native_flash_tariff_only_uses_matching_verified_seed(
+    native_input: float,
+    native_read: float | None,
+    created: int,
+    prompt_tokens: int,
+    can_fallback: bool,
+    native_max_input: int | None,
+) -> None:
+    """Missing native dimensions cannot erase matching seed evidence or mix prices."""
+    from preloop.models import models
+    from preloop.services import alibaba_price_catalog
+    from preloop.services.alibaba_pricing import Tariff
+    from preloop.services.model_pricing import estimate_ai_model_usage_cost_detailed
+
+    model = models.AIModel(
+        provider_name="qwen",
+        model_identifier="qwen3.8-flash",
+        api_endpoint="https://example.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    )
+    alibaba_price_catalog.reset_live_state_for_tests()
+    partial_native = Tariff(
+        input=native_input,
+        output=0.47,
+        max_input=native_max_input,
+        implicit_read=native_read,
+    )
+    alibaba_price_catalog.install_live_tariff(
+        "singapore-international", "qwen3.8-flash", partial_native
+    )
+    try:
+        result = estimate_ai_model_usage_cost_detailed(
+            model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=1000,
+            total_tokens=prompt_tokens + 1000,
+            usage_details={
+                "_preloop_cache_mode": "implicit",
+                "prompt_tokens_details": {
+                    "cached_tokens": 48000,
+                    "cache_creation_input_tokens": created,
+                },
+            },
+        )
+        if can_fallback:
+            assert result.cost == pytest.approx(0.003038)
+            assert result.source == "catalog"
+            assert result.pricing_snapshot is not None
+            assert "seed" in result.pricing_snapshot["source"]
+        else:
+            assert result.cost is None
+            assert result.source == "unpriced"
+        assert alibaba_price_catalog.native_tariff(model) is partial_native
+        assert partial_native.implicit_read == native_read
+    finally:
+        alibaba_price_catalog.reset_live_state_for_tests()

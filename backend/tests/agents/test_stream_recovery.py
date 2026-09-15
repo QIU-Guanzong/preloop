@@ -15,6 +15,7 @@ from preloop.agents.codex import CodexAgent
 from preloop.agents.gemini import GeminiAgent
 from preloop.agents.opencode import OpenCodeAgent
 from preloop.agents.stream_recovery import build_stream_recovery_block
+from preloop.utils.execve_limits import PROMPT_FILE_PATH
 
 pytestmark = pytest.mark.skipif(
     not all(shutil.which(tool) for tool in ("bash", "node", "timeout")),
@@ -80,7 +81,13 @@ def _run_generated(
     invocation = invocation.replace("/tmp/", str(tmp_path) + "/")
     invocation = invocation.replace("/workspace/", str(tmp_path) + "/")
     invocation = invocation.replace("sleep $((2 *", "sleep $((0 *")
-    (tmp_path / "prompt.txt").write_text(context["prompt"])
+    # The prompt no longer lives in the script; the chunked environment
+    # transport materializes it at PROMPT_FILE_PATH before the invocation
+    # block runs. The block under test starts after that point, so the
+    # fixture stands in for the materialization.
+    rewritten_prompt_path = Path(PROMPT_FILE_PATH.replace("/tmp/", str(tmp_path) + "/"))
+    rewritten_prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    rewritten_prompt_path.write_text(context["prompt"])
     fake = tmp_path / harness
     fake.write_text(
         "#!/usr/bin/env python3\n"

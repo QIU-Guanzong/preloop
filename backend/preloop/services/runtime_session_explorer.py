@@ -905,6 +905,7 @@ class RuntimeSessionExplorerService:
             token_usage=GatewayTokenUsage.from_row(row),
             estimated_cost=row["estimated_cost"],
             last_request_at=row["last_request_at"],
+            legal_hold=bool(row.get("legal_hold", False)),
         )
 
     def _build_activity_timeline(

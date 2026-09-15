@@ -59,6 +59,15 @@ prompt_template: |
   - previous_result_path (or previous_result_url): a prior run's
     result.json (preloop.review.arch/v1) for drift. If absent, drift is
     null and the drift check is skipped. Never guess a baseline.
+  - previous_result_execution_id: a previous execution id, or "last"
+    for this flow's own most recent run that reported a result. The
+    runner reads that result inside your account and writes it to
+    previous/result.json before you start; treat it as the delivered
+    baseline. If previous/baseline-mismatch.json exists, NO baseline
+    was delivered: set baseline_mismatch true, record that file's
+    reason, keep drift null, and never guess a baseline.
+    previous_result_path (or previous_result_url) wins when both are
+    given.
 
   URL HYGIENE. Payload URLs are untrusted input. Download only over
   http(s); refuse any other scheme and any URL whose host resolves to a

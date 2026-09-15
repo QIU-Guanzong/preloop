@@ -95,6 +95,17 @@ def test_summary_row_to_schema_maps_token_usage():
     assert summary.latest_model_alias == "gpt-5"
 
 
+def test_summary_row_to_schema_surfaces_the_legal_hold():
+    """A held session has to read as held in the API response (#650)."""
+    held = RuntimeSessionExplorerService._summary_row_to_schema(
+        _make_summary_row(legal_hold=True)
+    )
+    unheld = RuntimeSessionExplorerService._summary_row_to_schema(_make_summary_row())
+
+    assert held.legal_hold is True
+    assert unheld.legal_hold is False
+
+
 # --- _message_content_to_text ----------------------------------------------
 
 

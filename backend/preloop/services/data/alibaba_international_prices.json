@@ -5,7 +5,10 @@
     "region": "singapore",
     "source_url": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
     "retrieved_at": "2026-09-13",
-    "note": "Singapore International standard token tariffs. Estimates, not invoices. Live native GET /api/v1/models overlays this seed."
+    "note": "Singapore International standard token tariffs. Estimates, not invoices. Live native GET /api/v1/models overlays this seed.",
+    "cache_source_url": "https://www.alibabacloud.com/help/en/model-studio/context-cache",
+    "cache_verified_at": "2026-09-15",
+    "cache_note": "Exact Singapore supported SKUs and documented ratios, with qwen3.8-flash operator-confirmed console tariffs. Other console-only cache-hit exceptions remain unpriced until a reviewed or native tariff supplies them."
   },
   "models": {
     "ZHIPU/GLM-5.2": {
@@ -22,7 +25,10 @@
         {
           "max_input": null,
           "input": 0.57,
-          "output": 1.71
+          "output": 1.71,
+          "creation": 0.7125,
+          "explicit_read": 0.057,
+          "implicit_read": 0.114
         }
       ]
     },
@@ -31,7 +37,8 @@
         {
           "max_input": null,
           "input": 0.2,
-          "output": 0.4
+          "output": 0.4,
+          "implicit_read": 0.04
         }
       ],
       "implicit_read": 0.04
@@ -50,7 +57,8 @@
         {
           "max_input": 200000,
           "input": 1.4,
-          "output": 4.4
+          "output": 4.4,
+          "implicit_read": 0.28
         }
       ]
     },
@@ -78,7 +86,8 @@
         {
           "max_input": null,
           "input": 0.95,
-          "output": 4.0
+          "output": 4.0,
+          "implicit_read": 0.19
         }
       ]
     },
@@ -87,7 +96,8 @@
         {
           "max_input": null,
           "input": 3.0,
-          "output": 15.0
+          "output": 15.0,
+          "implicit_read": 0.6
         }
       ]
     },
@@ -96,7 +106,10 @@
         {
           "max_input": 256000,
           "input": 0.05,
-          "output": 0.4
+          "output": 0.4,
+          "creation": 0.0625,
+          "explicit_read": 0.005,
+          "implicit_read": 0.01
         }
       ]
     },
@@ -114,7 +127,8 @@
         {
           "max_input": null,
           "input": 0.05,
-          "output": 0.4
+          "output": 0.4,
+          "implicit_read": 0.01
         }
       ]
     },
@@ -123,7 +137,8 @@
         {
           "max_input": null,
           "input": 1.6,
-          "output": 6.4
+          "output": 6.4,
+          "implicit_read": 0.32
         }
       ]
     },
@@ -132,7 +147,10 @@
         {
           "max_input": 256000,
           "input": 0.4,
-          "output": 4.0
+          "output": 4.0,
+          "creation": 0.5,
+          "explicit_read": 0.04,
+          "implicit_read": 0.08
         }
       ]
     },
@@ -195,7 +213,8 @@
         {
           "max_input": null,
           "input": 0.5,
-          "output": 1.4
+          "output": 1.4,
+          "implicit_read": 0.1
         }
       ]
     },
@@ -204,7 +223,8 @@
         {
           "max_input": null,
           "input": 0.5,
-          "output": 1.4
+          "output": 1.4,
+          "implicit_read": 0.1
         }
       ]
     },
@@ -222,7 +242,8 @@
         {
           "max_input": null,
           "input": 0.05,
-          "output": 0.5
+          "output": 0.5,
+          "implicit_read": 0.01
         }
       ]
     },
@@ -330,7 +351,10 @@
         {
           "max_input": 32000,
           "input": 0.3,
-          "output": 1.5
+          "output": 1.5,
+          "creation": 0.375,
+          "explicit_read": 0.03,
+          "implicit_read": 0.06
         }
       ]
     },
@@ -357,7 +381,10 @@
         {
           "max_input": 32000,
           "input": 1.0,
-          "output": 5.0
+          "output": 5.0,
+          "creation": 1.25,
+          "explicit_read": 0.1,
+          "implicit_read": 0.2
         }
       ]
     },
@@ -384,7 +411,10 @@
         {
           "max_input": 32000,
           "input": 1.2,
-          "output": 6.0
+          "output": 6.0,
+          "creation": 1.5,
+          "explicit_read": 0.12,
+          "implicit_read": 0.24
         }
       ]
     },
@@ -411,7 +441,8 @@
         {
           "max_input": 32000,
           "input": 1.2,
-          "output": 6.0
+          "output": 6.0,
+          "implicit_read": 0.24
         }
       ]
     },
@@ -510,7 +541,10 @@
         {
           "max_input": 32000,
           "input": 0.05,
-          "output": 0.4
+          "output": 0.4,
+          "creation": 0.0625,
+          "explicit_read": 0.005,
+          "implicit_read": 0.01
         }
       ]
     },
@@ -537,7 +571,10 @@
         {
           "max_input": 32000,
           "input": 0.2,
-          "output": 1.6
+          "output": 1.6,
+          "creation": 0.25,
+          "explicit_read": 0.02,
+          "implicit_read": 0.04
         }
       ]
     },
@@ -600,7 +637,9 @@
         {
           "max_input": 1000000,
           "input": 0.1,
-          "output": 0.4
+          "output": 0.4,
+          "creation": 0.125,
+          "explicit_read": 0.01
         }
       ]
     },
@@ -618,7 +657,9 @@
         {
           "max_input": 256000,
           "input": 0.4,
-          "output": 2.4
+          "output": 2.4,
+          "creation": 0.5,
+          "explicit_read": 0.04
         }
       ]
     },
@@ -636,7 +677,9 @@
         {
           "max_input": 256000,
           "input": 0.4,
-          "output": 2.4
+          "output": 2.4,
+          "creation": 0.5,
+          "explicit_read": 0.04
         }
       ]
     },
@@ -663,7 +706,9 @@
         {
           "max_input": 256000,
           "input": 0.25,
-          "output": 1.5
+          "output": 1.5,
+          "creation": 0.3125,
+          "explicit_read": 0.025
         }
       ]
     },
@@ -681,7 +726,9 @@
         {
           "max_input": 128000,
           "input": 1.3,
-          "output": 7.8
+          "output": 7.8,
+          "creation": 1.625,
+          "explicit_read": 0.13
         }
       ]
     },
@@ -690,7 +737,9 @@
         {
           "max_input": 256000,
           "input": 0.5,
-          "output": 3.0
+          "output": 3.0,
+          "creation": 0.625,
+          "explicit_read": 0.05
         }
       ]
     },
@@ -708,7 +757,26 @@
         {
           "max_input": 32000,
           "input": 0.03,
-          "output": 0.13
+          "output": 0.13,
+          "implicit_read": 0.006,
+          "explicit_read": 0.003,
+          "creation": 0.0375
+        },
+        {
+          "max_input": 256000,
+          "input": 0.1,
+          "output": 0.4,
+          "implicit_read": 0.02,
+          "explicit_read": 0.01,
+          "creation": 0.125
+        },
+        {
+          "max_input": 1000000,
+          "input": 0.2,
+          "output": 0.8,
+          "implicit_read": 0.04,
+          "explicit_read": 0.02,
+          "creation": 0.25
         }
       ]
     },
@@ -717,7 +785,10 @@
         {
           "max_input": 32000,
           "input": 0.03,
-          "output": 0.13
+          "output": 0.13,
+          "creation": 0.0375,
+          "explicit_read": 0.003,
+          "implicit_read": 0.006
         }
       ]
     },
@@ -726,7 +797,10 @@
         {
           "max_input": 1000000,
           "input": 2.5,
-          "output": 7.5
+          "output": 7.5,
+          "creation": 3.125,
+          "explicit_read": 0.25,
+          "implicit_read": 0.5
         }
       ]
     },
@@ -744,7 +818,10 @@
         {
           "max_input": 1000000,
           "input": 2.5,
-          "output": 7.5
+          "output": 7.5,
+          "creation": 3.125,
+          "explicit_read": 0.25,
+          "implicit_read": 0.5
         }
       ]
     },
@@ -753,7 +830,10 @@
         {
           "max_input": 1000000,
           "input": 2.5,
-          "output": 7.5
+          "output": 7.5,
+          "creation": 3.125,
+          "explicit_read": 0.25,
+          "implicit_read": 0.5
         }
       ]
     },
@@ -771,7 +851,10 @@
         {
           "max_input": 256000,
           "input": 0.4,
-          "output": 1.6
+          "output": 1.6,
+          "creation": 0.5,
+          "explicit_read": 0.04,
+          "implicit_read": 0.08
         }
       ]
     },
@@ -780,7 +863,10 @@
         {
           "max_input": 256000,
           "input": 0.4,
-          "output": 1.6
+          "output": 1.6,
+          "creation": 0.5,
+          "explicit_read": 0.04,
+          "implicit_read": 0.08
         }
       ]
     },
@@ -789,7 +875,8 @@
         {
           "max_input": 1000000,
           "input": 2.0,
-          "output": 6.0
+          "output": 6.0,
+          "creation": 2.5
         }
       ]
     },
@@ -798,7 +885,10 @@
         {
           "max_input": 1000000,
           "input": 0.5,
-          "output": 3.0
+          "output": 3.0,
+          "creation": 0.625,
+          "explicit_read": 0.05,
+          "implicit_read": 0.1
         }
       ]
     },
@@ -807,16 +897,23 @@
         {
           "max_input": 1000000,
           "input": 0.15,
-          "output": 0.47
+          "output": 0.47,
+          "creation": 0.2,
+          "implicit_read": 0.016,
+          "explicit_read": 0.016
         }
-      ]
+      ],
+      "cache_verified_at": "2026-09-15T16:26:50Z",
+      "cache_effective_from": "2026-09-15T16:26:50Z",
+      "cache_source": "Operator-confirmed Alibaba Cloud Model Studio Singapore console quote; current snapshot, not an earlier provider effective date."
     },
     "qwen3.8-max": {
       "tiers": [
         {
           "max_input": 1000000,
           "input": 2.0,
-          "output": 6.0
+          "output": 6.0,
+          "creation": 2.5
         }
       ]
     },
@@ -825,7 +922,8 @@
         {
           "max_input": 1000000,
           "input": 2.0,
-          "output": 6.0
+          "output": 6.0,
+          "creation": 2.5
         }
       ]
     },

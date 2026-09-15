@@ -74,6 +74,13 @@ INCOMPLETE_REQUIRED: tuple[str, ...] = (
 # reading the envelope saw no drift at all. It is admitted on the same terms
 # as any other claim: validated in full, and only when the report it
 # summarizes is named under artifacts.
+#
+# "scope" is admitted on the same terms, and for the release audit only.
+# It states which project inside the repository the run was pointed at and
+# whether that project could be checked at all. A scoped run that found no
+# SBOM for its project has nothing to audit, so the envelope it writes is
+# this one, and the reader still has to be told which project the silence
+# is about.
 INCOMPLETE_OPTIONAL: tuple[str, ...] = (
     "git",
     "tool_versions",
@@ -85,9 +92,12 @@ INCOMPLETE_OPTIONAL: tuple[str, ...] = (
     "status",
     "verdict",
     "drift",
+    "scope",
 )
 # Schemas whose incompletion envelope may carry the drift block.
 INCOMPLETE_DRIFT_SCHEMAS: FrozenSet[str] = frozenset({SCHEMA_RELEASEAUDIT_V1})
+# Schemas whose envelopes may carry the project-scope block.
+SCOPE_SCHEMAS: FrozenSet[str] = frozenset({SCHEMA_RELEASEAUDIT_V1})
 INCOMPLETE_ALLOWED: FrozenSet[str] = frozenset(
     INCOMPLETE_REQUIRED + INCOMPLETE_OPTIONAL
 )
@@ -166,6 +176,30 @@ ART14_REPORTING_FIELD = "reporting"
 ART14_BASIS_004 = (
     "SBOM verification does not screen for vulnerabilities; run preset 005 or 006"
 )
+
+# --- Project scope (one project inside a larger repository) -------------
+# The release audit can be pointed at a single project inside a repository
+# that holds many, the way the code health review already can. The block is
+# additive and nullable: absent or null means the whole repository was the
+# unit of audit, which is what every run before this field did, so results
+# written earlier stay valid.
+SCOPE_FIELD = "scope"
+# What the verdict covers. "project" requires a project_path; "repository"
+# forbids one, so the two fields cannot tell different stories.
+SCOPE_COVERS: FrozenSet[str] = frozenset({"repository", "project"})
+# Whether the lens could be checked at all. "not_checkable" is the review
+# family's name for an absence of evidence (docs/guide/flows/
+# repo-review-presets.md): it is required rather than assumed, and it is
+# deliberately not called "skipped", because a skipped check reads as a
+# choice and this is the absence of an input. A not_checkable lens carries
+# its reason and can never end in a healthy verdict.
+SCOPE_STATUSES: FrozenSet[str] = frozenset({"audited", "not_checkable"})
+SCOPE_AUDITED = "audited"
+SCOPE_NOT_CHECKABLE = "not_checkable"
+SCOPE_REQUIRED: tuple[str, ...] = ("project_path", "covers", "status")
+# Verdicts a not_checkable lens may never carry: nothing was screened, so
+# nothing can read as a clean bill of health.
+HEALTHY_VERDICTS: FrozenSet[str] = frozenset({"pass", "pass_with_findings"})
 
 SOURCE_KINDS: FrozenSet[str] = frozenset({"database", "heuristic"})
 SOURCE_MATRIX_KEYS: tuple[str, ...] = (

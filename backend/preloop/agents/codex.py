@@ -8,6 +8,11 @@ from typing import Any, Dict
 
 from aiodocker.exceptions import DockerError
 
+from preloop.utils.execve_limits import (
+    PROMPT_FILE_PATH,
+    build_prompt_materialization_shell,
+    prompt_transport_env,
+)
 from preloop.services.mcp_config_service import MCPConfigService
 from preloop.services.model_runtime_resolver import gateway_url_for_api
 
@@ -183,6 +188,12 @@ class CodexAgent(ContainerAgentExecutor):
             )
             env["MCP_CONFIG_JSON"] = json.dumps(mcp_config)
 
+        # The rendered prompt travels as base64 chunks in the environment and
+        # is reassembled inside the container. It is never a single variable
+        # nor an argv element, either of which the kernel caps at
+        # MAX_ARG_STRLEN (preloop.utils.execve_limits).
+        env.update(prompt_transport_env(execution_context["prompt"]))
+
         # Build the Codex script using shared method
         script = self._build_codex_script(execution_context)
 
@@ -247,6 +258,10 @@ class CodexAgent(ContainerAgentExecutor):
                 "CpuQuota": int(os.getenv("AGENT_CPU_QUOTA", "100000")),
             },
         }
+
+        self._guard_docker_launch_payload(
+            container_config, what=f"{self.agent_type} container for {execution_id}"
+        )
 
         try:
             # Pull image if not available
@@ -425,19 +440,15 @@ fi
             env_key = f"{model_provider.upper().replace('-', '_')}_API_BASE"
             model_endpoint = os.getenv(env_key) or os.getenv("CUSTOM_API_BASE", "")
 
-        # Escape prompt for shell - must escape:
-        # - Double quotes (for string delimiter)
-        # - Single quotes (for shell quoting)
-        # - Backticks (prevent command substitution - critical for markdown code blocks)
-        # - Dollar signs (prevent variable expansion)
-        # - Backslashes (prevent escape sequence interpretation)
-        escaped_prompt = (
-            prompt.replace("\\", "\\\\")  # Backslashes first
-            .replace('"', '\\"')
-            .replace("'", "\\'")
-            .replace("`", "\\`")  # Backticks for markdown code fences
-            .replace("$", "\\$")  # Dollar signs for variables
-        )
+        # The prompt is NOT interpolated into this script. It arrives as
+        # base64 chunks in the environment and is reassembled into
+        # PROMPT_FILE_PATH by the block below, then piped into `codex exec`
+        # from that file. Escaping it into the script text was both a
+        # correctness hazard (every quote, backtick and dollar sign in a
+        # webhook-supplied PR body had to be escaped exactly right) and the
+        # reason the script could cross MAX_ARG_STRLEN: see
+        # preloop.utils.execve_limits.
+        prompt_block = build_prompt_materialization_shell(prompt)
 
         # Prepare initialization commands (git clone, custom commands)
         init_commands = self._prepare_init_commands(execution_context)
@@ -531,6 +542,11 @@ fi
         script = f"""
 set -e
 
+# Materialize the rendered prompt from its chunked environment transport.
+# Runs before anything else so a dropped chunk fails the run immediately,
+# rather than after a clone and a model call.
+{prompt_block}
+
 # Keep the container alive after execution for debugging.
 # Controlled by AGENT_POST_EXEC_SLEEP (seconds, default 0 = disabled).
 # Set to e.g. 600 to keep containers alive for 10 minutes.
@@ -617,7 +633,7 @@ echo "PRELOOP_AGENT_EXEC_START"
 set +e
 : > "{AGENT_OUTPUT_LOG_PATH}"
 : > "{ATTEMPT_LOG_PATH}"
-echo "{escaped_prompt}" | codex exec $CODEX_RESUME_ARGS --skip-git-repo-check --model "{model}" --yolo 2>&1 | tee -a "{AGENT_OUTPUT_LOG_PATH}" "{ATTEMPT_LOG_PATH}"
+cat "{PROMPT_FILE_PATH}" | codex exec $CODEX_RESUME_ARGS --skip-git-repo-check --model "{model}" --yolo 2>&1 | tee -a "{AGENT_OUTPUT_LOG_PATH}" "{ATTEMPT_LOG_PATH}"
 CODEX_PIPE_CODES=("${{PIPESTATUS[@]}}")
 CODEX_EXIT_CODE=${{CODEX_PIPE_CODES[1]:-0}}
 set -e

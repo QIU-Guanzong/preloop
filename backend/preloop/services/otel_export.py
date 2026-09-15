@@ -504,6 +504,8 @@ def _operation_name(endpoint_kind: str) -> str:
     kind = (endpoint_kind or "").lower()
     if "gemini" in kind or "generate" in kind:
         return "generate_content"
+    if "embed" in kind:
+        return "embed"
     return "chat"
 
 

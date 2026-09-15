@@ -72,6 +72,12 @@ Jobs teams otherwise buy from several vendors, in one Apache 2.0 stack:
 | **Runtime Observability** | One session timeline: tool calls, model calls, policy, approvals, spend, outcomes. | AgentOps, Langfuse, LangSmith |
 | **Evidence packs** | Apache flow presets write `result.json` plus an evidence directory for CRA / AI Act-style work. Not a certification. | Custom GRC folders |
 
+[Reviewed model pricing](docs/guide/model-price-refresh.md) distributes verified
+tariffs to gateway, API, and worker processes. Alibaba tariffs preserve regional
+and cache-policy differences. The weekly review preset prepares tested pricing
+PRs after you bind its repository and model; historical repricing is a separate
+operation. Models or billing modes without verified rates remain visibly unpriced.
+
 ```text
 AI Agent → Preloop → [Policy]  → Allow / Deny / Require Approval → Execute
                    → [Gateway] → Budget + attribution             → Model
