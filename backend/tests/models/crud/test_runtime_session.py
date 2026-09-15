@@ -340,3 +340,46 @@ def test_count_active_sessions_by_model_without_models_skips_the_query(
         == {}
     )
     db.query.assert_not_called()
+
+
+def test_a_held_session_reports_the_hold_in_its_summary(
+    db_session, create_account
+) -> None:
+    """A frozen session has to look frozen wherever the console reads it."""
+    from preloop.services.legal_hold import place_hold
+
+    account = create_account()
+    started = datetime.now(UTC) - timedelta(days=2)
+    session = RuntimeSession(
+        id=uuid4(),
+        account_id=account.id,
+        session_source_type="managed_agent",
+        session_source_id="agent-hold",
+        started_at=started,
+        last_activity_at=started,
+    )
+    db_session.add(session)
+    db_session.commit()
+
+    unheld = crud_runtime_session.get_account_session_summary(
+        db_session, account_id=str(account.id), runtime_session_id=str(session.id)
+    )
+    assert unheld["legal_hold"] is False
+
+    place_hold(
+        db_session,
+        account_id=account.id,
+        resource_type="runtime_session",
+        resource_id=str(session.id),
+        reason="litigation hold, matter 2026-07",
+    )
+
+    summary = crud_runtime_session.get_account_session_summary(
+        db_session, account_id=str(account.id), runtime_session_id=str(session.id)
+    )
+    listed = crud_runtime_session.list_account_sessions(
+        db_session, account_id=str(account.id)
+    )
+
+    assert summary["legal_hold"] is True
+    assert [item["legal_hold"] for item in listed["items"]] == [True]

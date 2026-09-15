@@ -1,0 +1,71 @@
+{
+  "currency": "USD",
+  "expires_at": "2026-09-29T16:29:41Z",
+  "models": {
+    "alibaba/singapore-international/qwen3.7-flash": {
+      "alibaba_policy": {
+        "currency": "USD",
+        "model_identifier": "qwen3.7-flash",
+        "region": "singapore-international",
+        "tiers": [
+          {
+            "creation": 0.0375,
+            "explicit_read": 0.003,
+            "implicit_read": 0.006,
+            "input": 0.03,
+            "max_input": 32000,
+            "output": 0.13
+          },
+          {
+            "creation": 0.125,
+            "explicit_read": 0.01,
+            "implicit_read": 0.02,
+            "input": 0.1,
+            "max_input": 256000,
+            "output": 0.4
+          },
+          {
+            "creation": 0.25,
+            "explicit_read": 0.02,
+            "implicit_read": 0.04,
+            "input": 0.2,
+            "max_input": 1000000,
+            "output": 0.8
+          }
+        ]
+      },
+      "effective_from": "2026-09-15T16:00:00Z",
+      "evidence_kind": "public",
+      "policy": "alibaba_regional_tokens",
+      "price_policy_history": [],
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "verified_at": "2026-09-15T16:00:00Z"
+    },
+    "alibaba/singapore-international/qwen3.8-flash": {
+      "alibaba_policy": {
+        "currency": "USD",
+        "model_identifier": "qwen3.8-flash",
+        "region": "singapore-international",
+        "tiers": [
+          {
+            "creation": 0.2,
+            "explicit_read": 0.016,
+            "implicit_read": 0.016,
+            "input": 0.15,
+            "max_input": 1000000,
+            "output": 0.47
+          }
+        ]
+      },
+      "effective_from": "2026-09-15T16:26:50Z",
+      "evidence_kind": "operator_confirmed_console",
+      "policy": "alibaba_regional_tokens",
+      "price_policy_history": [],
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/context-cache",
+      "verified_at": "2026-09-15T16:26:50Z"
+    }
+  },
+  "published_at": "2026-09-15T16:29:41Z",
+  "revision": "alibaba-console-review-2026-09-15-2",
+  "schema_version": 1
+}

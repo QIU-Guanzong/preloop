@@ -1,9 +1,11 @@
 # Operator notes
 
 An operator note is a short instruction from an identified human to a running
-agent. You type it in the console or the API; the agent receives it at
+agent. You type it in the console, the CLI or the API; the agent receives it at
 its next turn boundary; the note is recorded as a human decision, with who sent
-it, when it landed and on which turn.
+it, when it landed and on which turn. An agent can author one too, through an
+opt-in tool, and the record says so; see
+[A note from an agent](#a-note-from-an-agent).
 
 It exists because the alternative in an unattended run is to kill the agent and
 start again. A note is the cheaper correction: "the staging cluster is the one
@@ -36,6 +38,33 @@ Console: the **Operator notes** card on the agent page and on a running flow
 execution. Enter sends, Shift+Enter is a newline. Each note shows its state, and
 an undelivered note can be withdrawn from the same card.
 
+CLI, which is where an operator running an agent already is:
+
+```bash
+preloop notes send --agent 0b0d... "Deploy to eu-west-1, not us-east-1."
+preloop notes send --session 5a3e... "Stop refactoring the tests, ship the fix."
+preloop notes send --execution 9f2b... "The deadline moved to Friday."
+```
+
+Name exactly one of `--agent`, `--session` or `--execution`; naming none or
+naming two is refused before any request is made. The body is the argument,
+and with no argument it is read from standard input, so a multi line note can
+be piped or written in a heredoc:
+
+```bash
+cat <<'NOTE' | preloop notes send --agent 0b0d...
+Two things:
+  1. the cluster is the one in eu-west-1
+  2. do not touch the tests
+NOTE
+```
+
+`--expires-in 2h` overrides the 24 hour default. `--json` emits the note id
+and the target and nothing else, for scripts. A refusal prints the server's
+reason, including an unresolvable target and the rate limit, and exits
+non-zero. The CLI sends notes and does not read them: listing a note's
+delivery state and cancelling one stay in the console and the API.
+
 API:
 
 ```bash
@@ -59,6 +88,35 @@ and expiring visibly beats rotting silently.
 Mobile is out of scope for now. The iOS and Android clients already hold an
 account session, so they need no new backend: the three endpoints above are the
 whole surface.
+
+## A note from an agent
+
+An agent can leave a note for another agent through the `send_note` builtin
+tool, so a hand off between two runs stops going through a person or a file
+nobody sweeps. It is off by default and has to be enabled per agent or per
+flow, like any other builtin: an agent that was never given the tool does not
+see it in its tool list and is refused if it calls it anyway.
+
+```json
+{"text": "The migration is applied; run the backfill.", "agent_id": "0b0d..."}
+```
+
+Same one-target rule, same store, same delivery rail, same 4096 character and
+20-per-hour ceilings, and the same account boundary: the target is resolved in
+the calling agent's account, so an id from another account is simply not found.
+Naming no target or two is a structured refusal the model can correct on its
+next turn, not an exception, and no note row is written.
+
+What differs is only the author. The row records the calling managed agent
+rather than a user, the envelope carries `"authMethod": "agent"` and a display
+name suffixed `(agent)`, and the audit row for the send names the agent as the
+actor. The delivered block's framing sentence follows the authors inside it:
+an all-agent delivery says the named agent does not hold the permission to
+stop this run, and a mixed human-plus-agent delivery names both authorities
+instead of wrapping the sibling's text in the human-stop sentence. The
+per-note `from` and `auth` attributes still name the author either way. The
+note still grants nothing: every action taken because of it goes through the
+firewall, the gateway and the approval policy as before.
 
 ## How it is delivered
 
@@ -99,22 +157,34 @@ evented before it leaves.
 
 | Harness | What fires | How to pick the note up |
 | --- | --- | --- |
-| Claude Code | `PreToolUse`, installed by `preloop agents onboard --approvals` | `operator_note` on the permission-check response |
+| Claude Code | `PreToolUse`, installed by `preloop agents onboard --approvals` | `operator_note` on the permission-check response, written into `hookSpecificOutput.additionalContext` |
 | Claude Code (channels) | An MCP channel server you run | `POST /agents/notes/pending`, then push `channel_event` as `notifications/claude/channel`. The harness wraps our block in its own `<channel source= severity=>` tag |
 | Claude Code (cross-session messaging) | A bridge process holding `CLAUDE_CODE_MESSAGING_TOKEN`, with `crossSessionInbound: accept` on headless `-p` workers | `POST /agents/notes/pending`, then post `text` to the session inbox socket. The harness delivers it between tool calls |
-| Codex CLI | `PermissionRequest` | `operator_note` on the permission-check response |
-| Cursor CLI | `beforeShellExecution`, `beforeMCPExecution` | `operator_note` on the permission-check response |
+| Codex CLI | `PreToolUse` and `PermissionRequest` | `operator_note` on the permission-check response, written into the `PreToolUse` `hookSpecificOutput.additionalContext`. `PermissionRequest` has no field for it, so a note claimed there rides the next `PreToolUse` |
+| Cursor CLI | `beforeShellExecution`, `beforeMCPExecution`, `preToolUse` | `operator_note` on the permission-check response, written into the `preToolUse` `additional_context` on allow and deny. The two `before*` hooks have no field for it, and on this build `preToolUse` collects `additional_context` only on allow and deny, so a note claimed on `ask` also rides the next carrying call |
 | OpenCode | `tool.execute.before`, via `@preloop-ai/opencode-plugin` | `operator_note` on the permission-check response |
 | OpenClaw, Hermes | Gateway path only, no hook needed | Trailing message in the model request |
 
 For the Claude Code transports, Preloop supplies the text, the identity and the
 record; the harness supplies the last hop.
 
-This PR ships the server side of every row above. The harness-side rendering
-(the CLI hook putting `operator_note` into `additionalContext`, and the channel
-and inbox bridges) is a follow-up: those depend on per-harness output schemas
-that have to be verified against a running harness, and guessing at a schema on
-a governance path is worse than shipping the endpoint and wiring it next.
+The permission hook renders the block itself for Claude Code, Codex CLI and
+Cursor CLI: nothing to install beyond `preloop agents onboard --approvals`, and
+a turn with no pending note produces exactly the response it produced before.
+Each field above was read from the installed harness, which is why they differ:
+only some hook events have a field that reaches the model at all. Codex accepts
+`additionalContext` on `PreToolUse` and rejects any unknown field on a
+`PermissionRequest` response; Cursor keeps `additional_context` for
+`preToolUse` on allow and deny and strips it from `beforeShellExecution` and
+`beforeMCPExecution`. On this build `preToolUse` collects `additional_context`
+only on allow and deny, so a note claimed on `ask` also rides the next carrying
+call. A note claimed by one of those hooks is held for its session and written
+into the next tool call's carrying hook, once, which is one tool call later and
+still a turn boundary. The versions each shape was captured from are recorded
+in `cli/internal/cmd/testdata/operator-notes/`.
+
+The channel and inbox bridges remain a follow-up: they need a process the
+operator runs, not a hook Preloop already installs.
 
 A note whose harness fires no tool call and makes no model call is not
 delivered, and its state stays `pending` until it expires. There is no path
@@ -132,6 +202,14 @@ Deploy to eu-west-1, not us-east-1.
 </operator-note>
 </operator-notes>
 ```
+
+That framing is for a human-authored delivery and stays byte-identical to
+what shipped before `send_note`. A block whose every note is `auth="agent"`
+uses a different sentence: the named agent does not hold the permission to
+stop this run. A mixed block (human and agent notes in one delivery) says
+so, and still treats only the human-authored elements with the operator's
+stop-authority. The per-note `from` and `auth` attributes are unchanged in
+every case.
 
 Preloop stamps every attribute. The sender authors only the text inside the
 element, and a body containing the literal characters of one of these tags is
@@ -209,7 +287,8 @@ become a delivery, and the candidate query used at delivery time is itself
 bounded by the account.
 
 Limits: 4096 characters per note, 20 notes per author per agent per hour
-(or per session, when the target has no managed agent). Note
+(or per session, when the target has no managed agent). An agent author counts
+against the same ceiling, keyed on the authoring agent. Note
 bodies are stored in the clear, exactly as approval comments are, because both
 are operator text that has to be readable in the audit trail and in the
 timeline. Do not put secrets in a note; use the credential store.

@@ -66,6 +66,7 @@ FULLY_LOADED_PRESET = {
     "allowed_mcp_tools": [{"server": "preloop", "name": "ask_user"}],
     "git_clone_config": {"enabled": False},
     "custom_commands": {"enabled": True, "commands": ["echo hi"]},
+    "callable_flows": [{"flow": "child-preset", "max_children": 2}],
     "runner_pool": "server",
     "timeout_seconds": 7200,
     "approval_window_seconds": 259200,
@@ -83,6 +84,12 @@ def _covers(written, declared):
     if isinstance(declared, dict):
         return isinstance(written, dict) and all(
             k in written and _covers(written[k], v) for k, v in declared.items()
+        )
+    if isinstance(declared, list):
+        return (
+            isinstance(written, list)
+            and len(written) == len(declared)
+            and all(_covers(w, d) for w, d in zip(written, declared, strict=False))
         )
     return written == declared
 
@@ -218,7 +225,7 @@ class TestTheShippedCatalog:
             assert created.is_enabled is False
 
     def test_the_cra_presets_keep_their_three_day_window(self, sync):
-        """006 and 014 are the two that declare it, and both were losing it."""
+        """006, 014, and 015 declare a three-day window; keep every one."""
         from preloop.flow_presets import FLOW_PRESETS
 
         by_name = {p["name"]: p for p in FLOW_PRESETS}
@@ -230,6 +237,7 @@ class TestTheShippedCatalog:
         assert windowed == {
             "Release Security Audit": 259200,
             "Security Maintenance Implementation": 259200,
+            "Weekly model price review": 259200,
         }
 
     def test_preset_timeouts_survive(self, sync):

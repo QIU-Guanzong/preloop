@@ -7,6 +7,11 @@ from typing import Any, Dict
 
 from aiodocker.exceptions import DockerError
 
+from preloop.utils.execve_limits import (
+    PROMPT_FILE_PATH,
+    build_prompt_materialization_shell,
+    prompt_transport_env,
+)
 from preloop.services.mcp_config_service import MCPConfigService
 from preloop.services.model_runtime_resolver import gateway_url_for_api
 
@@ -155,8 +160,12 @@ class AiderAgent(ContainerAgentExecutor):
         model = execution_context.get("aider_model", "gpt-5.4")
         edit_format = execution_context.get("aider_edit_format", "whole")
 
-        # Escape prompt for shell (use single quotes to avoid escaping issues)
-        escaped_prompt = prompt.replace("'", "'\\''")
+        # The prompt is NOT interpolated into this script. It arrives as
+        # base64 chunks in the environment and is reassembled into
+        # PROMPT_FILE_PATH by the block below, which keeps the Docker `Cmd`
+        # string bounded whatever the trigger payload interpolated into the
+        # prompt (preloop.utils.execve_limits).
+        prompt_block = build_prompt_materialization_shell(prompt)
 
         # Prepare initialization commands (git clone, custom commands)
         init_commands = self._prepare_init_commands(execution_context)
@@ -184,6 +193,9 @@ fi
         aider_cmd = f"""
 set -e
 set -o pipefail
+
+# Materialize the rendered prompt from its chunked environment transport.
+{prompt_block}
 
 # Run initialization commands (git clone, custom commands) if any
 {init_commands}
@@ -280,7 +292,7 @@ if [ -f /workspace/.aider/mcp_settings.json ]; then
 fi
 echo "========================================="
 
-OUTPUT=$(aider-ce --model "$MODEL_NAME" --edit-format {edit_format} --yes --no-suggest-shell-commands --message '{escaped_prompt}' 2>&1) || EXIT_CODE=$?
+OUTPUT=$(aider-ce --model "$MODEL_NAME" --edit-format {edit_format} --yes --no-suggest-shell-commands --message "$(cat {PROMPT_FILE_PATH})" 2>&1) || EXIT_CODE=$?
 
 # Print the output
 echo "$OUTPUT"
@@ -296,6 +308,12 @@ fi
 # Exit with aider's exit code
 exit $AIDER_EXIT_CODE
 """
+
+        # The rendered prompt travels as base64 chunks in the environment and
+        # is reassembled inside the container. It is never a single variable
+        # nor an argv element, either of which the kernel caps at
+        # MAX_ARG_STRLEN (preloop.utils.execve_limits).
+        env.update(prompt_transport_env(execution_context["prompt"]))
 
         # Container configuration
         container_config = {
@@ -332,6 +350,10 @@ exit $AIDER_EXIT_CODE
                 "CpuQuota": int(os.getenv("AGENT_CPU_QUOTA", "100000")),
             },
         }
+
+        self._guard_docker_launch_payload(
+            container_config, what=f"{self.agent_type} container for {execution_id}"
+        )
 
         try:
             # Pull image if not available

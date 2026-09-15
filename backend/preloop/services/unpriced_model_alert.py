@@ -32,7 +32,7 @@ from typing import Any, Dict, Optional
 from sqlalchemy.orm import Session
 
 from preloop.models.crud import crud_audit_log
-from preloop.models.models.ai_model import AIModel
+from preloop.models import models
 from preloop.services.litellm_routing import (
     OPENAI_COMPATIBLE_PROVIDERS,
     endpoint_host,
@@ -65,7 +65,7 @@ _local_lock = threading.Lock()
 _local_recent: dict[str, float] = {}
 
 
-def _upstream_provider(ai_model: AIModel, provider_name: Optional[str]) -> str:
+def _upstream_provider(ai_model: models.AIModel, provider_name: Optional[str]) -> str:
     """Best-effort name of the upstream actually serving the model.
 
     Different AIModel configs for one upstream model can carry different
@@ -84,7 +84,7 @@ def _upstream_provider(ai_model: AIModel, provider_name: Optional[str]) -> str:
 def _dedupe_key(
     model_alias: str,
     provider_name: Optional[str],
-    ai_model: Optional[AIModel] = None,
+    ai_model: Optional[models.AIModel] = None,
 ) -> str:
     """Build the per-model dedup key.
 
@@ -137,7 +137,7 @@ def _is_cataloged_marketplace_endpoint(endpoint: Optional[str]) -> bool:
     )
 
 
-def should_page_unpriced_model(ai_model: Optional[AIModel]) -> bool:
+def should_page_unpriced_model(ai_model: Optional[models.AIModel]) -> bool:
     """Return False when paging an admin cannot fix the catalog.
 
     ``openai-compatible`` / ``custom`` models on a customer-owned endpoint
@@ -165,7 +165,11 @@ def should_page_unpriced_model(ai_model: Optional[AIModel]) -> bool:
     host = endpoint_host(ai_model.api_endpoint)
     if not host:
         return True
-    return _is_cataloged_marketplace_endpoint(ai_model.api_endpoint)
+    from preloop.services.alibaba_pricing import is_alibaba
+
+    return is_alibaba(ai_model) or _is_cataloged_marketplace_endpoint(
+        ai_model.api_endpoint
+    )
 
 
 def should_notify_unpriced_model(
@@ -173,7 +177,7 @@ def should_notify_unpriced_model(
     usage_accounting_requested: bool,
     usage_details: Optional[Dict[str, Any]],
     completion_tokens: int,
-    ai_model: Optional[AIModel] = None,
+    ai_model: Optional[models.AIModel] = None,
 ) -> bool:
     """Return False when an unpriced row should not page admins.
 
@@ -263,7 +267,10 @@ def notify_unpriced_model(
     provider_name: Optional[str],
     total_tokens: int,
     cooldown_hours: Optional[int] = None,
-    ai_model: Optional[AIModel] = None,
+    ai_model: Optional[models.AIModel] = None,
+    usage_details: Optional[Dict[str, Any]] = None,
+    prompt_tokens: int = 0,
+    refresh_status: str = "not_scheduled",
 ) -> bool:
     """Alert admins that a model could not be priced, at most once per cooldown.
 
@@ -287,8 +294,26 @@ def notify_unpriced_model(
     if not model_alias or not account_id:
         return False
 
+    from preloop.services.alibaba_pricing import (
+        is_alibaba,
+        pricing_failure_reason,
+        usd_region,
+    )
+
+    reason = "missing_catalog_price"
+    region = "provider_default"
+    if ai_model is not None and is_alibaba(ai_model):
+        region = usd_region(ai_model) or "unsupported_or_unverified"
+        reason = (
+            pricing_failure_reason(
+                ai_model, prompt_tokens=prompt_tokens, usage_details=usage_details
+            )
+            or "unresolved_usage"
+        )
     window = ALERT_COOLDOWN_HOURS if cooldown_hours is None else cooldown_hours
     key = _dedupe_key(model_alias, provider_name, ai_model)
+    if region != "provider_default":
+        key = f"{key}:{region}:{reason}"
 
     try:
         if _recently_alerted_locally(key, window * 3600):
@@ -312,6 +337,9 @@ def notify_unpriced_model(
                 "model_alias": model_alias,
                 "provider_name": provider_name,
                 "total_tokens": total_tokens,
+                "pricing_failure_reason": reason,
+                "refresh_status": refresh_status,
+                "pricing_region": region,
             },
         )
         _mark_locally(key)
@@ -322,15 +350,19 @@ def notify_unpriced_model(
         )
         return False
 
-    subject = f"Preloop: no pricing for model {model_alias}"
+    subject = f"Preloop: unresolved usage pricing for {model_alias}"
     message = (
         "Preloop metered gateway usage it could not price, so this traffic "
         "shows no cost for the customer.\n\n"
         f"Model alias: {model_alias}\n"
         f"Provider: {provider_name or 'unknown'}\n"
         f"Account: {account_id}\n"
-        f"Tokens on triggering request: {total_tokens:,}\n\n"
-        "Add pricing for this model (or a per-account price override), then "
+        f"Tokens on triggering request: {total_tokens:,}\n"
+        f"Pricing region: {region}\n"
+        f"Pricing gap: {reason}\n"
+        f"Catalog refresh: {refresh_status}\n\n"
+        "Review the missing billing dimension or regional tariff (or set an "
+        "appropriate per-account price override), then "
         "reprice historical rows with the usage repricing task so the "
         "customer's dashboard becomes accurate retroactively.\n"
         f"Further alerts for this model are suppressed for {window}h."
@@ -342,3 +374,31 @@ def notify_unpriced_model(
         logger.exception("Failed to send unpriced-model notification")
         return False
     return True
+
+
+def notify_unpriced_usage_row(api_usage_id: str, *, refresh_status: str) -> bool:
+    """Notify only if the persisted row remains unresolved after recovery."""
+    from preloop.models.crud import crud_ai_model, crud_api_usage
+    from preloop.models.db.session import get_db_session
+
+    db = next(get_db_session())
+    try:
+        row = crud_api_usage.get(db, id=api_usage_id)
+        if row is None or row.cost_source != "unpriced" or row.account_id is None:
+            return False
+        model = crud_ai_model.get(db, id=row.ai_model_id) if row.ai_model_id else None
+        meta = row.meta_data if isinstance(row.meta_data, dict) else {}
+        usage = meta.get("usage_details")
+        return notify_unpriced_model(
+            db,
+            account_id=str(row.account_id),
+            model_alias=row.model_alias,
+            provider_name=row.provider_name,
+            total_tokens=int(row.total_tokens or 0),
+            ai_model=model,
+            usage_details=usage if isinstance(usage, dict) else None,
+            prompt_tokens=int(row.prompt_tokens or 0),
+            refresh_status=refresh_status,
+        )
+    finally:
+        db.close()

@@ -161,11 +161,16 @@ _RUNNER_CONFLICT_RE = re.compile(
     re.IGNORECASE,
 )
 # Any other "Failed to start agent Job/container: ..." (e.g. the observed
-# "exec /opt/entrypoint.sh: argument list too long").
+# "exec /opt/entrypoint.sh: argument list too long"), plus the pre-launch
+# guard's own refusal. The guard (preloop.utils.execve_limits) runs the
+# kernel's arithmetic before the Job is created, so the run never reaches the
+# runtime's opaque "argument list too long"; its message must land in the
+# same category, since it is the same failure caught earlier.
 _RUNNER_ERROR_RE = re.compile(
     r"failed to start agent (?:job|container|pod)"
     r"|failed to create (?:kubernetes )?job"
     r"|argument list too long"
+    r"|launch payload exceeds"
     r"|imagepullbackoff|errimagepull|createcontainerconfigerror",
     re.IGNORECASE,
 )

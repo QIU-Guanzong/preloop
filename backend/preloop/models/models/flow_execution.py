@@ -34,6 +34,16 @@ TRIGGER_SUBJECT_KEY = "_subject"
 # single cell keep their overrides for free.
 MATRIX_OVERRIDES_KEY = "_matrix"
 
+# Reserved key under which a delegated child records the call that created it
+# inside FlowExecution.trigger_event_details. Shape:
+# {"parent_execution_id", "root_execution_id", "parent_flow_id",
+#  "parent_flow_name", "depth", "label"?, "timeout_seconds"?,
+#  "correlation_id"?}. Written by preloop.services.flow_delegation_call and
+# restated here (rather than imported from it) so the CRUD layer can project
+# the label out of the payload without models depending on services; a test
+# asserts the two spellings agree.
+DELEGATION_DETAILS_KEY = "delegation"
+
 # Reserved key under which the controller records the model/harness chosen
 # for one execution (matched routing rule or the flow default). Written only
 # by the controller after validating account-owned models. Never accepted
@@ -218,6 +228,15 @@ class FlowExecution(Base):
     # column.
     failure_category = Column(String(32), nullable=True, index=True)
 
+    # Why a PENDING execution has not been admitted yet, from a closed
+    # vocabulary (today: "account_concurrency_cap", see
+    # preloop.services.execution_concurrency). Set by claim_execution when it
+    # refuses admission and cleared the moment the execution is claimed, so
+    # "nothing is happening" has an answer on the row itself rather than in a
+    # worker log. A log line per refusal is not an option: the recovery loop
+    # revisits every unclaimed execution every 30 seconds.
+    queued_reason = Column(String(200), nullable=True)
+
     # Retry tracking
     retry_of_execution_id = Column(
         UUID(as_uuid=True),
@@ -301,6 +320,17 @@ class FlowExecution(Base):
     # existed, and on any query that does not request it.
     trigger_subject: Mapped[Optional[str]] = query_expression()
     trigger_subject_url: Mapped[Optional[str]] = query_expression()
+
+    # The label the caller passed to run_flow ("lint the diff"), for tree
+    # views that answer "what was this child asked to do?".
+    #
+    # Not a real column either: it lives inside trigger_event_details under
+    # DELEGATION_DETAILS_KEY and is projected out by the query, so listing a
+    # delegation tree never loads a webhook payload per row. Populated via
+    # with_expression() in CRUDFlowExecution.get_lineage; None on a run that
+    # was not delegated, on a call that passed no label, and on any query that
+    # does not request it.
+    delegation_label: Mapped[Optional[str]] = query_expression()
 
     # Relationships
     flow = relationship(

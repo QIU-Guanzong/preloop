@@ -1,6 +1,5 @@
 """OpenCode CLI agent implementation."""
 
-import base64
 import json
 import logging
 import os
@@ -10,6 +9,11 @@ from typing import Any, Dict
 
 from aiodocker.exceptions import DockerError
 
+from preloop.utils.execve_limits import (
+    PROMPT_FILE_PATH,
+    build_prompt_materialization_shell,
+    prompt_transport_env,
+)
 from preloop.services.mcp_config_service import MCPConfigService
 from preloop.services.model_runtime_resolver import gateway_url_for_api
 
@@ -252,6 +256,12 @@ class OpenCodeAgent(ContainerAgentExecutor):
             )
             env["MCP_CONFIG_JSON"] = json.dumps(mcp_config)
 
+        # The rendered prompt travels as base64 chunks in the environment and
+        # is reassembled inside the container. It is never a single variable
+        # nor an argv element, either of which the kernel caps at
+        # MAX_ARG_STRLEN (preloop.utils.execve_limits).
+        env.update(prompt_transport_env(execution_context["prompt"]))
+
         # Build the OpenCode script using shared method
         script = self._build_opencode_script(execution_context)
 
@@ -310,6 +320,10 @@ class OpenCodeAgent(ContainerAgentExecutor):
                 "CpuQuota": int(os.getenv("AGENT_CPU_QUOTA", "100000")),
             },
         }
+
+        self._guard_docker_launch_payload(
+            container_config, what=f"{self.agent_type} container for {execution_id}"
+        )
 
         try:
             # Pull image if not available
@@ -508,9 +522,14 @@ fi
         # unescaped so the shell expands them to their env-var values.
         opencode_config_shell = opencode_config_json.replace('"$schema"', '"\\$schema"')
 
-        # Base64-encode the prompt so it can be safely embedded in
-        # the shell script without heredoc delimiter injection risk.
-        prompt_b64 = base64.b64encode(prompt.encode()).decode()
+        # The prompt is NOT embedded in this script. It arrives as base64
+        # chunks in the environment and is reassembled into PROMPT_FILE_PATH
+        # by the block below. Embedding it base64-encoded was safe against
+        # heredoc injection but not against MAX_ARG_STRLEN: base64 is a 4/3
+        # expansion, so a 83 KiB prompt made a 133 KiB script, past the
+        # 128 KiB the kernel allows for one execve string
+        # (preloop.utils.execve_limits).
+        prompt_block = build_prompt_materialization_shell(prompt)
 
         # Native CLI session persistence blocks (all empty on a cold start).
         session_blocks = self._build_cli_session_blocks(execution_context)
@@ -763,10 +782,12 @@ echo "MCP Timeout: {mcp_timeout_ms}ms"
 echo "Working Directory: $(pwd)"
 echo "=============================="
 
-# Write prompt via base64 to prevent heredoc delimiter injection.
-# The prompt may originate from external events (webhooks, triggers)
-# and could contain arbitrary text including shell metacharacters.
-echo '{prompt_b64}' | base64 -d > /tmp/prompt.txt
+# Reassemble the rendered prompt from its chunked environment transport.
+# The prompt may originate from external events (webhooks, triggers) and
+# could contain arbitrary text including shell metacharacters, so it never
+# appears in this script: it travels as base64 in the environment and is
+# decoded into a file here.
+{prompt_block}
 
 # Resume the prior CLI session when a correlated restart restored one;
 # expands to nothing on a cold start.
@@ -791,7 +812,7 @@ echo "PRELOOP_AGENT_EXEC_START"
 set +e
 : > "{AGENT_OUTPUT_LOG_PATH}"
 : > "{ATTEMPT_LOG_PATH}"
-opencode run $OPENCODE_RESUME_ARGS --format json --print-logs --log-level WARN --model {opencode_model_arg} -- "$(cat /tmp/prompt.txt)" 2>&1 | node /tmp/opencode-json-log-filter.js | tee -a "{AGENT_OUTPUT_LOG_PATH}" "{ATTEMPT_LOG_PATH}"
+opencode run $OPENCODE_RESUME_ARGS --format json --print-logs --log-level WARN --model {opencode_model_arg} -- "$(cat {PROMPT_FILE_PATH})" 2>&1 | node /tmp/opencode-json-log-filter.js | tee -a "{AGENT_OUTPUT_LOG_PATH}" "{ATTEMPT_LOG_PATH}"
 PIPE_CODES=("${{PIPESTATUS[@]}}")
 OPENCODE_EXIT_CODE=${{PIPE_CODES[0]}}
 FILTER_EXIT_CODE=${{PIPE_CODES[1]:-0}}

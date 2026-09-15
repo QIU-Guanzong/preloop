@@ -1,13 +1,17 @@
 """Legal hold: actor, reason, what it freezes and what release restores."""
 
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import Engine, select, text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 
 from preloop.models import models
 from preloop.models.crud import flow_artifact as crud_artifact
+from preloop.models.crud.history_policy import lock_account_for_retention
 from preloop.models.models.audit_log import AuditLog
 from preloop.models.models.legal_hold import LegalHold
 from preloop.services.flow_artifacts import evidence_receipt
@@ -64,6 +68,72 @@ def pack(db_session, test_user):
     db_session.add(execution)
     db_session.flush()
     return execution, artifact
+
+
+@pytest.fixture
+def runtime_session(db_session, test_user):
+    """One ended runtime session with an activity row under it."""
+    stamp = datetime.now(UTC) - timedelta(days=400)
+    session = models.RuntimeSession(
+        account_id=test_user.account_id,
+        session_source_type="managed_agent",
+        session_source_id=f"agent-{uuid.uuid4().hex[:8]}",
+        started_at=stamp,
+        last_activity_at=stamp,
+        ended_at=stamp,
+    )
+    db_session.add(session)
+    db_session.flush()
+    db_session.add(
+        models.RuntimeSessionActivity(
+            account_id=test_user.account_id,
+            runtime_session_id=session.id,
+            activity_type="tool_call",
+            tool_name="search",
+            status="success",
+            timestamp=stamp,
+        )
+    )
+    db_session.flush()
+    return session
+
+
+@pytest.fixture
+def committed_runtime_session(
+    db_engine: Engine,
+) -> Iterator[tuple[uuid.UUID, uuid.UUID]]:
+    """Account and session committed so independent connections can lock them."""
+    stamp = datetime.now(UTC) - timedelta(days=400)
+    with Session(db_engine) as seed:
+        account = models.Account(organization_name="hold-lock-race")
+        seed.add(account)
+        seed.flush()
+        session = models.RuntimeSession(
+            account_id=account.id,
+            session_source_type="managed_agent",
+            session_source_id=f"agent-{uuid.uuid4().hex[:8]}",
+            started_at=stamp,
+            last_activity_at=stamp,
+            ended_at=stamp,
+        )
+        seed.add(session)
+        seed.commit()
+        account_id, session_id = account.id, session.id
+    try:
+        yield account_id, session_id
+    finally:
+        with Session(db_engine) as cleanup:
+            cleanup.query(LegalHold).filter(
+                LegalHold.account_id == str(account_id)
+            ).delete()
+            cleanup.query(AuditLog).filter(AuditLog.account_id == account_id).delete()
+            cleanup.query(models.RuntimeSession).filter(
+                models.RuntimeSession.id == session_id
+            ).delete()
+            cleanup.query(models.Account).filter(
+                models.Account.id == account_id
+            ).delete()
+            cleanup.commit()
 
 
 # --- the record ------------------------------------------------------------
@@ -271,6 +341,108 @@ def test_an_execution_hold_reaches_its_packs(db_session, account, pack):
     assert outcome.flagged["flow_artifact"] == 1
 
 
+def test_a_hold_freezes_a_runtime_session(
+    db_session, test_user, account, runtime_session
+):
+    """A session under litigation hold is flagged like every held class."""
+    outcome = place_hold(
+        db_session,
+        account_id=account.id,
+        resource_type="runtime_session",
+        resource_id=str(runtime_session.id),
+        reason="litigation hold, matter 2026-07",
+        user_id=test_user.id,
+    )
+
+    db_session.refresh(runtime_session)
+    assert runtime_session.legal_hold is True
+    assert outcome.flagged["runtime_session"] == 1
+    assert outcome.hold.resource_type == "runtime_session"
+
+
+def test_a_hold_on_another_accounts_session_is_refused(
+    db_session, account, runtime_session
+):
+    with pytest.raises(LegalHoldError) as excinfo:
+        place_hold(
+            db_session,
+            account_id=uuid.uuid4(),
+            resource_type="runtime_session",
+            resource_id=str(runtime_session.id),
+            reason="fishing for someone else's sessions",
+        )
+
+    assert excinfo.value.code == "resource_not_found"
+
+
+def test_releasing_a_session_hold_clears_the_flag(
+    db_session, test_user, account, runtime_session
+):
+    outcome = place_hold(
+        db_session,
+        account_id=account.id,
+        resource_type="runtime_session",
+        resource_id=str(runtime_session.id),
+        reason="litigation hold, matter 2026-07",
+        user_id=test_user.id,
+    )
+
+    release_hold(
+        db_session,
+        account_id=account.id,
+        hold_id=outcome.hold.id,
+        reason="matter closed 2026-08",
+        user_id=test_user.id,
+    )
+
+    db_session.refresh(runtime_session)
+    assert runtime_session.legal_hold is False
+
+
+def test_placing_and_releasing_a_session_hold_are_both_audited(
+    db_session, test_user, account, runtime_session
+):
+    """A session hold is audited exactly like the other hold actions."""
+    outcome = place_hold(
+        db_session,
+        account_id=account.id,
+        resource_type="runtime_session",
+        resource_id=str(runtime_session.id),
+        reason="litigation hold, matter 2026-07",
+        user_id=test_user.id,
+    )
+    release_hold(
+        db_session,
+        account_id=account.id,
+        hold_id=outcome.hold.id,
+        reason="matter closed 2026-08",
+        user_id=test_user.id,
+    )
+
+    rows = (
+        db_session.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.account_id == account.id,
+                AuditLog.resource_type == "runtime_session",
+            )
+            .order_by(AuditLog.timestamp)
+        )
+        .scalars()
+        .all()
+    )
+
+    assert [row.action for row in rows] == [
+        "legal_hold_placed",
+        "legal_hold_released",
+    ]
+    assert all(row.user_id == test_user.id for row in rows)
+    assert all(row.resource_id == str(runtime_session.id) for row in rows)
+    assert rows[0].details["reason"] == "litigation hold, matter 2026-07"
+    assert rows[0].details["flagged"]["runtime_session"] == 1
+    assert rows[1].details["placed_reason"] == "litigation hold, matter 2026-07"
+
+
 # --- release ---------------------------------------------------------------
 
 
@@ -426,3 +598,43 @@ def test_placing_and_releasing_are_both_audited(db_session, test_user, account, 
     assert rows[0].details["reason"] == "incident review INC-114"
     assert rows[0].details["hold_id"] == str(outcome.hold.id)
     assert rows[1].details["placed_reason"] == "incident review INC-114"
+
+
+# --- account lock ----------------------------------------------------------
+
+
+def test_hold_writes_take_the_purge_account_lock(
+    db_engine: Engine, committed_runtime_session: tuple[uuid.UUID, uuid.UUID]
+):
+    """Hold writes wait on the same account FOR UPDATE the purge uses.
+
+    A concurrent purge then skip_locked-skips that account for the batch
+    instead of deleting a row the hold has already selected against.
+    """
+    account_id, session_id = committed_runtime_session
+    with Session(db_engine) as holder, Session(db_engine) as purger:
+        place_hold(
+            holder,
+            account_id=account_id,
+            resource_type="runtime_session",
+            resource_id=str(session_id),
+            reason="litigation hold, matter 2026-07",
+            commit=False,
+        )
+        skipped = lock_account_for_retention(purger, account_id=account_id)
+        assert skipped is None
+        with Session(db_engine) as competitor:
+            competitor.execute(text("SET LOCAL lock_timeout = '250ms'"))
+            with pytest.raises(OperationalError, match="lock timeout"):
+                place_hold(
+                    competitor,
+                    account_id=account_id,
+                    resource_type="runtime_session",
+                    resource_id=str(session_id),
+                    reason="second hold on the same account",
+                )
+            competitor.rollback()
+        holder.rollback()
+        locked = lock_account_for_retention(purger, account_id=account_id)
+        assert locked is not None
+        assert locked.id == account_id

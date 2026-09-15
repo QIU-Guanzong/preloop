@@ -256,6 +256,15 @@ async def test_a_second_distinct_delivery_still_runs(
     account = str(test_user.account_id)
 
     await deliver(service, flow, github_label_event(account_id=account))
+    # The first run is over before the second delivery arrives. While it is
+    # still active the trigger service coalesces further events for the same
+    # issue on purpose (see test_flow_trigger_label_events.py); that guard is
+    # about one object, this test is about two distinct deliveries.
+    for row in executions_for(db_session, flow.id):
+        row.status = "SUCCEEDED"
+        db_session.add(row)
+    db_session.commit()
+
     await deliver(
         service,
         flow,

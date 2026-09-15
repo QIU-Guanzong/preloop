@@ -21,12 +21,17 @@ from preloop.services.dynamic_fastmcp import (
     create_dynamic_mcp_server,
 )
 from preloop.tools.builtin_defs import (
-    APPLY_ISSUE_TRIAGE_TOOL,
-    GET_ISSUE_TRIAGE_CONTEXT_TOOL,
     ASK_USER_TOOL,
+    GET_EXECUTION_TOOL,
+    GET_ISSUE_DESCRIPTION,
+    GET_ISSUE_SCHEMA,
     PERMISSION_PROMPT_TOOL,
     REQUEST_APPROVAL_TOOL,
     RESOLVE_SBOM_UPSTREAMS_TOOL,
+    RUN_FLOW_TOOL,
+    SEND_NOTE_TOOL,
+    UPDATE_ISSUE_DESCRIPTION,
+    UPDATE_ISSUE_SCHEMA,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,9 +102,12 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
     from preloop.api.endpoints import mcp as mcp_router
 
     # Register Tool 1: get_issue
-    @mcp.tool()
-    async def get_issue(issue: str, ctx: Optional[Context] = None) -> str:
-        """Get detailed information about an issue by its identifier (URL, key, or ID)."""
+    async def get_issue(
+        issue: str,
+        include: list[str] | None = None,
+        ctx: Optional[Context] = None,
+    ) -> str:
+        """Apply the configured approval policy before reading an issue."""
         # Get user context for approval checking
         from preloop.services.dynamic_fastmcp_http import get_current_user_context
 
@@ -113,7 +121,7 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
             tool_name="get_issue",
             tool_source="builtin",
             account_id=user_context.account_id,
-            arguments={"issue": issue},
+            arguments={"issue": issue, "include": include},
             ctx=ctx,
             workflow_id=_rule_workflow_id_var.get(None),
             correlation_id=_correlation_id_var.get(None),
@@ -123,84 +131,14 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
         if not approved:
             return error
 
-        result = await mcp_router.get_issue(issue)
+        result = await mcp_router.get_issue(issue, include=include)
         return result.model_dump_json()
 
-    async def get_issue_triage_context(
-        issue: str, ctx: Optional[Context] = None
-    ) -> str:
-        """Apply the configured approval policy before scoped triage access."""
-        from preloop.services.dynamic_fastmcp_http import get_current_user_context
-
-        user_context = get_current_user_context()
-        if not user_context:
-            return "Error: No user context available"
-        arguments = {"issue": issue}
-        approved, error = await require_approval(
-            tool_name="get_issue_triage_context",
-            tool_source="builtin",
-            account_id=user_context.account_id,
-            arguments=arguments,
-            ctx=ctx,
-            workflow_id=_rule_workflow_id_var.get(None),
-            correlation_id=_correlation_id_var.get(None),
-            justification=_justification_var.get(None),
-        )
-        if not approved:
-            return error
-        result = await mcp_router.get_issue_triage_context(**arguments)
-        return result.model_dump_json()
-
-    get_issue_triage_context_tool = FunctionTool.from_function(
-        get_issue_triage_context,
-        description=GET_ISSUE_TRIAGE_CONTEXT_TOOL["description"],
+    get_issue_tool = FunctionTool.from_function(
+        get_issue, description=GET_ISSUE_DESCRIPTION
     )
-    get_issue_triage_context_tool.parameters = deepcopy(
-        GET_ISSUE_TRIAGE_CONTEXT_TOOL["schema"]
-    )
-    mcp.add_tool(get_issue_triage_context_tool)
-
-    async def apply_issue_triage(
-        issue: str,
-        expected_revision: str,
-        assessment: str,
-        complexity_label: str | None = None,
-        title: str | None = None,
-        ctx: Optional[Context] = None,
-    ) -> str:
-        """Apply the configured approval policy before scoped triage access."""
-        from preloop.services.dynamic_fastmcp_http import get_current_user_context
-
-        user_context = get_current_user_context()
-        if not user_context:
-            return "Error: No user context available"
-        arguments = {
-            "issue": issue,
-            "expected_revision": expected_revision,
-            "assessment": assessment,
-            "complexity_label": complexity_label,
-            "title": title,
-        }
-        approved, error = await require_approval(
-            tool_name="apply_issue_triage",
-            tool_source="builtin",
-            account_id=user_context.account_id,
-            arguments=arguments,
-            ctx=ctx,
-            workflow_id=_rule_workflow_id_var.get(None),
-            correlation_id=_correlation_id_var.get(None),
-            justification=_justification_var.get(None),
-        )
-        if not approved:
-            return error
-        result = await mcp_router.apply_issue_triage(**arguments)
-        return result.model_dump_json()
-
-    apply_issue_triage_tool = FunctionTool.from_function(
-        apply_issue_triage, description=APPLY_ISSUE_TRIAGE_TOOL["description"]
-    )
-    apply_issue_triage_tool.parameters = deepcopy(APPLY_ISSUE_TRIAGE_TOOL["schema"])
-    mcp.add_tool(apply_issue_triage_tool)
+    get_issue_tool.parameters = deepcopy(GET_ISSUE_SCHEMA)
+    mcp.add_tool(get_issue_tool)
 
     # Register Tool 2: create_issue
     @mcp.tool()
@@ -258,7 +196,6 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
         return result.model_dump_json()
 
     # Register Tool 3: update_issue
-    @mcp.tool()
     async def update_issue(
         issue: str,
         title: str | None = None,
@@ -269,9 +206,12 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
         labels: list[str] | None = None,
         add_reaction: str | None = None,
         remove_reaction: str | None = None,
+        expected_revision: str | None = None,
+        assessment: str | None = None,
+        complexity_label: str | None = None,
         ctx: Optional[Context] = None,
     ) -> str:
-        """Update an existing issue. To add a GitHub eyes reaction on pickup, pass add_reaction=\"eyes\" with no other fields."""
+        """Apply the configured approval policy before updating an issue."""
         # Get user context for approval checking
         from preloop.services.dynamic_fastmcp_http import get_current_user_context
 
@@ -280,22 +220,27 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
         if not user_context:
             return "Error: No user context available"
 
+        arguments = {
+            "issue": issue,
+            "title": title,
+            "description": description,
+            "status": status,
+            "priority": priority,
+            "assignee": assignee,
+            "labels": labels,
+            "add_reaction": add_reaction,
+            "remove_reaction": remove_reaction,
+            "expected_revision": expected_revision,
+            "assessment": assessment,
+            "complexity_label": complexity_label,
+        }
+
         # Check approval with streaming
         approved, error = await require_approval(
             tool_name="update_issue",
             tool_source="builtin",
             account_id=user_context.account_id,
-            arguments={
-                "issue": issue,
-                "title": title,
-                "description": description,
-                "status": status,
-                "priority": priority,
-                "assignee": assignee,
-                "labels": labels,
-                "add_reaction": add_reaction,
-                "remove_reaction": remove_reaction,
-            },
+            arguments=arguments,
             ctx=ctx,
             workflow_id=_rule_workflow_id_var.get(None),
             correlation_id=_correlation_id_var.get(None),
@@ -305,18 +250,14 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
         if not approved:
             return error
 
-        result = await mcp_router.update_issue(
-            issue=issue,
-            title=title,
-            description=description,
-            status=status,
-            priority=priority,
-            assignee=assignee,
-            labels=labels,
-            add_reaction=add_reaction,
-            remove_reaction=remove_reaction,
-        )
+        result = await mcp_router.update_issue(**arguments)
         return result.model_dump_json()
+
+    update_issue_tool = FunctionTool.from_function(
+        update_issue, description=UPDATE_ISSUE_DESCRIPTION
+    )
+    update_issue_tool.parameters = deepcopy(UPDATE_ISSUE_SCHEMA)
+    mcp.add_tool(update_issue_tool)
 
     # Register Tool 4: search
     @mcp.tool()
@@ -899,6 +840,90 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
             }
         return _dump(behavior)
 
+    # Register Tool 7c2: send_note (shared metadata:
+    # tools.builtin_defs.SEND_NOTE_TOOL). One agent leaves an operator note
+    # for another agent, a runtime session or an execution. Everything that
+    # makes a note a note (target resolution, the envelope, the rate limit,
+    # the audit row, delivery) is the existing operator-note code; the only
+    # new fact is that the author is an agent. Default-off, so a flow opts in
+    # through its tool allow-list.
+    async def send_note(
+        text: str,
+        agent_id: str | None = None,
+        runtime_session_id: str | None = None,
+        execution_id: str | None = None,
+        ctx: Optional[Context] = None,
+    ) -> str:
+        """Leave an operator note for one other agent, session or execution.
+
+        Args:
+            text: The note body, as the calling agent wrote it.
+            agent_id: Target managed agent, current or next session.
+            runtime_session_id: Target runtime session, and only that session.
+            execution_id: Target flow execution, resolved to its session.
+            ctx: MCP context (injected by FastMCP).
+
+        Returns:
+            JSON: the created note, or a structured refusal naming the
+            problem. A bad call is refused, never raised, so the model can
+            correct it on the next turn.
+        """
+        import json
+
+        from preloop.models.db.session import get_db_session
+        from preloop.services.agent_send_note import send_note_from_agent
+        from preloop.services.approval_attribution import (
+            attribution_from_user_context,
+        )
+        from preloop.services.dynamic_fastmcp_http import get_current_user_context
+
+        user_context = get_current_user_context()
+        if not user_context:
+            return "Error: No user context available"
+
+        arguments = {
+            "text": text,
+            "agent_id": agent_id,
+            "runtime_session_id": runtime_session_id,
+            "execution_id": execution_id,
+        }
+        approved, error = await require_approval(
+            tool_name=SEND_NOTE_TOOL["name"],
+            tool_source="builtin",
+            account_id=user_context.account_id,
+            arguments=arguments,
+            ctx=ctx,
+            workflow_id=_rule_workflow_id_var.get(None),
+            correlation_id=_correlation_id_var.get(None),
+            justification=_justification_var.get(None),
+        )
+        if not approved:
+            return error
+
+        # The author is the identity the call already carries, never an
+        # argument: an agent must not be able to sign a note as another one.
+        caller = attribution_from_user_context(user_context)
+        db = next(get_db_session())
+        try:
+            result = send_note_from_agent(
+                db,
+                account_id=user_context.account_id,
+                author_agent_id=caller.managed_agent_id,
+                text=text,
+                agent_id=agent_id,
+                runtime_session_id=runtime_session_id,
+                execution_id=execution_id,
+            )
+        finally:
+            db.close()
+        return json.dumps(result)
+
+    send_note_tool = FunctionTool.from_function(
+        send_note, description=SEND_NOTE_TOOL["description"]
+    )
+    send_note_tool.parameters = deepcopy(SEND_NOTE_TOOL["schema"])
+    mcp.add_tool(send_note_tool)
+
     # Register Tool 7d: resolve_sbom_upstreams (shared metadata:
     # tools.builtin_defs.RESOLVE_SBOM_UPSTREAMS_TOOL). Read-only registry
     # lookup used by the SBOM security presets (005/006) to enrich vendored
@@ -947,6 +972,197 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
         except ValueError as exc:
             return f"Error: {exc}"
         return json.dumps(report)
+
+    # Register Tool 7e: run_flow (shared metadata:
+    # tools.builtin_defs.RUN_FLOW_TOOL). Flow to flow delegation (#630):
+    # creates one child execution of an allowlisted flow and returns the A2A
+    # shaped task record frozen by #625. Every rule that can decline the call
+    # lives in preloop.services.flow_delegation_call, server side, and a
+    # refusal comes back as a record rather than as an exception.
+    async def run_flow(
+        flow: str,
+        payload: dict[str, Any] | None = None,
+        label: str | None = None,
+        timeout_seconds: int | None = None,
+        ctx: Optional[Context] = None,
+    ) -> str:
+        """Run another flow of this account as a child of this execution.
+
+        Asynchronous by design: the call returns as soon as the child row
+        exists and never blocks this turn. Waiting for a child lands with
+        issue #633, reading one with #632.
+
+        Args:
+            flow: Slug or name of the flow to run, inside this account.
+            payload: Trigger payload handed to the child.
+            label: Short label recorded on the child.
+            timeout_seconds: Window for the child, clamped to this
+                execution's own remaining time.
+            ctx: MCP context (injected by FastMCP).
+
+        Returns:
+            One A2A task record as JSON: the child execution, or a rejected
+            record naming the rule that refused the call.
+        """
+        import json
+
+        from preloop.models.db.session import get_db_session
+        from preloop.services.dynamic_fastmcp_http import get_current_user_context
+        from preloop.services.flow_delegation_call import (
+            DelegationUnavailableError,
+            RUN_FLOW_TOOL_NAME,
+            delegate_flow,
+        )
+        from preloop.services.kill_switch import FlowHaltActiveError
+
+        user_context = get_current_user_context()
+        if not user_context:
+            return "Error: No user context available"
+        if not user_context.flow_execution_id:
+            return (
+                "Error: run_flow is only available inside a flow execution; "
+                "there is no parent execution to delegate from."
+            )
+
+        correlation_id = _correlation_id_var.get(None)
+        approved, error = await require_approval(
+            tool_name=RUN_FLOW_TOOL_NAME,
+            tool_source="builtin",
+            account_id=user_context.account_id,
+            arguments={
+                "flow": flow,
+                "payload": payload or {},
+                "label": label,
+                "timeout_seconds": timeout_seconds,
+            },
+            ctx=ctx,
+            workflow_id=_rule_workflow_id_var.get(None),
+            correlation_id=correlation_id,
+            justification=_justification_var.get(None),
+        )
+        if not approved:
+            return error
+
+        db = next(get_db_session())
+        try:
+            record = await delegate_flow(
+                db,
+                account_id=user_context.account_id,
+                parent_execution_id=user_context.flow_execution_id,
+                reference=flow,
+                payload=payload,
+                label=label,
+                timeout_seconds=timeout_seconds,
+                correlation_id=correlation_id,
+                user_id=user_context.user_id,
+                runtime_session_id=user_context.runtime_session_id,
+                api_key_id=user_context.api_key_id,
+                api_key_name=user_context.api_key_name,
+            )
+        except DelegationUnavailableError as exc:
+            return f"Error: {exc}"
+        except FlowHaltActiveError as exc:
+            # The account kill switch refuses a delegated start exactly as it
+            # refuses a manual one; say so in the halt's own words.
+            return f"Error: {exc}"
+        finally:
+            db.close()
+        return json.dumps(record)
+
+    run_flow_tool = FunctionTool.from_function(
+        run_flow, description=RUN_FLOW_TOOL["description"]
+    )
+    # The catalog schema is the authority: it closes the object
+    # (additionalProperties false) and documents every argument once, so the
+    # REST catalog and the callable cannot drift.
+    run_flow_tool.parameters = deepcopy(RUN_FLOW_TOOL["schema"])
+    mcp.add_tool(run_flow_tool)
+
+    # Register Tool 7f: get_execution (shared metadata:
+    # tools.builtin_defs.GET_EXECUTION_TOOL). The read half of delegation
+    # (#632): the caller polls an execution it started and gets back the same
+    # A2A shaped record run_flow handed it. Scope (this execution and its
+    # descendants, nothing else), the result size cap and the audit row all
+    # live in preloop.services.flow_execution_read, server side.
+    async def get_execution(
+        execution_id: str,
+        include_result: bool = False,
+        ctx: Optional[Context] = None,
+    ) -> str:
+        """Read one execution this execution started, or itself.
+
+        Args:
+            execution_id: The execution to read, as returned by run_flow.
+            include_result: Whether to include the result payload, which is
+                only present once the execution has finished.
+            ctx: MCP context (injected by FastMCP).
+
+        Returns:
+            One A2A task record as JSON: the execution, or a rejected record
+            carrying execution_not_found when the caller may not read it.
+        """
+        import json
+
+        from preloop.models.db.session import get_db_session
+        from preloop.services.dynamic_fastmcp_http import get_current_user_context
+        from preloop.services.flow_delegation_call import DelegationUnavailableError
+        from preloop.services.flow_execution_read import (
+            GET_EXECUTION_TOOL_NAME,
+            read_execution,
+        )
+
+        user_context = get_current_user_context()
+        if not user_context:
+            return "Error: No user context available"
+        if not user_context.flow_execution_id:
+            return (
+                "Error: get_execution is only available inside a flow "
+                "execution; there is no execution to read from."
+            )
+
+        correlation_id = _correlation_id_var.get(None)
+        approved, error = await require_approval(
+            tool_name=GET_EXECUTION_TOOL_NAME,
+            tool_source="builtin",
+            account_id=user_context.account_id,
+            arguments={
+                "execution_id": execution_id,
+                "include_result": bool(include_result),
+            },
+            ctx=ctx,
+            workflow_id=_rule_workflow_id_var.get(None),
+            correlation_id=correlation_id,
+            justification=_justification_var.get(None),
+        )
+        if not approved:
+            return error
+
+        db = next(get_db_session())
+        try:
+            record = read_execution(
+                db,
+                account_id=user_context.account_id,
+                caller_execution_id=user_context.flow_execution_id,
+                reference=execution_id,
+                include_result=bool(include_result),
+                correlation_id=correlation_id,
+                user_id=user_context.user_id,
+                runtime_session_id=user_context.runtime_session_id,
+                api_key_id=user_context.api_key_id,
+                api_key_name=user_context.api_key_name,
+            )
+        except DelegationUnavailableError as exc:
+            return f"Error: {exc}"
+        finally:
+            db.close()
+        return json.dumps(record)
+
+    get_execution_tool = FunctionTool.from_function(
+        get_execution, description=GET_EXECUTION_TOOL["description"]
+    )
+    # Same rule as run_flow: the catalog schema is the authority.
+    get_execution_tool.parameters = deepcopy(GET_EXECUTION_TOOL["schema"])
+    mcp.add_tool(get_execution_tool)
 
     # Register Tool 8: add_comment
     @mcp.tool()

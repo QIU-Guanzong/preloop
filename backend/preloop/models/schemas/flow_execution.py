@@ -228,6 +228,15 @@ class FlowExecutionBase(BaseModel):
             "for executions that predate this field."
         ),
     )
+    queued_reason: Optional[str] = Field(
+        None,
+        description=(
+            "Why a PENDING execution has not been admitted yet: "
+            "account_concurrency_cap when the account already has its "
+            "maximum number of executions running. Cleared when the "
+            "execution is claimed; null for every other row."
+        ),
+    )
     retry_of_execution_id: Optional[uuid.UUID] = Field(
         None, description="ID of the original execution if this is a retry"
     )
@@ -337,6 +346,13 @@ class FlowExecutionListResponse(ExecutionModelProjection):
             "Coarse machine-readable failure class for terminal executions "
             "(runner_conflict, model_transient, agent_error, ...). Null when "
             "the execution succeeded, is still running, or predates the field."
+        ),
+    )
+    queued_reason: Optional[str] = Field(
+        None,
+        description=(
+            "Why a PENDING execution has not been admitted yet "
+            "(account_concurrency_cap). Null for every other row."
         ),
     )
     retry_of_execution_id: Optional[uuid.UUID] = None
@@ -468,6 +484,72 @@ class BatchExecutionsResponse(BaseModel):
     flow_id: uuid.UUID
     rollup: BatchRollup
     executions: List[BatchExecutionListItem]
+
+
+# --- Delegation tree schemas (#634) ---
+
+
+class ExecutionTreeNode(FlowExecutionListResponse):
+    """One execution in a delegation tree, as the console draws the row.
+
+    A list row plus the two things only a tree knows: who started it
+    (``parent_execution_id``, already on the list row) and what it was asked
+    to do (``label``).
+    """
+
+    label: Optional[str] = Field(
+        None,
+        description=(
+            "Label the caller passed to run_flow for this child, e.g. "
+            "'lint the diff'. Null on a run that was not delegated and on a "
+            "delegation that passed no label."
+        ),
+    )
+
+
+class ExecutionTreeResponse(BaseModel):
+    """One execution's subtree plus the rollup over it.
+
+    ``execution`` is the run that was asked about and its rollup fields are
+    its own; ``rollup`` covers the descendants only. The two are deliberately
+    never added together: "this run cost X, the work it delegated cost Y" is
+    the question the tree exists to answer, and one number would hide it.
+    """
+
+    execution_id: uuid.UUID = Field(..., description="The execution asked about")
+    root_execution_id: uuid.UUID = Field(
+        ...,
+        description=(
+            "Root of the lineage this execution belongs to; the execution's "
+            "own id when it is the root."
+        ),
+    )
+    execution: ExecutionTreeNode = Field(
+        ..., description="The execution asked about, with its own cost and tokens"
+    )
+    executions: List[ExecutionTreeNode] = Field(
+        default_factory=list,
+        description=(
+            "Every descendant of this execution, parents before children. "
+            "Empty for the overwhelming majority of runs, which delegate "
+            "nothing."
+        ),
+    )
+    rollup: BatchRollup = Field(
+        ...,
+        description=(
+            "Status counts, tokens, tool calls and estimated cost summed over "
+            "the descendants, in the same shape the batch listing uses. "
+            "Excludes the execution itself."
+        ),
+    )
+    truncated: bool = Field(
+        False,
+        description=(
+            "True when the lineage holds more executions than one read "
+            "returns, so the tree and the rollup are partial."
+        ),
+    )
 
 
 # Pydantic model for sending commands to a flow execution

@@ -25,7 +25,12 @@ from preloop.services.flow_ci_feedback import (
 )
 from .flow_orchestrator import FlowExecutionOrchestrator
 from preloop.services.kill_switch import FlowHaltActiveError, flows_halted
-from preloop.sync.event_normalizer import attach_trigger_subject
+from preloop.sync.event_normalizer import (
+    LABEL_CHANGE_ACTIONS,
+    LABEL_CHANGE_EVENT_TYPES,
+    attach_trigger_subject,
+    gitlab_label_delta,
+)
 from preloop.sync.services.event_bus import get_nats_client
 from preloop.services.webhook_delivery_dedupe import (
     delivery_key_for_event,
@@ -42,6 +47,30 @@ logger = logging.getLogger(__name__)
 # runaway matrix from creating unbounded executions in one request; the
 # design-partner use case is a 5x3 grid, so 25 leaves headroom.
 MATRIX_MAX_ENTRIES = 25
+
+# Resource-key kinds (third segment of ``_extract_resource_key``) that name a
+# tracker object a human works on one at a time. Releases and generic webhook
+# bodies are deliberately absent: they have their own dedup path.
+TRACKER_OBJECT_KINDS: frozenset = frozenset({"issue", "pr", "merge_request"})
+
+# An execution in any of these holds, or is about to hold, the object. A
+# terminal run does not, and a parked run (WAITING_FOR_HUMAN) does: it owns
+# the issue until a human answers, and its resume continues the same work.
+TRACKER_OBJECT_ACTIVE_STATUSES = (
+    "PENDING",
+    "INITIALIZING",
+    "STARTING",
+    "RUNNING",
+    "WAITING_FOR_HUMAN",
+)
+
+# Event types whose whole purpose is to reach an execution that is already
+# running on the object: PR-comment resumes and CI-failure resumes bind to
+# the live run themselves (see flow_pr_binding / flow_ci_feedback), so the
+# coalescing guard must not swallow them first.
+COALESCE_EXEMPT_EVENT_TYPES: frozenset = frozenset(
+    {"comment_created", "comment_updated", "comment_deleted"}
+) | frozenset(GITHUB_CI_EVENT_TYPES)
 
 
 def _label_name(item: Any) -> Optional[str]:
@@ -82,6 +111,56 @@ def _label_names_from_payload(payload: Dict[str, Any]) -> List[str]:
     if isinstance(obj_attrs, dict):
         _add(obj_attrs.get("labels"))
     _add(payload.get("label"))
+    return names
+
+
+def _is_label_change_event(event_data: Dict[str, Any]) -> bool:
+    """True when this delivery is about one label being added or removed.
+
+    Matches the normalized ``issue_labeled`` / ``issue_unlabeled`` names and
+    the raw provider action, so GitHub's ``pull_request.labeled`` (which has
+    no normalized name of its own yet) is treated the same way.
+    """
+    if (event_data.get("type") or "") in LABEL_CHANGE_EVENT_TYPES:
+        return True
+    payload = event_data.get("payload")
+    if isinstance(payload, dict):
+        return payload.get("action") in LABEL_CHANGE_ACTIONS
+    return False
+
+
+def _event_label_names(payload: Dict[str, Any]) -> List[str]:
+    """Label names carried by a labeled/unlabeled event itself.
+
+    Three shapes, in the order they are cheapest to read:
+
+    * enriched payloads merge ``extract_filter_fields``, which exposes the
+      delta as ``added_labels`` / ``removed_labels``
+    * raw GitHub puts the one subject label under ``label``
+    * raw GitLab sends no dedicated event; the delta is in ``changes.labels``
+
+    Additions and removals are both returned. A GitLab edit that adds and
+    removes in one hook normalizes to ``issue_labeled`` while still carrying
+    the removed titles (see ``gitlab_label_delta``), and an ``unlabeled``
+    flow filters on the label that left.
+    """
+    names: List[str] = []
+    seen: set[str] = set()
+
+    def _add(value: Any) -> None:
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            name = _label_name(item)
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+
+    _add(payload.get("added_labels"))
+    _add(payload.get("removed_labels"))
+    _add(payload.get("label"))
+    added, removed = gitlab_label_delta(payload)
+    _add(added)
+    _add(removed)
     return names
 
 
@@ -346,6 +425,102 @@ class FlowTriggerService:
                 return execution
 
         return None
+
+    def _extract_tracker_object_key(self, event_data: Dict[str, Any]) -> Optional[str]:
+        """Resource key for the issue/PR/MR this event is about, or None.
+
+        Reuses ``_extract_resource_key`` and keeps only the kinds a human
+        works on one at a time, so the coalescing guard cannot accidentally
+        serialize release or webhook-body deliveries that already have their
+        own dedup path.
+        """
+        key = self._extract_resource_key(event_data)
+        if not key:
+            return None
+        parts = key.split(":")
+        if len(parts) < 4:
+            return None
+        return key if parts[2] in TRACKER_OBJECT_KINDS else None
+
+    def _find_active_execution_for_tracker_object(
+        self,
+        flow: Flow,
+        object_key: str,
+        account_id: str,
+    ) -> Optional[FlowExecution]:
+        """Return this flow's active execution for the same issue/PR, if any.
+
+        Wider than the commit and resource-key dedup above in two ways: it
+        covers issue and pull-request events (which those deliberately skip,
+        see issue #241) and it counts a parked run as active. Narrower in
+        one: it only answers for tracker objects.
+        """
+        executions = crud_flow_execution.get_running_by_flow(
+            self.db,
+            flow_id=flow.id,
+            account_id=uuid.UUID(account_id)
+            if isinstance(account_id, str)
+            else account_id,
+            running_statuses=list(TRACKER_OBJECT_ACTIVE_STATUSES),
+            tracker_object_key=object_key,
+        )
+
+        for execution in executions:
+            trigger_details = execution.trigger_event_details or {}
+            exec_payload = trigger_details.get("payload", {})
+            exec_event_data = {
+                "source": trigger_details.get("source", ""),
+                "payload": exec_payload if isinstance(exec_payload, dict) else {},
+            }
+            if self._extract_tracker_object_key(exec_event_data) == object_key:
+                return execution
+
+        return None
+
+    def _record_coalesced_trigger(
+        self,
+        flow: Flow,
+        event_data: Dict[str, Any],
+        object_key: str,
+        active: FlowExecution,
+    ) -> None:
+        """Make a skipped trigger visible instead of silently dropping it."""
+        logger.info(
+            "Skipping flow '%s' (%s) for %s: execution %s (status %s) is "
+            "already active on %s. One active execution per flow and tracker "
+            "object; the event is not queued.",
+            flow.name,
+            flow.id,
+            event_data.get("type"),
+            active.id,
+            active.status,
+            object_key,
+        )
+        try:
+            from preloop.models.crud import crud_event
+
+            crud_event.log_event(
+                self.db,
+                event_type="flow_trigger_skipped_active_object",
+                account_id=flow.account_id,
+                event_data={
+                    "flow_id": str(flow.id),
+                    "flow_name": flow.name,
+                    "trigger_source": event_data.get("source"),
+                    "trigger_type": event_data.get("type"),
+                    "object_key": object_key,
+                    "active_execution_id": str(active.id),
+                    "active_status": active.status,
+                    "reason": "active_execution_for_tracker_object",
+                },
+            )
+        except Exception:  # noqa: BLE001 - audit must never block triggering
+            logger.warning(
+                "Could not record the skipped trigger for flow %s on %s",
+                flow.id,
+                object_key,
+                exc_info=True,
+            )
 
     def _extract_repo_key(self, event_data: Dict[str, Any]) -> Optional[str]:
         """
@@ -849,6 +1024,38 @@ class FlowTriggerService:
 
         return execution
 
+    def _labels_to_match(
+        self,
+        flow: Flow,
+        event_data: Dict[str, Any],
+        payload: Dict[str, Any],
+        key: str,
+    ) -> Any:
+        """The label names a ``labels`` condition is tested against.
+
+        For a labeled/unlabeled delivery this is the label the event carries,
+        so a filter reads "this event added ``agent-ready``" instead of "the
+        issue has ``agent-ready``". Every other event type keeps the object's
+        label list, which is the right reading for issue-opened and
+        merge-request conditions.
+
+        A label event that carries no label name at all falls back to the
+        list. Dropping it instead would silently stop a working flow on any
+        payload shape this does not know about; the per-object coalescing
+        guard bounds what that fallback can cost.
+        """
+        if _is_label_change_event(event_data):
+            carried = _event_label_names(payload)
+            if carried:
+                return carried
+            logger.info(
+                "Flow %s: %s event carries no label name; falling back to the "
+                "object's label list for the 'labels' condition",
+                flow.id,
+                event_data.get("type"),
+            )
+        return _label_names_from_payload(payload) or payload.get(key)
+
     def _matches_trigger_config(self, flow: Flow, event_data: Dict[str, Any]) -> bool:
         """
         Check if the event matches the flow's trigger_config (if specified).
@@ -901,7 +1108,7 @@ class FlowTriggerService:
                     # The issue qualified at intake; its PR need not duplicate
                     # that label. Every other configured condition still applies.
                     continue
-                actual_value = _label_names_from_payload(payload) or payload.get(key)
+                actual_value = self._labels_to_match(flow, event_data, payload, key)
             else:
                 actual_value = payload.get(key)
 
@@ -1084,24 +1291,16 @@ class FlowTriggerService:
 
         return False
 
-    def _is_triage_self_update(self, flow: Flow, event_data: Dict[str, Any]) -> bool:
+    def _is_triage_self_update(self, event_data: Dict[str, Any]) -> bool:
         """Match a complete issue snapshot to trusted triage write receipts.
 
-        PAT-backed writes may have a human sender. Only automatic triage flows
-        are coalesced, and marker text alone never establishes a self-update.
-        Pending exact snapshots expire; a verified final snapshot may persist.
+        The decision keys on the server-written receipt, not on which tools a
+        flow selected: the receipt is the only evidence that Preloop itself
+        produced this exact issue content. PAT-backed writes may have a human
+        sender, and marker text alone never establishes a self-update. Pending
+        exact snapshots expire; a verified final snapshot may persist.
         """
         if event_data.get("type") != "issue_updated":
-            return False
-        selected_tools = flow.allowed_mcp_tools
-        if not isinstance(selected_tools, list) or not any(
-            isinstance(tool, dict)
-            and tool.get("name") == "apply_issue_triage"
-            and tool.get("source") in (None, "builtin")
-            and not tool.get("mcp_server_id")
-            and not tool.get("server_id")
-            for tool in selected_tools
-        ):
             return False
         account_id = event_data.get("account_id")
         tracker_id = event_data.get("tracker_id")
@@ -1262,6 +1461,11 @@ class FlowTriggerService:
 
             logger.info(f"Found {len(matching_flows)} potential matching flow(s)")
 
+            # The receipt describes the event, not a flow, so evaluate it once.
+            triage_self_update = self._is_triage_self_update(event_data)
+            if triage_self_update:
+                logger.info("Event matches a recorded triage write receipt")
+
             # Filter flows by trigger_config and enabled status
             flows_to_trigger = []
             for flow in matching_flows:
@@ -1276,9 +1480,9 @@ class FlowTriggerService:
                     )
                     continue
 
-                if self._is_triage_self_update(flow, event_data):
+                if triage_self_update:
                     logger.info(
-                        "Skipping triage flow %s for its recorded issue update",
+                        "Skipping flow %s for a recorded triage issue update",
                         flow.id,
                     )
                     continue
@@ -1382,6 +1586,24 @@ class FlowTriggerService:
                                 f"re-send the same event."
                             )
                             continue
+
+                    # One active execution per (flow, tracker object). Four
+                    # issues produced 21 executions and three duplicate pull
+                    # requests in production because nothing bounded the
+                    # number of runs a single issue could start. Comment and
+                    # CI deliveries are exempt: they are how a live run is
+                    # fed more input, and they bind to it below.
+                    if account_id and event_type not in COALESCE_EXEMPT_EVENT_TYPES:
+                        object_key = self._extract_tracker_object_key(event_data)
+                        if object_key:
+                            active = self._find_active_execution_for_tracker_object(
+                                flow, object_key, account_id
+                            )
+                            if active is not None:
+                                self._record_coalesced_trigger(
+                                    flow, event_data, object_key, active
+                                )
+                                continue
 
                     logger.info(
                         f"Triggering flow '{flow.name}' ({flow.id}) for event {event_type}"
@@ -1608,15 +1830,27 @@ class FlowTriggerService:
             )
             return "skipped_overlap"
 
+        # A schedule may carry a static payload (schedule_config.payload) for
+        # options it has no other way to state, such as the
+        # previous_result_execution_id a review subscription diffs against.
+        # The schedule's own fields are written last: a stored config does
+        # not get to rewrite when it fired.
+        payload: Dict[str, Any] = dict(schedule_config.get("payload") or {})
+        described_schedule = {
+            key: value for key, value in schedule_config.items() if key != "payload"
+        }
+        payload.update(
+            {
+                "schedule": described_schedule,
+                "timezone": schedule_config.get("timezone", "UTC"),
+                "scheduled_at": scheduled_at,
+            }
+        )
         event_data = {
             "source": "schedule",
             "type": "schedule",
             "account_id": str(flow.account_id) if flow.account_id else None,
-            "payload": {
-                "schedule": schedule_config,
-                "timezone": schedule_config.get("timezone", "UTC"),
-                "scheduled_at": scheduled_at,
-            },
+            "payload": payload,
         }
         nats_client = await get_nats_client()
         await self._start_flow_execution(
@@ -1635,6 +1869,10 @@ class FlowTriggerService:
         retry_of_execution_id: Optional[uuid.UUID] = None,
         triggered_by: Optional[str] = None,
         source_execution_id: Optional[uuid.UUID] = None,
+        *,
+        parent_execution_id: Optional[uuid.UUID] = None,
+        root_execution_id: Optional[uuid.UUID] = None,
+        delegation_depth: int = 0,
     ) -> Dict[str, Any]:
         """
         Manually trigger a flow execution for testing purposes or as a retry.
@@ -1649,6 +1887,13 @@ class FlowTriggerService:
                 only thing that tells two of them apart in the console list.
             source_execution_id: Controller-owned continuation of a persisted
                 execution on this flow. Never read from the trigger body.
+            parent_execution_id: Execution that started this one, for a
+                delegated child (#630). Controller owned: resolved from the
+                calling execution's own identity, never from a payload.
+            root_execution_id: First execution of the delegation tree, NULL on
+                a root run. Controller owned, as above.
+            delegation_depth: Distance from the root of the tree, 0 for a run
+                nobody delegated. Controller owned, as above.
 
         Returns:
             Dict with execution_id and status
@@ -1722,6 +1967,9 @@ class FlowTriggerService:
             status="PENDING",
             trigger_event_details=trigger_details,
             retry_of_execution_id=retry_of_execution_id,
+            parent_execution_id=parent_execution_id,
+            root_execution_id=root_execution_id,
+            delegation_depth=delegation_depth,
         )
 
         execution = crud_flow_execution.create(self.db, obj_in=execution_data)

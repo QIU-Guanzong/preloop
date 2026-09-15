@@ -246,8 +246,9 @@ async def test_concurrent_authenticated_streams_release_request_pool(
             "preloop.services.openai_gateway.ModelGatewayEventEmitter.emit_for_usage"
         ),
         patch(
-            "preloop.services.openai_gateway.GatewayUsageSearchService.auto_index_interaction"
+            "preloop.services.openai_gateway.GatewayUsageSearchService.build_index_document"
         ),
+        patch("preloop.services.openai_gateway.get_gateway_usage_index_queue"),
     ):
         async with httpx.AsyncClient(
             transport=transport, base_url="http://test"
@@ -371,8 +372,9 @@ async def test_nested_session_summary_releases_pool_and_preserves_accounting(
             "preloop.services.openai_gateway.ModelGatewayEventEmitter.emit_for_usage"
         ),
         patch(
-            "preloop.services.openai_gateway.GatewayUsageSearchService.auto_index_interaction"
+            "preloop.services.openai_gateway.GatewayUsageSearchService.build_index_document"
         ),
+        patch("preloop.services.openai_gateway.get_gateway_usage_index_queue"),
     ):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(
@@ -446,8 +448,9 @@ async def test_completed_http_stream_persists_usage_after_body_flush(
             "preloop.services.openai_gateway.ModelGatewayEventEmitter.emit_for_usage"
         ),
         patch(
-            "preloop.services.openai_gateway.GatewayUsageSearchService.auto_index_interaction"
+            "preloop.services.openai_gateway.GatewayUsageSearchService.build_index_document"
         ),
+        patch("preloop.services.openai_gateway.get_gateway_usage_index_queue"),
     ):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=asgi_app), base_url="http://test"
@@ -522,8 +525,9 @@ async def test_http_stream_disconnect_records_partial_usage_and_releases_pool(
             "preloop.services.openai_gateway.ModelGatewayEventEmitter.emit_for_usage"
         ),
         patch(
-            "preloop.services.openai_gateway.GatewayUsageSearchService.auto_index_interaction"
+            "preloop.services.openai_gateway.GatewayUsageSearchService.build_index_document"
         ),
+        patch("preloop.services.openai_gateway.get_gateway_usage_index_queue"),
     ):
         try:
             await gateway_pool.app(scope, receive, send)
@@ -578,8 +582,9 @@ async def test_gateway_auth_releases_pool_before_other_request_dependencies(
             "preloop.services.openai_gateway.ModelGatewayEventEmitter.emit_for_usage"
         ),
         patch(
-            "preloop.services.openai_gateway.GatewayUsageSearchService.auto_index_interaction"
+            "preloop.services.openai_gateway.GatewayUsageSearchService.build_index_document"
         ),
+        patch("preloop.services.openai_gateway.get_gateway_usage_index_queue"),
     ):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(
@@ -740,8 +745,9 @@ async def test_initial_stream_policy_failure_is_accounted_and_closes_provider(
             "preloop.services.openai_gateway.ModelGatewayEventEmitter.emit_for_usage"
         ),
         patch(
-            "preloop.services.openai_gateway.GatewayUsageSearchService.auto_index_interaction"
+            "preloop.services.openai_gateway.GatewayUsageSearchService.build_index_document"
         ),
+        patch("preloop.services.openai_gateway.get_gateway_usage_index_queue"),
     ):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=asgi_app, raise_app_exceptions=True),

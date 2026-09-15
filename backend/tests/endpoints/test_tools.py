@@ -98,9 +98,14 @@ class TestListAllTools:
             "improve_compliance",
             "permission_prompt",
             "resolve_sbom_upstreams",
-            "get_issue_triage_context",
-            "apply_issue_triage",
+            "send_note",
+            "run_flow",
+            "get_execution",
         }
+        # Issue triage folded back into get_issue/update_issue (#661): no
+        # separate default-disabled triage tools remain in the catalogue.
+        names = {tool["name"] for tool in tools.BUILTIN_TOOLS}
+        assert not names & {"get_issue_triage_context", "apply_issue_triage"}
         for tool in result:
             expected = tool["name"] not in default_disabled
             assert tool["is_enabled"] is expected

@@ -59,6 +59,7 @@ import {
 } from '../../components/token-figures';
 import '../../components/preloop-gateway-event.ts';
 import '../../components/preloop-execution-continuation';
+import '../../components/preloop-execution-tree';
 import '../../components/view-header.ts';
 import '../../components/json-tree.ts';
 import '../../components/session-chat-view';
@@ -3193,6 +3194,12 @@ ${execution.resolved_input_prompt}</pre>
       <div class="column-layout wide">
         <div class="main-column">
           ${this.renderSummaryStrip(execution)}
+          <!-- What this run delegated, and what that cost. Renders one quiet
+               line for the overwhelming majority of runs, which delegate
+               nothing. -->
+          <preloop-execution-tree
+            execution-id=${execution.id}
+          ></preloop-execution-tree>
           <preloop-execution-continuation
             .execution=${execution}
           ></preloop-execution-continuation>
@@ -3415,6 +3422,13 @@ ${log.payload.content}</pre>
     try {
       // Send stop command to backend (which stops the container directly)
       await sendCommandToExecution(this.executionId, 'stop');
+
+      // Say so at once. The command has already written STOPPED, and a run
+      // stopped while it was still queued has no runtime to publish a status
+      // update, so the page would otherwise read PENDING until a reload.
+      if (this.execution) {
+        this.execution = { ...this.execution, status: 'STOPPED' };
+      }
 
       // Wait a moment for the container to stop
       await new Promise((resolve) => setTimeout(resolve, 500));
