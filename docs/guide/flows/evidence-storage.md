@@ -205,8 +205,8 @@ specific pack has to survive, place a legal hold on it or export the period.
 | `audit` | Audit log rows |
 | `approvals` | Approval requests and their events |
 | `evidence` | Evidence pack records (manifest and digest), not the payload |
-| `runtime_sessions` | Runtime sessions and session activity |
-| `usage` | API and gateway usage rows |
+| `runtime_sessions` | Runtime sessions, session activity and the session search chunks derived from them |
+| `usage` | API and gateway usage rows, and the search chunks quoting them |
 
 ```
 GET  /api/v1/retention/settings        # resolved days per class, plus the floor
@@ -234,7 +234,10 @@ operator enables it, retention is a stated policy that nothing enforces, and
 
 A pass that hits a bound stops and resumes next time rather than running long.
 Every pass that removed anything writes an audit row per record class with the
-cutoff and the count, so the deletion of records is itself a record.
+cutoff and the count, so the deletion of records is itself a record. The audit
+row also carries `derived_deleted`: rows removed from tables that quote the
+records, counted separately so a report says how many sessions went without
+inflating the number by their search chunks.
 
 ### Legal hold
 
@@ -265,6 +268,49 @@ access can still delete a held row, and a backup restore can still reintroduce
 a purged one. If your obligation requires immutability that survives a
 platform administrator, put that control in the storage layer and use the
 period export to hold the record somewhere Preloop cannot reach.
+
+### What search can reach after a purge
+
+Session content is indexed into a search corpus as it is written: chunks of
+gateway interactions, transcript messages, tool calls, operator notes and
+session summaries, each one account scoped and session scoped. That corpus is
+a second copy of the records, so it follows the same rules rather than rules
+of its own.
+
+**A purge takes the chunks with the record, in the same transaction.** When
+the `runtime_sessions` pass deletes a session, its chunks go in the same
+batch, not on a later sweep. When the `usage` pass deletes a usage row, the
+gateway chunks quoting it go with it. So after a purge, search cannot quote a
+record the account was told was deleted, and there is no window in which it
+still can.
+
+**A hold preserves the chunks too.** A held session keeps its chunks exactly
+as it keeps its activity rows. This holds across classes: a held session's
+gateway chunks survive the `usage` pass even when the usage row itself is past
+its cutoff, so such a chunk can outlive the row it quotes for as long as the
+hold lasts. That is the intended direction. A hold is an instruction to
+preserve the record and a retention cutoff on a different class does not
+overrule it. Release the hold and the next pass takes the chunk.
+
+**Redaction reaches the copy.** A source redacted after it was indexed is
+either re-indexed, so the chunks hold the redacted text, or dropped. Where
+neither applies, the stored text is cleared in place and the chunks are marked
+`withheld`: the rows remain, so search still knows that content existed, when,
+and in which session, but the text is gone from the database and the read path
+returns none for them. Text is returned only for the redaction states named
+returnable, which is a whitelist, so a state added later withholds text until
+somebody decides otherwise.
+
+**The invariant is checkable, not assumed.**
+`preloop.services.session_search_retention.orphan_chunk_report` counts chunks
+whose session or usage row no longer exists. The answer after any purge pass
+is zero; `assert_no_orphan_chunks` is the same check as an assertion for tests
+and for an operator running it against a real database after a pass.
+
+What this does not cover: a backup restored from before a purge reintroduces
+the chunks along with the records, exactly as it reintroduces everything else,
+and an operator with database access can write to the corpus directly. Both
+are the same limit as the rest of this section, for the same reason.
 
 ### Period export
 

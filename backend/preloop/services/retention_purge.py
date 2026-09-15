@@ -26,6 +26,14 @@ the off-peak UTC window. A backlog is drained across passes. It runs off the
 request path in a background task, the same shape as
 :class:`preloop.services.session_optimization_jobs.OptimizationJobSweeper`.
 
+**It takes the copies with the original.** Derived rows that quote a record
+go in the same transaction as the record, not on a later sweep: today that is
+the session search corpus, wired per class through
+:func:`preloop.services.session_search_retention.delete_derived_chunks` and
+counted separately as ``derived_deleted``. A deletion that leaves a searchable
+copy behind is not a deletion, and one that is only eventually true leaves a
+window in which search answers from a record the account was told was gone.
+
 **It audits itself.** Retention decisions are themselves records: one
 ``audit_log`` row per account and record class that actually deleted
 something, with the cutoff, the counts and the setting that produced them.
@@ -72,6 +80,7 @@ from preloop.services.service_roles import (
     background_passes_allowed,
     current_service_role,
 )
+from preloop.services.session_search_retention import delete_derived_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +103,11 @@ class ClassResult:
     cutoff: datetime
     deleted: int = 0
     batches: int = 0
+    #: Rows removed from tables derived from this class in the same pass: the
+    #: session search corpus today. Counted separately from ``deleted``, which
+    #: is the count of records of the class itself, so a retention report says
+    #: how many sessions went without inflating it by their chunk count.
+    derived_deleted: int = 0
     #: True when the class still had matching rows when the pass stopped.
     more_remaining: bool = False
     applied_cutoffs: list[dict[str, Any]] = field(default_factory=list)
@@ -106,6 +120,7 @@ class ClassResult:
             "applied_cutoffs": list(self.applied_cutoffs),
             "cutoff": self.cutoff.isoformat(),
             "deleted": self.deleted,
+            "derived_deleted": self.derived_deleted,
             "batches": self.batches,
             "more_remaining": self.more_remaining,
         }
@@ -469,6 +484,13 @@ def purge_class(
             # to be told so, or the next verification reports the purge as
             # tampering (issue #558).
             pruned_seq = max(pruned_seq, _max_chain_seq(db, ids))
+        # Derived copies go in the same transaction as the rows they quote.
+        # A later sweep would leave a window in which a search still answers
+        # from a record the purge already deleted, and a purge that is only
+        # eventually true is not a deletion (issue #655).
+        result.derived_deleted += delete_derived_chunks(
+            db, record_class=record_class, ids=ids
+        )
         deleted = db.execute(
             delete(model)
             .where(model.id.in_(ids))

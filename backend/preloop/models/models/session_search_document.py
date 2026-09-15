@@ -60,8 +60,32 @@ REDACTION_STATE_CLEAR = "clear"
 REDACTION_STATE_REDACTED = "redacted"
 #: Capture was disabled: the chunk carries a descriptor and no captured text.
 REDACTION_STATE_METADATA_ONLY = "metadata_only"
+#: The source was redacted *after* this chunk was written. The stored text is
+#: cleared when the state is set, and the read path refuses to return text for
+#: the state as well, so a chunk in this state cannot answer a search with
+#: content the source no longer has.
+REDACTION_STATE_WITHHELD = "withheld"
 
 REDACTION_STATES = (
+    REDACTION_STATE_CLEAR,
+    REDACTION_STATE_REDACTED,
+    REDACTION_STATE_METADATA_ONLY,
+    REDACTION_STATE_WITHHELD,
+)
+
+#: The redaction states whose stored text a search response may return.
+#:
+#: ``clear`` is text that needed no masking and ``redacted`` is text whose
+#: credential-looking values were masked before it was ever stored, so both
+#: are text the corpus is allowed to have. ``metadata_only`` holds a synthetic
+#: descriptor (kind, role, length) and no captured text at all, which is safe
+#: for the same reason. ``withheld`` is the one state that exists precisely
+#: because the text stopped being allowed, and it is the one state left out.
+#:
+#: The read path derives its behaviour from this tuple rather than testing for
+#: a state inline, so adding a state without deciding whether it is returnable
+#: is not possible: a new state is withheld until it is named here.
+TEXT_RETURNABLE_REDACTION_STATES = (
     REDACTION_STATE_CLEAR,
     REDACTION_STATE_REDACTED,
     REDACTION_STATE_METADATA_ONLY,

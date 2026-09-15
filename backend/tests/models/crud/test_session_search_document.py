@@ -14,6 +14,7 @@ from preloop.models.crud.session_search_document import (
     content_hash_for,
 )
 from preloop.models.models.session_search_document import (
+    REDACTION_STATE_WITHHELD,
     SOURCE_KIND_TRANSCRIPT_MESSAGE,
 )
 
@@ -180,4 +181,122 @@ def test_deleting_a_runtime_session_deletes_its_chunks(db_session, test_user):
             runtime_session_id=session_id,
         )
         == 0
+    )
+
+
+def test_the_guarded_read_applies_the_same_account_bound(db_session, test_user):
+    """The safe read may not be a wider query than the raw one (#655)."""
+    other_account = crud_account.create(
+        db_session,
+        obj_in={"organization_name": "Other Organization", "is_active": True},
+    )
+    db_session.flush()
+    mine = _session(db_session, test_user.account_id)
+    theirs = _session(db_session, other_account.id, source_id="session-c")
+    _write(db_session, test_user.account_id, mine, "shared vocabulary here")
+    _write(
+        db_session,
+        other_account.id,
+        theirs,
+        "shared vocabulary here",
+        source_id="message-3",
+    )
+
+    hits = crud_session_search_document.search_account_hits(
+        db_session, account_id=test_user.account_id, query="vocabulary"
+    )
+
+    assert [hit.runtime_session_id for hit in hits] == [mine.id]
+    assert (
+        crud_session_search_document.search_account_hits(
+            db_session,
+            account_id=test_user.account_id,
+            runtime_session_id=theirs.id,
+        )
+        == []
+    )
+
+
+def test_withholding_clears_the_text_and_the_generated_vector(db_session, test_user):
+    """The vector is generated from content, so clearing content clears it."""
+    session = _session(db_session, test_user.account_id)
+    stored = _write(db_session, test_user.account_id, session, "pineapple ledger")
+
+    marked = crud_session_search_document.withhold_source_text(
+        db_session,
+        source_kind=SOURCE_KIND_TRANSCRIPT_MESSAGE,
+        source_id="message-1",
+    )
+
+    assert marked == 1
+    db_session.expire_all()
+    row = db_session.get(type(stored[0]), stored[0].id)
+    assert row.content == ""
+    assert row.redaction_state == REDACTION_STATE_WITHHELD
+    assert row.content_hash == content_hash_for("")
+    vector = db_session.execute(
+        text("SELECT search_vector FROM session_search_document WHERE id = :id"),
+        {"id": row.id},
+    ).scalar_one()
+    assert vector == ""
+    assert (
+        crud_session_search_document.search_account_chunks(
+            db_session, account_id=test_user.account_id, query="pineapple"
+        )
+        == []
+    )
+
+
+def test_a_withheld_chunk_is_still_a_countable_row(db_session, test_user):
+    """A redaction leaves a gap that is legible rather than indistinguishable."""
+    session = _session(db_session, test_user.account_id)
+    _write(db_session, test_user.account_id, session, "one", "two")
+
+    crud_session_search_document.withhold_source_text(
+        db_session,
+        source_kind=SOURCE_KIND_TRANSCRIPT_MESSAGE,
+        source_id="message-1",
+    )
+
+    assert (
+        crud_session_search_document.count_for_session(
+            db_session,
+            account_id=test_user.account_id,
+            runtime_session_id=session.id,
+        )
+        == 2
+    )
+    hits = crud_session_search_document.search_account_hits(
+        db_session, account_id=test_user.account_id
+    )
+    assert [hit.text_withheld for hit in hits] == [True, True]
+
+
+def test_deleting_many_sources_in_one_statement(db_session, test_user):
+    """The purge removes a batch of ids, not one source at a time."""
+    session = _session(db_session, test_user.account_id)
+    _write(db_session, test_user.account_id, session, "a", "b", source_id="message-a")
+    _write(db_session, test_user.account_id, session, "c", source_id="message-b")
+    _write(db_session, test_user.account_id, session, "d", source_id="message-c")
+
+    deleted = crud_session_search_document.delete_for_sources(
+        db_session,
+        source_kind=SOURCE_KIND_TRANSCRIPT_MESSAGE,
+        source_ids=["message-a", "message-b"],
+    )
+
+    assert deleted == 3
+    assert (
+        crud_session_search_document.delete_for_sources(
+            db_session, source_kind=SOURCE_KIND_TRANSCRIPT_MESSAGE, source_ids=[]
+        )
+        == 0
+    )
+    assert (
+        crud_session_search_document.count_for_session(
+            db_session,
+            account_id=test_user.account_id,
+            runtime_session_id=session.id,
+        )
+        == 1
     )

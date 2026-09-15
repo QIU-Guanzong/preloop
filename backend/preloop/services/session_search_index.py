@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -59,6 +60,18 @@ _CREDENTIAL_PATTERN = re.compile(
     r"(?i)\b([\w.-]*(?:api[_-]?key|authorization|secret|token|password)"
     r"[\w.-]*)\s*[:=]\s*(\"[^\"]*\"|'[^']*'|\S+)"
 )
+
+
+@dataclass(frozen=True)
+class RedactionOutcome:
+    """What :func:`redact_indexed_source` did, and to how many chunks.
+
+    ``action`` is one of ``reindexed``, ``dropped``, ``withheld`` or ``noop``.
+    Callers audit it; the tests assert on it.
+    """
+
+    action: str
+    chunks: int
 
 
 def _now() -> datetime:
@@ -512,6 +525,105 @@ def index_flow_log(
         meta_data=meta_data,
         commit=commit,
     )
+
+
+def redact_indexed_source(
+    db: Session,
+    *,
+    source_kind: str,
+    source_id: Any,
+    replacement_text: Optional[str] = None,
+    account_id: Optional[Any] = None,
+    runtime_session_id: Optional[Any] = None,
+    occurred_at: Optional[datetime] = None,
+    role: Optional[str] = None,
+    drop: bool = False,
+    commit: bool = False,
+) -> RedactionOutcome:
+    """Apply a redaction that happened after the source was indexed.
+
+    Indexing at write time sanitises what it stores, but a source can be
+    redacted later: content capture is turned off, a payload is scrubbed, an
+    operator removes a note. The corpus is a second copy of that content, and
+    a second copy that keeps answering with the old text is the whole reason a
+    search index is a compliance problem rather than a feature.
+
+    Three outcomes, in the order a caller should prefer them:
+
+    ``reindexed``
+        ``replacement_text`` was given, so the source is written again through
+        the normal write path and the chunks now hold the redacted text. The
+        session, account and timestamp are read off the existing chunks when
+        the caller does not pass them, so a redactor only needs the source it
+        is redacting.
+    ``dropped``
+        ``drop=True``, or the replacement is empty: the chunks go. The right
+        answer when the source itself is gone.
+    ``withheld``
+        Neither: the stored text is cleared in place and the chunks are marked
+        :data:`~preloop.models.models.session_search_document.REDACTION_STATE_WITHHELD`.
+        The rows remain so the search still knows something happened, and the
+        read path returns no text for them.
+
+    Unlike the writers this does not swallow its exceptions. A redaction that
+    quietly failed would leave the operator believing text was removed when it
+    was not, which is worse than an error.
+    """
+    existing = crud_session_search_document.list_for_source(
+        db, source_kind=source_kind, source_id=str(source_id)
+    )
+    if not existing:
+        return RedactionOutcome(action="noop", chunks=0)
+
+    if drop or (replacement_text is not None and not replacement_text.strip()):
+        removed = crud_session_search_document.delete_for_source(
+            db, source_kind=source_kind, source_id=str(source_id)
+        )
+        if commit:
+            db.commit()
+        return RedactionOutcome(action="dropped", chunks=removed)
+
+    if replacement_text is not None:
+        first = existing[0]
+        stored = write_source_chunks(
+            db,
+            account_id=account_id if account_id is not None else first.account_id,
+            runtime_session_id=(
+                runtime_session_id
+                if runtime_session_id is not None
+                else first.runtime_session_id
+            ),
+            source_kind=source_kind,
+            source_id=source_id,
+            text=replacement_text,
+            occurred_at=occurred_at or first.occurred_at,
+            role=role if role is not None else first.role,
+            meta_data={"redacted_after_indexing": True},
+            model_alias=first.model_alias,
+            provider_name=first.provider_name,
+            runtime_principal_id=first.runtime_principal_id,
+            api_key_id=first.api_key_id,
+            flow_id=first.flow_id,
+            status=first.status,
+            commit=commit,
+        )
+        if not stored:
+            # The write path swallows its own failures and the corpus must not
+            # be left holding the pre-redaction text because of one.
+            removed = crud_session_search_document.delete_for_source(
+                db, source_kind=source_kind, source_id=str(source_id)
+            )
+            if commit:
+                db.commit()
+            return RedactionOutcome(action="dropped", chunks=removed)
+        return RedactionOutcome(action="reindexed", chunks=len(stored))
+
+    marked = crud_session_search_document.withhold_source_text(
+        db, source_kind=source_kind, source_id=str(source_id)
+    )
+    if commit:
+        db.commit()
+    return RedactionOutcome(action="withheld", chunks=marked)
 
 
 def _descriptor(*, kind: str, role: Optional[str], text: str) -> str:
