@@ -1,5 +1,6 @@
 """Tests for DynamicFastMCP."""
 
+import inspect
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -11,6 +12,7 @@ from fastmcp.tools import Tool
 from preloop.services.dynamic_fastmcp import (
     DynamicFastMCP,
     _python_type_for_schema,
+    _schema_type_names,
     create_dynamic_mcp_server,
     create_user_context_from_scope,
 )
@@ -351,6 +353,58 @@ class TestListTools:
         assert any(t.name == "proxied_tool" for t in result)
         # Should NOT include internal name in results
         assert not any(t.name == internal_name for t in result)
+
+    async def test_list_tools_skips_unsafe_tool_name_keeps_sibling(
+        self, dynamic_mcp, user_context
+    ):
+        """A hostile upstream tool name must not take down sibling proxied tools."""
+        dynamic_mcp._user_context_provider = lambda: user_context
+
+        mock_mcp_server = MagicMock()
+        mock_mcp_server.id = str(uuid4())
+        mock_mcp_server.name = "upstream"
+
+        hostile_tool = MagicMock()
+        hostile_tool.name = (
+            "t():\n    pass\nraise RuntimeError('injected-wrapper')\nasync def ignored"
+        )
+        hostile_tool.description = "Hostile"
+        hostile_tool.input_schema = {"properties": {"ok": {"type": "string"}}}
+
+        sibling_tool = MagicMock()
+        sibling_tool.name = "sibling_ok"
+        sibling_tool.description = "Sibling"
+        sibling_tool.input_schema = {"properties": {"ok": {"type": "string"}}}
+
+        safe_account_id = user_context.account_id.replace("-", "_")
+        sibling_internal = f"account_{safe_account_id}_sibling_ok"
+        registered_tool = Tool(
+            name=sibling_internal, description="Internal", parameters={}
+        )
+
+        with patch("preloop.services.dynamic_fastmcp.get_db") as mock_get_db:
+            mock_db = MagicMock()
+            mock_db.close = MagicMock()
+            mock_get_db.side_effect = lambda: iter([mock_db])
+
+            with patch(
+                "preloop.services.mcp_tool_discovery._get_proxied_tools_sync",
+                return_value=[
+                    (mock_mcp_server, hostile_tool),
+                    (mock_mcp_server, sibling_tool),
+                ],
+            ):
+                with patch.object(
+                    FastMCP,
+                    "list_tools",
+                    new=AsyncMock(return_value=[registered_tool]),
+                ):
+                    with patch.object(dynamic_mcp, "tool", return_value=lambda x: x):
+                        result = await dynamic_mcp.list_tools()
+
+        names = {t.name for t in result}
+        assert "sibling_ok" in names
+        assert hostile_tool.name not in names
 
     async def test_list_tools_excludes_explicitly_disabled_builtin(
         self, dynamic_mcp, user_context
@@ -1135,6 +1189,24 @@ class TestPythonTypeForSchema:
         assert _python_type_for_schema({"type": "frobnicate"}) == "Any"
         assert _python_type_for_schema({"type": ["null", "frobnicate"]}) == "Any"
 
+    def test_schema_type_names_de_duplicates(self):
+        """Union forms keep declaration order but drop duplicate type names."""
+        assert _schema_type_names({"type": ["null", "array", "array"]}) == [
+            "null",
+            "array",
+        ]
+        assert _schema_type_names(
+            {"anyOf": [{"type": "array"}, {"type": "array"}, {"type": "null"}]}
+        ) == ["array", "null"]
+        assert _schema_type_names(
+            {
+                "oneOf": [
+                    {"type": ["string", "string"]},
+                    {"type": "integer"},
+                ]
+            }
+        ) == ["string", "integer"]
+
 
 class TestCreateProxiedToolWrapper:
     """Test _create_proxied_tool_wrapper method."""
@@ -1283,7 +1355,152 @@ class TestCreateProxiedToolWrapper:
         )
 
         tool = Tool.from_function(wrapper)
-        await tool.run({"payload": {"anything": [1, 2, 3]}})
+        result = await tool.run({"payload": {"anything": [1, 2, 3]}})
+        assert "Access denied" in result.content[0].text
+
+    async def test_wrapper_skips_invalid_identifier_param_names(
+        self, dynamic_mcp, user_context
+    ):
+        """Hyphenated and spaced property keys are omitted, not interpolated."""
+        wrapper = dynamic_mcp._create_proxied_tool_wrapper(
+            tool_name="safe_tool",
+            server_id="server-123",
+            account_id=user_context.account_id,
+            description="Safe tool",
+            input_schema={
+                "properties": {
+                    "user-keys": {"type": "array"},
+                    "foo bar": {"type": "string"},
+                    "safe_param": {"type": "string"},
+                },
+                "required": ["safe_param"],
+            },
+        )
+
+        assert callable(wrapper)
+        parameters = inspect.signature(wrapper).parameters
+        assert "safe_param" in parameters
+        assert "user-keys" not in parameters
+        assert "foo bar" not in parameters
+        assert "ctx" in parameters
+
+        tool = Tool.from_function(wrapper)
+        result = await tool.run({"safe_param": "ok"})
+        assert "Access denied" in result.content[0].text
+
+    async def test_wrapper_skips_injection_like_param_name(
+        self, dynamic_mcp, user_context
+    ):
+        """A property key that would inject statements is not exec'd."""
+        injection = (
+            "x):\n    pass\nraise RuntimeError('injected-wrapper')\nasync def _ignore(y"
+        )
+        wrapper = dynamic_mcp._create_proxied_tool_wrapper(
+            tool_name="safe_tool",
+            server_id="server-123",
+            account_id=user_context.account_id,
+            description="Safe tool",
+            input_schema={
+                "properties": {
+                    injection: {"type": "string"},
+                    "safe_param": {"type": "string"},
+                },
+                "required": ["safe_param"],
+            },
+        )
+
+        assert callable(wrapper)
+        parameters = inspect.signature(wrapper).parameters
+        assert "safe_param" in parameters
+        assert injection not in parameters
+
+    async def test_wrapper_skips_keyword_param_name(self, dynamic_mcp, user_context):
+        """Python keywords are omitted from the generated signature."""
+        wrapper = dynamic_mcp._create_proxied_tool_wrapper(
+            tool_name="safe_tool",
+            server_id="server-123",
+            account_id=user_context.account_id,
+            description="Safe tool",
+            input_schema={
+                "properties": {
+                    "class": {"type": "string"},
+                    "safe_param": {"type": "string"},
+                },
+                "required": ["safe_param"],
+            },
+        )
+
+        assert callable(wrapper)
+        parameters = inspect.signature(wrapper).parameters
+        assert "safe_param" in parameters
+        assert "class" not in parameters
+
+    async def test_wrapper_skips_reserved_local_params(self, dynamic_mcp, user_context):
+        """Reserved generated-body names, including duplicate ctx, are omitted."""
+        wrapper = dynamic_mcp._create_proxied_tool_wrapper(
+            tool_name="safe_tool",
+            server_id="server-123",
+            account_id=user_context.account_id,
+            description="Safe tool",
+            input_schema={
+                "properties": {
+                    "arguments": {"type": "object"},
+                    "user_context": {"type": "object"},
+                    "param_name": {"type": "string"},
+                    "value": {"type": "string"},
+                    "ctx": {"type": "string"},
+                    "safe_param": {"type": "string"},
+                },
+                "required": ["safe_param"],
+            },
+        )
+
+        assert callable(wrapper)
+        parameter_names = list(inspect.signature(wrapper).parameters)
+        assert "safe_param" in parameter_names
+        assert "arguments" not in parameter_names
+        assert "user_context" not in parameter_names
+        assert "param_name" not in parameter_names
+        assert "value" not in parameter_names
+        assert parameter_names.count("ctx") == 1
+
+    @pytest.mark.parametrize(
+        "unsafe_name",
+        [
+            "user-keys",
+            "foo bar",
+            "class",
+            "ctx",
+            (
+                "t():\n    pass\nraise RuntimeError('injected-wrapper')\n"
+                "async def ignored"
+            ),
+        ],
+    )
+    def test_wrapper_rejects_unsafe_tool_name_without_exec(
+        self, dynamic_mcp, user_context, unsafe_name
+    ):
+        """Hostile or reserved tool names are skipped and do not exec source."""
+        assert (
+            dynamic_mcp._create_proxied_tool_wrapper(
+                tool_name=unsafe_name,
+                server_id="server-123",
+                account_id=user_context.account_id,
+                description="Hostile",
+                input_schema={"properties": {"ok": {"type": "string"}}},
+            )
+            is None
+        )
+
+        sibling = dynamic_mcp._create_proxied_tool_wrapper(
+            tool_name="sibling_ok",
+            server_id="server-123",
+            account_id=user_context.account_id,
+            description="Sibling",
+            input_schema={"properties": {"ok": {"type": "string"}}},
+        )
+        assert callable(sibling)
+        assert "ok" in inspect.signature(sibling).parameters
 
 
 class TestHelperFunctions:
