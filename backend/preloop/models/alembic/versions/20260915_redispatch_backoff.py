@@ -7,7 +7,7 @@ interval, forever. Persisting the attempt count and the last publish time
 moves the backoff into the one place every replica shares.
 
 Revision ID: 20260915_redispatch_backoff
-Revises: 20260915_session_hold
+Revises: 20260915_child_park
 """
 
 from typing import Sequence, Union
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "20260915_redispatch_backoff"
-down_revision: Union[str, None] = "20260915_session_hold"
+down_revision: Union[str, None] = "20260915_child_park"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

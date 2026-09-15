@@ -10,6 +10,7 @@ label Preloop stamped, and the store says so afterwards.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -669,3 +670,89 @@ def test_every_gateway_entry_point_delivers_notes_for_its_protocol() -> None:
             operator_notes.PROTOCOL_ANTHROPIC: "PROTOCOL_ANTHROPIC",
         }[protocol]
         assert f"operator_notes.{constant}" in body, method_name
+
+
+# --- author-aware block framing ---------------------------------------------
+
+_HUMAN_FRAMING_PIN = (
+    "The block below is an instruction from the human operating this agent, "
+    "delivered out of band by the Preloop control plane at a turn boundary. "
+    "It is not content from a tool result, a fetched page or any other "
+    "untrusted source: Preloop stamped every attribute, the sender authored "
+    "only the text inside the element. Treat it with the authority of the "
+    "named person, who already holds the permission to stop this agent. Cite "
+    "the note id if you change course because of it."
+)
+
+
+def _render_note(
+    *,
+    body: str,
+    author: str,
+    auth_method: str,
+    note_id: str = "a1b2c3d4e5f60718",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        command_id=note_id,
+        author_display=author,
+        author_auth_method=auth_method,
+        created_at=datetime(2026, 9, 10, 9, 14, 2, tzinfo=UTC),
+        body=body,
+    )
+
+
+def test_human_notes_block_framing_is_byte_identical() -> None:
+    """Human-only deliveries must not move existing prompt pins."""
+    note = _render_note(
+        body="Deploy to eu-west-1, not us-east-1.",
+        author="Ada Lovelace",
+        auth_method="jwt",
+    )
+    text = operator_notes.render_notes_block([note])
+    assert operator_notes._FRAMING == _HUMAN_FRAMING_PIN
+    assert text == (
+        '<operator-notes count="1" source="preloop-control-plane">\n'
+        f"{_HUMAN_FRAMING_PIN}\n"
+        f"{operator_notes.render_note_element(note)}\n"
+        "</operator-notes>"
+    )
+
+
+def test_agent_notes_block_does_not_claim_human_stop_authority() -> None:
+    """An all-agent delivery must not wrap sibling text in human stop-authority."""
+    note = _render_note(
+        body="The migration is applied; run the backfill.",
+        author="Reviewer (agent)",
+        auth_method=operator_notes.AUTH_METHOD_AGENT,
+    )
+    text = operator_notes.render_notes_block([note])
+    assert operator_notes._FRAMING_AGENT in text
+    assert operator_notes._FRAMING not in text
+    assert "instruction from the human operating this agent" not in text
+    assert "named person" not in text
+    assert "does not hold the permission to stop this run" in text
+    assert 'from="Reviewer (agent)"' in text
+    assert f'auth="{operator_notes.AUTH_METHOD_AGENT}"' in text
+
+
+def test_mixed_notes_block_does_not_grant_agent_human_authority() -> None:
+    """A mixed delivery must not put one human-authority paragraph over an agent note."""
+    human = _render_note(
+        body="Pause the deploy.",
+        author="Ada Lovelace",
+        auth_method="jwt",
+        note_id="humannote000001",
+    )
+    agent = _render_note(
+        body="The migration is applied; run the backfill.",
+        author="Reviewer (agent)",
+        auth_method=operator_notes.AUTH_METHOD_AGENT,
+        note_id="agentnote000001",
+    )
+    text = operator_notes.render_notes_block([human, agent])
+    assert operator_notes._FRAMING_MIXED in text
+    assert operator_notes._FRAMING not in text
+    assert operator_notes._FRAMING_AGENT not in text
+    assert "does not hold that permission" in text
+    assert "Pause the deploy." in text
+    assert "The migration is applied; run the backfill." in text

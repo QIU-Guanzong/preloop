@@ -51,14 +51,17 @@ from preloop.utils.audit import log_config_change
 from preloop.utils.permissions import require_permission
 
 from preloop.tools.builtin_defs import (
-    APPLY_ISSUE_TRIAGE_TOOL,
-    GET_EXECUTION_TOOL,
-    GET_ISSUE_TRIAGE_CONTEXT_TOOL,
     ASK_USER_TOOL,
+    GET_EXECUTION_TOOL,
+    GET_ISSUE_DESCRIPTION,
+    GET_ISSUE_SCHEMA,
     PERMISSION_PROMPT_TOOL,
     REQUEST_APPROVAL_TOOL,
     RESOLVE_SBOM_UPSTREAMS_TOOL,
     RUN_FLOW_TOOL,
+    SEND_NOTE_TOOL,
+    UPDATE_ISSUE_DESCRIPTION,
+    UPDATE_ISSUE_SCHEMA,
 )
 from preloop.tools.native_defs import NATIVE_TOOL_NAMES, NATIVE_TOOLS
 
@@ -68,30 +71,20 @@ router = APIRouter()
 # Define builtin tools metadata
 # NOTE: Implementations live in initialize_mcp.py; shared defs in builtin_defs.py
 BUILTIN_TOOLS = [
-    GET_ISSUE_TRIAGE_CONTEXT_TOOL,
-    APPLY_ISSUE_TRIAGE_TOOL,
     REQUEST_APPROVAL_TOOL,
     ASK_USER_TOOL,
     PERMISSION_PROMPT_TOOL,
     RESOLVE_SBOM_UPSTREAMS_TOOL,
+    SEND_NOTE_TOOL,
     RUN_FLOW_TOOL,
     GET_EXECUTION_TOOL,
     {
         "name": "get_issue",
-        "description": "Get detailed information about an issue by its identifier (URL, key, or ID)",
+        "description": GET_ISSUE_DESCRIPTION,
         "source": "builtin",
         "requires_tracker": True,
         "required_tracker_types": [],
-        "schema": {
-            "type": "object",
-            "properties": {
-                "issue": {
-                    "type": "string",
-                    "description": "Issue identifier (URL, key, or ID)",
-                }
-            },
-            "required": ["issue"],
-        },
+        "schema": GET_ISSUE_SCHEMA,
     },
     {
         "name": "create_issue",
@@ -119,31 +112,11 @@ BUILTIN_TOOLS = [
     },
     {
         "name": "update_issue",
-        "description": "Update an existing issue's metadata and/or manage GitHub issue reactions. To add or remove a reaction only, pass add_reaction or remove_reaction without other fields.",
+        "description": UPDATE_ISSUE_DESCRIPTION,
         "source": "builtin",
         "requires_tracker": True,
         "required_tracker_types": [],
-        "schema": {
-            "type": "object",
-            "properties": {
-                "issue": {"type": "string", "description": "Issue identifier"},
-                "title": {"type": "string", "description": "New title"},
-                "description": {"type": "string", "description": "New description"},
-                "status": {"type": "string", "description": "New status"},
-                "priority": {"type": "string", "description": "New priority"},
-                "assignee": {"type": "string", "description": "New assignee"},
-                "labels": {"type": "array", "items": {"type": "string"}},
-                "add_reaction": {
-                    "type": "string",
-                    "description": "Reaction to add (GitHub: eyes, +1, heart, hooray, rocket, laugh, confused, -1). GitLab issues do not support reactions.",
-                },
-                "remove_reaction": {
-                    "type": "string",
-                    "description": "Reaction to remove (same names as add_reaction)",
-                },
-            },
-            "required": ["issue"],
-        },
+        "schema": UPDATE_ISSUE_SCHEMA,
     },
     {
         "name": "search",

@@ -15,6 +15,34 @@ class CRUDFlowExecutionLog(CRUDBase[models.FlowExecutionLog]):
     def __init__(self) -> None:
         super().__init__(model=models.FlowExecutionLog)
 
+    def list_by_type(
+        self,
+        db: Session,
+        *,
+        execution_id: uuid.UUID,
+        log_type: str,
+        limit: int = 200,
+    ) -> List[models.FlowExecutionLog]:
+        """Log rows of one kind for one execution, oldest first.
+
+        Small, bounded and typed, because some log rows are state a later
+        turn reads back (a refused delegation is the first: it creates no
+        execution row, so the parent's timeline is where it lives).
+        """
+        query = (
+            select(models.FlowExecutionLog)
+            .filter(
+                models.FlowExecutionLog.execution_id == execution_id,
+                models.FlowExecutionLog.log_type == log_type,
+            )
+            .order_by(
+                models.FlowExecutionLog.timestamp.asc(),
+                models.FlowExecutionLog.id.asc(),
+            )
+            .limit(max(1, limit))
+        )
+        return list(db.execute(query).scalars().all())
+
     def get_by_execution_id(
         self,
         db: Session,

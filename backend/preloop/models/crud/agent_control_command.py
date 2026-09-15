@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Union
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from preloop.models import models
@@ -14,6 +15,28 @@ from preloop.models import models
 from .base import CRUDBase
 
 AgentControlCommand = models.AgentControlCommand
+
+
+@dataclass(frozen=True)
+class SessionNoteSummary:
+    """What one runtime session's notes look like from a list row.
+
+    The count answers "was this session steered", the author answers "by
+    whom", and the credential kind is what separates a note a person wrote
+    from one another agent wrote.
+    """
+
+    note_count: int
+    latest_author_display: Optional[str]
+    latest_author_auth_method: Optional[str]
+    latest_note_at: Optional[datetime]
+
+
+# Pending still will, delivered and acked already did. Cancelled, expired and
+# failed never steered, so they do not belong on the sessions-list badge.
+# ``list_notes`` still returns those rows: the composer is the history of what
+# was written, including a withdrawal.
+NOTE_STATUSES_THAT_STEER = ("pending", "delivered", "acked")
 
 
 class CRUDAgentControlCommand(CRUDBase[AgentControlCommand]):
@@ -333,6 +356,7 @@ class CRUDAgentControlCommand(CRUDBase[AgentControlCommand]):
         created_by_user_id: Optional[Union[uuid.UUID, str]],
         expires_at: Optional[datetime],
         source: Optional[str] = None,
+        created_by_managed_agent_id: Optional[Union[uuid.UUID, str]] = None,
         commit: bool = True,
     ) -> AgentControlCommand:
         """Persist one operator note as pending, before any delivery.
@@ -340,6 +364,10 @@ class CRUDAgentControlCommand(CRUDBase[AgentControlCommand]):
         The A2A-shaped ``envelope`` is stored verbatim so a future A2A
         endpoint can hand back exactly what was recorded, and so the delivered
         text can be rebuilt from the row alone.
+
+        ``created_by_managed_agent_id`` is the author when the author is an
+        agent (the ``send_note`` tool) rather than a person; the two author
+        columns are never both set.
         """
         record = AgentControlCommand(
             created_at=datetime.now(timezone.utc).replace(tzinfo=None),
@@ -355,6 +383,7 @@ class CRUDAgentControlCommand(CRUDBase[AgentControlCommand]):
             status="pending",
             source=source,
             created_by_user_id=created_by_user_id,
+            created_by_managed_agent_id=created_by_managed_agent_id,
             expires_at=expires_at,
         )
         db.add(record)
@@ -392,7 +421,13 @@ class CRUDAgentControlCommand(CRUDBase[AgentControlCommand]):
         runtime_session_id: Optional[Union[uuid.UUID, str]] = None,
         limit: int = 50,
     ) -> List[AgentControlCommand]:
-        """List notes for an agent or a session, newest first."""
+        """List notes for an agent or a session, newest first.
+
+        This is the composer history, so withdrawn, expired and failed notes
+        stay in the list. The sessions-list badge uses
+        ``note_summaries_for_sessions``, which counts only notes that steered
+        or still will.
+        """
         query = db.query(AgentControlCommand).filter(
             AgentControlCommand.account_id == account_id,
             AgentControlCommand.kind == "note",
@@ -526,23 +561,41 @@ class CRUDAgentControlCommand(CRUDBase[AgentControlCommand]):
         db: Session,
         *,
         account_id: Union[uuid.UUID, str],
-        created_by_user_id: Union[uuid.UUID, str],
+        created_by_user_id: Optional[Union[uuid.UUID, str]] = None,
         since: datetime,
         managed_agent_id: Optional[Union[uuid.UUID, str]] = None,
         runtime_session_id: Optional[Union[uuid.UUID, str]] = None,
+        created_by_managed_agent_id: Optional[Union[uuid.UUID, str]] = None,
     ) -> int:
         """Count one author's recent notes to one agent or session.
 
         Agent scope is the default rate-limit key. When the target has no
         managed agent (a flow execution on an account credential), the count
         is per session so that path is not unlimited.
+
+        The author is either a user or, for notes written by the ``send_note``
+        tool, a managed agent. Naming neither is a programming error: the
+        count would be every author's notes, which is not a rate limit.
         """
+        if (created_by_user_id is None) == (created_by_managed_agent_id is None):
+            raise ValueError(
+                "Name exactly one author: created_by_user_id or "
+                "created_by_managed_agent_id"
+            )
         query = db.query(AgentControlCommand).filter(
             AgentControlCommand.account_id == account_id,
-            AgentControlCommand.created_by_user_id == created_by_user_id,
             AgentControlCommand.kind == "note",
             AgentControlCommand.created_at >= since,
         )
+        if created_by_user_id is not None:
+            query = query.filter(
+                AgentControlCommand.created_by_user_id == created_by_user_id
+            )
+        else:
+            query = query.filter(
+                AgentControlCommand.created_by_managed_agent_id
+                == created_by_managed_agent_id
+            )
         if managed_agent_id is not None:
             query = query.filter(
                 AgentControlCommand.managed_agent_id == managed_agent_id
@@ -552,3 +605,78 @@ class CRUDAgentControlCommand(CRUDBase[AgentControlCommand]):
                 AgentControlCommand.runtime_session_id == runtime_session_id
             )
         return int(query.count())
+
+    def note_summaries_for_sessions(
+        self,
+        db: Session,
+        *,
+        account_id: Union[uuid.UUID, str],
+        runtime_session_ids: Iterable[Union[uuid.UUID, str]],
+    ) -> Dict[str, SessionNoteSummary]:
+        """Summarise the notes on each of these sessions, in one query.
+
+        The sessions list shows "this session was noted, and by whom", so it
+        needs a count and the newest author per row. One statement covers the
+        whole page: the window functions carry the count beside the newest
+        row, so a page of fifty sessions reads the note index once instead of
+        once per row. Sessions with no note are simply absent from the result,
+        which is what lets a caller render nothing for them.
+
+        Only notes that steered (or still will) count: cancelled, expired and
+        failed rows never reached the agent, so a session whose only note was
+        withdrawn does not show as steered. The composer list is the other
+        surface and still includes those rows as history.
+        """
+        wanted: List[uuid.UUID] = []
+        seen: set[uuid.UUID] = set()
+        for value in runtime_session_ids or ():
+            try:
+                session_id = (
+                    value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+                )
+            except (AttributeError, TypeError, ValueError):
+                # A synthetic list row (standalone API calls) has no session.
+                continue
+            if session_id not in seen:
+                seen.add(session_id)
+                wanted.append(session_id)
+        if not wanted:
+            return {}
+
+        newest = func.row_number().over(
+            partition_by=AgentControlCommand.runtime_session_id,
+            order_by=(
+                AgentControlCommand.created_at.desc(),
+                AgentControlCommand.id.desc(),
+            ),
+        )
+        note_count = func.count().over(
+            partition_by=AgentControlCommand.runtime_session_id
+        )
+        ranked = (
+            select(
+                AgentControlCommand.runtime_session_id.label("runtime_session_id"),
+                AgentControlCommand.author_display.label("author_display"),
+                AgentControlCommand.author_auth_method.label("author_auth_method"),
+                AgentControlCommand.created_at.label("created_at"),
+                note_count.label("note_count"),
+                newest.label("rank"),
+            )
+            .where(
+                AgentControlCommand.account_id == account_id,
+                AgentControlCommand.kind == "note",
+                AgentControlCommand.status.in_(NOTE_STATUSES_THAT_STEER),
+                AgentControlCommand.runtime_session_id.in_(wanted),
+            )
+            .subquery()
+        )
+        rows = db.execute(select(ranked).where(ranked.c.rank == 1)).all()
+        return {
+            str(row.runtime_session_id): SessionNoteSummary(
+                note_count=int(row.note_count),
+                latest_author_display=row.author_display,
+                latest_author_auth_method=row.author_auth_method,
+                latest_note_at=row.created_at,
+            )
+            for row in rows
+        }

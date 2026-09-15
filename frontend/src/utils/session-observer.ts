@@ -57,6 +57,11 @@ export interface ObservedSession {
   optimizationWasteScore: number | null;
   optimizationPotentialSavingsTokens: number | null;
   optimizationPotentialSavingsUsd: number | null;
+  /** How many notes this session received; 0 for a session nobody steered. */
+  noteCount: number;
+  latestNoteAuthorDisplay: string | null;
+  latestNoteAuthorAuthMethod: string | null;
+  latestNoteAt: string | null;
   raw: unknown;
 }
 
@@ -281,6 +286,13 @@ export function normalizeObservedSession(
       typeof row.optimization_potential_savings_usd === 'number'
         ? row.optimization_potential_savings_usd
         : null,
+    noteCount:
+      typeof row.note_count === 'number' && row.note_count > 0
+        ? row.note_count
+        : 0,
+    latestNoteAuthorDisplay: asString(row.latest_note_author_display),
+    latestNoteAuthorAuthMethod: asString(row.latest_note_author_auth_method),
+    latestNoteAt: asString(row.latest_note_at),
     raw: session,
   };
 }
@@ -317,6 +329,14 @@ export function normalizeObservedSessions(
           new Date(existing.lastActivityAt).getTime())
     ) {
       existing.lastActivityAt = session.lastActivityAt;
+    }
+    // Note counts are per session, already counted by the server, so two rows
+    // for one session carry the same figure: take it rather than add it.
+    if (!existing.noteCount && session.noteCount) {
+      existing.noteCount = session.noteCount;
+      existing.latestNoteAuthorDisplay = session.latestNoteAuthorDisplay;
+      existing.latestNoteAuthorAuthMethod = session.latestNoteAuthorAuthMethod;
+      existing.latestNoteAt = session.latestNoteAt;
     }
   }
   return Array.from(byId.values()).sort((left, right) => {
