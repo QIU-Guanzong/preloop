@@ -18,6 +18,7 @@ from preloop.models.crud.entitlement import (
     entitlement_clause,
     is_entitled_subscription,
     is_expired_trial,
+    is_live_trial,
     is_stale_subscription,
     trial_ended_at,
 )
@@ -62,8 +63,24 @@ def test_entitlement_rule(status, period_end, entitled):
 def test_no_subscription_is_never_entitled():
     assert is_entitled_subscription(None, now=NOW) is False
     assert is_expired_trial(None, now=NOW) is False
+    assert is_live_trial(None, now=NOW) is False
     assert trial_ended_at(None) is None
     assert is_stale_subscription(None, now=NOW) is False
+
+
+@pytest.mark.parametrize(
+    "status, period_end, live",
+    [
+        ("trialing", PAST, False),
+        ("trialing", FUTURE, True),
+        ("active", FUTURE, False),
+        ("past_due", FUTURE, False),
+        (None, None, False),
+    ],
+)
+def test_is_live_trial(status, period_end, live):
+    subscription = None if status is None else _row(status, period_end)
+    assert is_live_trial(subscription, now=NOW) is live
 
 
 def test_trial_expiry_is_exact_and_timezone_naive_rows_read_as_utc():
