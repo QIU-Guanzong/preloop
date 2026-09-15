@@ -193,4 +193,6 @@ def test_flow_runners_revision_chains_onto_approval_rule_context() -> None:
         "20260913_repricing_job",
         "20260912_hosted_spend",
     }
-    assert script.get_heads() == ["20260914_pricing_merge"]
+    queued_reason = script.get_revision("20260915_queued_reason")
+    assert queued_reason.down_revision == "20260914_pricing_merge"
+    assert script.get_heads() == ["20260915_queued_reason"]

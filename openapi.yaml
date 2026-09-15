@@ -15327,6 +15327,13 @@ components:
           description: Coarse machine-readable failure class for terminal executions
             (runner_conflict, model_transient, agent_error, ...). Null when the execution
             succeeded, is still running, or predates the field.
+        queued_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Queued Reason
+          description: Why a PENDING execution has not been admitted yet (account_concurrency_cap).
+            Null for every other row.
         retry_of_execution_id:
           anyOf:
           - type: string
@@ -17257,6 +17264,13 @@ components:
           description: Coarse machine-readable failure class for terminal executions
             (runner_conflict, model_transient, agent_error, ...). Null when the execution
             succeeded, is still running, or predates the field.
+        queued_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Queued Reason
+          description: Why a PENDING execution has not been admitted yet (account_concurrency_cap).
+            Null for every other row.
         retry_of_execution_id:
           anyOf:
           - type: string
@@ -17523,6 +17537,14 @@ components:
             model_config, no_confirmation, setup_failed, tool_error, agent_error,
             timeout, cancelled, unknown. Null for successful or still-running executions,
             and for executions that predate this field.'
+        queued_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Queued Reason
+          description: 'Why a PENDING execution has not been admitted yet: account_concurrency_cap
+            when the account already has its maximum number of executions running.
+            Cleared when the execution is claimed; null for every other row.'
         retry_of_execution_id:
           anyOf:
           - type: string
