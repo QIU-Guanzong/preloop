@@ -148,6 +148,36 @@ describe('FlowExecutionView', () => {
           );
         }
 
+        // Every execution page asks what the run delegated (#634). Nothing
+        // in this file delegates, so the answer is an empty tree.
+        if (url.endsWith('/tree') && method === 'GET') {
+          const id = url.split('/').slice(-2)[0];
+          return new Response(
+            JSON.stringify({
+              execution_id: id,
+              root_execution_id: id,
+              execution: {
+                id,
+                flow_id: 'flow-1',
+                status: 'SUCCEEDED',
+                start_time: '2026-03-09T10:00:00Z',
+                estimated_cost: 0,
+              },
+              executions: [],
+              rollup: {
+                total: 0,
+                by_status: {},
+                completed: 0,
+                total_tokens: 0,
+                total_estimated_cost: 0,
+                total_tool_calls: 0,
+              },
+              truncated: false,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+
         if (
           url.endsWith('/api/v1/flows/executions/exec-1') &&
           method === 'GET'
@@ -1894,5 +1924,41 @@ describe('FlowExecutionView', () => {
     release();
     await stopping;
     expect((element as any).execution.status).to.equal('STOPPED');
+  });
+  describe('delegation tree', () => {
+    const treePanel = (element: FlowExecutionView) =>
+      element.shadowRoot!.querySelector('preloop-execution-tree') as any;
+
+    it('hands the tree panel the execution on the page', async () => {
+      const element = await load('exec-1');
+
+      const panel = treePanel(element);
+      expect(panel).to.exist;
+      expect(panel.getAttribute('execution-id')).to.equal('exec-1');
+      expect(panel.executionId).to.equal('exec-1');
+    });
+
+    it('leaves the page as it was for a run that delegated nothing', async () => {
+      const element = await load('exec-1');
+      const panel = treePanel(element);
+      await waitUntil(() => !panel.loading);
+      await panel.updateComplete;
+
+      // The empty state, and no tree section.
+      expect(
+        panel.shadowRoot.querySelector('[data-testid="execution-tree-empty"]')
+      ).to.exist;
+      expect(panel.shadowRoot.querySelector('[data-testid="execution-tree"]'))
+        .to.not.exist;
+
+      // Everything the page already did, unchanged.
+      expect(element.shadowRoot!.querySelector('[data-testid="summary-strip"]'))
+        .to.exist;
+      expect(stripValue(element, 'strip-duration')).to.equal('2m 0s');
+      expect(stripValue(element, 'strip-cost')).to.equal('$0.10');
+      expect(
+        element.shadowRoot!.querySelectorAll('sl-tab-group sl-tab').length
+      ).to.equal(5);
+    });
   });
 });
