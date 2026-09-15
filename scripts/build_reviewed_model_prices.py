@@ -18,15 +18,65 @@ from typing import Any
 from preloop.services.reviewed_model_price_refresh import PRICE_FIELDS, validate_feed
 
 
-def build_feed(catalog: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+def build_feed(
+    catalog: dict[str, Any],
+    manifest: dict[str, Any],
+    alibaba_catalogs: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Copy reviewed rates/policies, requiring per-model provider evidence."""
     payload = {**manifest, "models": {}}
     for model, evidence in manifest["models"].items():
-        entry = catalog[model]
-        if "prices" in evidence or "price_policy" in evidence:
+        if any(
+            field in evidence
+            for field in (
+                "prices",
+                "price_policy",
+                "alibaba_policy",
+                "price_policy_history",
+            )
+        ):
             raise ValueError(
                 "Manifest prices/policy must come from the reviewed catalog"
             )
+        if evidence["policy"] == "alibaba_regional_tokens":
+            prefix, region, identifier = model.split("/", 2)
+            if (
+                prefix != "alibaba"
+                or not alibaba_catalogs
+                or region not in alibaba_catalogs
+            ):
+                raise ValueError("Alibaba feed needs an explicit regional seed")
+            seed = alibaba_catalogs[region]
+            meta = seed.get("_meta", {})
+            expected_region = (
+                "singapore" if region == "singapore-international" else region
+            )
+            if meta.get("currency") != "USD" or meta.get("region") != expected_region:
+                raise ValueError("Alibaba seed currency or region mismatch")
+            entry = seed["models"][identifier]
+            # Copy shared cache fields into each tier without inventing absent rates.
+            tiers = [
+                {
+                    **{
+                        key: entry[key]
+                        for key in ("implicit_read", "explicit_read", "creation")
+                        if key in entry
+                    },
+                    **tier,
+                }
+                for tier in entry["tiers"]
+            ]
+            payload["models"][model] = {
+                **evidence,
+                "alibaba_policy": {
+                    "region": region,
+                    "currency": "USD",
+                    "model_identifier": identifier,
+                    "tiers": tiers,
+                },
+            }
+            continue
+        entry = catalog[model]
         if evidence["policy"] == "deepseek_utc_bands":
             payload["models"][model] = {
                 **evidence,
@@ -49,9 +99,24 @@ def main() -> int:
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--alibaba-catalog",
+        action="append",
+        default=[],
+        metavar="REGION=PATH",
+        help="Reviewed USD regional seed; repeat for multiple regions",
+    )
     args = parser.parse_args()
+    alibaba_catalogs = {}
+    for source in args.alibaba_catalog:
+        region, path = source.split("=", 1)
+        if region in alibaba_catalogs:
+            parser.error("Duplicate Alibaba region")
+        alibaba_catalogs[region] = json.loads(Path(path).read_text())
     payload = build_feed(
-        json.loads(args.catalog.read_text()), json.loads(args.manifest.read_text())
+        json.loads(args.catalog.read_text()),
+        json.loads(args.manifest.read_text()),
+        alibaba_catalogs,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")

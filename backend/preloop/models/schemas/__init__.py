@@ -1,4 +1,5 @@
 from .flow import (
+    CallableFlowEntry,
     FlowCreate,
     FlowFailureNotifications,
     FlowNotifications,
@@ -70,6 +71,7 @@ __all__ = [
     "BatchExecutionsResponse",
     "BatchRollup",
     "BatchTriggerResponse",
+    "CallableFlowEntry",
     "FlowMatrixEntry",
     "FlowCreate",
     "FlowFailureNotifications",

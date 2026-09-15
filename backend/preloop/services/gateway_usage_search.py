@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -13,6 +15,64 @@ from preloop.models.models.gateway_usage_search_document import (
     GatewayUsageSearchDocument,
 )
 from preloop.utils.request_fingerprint import public_request_fingerprint
+
+# Runs of non-whitespace, scanned lazily so a large value is never split
+# into every word it contains.
+_WHITESPACE_RUN = re.compile(r"\S+")
+
+
+class _LineBuffer:
+    """Document lines with a hard ceiling on count and total characters.
+
+    The flattening pass used to run to the end of the payload and throw the
+    excess away afterwards, so a multi-megabyte response paid for text work
+    and allocations it could never use. This stops at the first line past
+    the ceiling instead.
+    """
+
+    def __init__(self, *, max_lines: int, max_chars: int) -> None:
+        self._lines: list[str] = []
+        self._chars = 0
+        self._max_lines = max_lines
+        self._max_chars = max_chars
+        self.truncated = False
+
+    def __len__(self) -> int:
+        return len(self._lines)
+
+    @property
+    def full(self) -> bool:
+        """Whether the document has reached either ceiling."""
+        return len(self._lines) >= self._max_lines or self._chars >= self._max_chars
+
+    def append(self, line: str, *, force: bool = False) -> None:
+        """Add one line, unless the document is already full."""
+        if self.full and not force:
+            self.truncated = True
+            return
+        self._lines.append(line)
+        self._chars += len(line) + 1
+
+    def render(self) -> str:
+        """Join the lines, flagging a document that lost content."""
+        text = "\n".join(self._lines)
+        if self.truncated:
+            return text + "\ntruncated: true"
+        return text
+
+
+@dataclass(frozen=True)
+class GatewayUsageIndexDocument:
+    """A prepared corpus row: an id plus bounded text and metadata.
+
+    Deliberately holds no payloads. Once one of these exists the request and
+    response bodies it was derived from can be released, which is what lets
+    the write happen off the response path.
+    """
+
+    api_usage_id: str
+    searchable_text: str
+    meta_data: dict[str, Any]
 
 
 class GatewayUsageSearchService:
@@ -43,13 +103,17 @@ class GatewayUsageSearchService:
     ) -> str:
         """Build a normalized plain-text document for one gateway interaction."""
         meta_data = usage.meta_data or {}
-        lines: list[str] = [
+        lines = _LineBuffer(
+            max_lines=self.MAX_LINE_COUNT, max_chars=self.MAX_TEXT_CHARS
+        )
+        for header in (
             "kind: gateway_interaction",
             f"endpoint: {usage.endpoint}",
             f"method: {usage.method}",
             f"status_code: {usage.status_code}",
             f"outcome: {self._derive_outcome(usage.status_code)}",
-        ]
+        ):
+            lines.append(header)
 
         for key, value in (
             ("provider_name", usage.provider_name),
@@ -72,9 +136,9 @@ class GatewayUsageSearchService:
         self._append_payload(lines, "response", response_payload)
         response_line_count = len(lines) - response_count_before
 
-        lines.append(f"request_line_count: {request_line_count}")
-        lines.append(f"response_line_count: {response_line_count}")
-        return self._truncate_document("\n".join(lines))
+        lines.append(f"request_line_count: {request_line_count}", force=True)
+        lines.append(f"response_line_count: {response_line_count}", force=True)
+        return self._truncate_document(lines.render())
 
     def build_document_metadata(
         self,
@@ -132,14 +196,20 @@ class GatewayUsageSearchService:
             meta_data=meta_data,
         )
 
-    def auto_index_interaction(
+    def build_index_document(
         self,
         *,
         usage: ApiUsage,
         request_payload: Optional[dict[str, Any]],
         response_payload: Optional[dict[str, Any]],
-    ) -> Optional[GatewayUsageSearchDocument]:
-        """Index one gateway interaction when the explicit policy allows it."""
+    ) -> Optional[GatewayUsageIndexDocument]:
+        """Prepare a corpus row for one interaction, or ``None`` when policy says no.
+
+        The payloads are read once and never copied: the output is bounded by
+        ``MAX_LINE_COUNT`` lines of at most ``MAX_VALUE_CHARS`` each, capped
+        again at ``MAX_TEXT_CHARS``. Callers on the response path can release
+        the payloads as soon as this returns.
+        """
         if not settings.model_gateway_auto_index_interactions:
             return None
         if (
@@ -148,114 +218,121 @@ class GatewayUsageSearchService:
         ):
             return None
 
-        return self.index_interaction(
-            usage=usage,
-            request_payload=self._prepare_payload_for_indexing(request_payload),
-            response_payload=self._prepare_payload_for_indexing(response_payload),
+        indexable_request = self._payload_for_indexing(request_payload)
+        indexable_response = self._payload_for_indexing(response_payload)
+        return GatewayUsageIndexDocument(
+            api_usage_id=str(usage.id),
+            searchable_text=self.build_searchable_text(
+                usage=usage,
+                request_payload=indexable_request,
+                response_payload=indexable_response,
+            ),
+            meta_data=self.build_document_metadata(
+                usage=usage,
+                request_payload=indexable_request,
+                response_payload=indexable_response,
+            ),
         )
 
+    def persist_index_document(
+        self, document: GatewayUsageIndexDocument
+    ) -> GatewayUsageSearchDocument:
+        """Write one prepared corpus row."""
+        if self.db is None:
+            raise ValueError("GatewayUsageSearchService requires a database session")
+        return crud_gateway_usage_search_document.upsert_for_api_usage_id(
+            self.db,
+            api_usage_id=document.api_usage_id,
+            searchable_text=document.searchable_text,
+            meta_data=document.meta_data,
+        )
+
+    def auto_index_interaction(
+        self,
+        *,
+        usage: ApiUsage,
+        request_payload: Optional[dict[str, Any]],
+        response_payload: Optional[dict[str, Any]],
+    ) -> Optional[GatewayUsageSearchDocument]:
+        """Index one gateway interaction inline when the policy allows it.
+
+        Kept for callers that are already off the response path (imports,
+        backfills, tests). The gateway itself queues instead, see
+        ``preloop.services.gateway_usage_index_queue``.
+        """
+        document = self.build_index_document(
+            usage=usage,
+            request_payload=request_payload,
+            response_payload=response_payload,
+        )
+        if document is None:
+            return None
+        return self.persist_index_document(document)
+
     @classmethod
-    def _prepare_payload_for_indexing(
+    def _payload_for_indexing(
         cls, payload: Optional[dict[str, Any]]
     ) -> Optional[dict[str, Any]]:
-        if not isinstance(payload, dict):
+        """Decide whether a payload may be indexed, without copying it.
+
+        An earlier version deep-copied both payloads into sanitized dicts
+        before flattening them, which doubled the memory a large interaction
+        cost at exactly the moment the process was holding the most. Secret
+        keys are redacted during flattening instead, so the copy bought
+        nothing.
+        """
+        if not isinstance(payload, dict) or not payload:
             return None
         if not settings.model_gateway_capture_content:
             return None
-        sanitized_payload = cls._sanitize_payload_for_indexing(payload)
-        if not isinstance(sanitized_payload, dict) or not sanitized_payload:
-            return None
-        return sanitized_payload
-
-    @classmethod
-    def _sanitize_payload_for_indexing(
-        cls, value: Any, *, inside_content_field: bool = False
-    ) -> Any:
-        if value is None:
-            return None
-
-        if isinstance(value, dict):
-            if value.get("redacted") is True:
-                return None
-
-            sanitized: dict[str, Any] = {}
-            for key, item in value.items():
-                if cls._is_secret_key(key):
-                    sanitized[key] = cls.REDACTED_VALUE
-                    continue
-
-                sanitized_item = cls._sanitize_payload_for_indexing(
-                    item,
-                    inside_content_field=inside_content_field
-                    or key.lower() in cls._CONTENT_FIELD_NAMES,
-                )
-                if sanitized_item is not None:
-                    sanitized[key] = sanitized_item
-            return sanitized or None
-
-        if isinstance(value, list):
-            sanitized_items = [
-                sanitized_item
-                for item in value
-                if (
-                    sanitized_item := cls._sanitize_payload_for_indexing(
-                        item, inside_content_field=inside_content_field
-                    )
-                )
-                is not None
-            ]
-            return sanitized_items or None
-
-        if inside_content_field and not settings.model_gateway_capture_content:
-            return None
-
-        normalized = cls._normalize_scalar(value)
-        if not normalized:
-            return None
-        return normalized
+        return payload
 
     @classmethod
     def _append_payload(
-        cls, lines: list[str], prefix: str, payload: Optional[dict[str, Any]]
+        cls, lines: _LineBuffer, prefix: str, payload: Optional[dict[str, Any]]
     ) -> None:
         if payload is None:
             return
         cls._append_value(lines, prefix, payload)
 
     @classmethod
-    def _append_value(cls, lines: list[str], prefix: str, value: Any) -> None:
-        if len(lines) >= cls.MAX_LINE_COUNT or value is None:
+    def _append_value(cls, lines: _LineBuffer, prefix: str, value: Any) -> None:
+        if lines.full or value is None:
             return
 
         if isinstance(value, dict):
-            if value.get("redacted") is True and "length" in value:
-                lines.append(f"{prefix}: [redacted length={value['length']}]")
+            if value.get("redacted") is True:
+                # A redacted stand-in carries no content worth indexing; the
+                # length, when the redactor recorded one, is the only useful
+                # part of it.
+                if "length" in value:
+                    lines.append(f"{prefix}: [redacted length={value['length']}]")
                 return
 
             for key in sorted(value):
                 next_prefix = f"{prefix}.{key}"
                 if cls._is_secret_key(key):
                     lines.append(f"{next_prefix}: {cls.REDACTED_VALUE}")
-                    if len(lines) >= cls.MAX_LINE_COUNT:
+                    if lines.full:
                         return
                     continue
                 cls._append_value(lines, next_prefix, value[key])
-                if len(lines) >= cls.MAX_LINE_COUNT:
+                if lines.full:
                     return
             return
 
         if isinstance(value, list):
             for index, item in enumerate(value):
                 cls._append_value(lines, f"{prefix}.{index}", item)
-                if len(lines) >= cls.MAX_LINE_COUNT:
+                if lines.full:
                     return
             return
 
         cls._append_scalar(lines, prefix, value)
 
     @classmethod
-    def _append_scalar(cls, lines: list[str], key: str, value: Any) -> None:
-        if len(lines) >= cls.MAX_LINE_COUNT or value is None:
+    def _append_scalar(cls, lines: _LineBuffer, key: str, value: Any) -> None:
+        if lines.full or value is None:
             return
 
         normalized = cls._normalize_scalar(value)
@@ -265,12 +342,36 @@ class GatewayUsageSearchService:
 
     @classmethod
     def _normalize_scalar(cls, value: Any) -> str:
-        text = " ".join(str(value).split())
-        if not text:
+        """Collapse whitespace in at most ``MAX_VALUE_CHARS`` of a value.
+
+        Reads lazily rather than splitting the whole value: a megabyte of
+        response text used to become a list of every word in it before the
+        first ``MAX_VALUE_CHARS`` were kept, which was the single largest
+        allocation on the gateway response path.
+        """
+        text = value if isinstance(value, str) else str(value)
+        pieces: list[str] = []
+        used = 0
+        truncated = False
+        for match in _WHITESPACE_RUN.finditer(text):
+            token = match.group(0)
+            separator = 1 if pieces else 0
+            remaining = cls.MAX_VALUE_CHARS - used - separator
+            if remaining <= 0:
+                truncated = True
+                break
+            if len(token) > remaining:
+                pieces.append(token[:remaining])
+                truncated = True
+                break
+            pieces.append(token)
+            used += separator + len(token)
+        if not pieces:
             return ""
-        if len(text) > cls.MAX_VALUE_CHARS:
-            return text[: cls.MAX_VALUE_CHARS] + "... [truncated]"
-        return text
+        normalized = " ".join(pieces)
+        if truncated:
+            return normalized + "... [truncated]"
+        return normalized
 
     @classmethod
     def _truncate_document(cls, value: str) -> str:

@@ -17,6 +17,7 @@ from preloop.models.crud import (
     crud_api_usage,
     crud_flow,
 )
+from preloop.models.crud.entitlement import is_live_trial
 from preloop.models.crud.plan import subscription as crud_subscription
 from preloop.models.models.ai_model import AIModel
 from preloop.models.models.flow import Flow
@@ -176,7 +177,7 @@ class ModelGatewayBudgetService:
         )
         if (
             subscription
-            and subscription.status == "trialing"
+            and is_live_trial(subscription)
             and self._is_built_in_hosted_model(ai_model)
         ):
             trial_hosted_model_limit_usd = max(
