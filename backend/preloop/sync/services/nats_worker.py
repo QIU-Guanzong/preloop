@@ -549,6 +549,55 @@ class PreloopSyncNatsWorker:
                     except asyncio.CancelledError:
                         raise
 
+    async def _flow_pool_has_capacity(self) -> Optional[bool]:
+        """Can the flow-execution pool take another execution right now?
+
+        Answered from JetStream, not from this process. One worker runs the
+        reaper pass for the whole pool now that the pass is leased, and its
+        own semaphore says nothing about its peers. Flow consumers with
+        messages still waiting to be delivered mean every replica is busy:
+        what was published last pass has not been picked up, so publishing
+        more of it is load with no progress behind it.
+
+        Returns:
+            False when flow tasks are already queued undelivered, True when
+            the queue is empty, None when JetStream could not be asked (the
+            reaper then runs its pass as before).
+        """
+        flow_subjects = {
+            f"preloop.sync.tasks.{task}" for task in FLOW_ORCHESTRATION_TASKS
+        }
+        flow_subs = [
+            sub
+            for subject, sub in self.subs
+            if subject in flow_subjects or subject == "preloop.sync.tasks.*"
+        ]
+        if not flow_subs:
+            return None
+
+        waiting = 0
+        answered = False
+        for sub in flow_subs:
+            try:
+                info = await sub.consumer_info()
+            except Exception:  # noqa: BLE001 - an unknown answer is not a failure
+                logger.debug(
+                    "Could not read consumer info for a flow subscription",
+                    exc_info=True,
+                )
+                continue
+            answered = True
+            waiting += int(getattr(info, "num_pending", 0) or 0)
+
+        if not answered:
+            return None
+        if waiting:
+            logger.debug(
+                "Flow-execution pool has %s undelivered task(s) queued: no free slot",
+                waiting,
+            )
+        return waiting == 0
+
     async def _stale_claim_reaper_loop(self) -> None:
         """Periodically re-dispatch stale/unclaimed active flow executions."""
         from preloop.config import settings
@@ -578,12 +627,13 @@ class PreloopSyncNatsWorker:
                 recovery_service = get_recovery_service()
                 db = next(get_db_session())
                 try:
-                    recovered = await recovery_service.recover_orphaned_executions(db)
-                    if recovered:
-                        logger.info(
-                            "Stale-claim reaper re-dispatched %s execution(s)",
-                            recovered,
-                        )
+                    # The pass is leased, so only one replica per interval
+                    # gets past this call; the rest return 0 immediately.
+                    # Counts are logged by the pass itself, in one line.
+                    await recovery_service.recover_orphaned_executions(
+                        db,
+                        capacity_probe=self._flow_pool_has_capacity,
+                    )
                 finally:
                     db.close()
             except asyncio.CancelledError:

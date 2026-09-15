@@ -1,7 +1,8 @@
 import logging
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from sqlalchemy import ColumnElement, and_, or_
 from sqlalchemy.orm import Session, joinedload, load_only, with_expression
@@ -1745,6 +1746,112 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             for row_account, count in query.group_by(models.Flow.account_id).all()
         }
 
+    @contextmanager
+    def stale_claim_reaper_lease(
+        self,
+        db: Session,
+        *,
+        holder: str = "",
+    ) -> Iterator[bool]:
+        """Hold "one stale-claim reaper pass at a time", instance wide.
+
+        Yields True to the single caller that took the lease and False to
+        every other caller, which then skips its pass. Losing is not an
+        error: the pass runs on a timer and the holder is doing the same
+        work.
+
+        A session-scoped ``pg_try_advisory_lock``, not a leased row: it is
+        released by ``pg_advisory_unlock`` on the way out, and by Postgres
+        itself if the holder's connection dies, so a crashed reaper cannot
+        wedge every replica the way an expiring row lease would until its
+        deadline passed. Non-Postgres dialects (single-process dev, SQLite
+        tests) always win the lease: there is no second reaper to exclude.
+
+        Args:
+            db: Database session; the lock lives on its connection.
+            holder: Optional worker id, logged so "who is reaping?" has an
+                answer.
+
+        Yields:
+            True when this caller may run the pass.
+        """
+        from sqlalchemy import text
+
+        from preloop.services.execution_reaper import STALE_CLAIM_REAPER_LOCK_KEY
+
+        bind = db.bind
+        if bind is None or bind.dialect.name != "postgresql":
+            yield True
+            return
+
+        acquired = bool(
+            db.execute(
+                text("SELECT pg_try_advisory_lock(hashtextextended(:key, 0))"),
+                {"key": STALE_CLAIM_REAPER_LOCK_KEY},
+            ).scalar()
+        )
+        if not acquired:
+            logger.debug(
+                "Stale-claim reaper lease is held elsewhere; %s skips this pass",
+                holder or "this worker",
+            )
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            try:
+                db.execute(
+                    text("SELECT pg_advisory_unlock(hashtextextended(:key, 0))"),
+                    {"key": STALE_CLAIM_REAPER_LOCK_KEY},
+                )
+                db.commit()
+            except Exception:  # noqa: BLE001 - the lock dies with the connection
+                logger.warning(
+                    "Failed to release the stale-claim reaper lease; it is "
+                    "released when this connection closes",
+                    exc_info=True,
+                )
+
+    def record_redispatch(
+        self,
+        db: Session,
+        *,
+        execution_ids: Iterable[Any],
+        now: Optional[datetime] = None,
+    ) -> int:
+        """Count a reaper re-publish against each execution.
+
+        The counter is what the backoff grows on, and it lives on the row
+        rather than in a worker process so every replica applies the same
+        schedule to the same execution.
+
+        Returns:
+            How many rows were updated.
+        """
+        from sqlalchemy import func
+
+        ids = [execution_id for execution_id in execution_ids]
+        if not ids:
+            return 0
+        moment = now or datetime.now(timezone.utc)
+        updated = (
+            db.query(FlowExecution)
+            .filter(FlowExecution.id.in_(ids))
+            .update(
+                {
+                    FlowExecution.redispatch_count: func.coalesce(
+                        FlowExecution.redispatch_count, 0
+                    )
+                    + 1,
+                    FlowExecution.last_redispatch_at: moment,
+                },
+                synchronize_session=False,
+            )
+        )
+        db.commit()
+        return int(updated or 0)
+
     def get_queued_reason(self, db: Session, *, execution_id: Any) -> Optional[str]:
         """Why this execution has not been admitted yet, or None."""
         return (
@@ -1881,6 +1988,12 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         row.orchestrator_claimed_at = now
         row.orchestrator_heartbeat_at = now
         row.queued_reason = None
+        # A claim is progress, so the reaper's backoff for this execution
+        # starts again from zero. Without this, a run that queued for an hour
+        # and then died on its new owner would wait out a fifteen minute gap
+        # before anyone adopted it.
+        row.redispatch_count = 0
+        row.last_redispatch_at = None
         db.add(row)
         db.commit()
         db.refresh(row)
