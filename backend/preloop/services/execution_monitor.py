@@ -84,6 +84,11 @@ class ExecutionMonitor:
             except Exception as e:
                 logger.error(f"Error sweeping parked executions: {e}", exc_info=True)
 
+            try:
+                await self._sweep_child_parks()
+            except Exception as e:
+                logger.error(f"Error sweeping child parks: {e}", exc_info=True)
+
             # Wait before next check
             try:
                 await asyncio.sleep(self.check_interval)
@@ -116,6 +121,27 @@ class ExecutionMonitor:
                 counts.get("expired", 0),
                 counts.get("resumed", 0),
                 counts.get("reminded", 0),
+            )
+
+    async def _sweep_child_parks(self):
+        """Resume parents whose children finished but whose resume never landed.
+
+        The completion path in the orchestrator resumes the parent directly,
+        so this sweep is the safety net for the run that crashed between
+        confirming its park and claiming it, for the child that died without
+        reaching its terminal notification, and for the parent whose child
+        wait deadline passed while a child is still running (it is resumed
+        anyway, with an expired record per unfinished child).
+        """
+        from preloop.services.flow_child_wait import sweep_child_parks
+
+        counts = await sweep_child_parks()
+        if any(counts.values()):
+            logger.info(
+                "Child park sweep: %s resumed, %s expired, %s reclaimed",
+                counts.get("resumed", 0),
+                counts.get("expired", 0),
+                counts.get("reclaimed", 0),
             )
 
     async def _check_stale_executions(self):

@@ -181,17 +181,27 @@ class FlowExecution(Base):
     # the packed session storage and invoke the CLI resume flag. Deliberately
     # NOT exposed on the execution response schemas.
     cli_session = Column(JSONB, nullable=True)
-    # Park state (status WAITING_FOR_HUMAN). An execution that raised a
-    # question a human has not answered yet holds no container, no runner and
-    # no worker: it is parked, and the decision resumes it as a new execution
-    # that natively continues this one's agent session.
+    # Park state (status WAITING_FOR_HUMAN or WAITING_FOR_CHILDREN). An
+    # execution that raised a question a human has not answered yet, or that
+    # is waiting for the flows it started with run_flow, holds no container,
+    # no runner and no worker: it is parked, and the decision (or the last
+    # child finishing) resumes it as a new execution that natively continues
+    # this one's agent session.
     #
-    # park_request_id is written by the approval path (a different process
-    # from the orchestrator) and is the signal the monitor loop polls, exactly
-    # like stop_requested_at. parked_at is stamped when the orchestrator has
-    # actually released the runtime, so "requested" and "parked" stay
-    # distinguishable.
+    # park_request_id is written by a different process from the orchestrator
+    # (the approval path, or the run_flow tool call) and is the signal the
+    # monitor loop polls, exactly like stop_requested_at. parked_at is
+    # stamped when the orchestrator has actually released the runtime, so
+    # "requested" and "parked" stay distinguishable.
     park_request_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    # What this run is parked on, from a closed vocabulary: "human" (an
+    # approval request, the id above is that request) or "children" (the
+    # executions it started with run_flow, the id above is the wait that
+    # groups them). The status says the same thing (WAITING_FOR_HUMAN /
+    # WAITING_FOR_CHILDREN), and this column is what the orchestrator reads
+    # while the row is still RUNNING, before either status is written. NULL
+    # on rows that predate the column, which are all human parks.
+    park_kind = Column(String(16), nullable=True)
     park_requested_at = Column(DateTime(timezone=True), nullable=True)
     parked_at = Column(DateTime(timezone=True), nullable=True)
     park_expires_at = Column(DateTime(timezone=True), nullable=True)

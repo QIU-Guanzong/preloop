@@ -57,6 +57,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by `FLOW_DELEGATION_MAX_DEPTH` (default 2) and
   `FLOW_DELEGATION_MAX_CHILDREN` (default 25, the matrix fan out ceiling).
   Docs at `docs/guide/flows/flow-delegation.md`.
+- `run_flow(wait=true)` waits for every child the calling execution has
+  started. It waits in process for `FLOW_DELEGATION_WAIT_SECONDS` (default
+  90) so a fast child never costs a park cycle, then parks the run on the
+  new `WAITING_FOR_CHILDREN` status: the container, the runner and the
+  runtime token are released and the flow timeout budget pauses, exactly as
+  a park on a human decision does. The parent resumes as a new execution
+  that natively continues the same agent session once every tracked child
+  is terminal (completed, failed, stopped or refused), with one completion
+  record per call in the trigger payload under `children` and a prompt block
+  with one row per call: execution id, flow, label, final state, cost and a
+  result pointer. The results arrive as that next turn, not as the return
+  value of the `run_flow` call, which is the same honest limitation the
+  human park has. A parent whose children are still running at
+  `FLOW_DELEGATION_CHILD_WAIT_SECONDS` (default 6 hours) resumes anyway with
+  an expired record for each of them; the children are not stopped. The
+  execution monitor sweep recovers a parent whose resume never landed, and
+  concurrent child completions resume it exactly once. Docs at
+  `docs/guide/flows/flow-delegation.md`.
 - Per-account flow-execution admission cap
   `FLOW_EXECUTION_MAX_RUNNING_PER_ACCOUNT` (default 3, Helm
   `flowExecution.maxRunningPerAccount`). An account may override it through

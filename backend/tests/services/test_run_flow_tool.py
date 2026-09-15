@@ -411,3 +411,119 @@ async def test_a_halted_account_answers_in_the_halts_own_words(mcp_server, monke
     result = await tool.fn(flow="Child Flow")
 
     assert result == "Error: account halted by kill switch"
+
+
+# --- waiting for children (#633) ------------------------------------------
+
+
+def _flow_identity():
+    return SimpleNamespace(
+        account_id="acct",
+        user_id="user",
+        flow_execution_id="exec-1",
+        runtime_session_id=None,
+        api_key_id=None,
+        api_key_name=None,
+    )
+
+
+async def test_wait_asks_for_the_children_of_this_execution(mcp_server, monkeypatch):
+    """The wait is about the caller's whole fan out, not this one child."""
+    tool = await mcp_server.get_tool(TOOL_NAME)
+    record = {
+        "id": "task-1",
+        "status": {"state": "TASK_STATE_SUBMITTED"},
+        "metadata": {"preloop.ai/executionId": "child-1"},
+    }
+    parked = json.dumps({"status": "parked_for_children"})
+    wait = AsyncMock(return_value=parked)
+    monkeypatch.setattr(
+        "preloop.services.dynamic_fastmcp_http.get_current_user_context",
+        _flow_identity,
+    )
+    monkeypatch.setattr(
+        "preloop.services.initialize_mcp.require_approval",
+        AsyncMock(return_value=(True, None)),
+    )
+    monkeypatch.setattr(
+        "preloop.services.flow_delegation_call.delegate_flow",
+        AsyncMock(return_value=record),
+    )
+    monkeypatch.setattr("preloop.services.flow_child_wait.wait_for_children", wait)
+    monkeypatch.setattr(
+        "preloop.models.db.session.get_db_session", lambda: iter([MagicMock()])
+    )
+
+    result = await tool.fn(flow="Child Flow", wait=True)
+
+    assert result == parked
+    assert wait.await_args.kwargs["parent_execution_id"] == "exec-1"
+    assert wait.await_args.kwargs["account_id"] == "acct"
+
+
+async def test_a_refused_call_with_wait_does_not_wait_for_anything(
+    mcp_server, monkeypatch
+):
+    """Nothing started, so there is nothing new to wait for: the reason wins."""
+    tool = await mcp_server.get_tool(TOOL_NAME)
+    record = {
+        "id": "attempt-1",
+        "status": {"state": "TASK_STATE_REJECTED"},
+        "metadata": {"preloop.ai/refusalReason": "fanout_exceeded"},
+    }
+    wait = AsyncMock()
+    monkeypatch.setattr(
+        "preloop.services.dynamic_fastmcp_http.get_current_user_context",
+        _flow_identity,
+    )
+    monkeypatch.setattr(
+        "preloop.services.initialize_mcp.require_approval",
+        AsyncMock(return_value=(True, None)),
+    )
+    monkeypatch.setattr(
+        "preloop.services.flow_delegation_call.delegate_flow",
+        AsyncMock(return_value=record),
+    )
+    monkeypatch.setattr("preloop.services.flow_child_wait.wait_for_children", wait)
+    monkeypatch.setattr(
+        "preloop.models.db.session.get_db_session", lambda: iter([MagicMock()])
+    )
+
+    result = await tool.fn(flow="Child Flow", wait=True)
+
+    assert json.loads(result) == record
+    wait.assert_not_awaited()
+
+
+async def test_the_default_call_still_never_waits(mcp_server, monkeypatch):
+    """Asynchronous by default: the old behaviour is the unchanged one."""
+    tool = await mcp_server.get_tool(TOOL_NAME)
+    wait = AsyncMock()
+    monkeypatch.setattr(
+        "preloop.services.dynamic_fastmcp_http.get_current_user_context",
+        _flow_identity,
+    )
+    monkeypatch.setattr(
+        "preloop.services.initialize_mcp.require_approval",
+        AsyncMock(return_value=(True, None)),
+    )
+    monkeypatch.setattr(
+        "preloop.services.flow_delegation_call.delegate_flow",
+        AsyncMock(return_value={"id": "task-1"}),
+    )
+    monkeypatch.setattr("preloop.services.flow_child_wait.wait_for_children", wait)
+    monkeypatch.setattr(
+        "preloop.models.db.session.get_db_session", lambda: iter([MagicMock()])
+    )
+
+    await tool.fn(flow="Child Flow")
+
+    wait.assert_not_awaited()
+
+
+async def test_the_wait_is_documented_where_an_agent_will_read_it():
+    """The closed schema carries the argument and its honest limitation."""
+    entry = _catalog_entry()
+    assert entry["schema"]["properties"]["wait"]["type"] == "boolean"
+    assert "next turn" in entry["schema"]["properties"]["wait"]["description"]
+    assert "parked" in entry["description"]

@@ -315,10 +315,12 @@ RUN_FLOW_TOOL: Dict[str, Any] = {
     "name": "run_flow",
     "description": (
         "Run another flow of this account as a child of the current "
-        "execution. Asynchronous: the call returns as soon as the child "
-        "execution row exists and never waits for the child to finish, so "
-        "read its progress with the execution id in the returned record. "
-        "The target must be named on the calling flow's callable flows "
+        "execution. Asynchronous by default: the call returns as soon as the "
+        "child execution row exists. Pass wait=true on the last call of a fan "
+        "out to wait for every child this execution started; if they are not "
+        "all done within a short window this execution is parked, holds no "
+        "container while they run, and resumes with one completion record per "
+        "child. The target must be named on the calling flow's callable flows "
         "allowlist; depth, cycles and the number of direct children are "
         "capped server side. Returns one A2A shaped task record as JSON. A "
         "refusal is a record too: state TASK_STATE_REJECTED with "
@@ -368,9 +370,21 @@ RUN_FLOW_TOOL: Dict[str, Any] = {
                 "type": "integer",
                 "description": (
                     "Optional window for the child, clamped to the calling "
-                    "execution's own remaining time. Recorded on the child; "
-                    "nothing blocks this turn on it, because this tool never "
-                    "waits."
+                    "execution's own remaining time. Recorded on the child."
+                ),
+            },
+            "wait": {
+                "type": "boolean",
+                "description": (
+                    "Wait for every child this execution has started, not "
+                    "only this one, then stop working: if they are all done "
+                    "within a short in process window their completion "
+                    "records are returned here, otherwise this execution is "
+                    "parked and resumes when the last child finishes (or when "
+                    "the child wait deadline passes, with the unfinished ones "
+                    "marked expired). The results arrive as the next turn of "
+                    "this run, not as the return value of this call. Defaults "
+                    "to false."
                 ),
             },
         },

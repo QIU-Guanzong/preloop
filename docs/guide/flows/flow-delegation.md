@@ -4,10 +4,11 @@ A flow execution can start another flow of the same account as a child of
 itself. The tool is `run_flow`, it is off by default, and every rule that
 decides whether a call is permitted runs on the server.
 
-Delegation is asynchronous today. `run_flow` returns as soon as the child
-execution row exists and never blocks the calling turn. Reading a child's
-result, and waiting for one, are separate changes; until they land a parent
-that needs an outcome polls the child execution it was handed.
+Delegation is asynchronous by default. `run_flow` returns as soon as the
+child execution row exists and never blocks the calling turn. A call that
+passes `wait` does wait, and the way it waits is a park: see
+[Waiting for children](#waiting-for-children). Reading a child's result on
+demand is a separate change.
 
 ## Turning it on for a flow
 
@@ -32,6 +33,7 @@ delegate at all.
 | `payload` | Trigger payload for the child, readable as `{{trigger_event.payload.<key>}}` |
 | `label` | Short label recorded on the child so siblings are distinguishable |
 | `timeout_seconds` | Window for the child, clamped to the caller's own remaining time |
+| `wait` | Wait for every child this execution has started, parking the run if they are slow. Default false |
 
 Model and harness overrides inside `payload` are stripped: a child runs on
 its own flow's routing, never on routing chosen by the calling agent.
@@ -83,6 +85,68 @@ refused by the halt exactly as a manual start is.
 
 An allowlist entry's own `max_children` is applied on top of the instance
 ceiling: whichever refuses first, refuses.
+
+## Waiting for children
+
+`run_flow(wait=true)` waits for every child the calling execution has
+started, not only the one that call created. A fan out is therefore started
+with several calls and waited for once, on the last of them.
+
+The wait has two phases.
+
+1. **In process.** For `FLOW_DELEGATION_WAIT_SECONDS` the call simply waits
+   and, if the children finish inside it, returns their completion records
+   as the result of the call. A fast child never costs a park cycle. This
+   mirrors the approval park after threshold.
+2. **Parked.** Past that window the execution is parked on
+   `WAITING_FOR_CHILDREN`: the container is released, the runner is freed,
+   the runtime token is retired and the flow's timeout budget pauses. The
+   run holds nothing while its children run. It is resumed as a new
+   execution that natively continues the same agent session when the last
+   tracked child reaches a terminal state.
+
+Terminal means finished, not successful: completed, failed, stopped and
+refused all release the parent. A parent that waits for six flows and gets
+four failures resumes with four failures, which is the point.
+
+### The honest limitation
+
+The results arrive as the **next turn** of the run, not as the return value
+of the `run_flow` call the agent made. No harness lets us inject a value as
+the return of a tool call in a session that was already killed. This is the
+same limitation the human park has: the resumed prompt carries a block with
+one row per call, and the machine readable records live in the trigger
+payload under `children`.
+
+```
+| execution | flow | label | final state | cost | result |
+| --- | --- | --- | --- | --- | --- |
+| 1a2b... | Dependency Audit | frontend | SUCCEEDED | $0.4120 | attached |
+| 3c4d... | Dependency Audit | backend | FAILED | $0.0900 | no result artifact |
+| 5e6f... | Dependency Audit | infra | REFUSED (fanout_exceeded) | not recorded | nothing ran |
+```
+
+A call that was refused before anything ran is a row too: the parent asked
+for it and never got it, so it is reported rather than silently missing.
+
+### When a child never finishes
+
+A parked parent has its own deadline, `FLOW_DELEGATION_CHILD_WAIT_SECONDS`.
+When it passes, the parent resumes anyway and every child that is still
+running is reported with an expired record saying so. The parent writes a
+report with declared coverage instead of the platform reporting a missing
+result. The children are left alone: stopping a parent's children is not
+part of this behaviour.
+
+If the resume never lands (a worker died between confirming the park and
+claiming it), the execution monitor's sweep picks the parent up and resumes
+it. Two children finishing in the same instant resume the parent exactly
+once: the claim is a single conditional update, and the loser does nothing.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `FLOW_DELEGATION_WAIT_SECONDS` | `90` | How long `run_flow(wait=true)` waits in process before parking the run. `0` parks immediately. |
+| `FLOW_DELEGATION_CHILD_WAIT_SECONDS` | `21600` | How long a parked parent waits for its children before it is resumed anyway with expired records. Six hours. |
 
 ## Reading the tree
 

@@ -204,4 +204,6 @@ def test_flow_runners_revision_chains_onto_approval_rule_context() -> None:
     }
     callable_flows = script.get_revision("20260915_flow_callable_flows")
     assert callable_flows.down_revision == "20260915_queued_lineage_merge"
-    assert script.get_heads() == ["20260915_flow_callable_flows"]
+    child_park = script.get_revision("20260915_child_park")
+    assert child_park.down_revision == "20260915_flow_callable_flows"
+    assert script.get_heads() == ["20260915_child_park"]

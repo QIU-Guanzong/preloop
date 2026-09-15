@@ -139,6 +139,7 @@ because a new status is a decision.
 | `RUNNING` | `TASK_STATE_WORKING` | The agent is working |
 | `RESUMING` | `TASK_STATE_WORKING` | A parked run being restarted is working again |
 | `WAITING_FOR_HUMAN` | `TASK_STATE_INPUT_REQUIRED` | Alive, holding no runtime, waiting for an answer. Interrupted, not terminal |
+| `WAITING_FOR_CHILDREN` | `TASK_STATE_WORKING` | Alive, holding no runtime, waiting for the flows it started. Nobody outside has to act |
 | `SUCCEEDED` | `TASK_STATE_COMPLETED` | Terminal, the work was done |
 | `FAILED` | `TASK_STATE_FAILED` | Terminal, the work was attempted and ended badly |
 | `TIMEOUT` | `TASK_STATE_FAILED` | Nobody asked for the clock to run out |

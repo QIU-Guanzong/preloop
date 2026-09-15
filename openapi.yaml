@@ -17567,23 +17567,25 @@ components:
             format: date-time
           - type: 'null'
           title: Parked At
-          description: When this execution was parked waiting for a human decision.
-            Set only while status is WAITING_FOR_HUMAN and cleared when the decision
-            resumes it.
+          description: When this execution was parked waiting for a human decision
+            (status WAITING_FOR_HUMAN) or for the flows it started (status WAITING_FOR_CHILDREN).
+            Cleared when the run is resumed.
         park_expires_at:
           anyOf:
           - type: string
             format: date-time
           - type: 'null'
           title: Park Expires At
-          description: When the pending approval window closes
+          description: When the pending approval window closes, or when a run parked
+            on its children is resumed anyway
         park_request_id:
           anyOf:
           - type: string
             format: uuid
           - type: 'null'
           title: Park Request Id
-          description: The approval request this execution is parked on
+          description: The approval request this execution is parked on, or the wait
+            grouping the children it is parked on
         stop_requested_at:
           anyOf:
           - type: string

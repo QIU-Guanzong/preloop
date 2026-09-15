@@ -288,13 +288,29 @@ def _chain_compute_seconds(parked: Any) -> int:
     return max(0, int((parked_at - start).total_seconds()))
 
 
+#: Trigger keys under which a park chain records the agent wall clock it has
+#: already spent. ``_answers`` is this module's; ``_children`` belongs to
+#: ``flow_child_wait`` (#633), which parks on the same columns and must pause
+#: the same budget. Named here rather than imported to keep the dependency
+#: one way: the children park knows about approvals, not the other way round.
+PARK_CHAIN_KEYS = (ANSWERS_KEY, "_children")
+
+
 def consumed_seconds_from_details(details: Optional[Dict[str, Any]]) -> int:
-    """Compute seconds already charged to this park chain, from the payload."""
-    block = (details or {}).get(ANSWERS_KEY)
-    if not isinstance(block, dict):
-        return 0
-    value = block.get("consumed_seconds")
-    return value if isinstance(value, int) and value > 0 else 0
+    """Compute seconds already charged to this park chain, from the payload.
+
+    A resumed run is charged the remainder of its flow's budget, whether it
+    was parked on a human or on its children: a park is not a way to buy a
+    second full timeout.
+    """
+    for key in PARK_CHAIN_KEYS:
+        block = (details or {}).get(key)
+        if not isinstance(block, dict):
+            continue
+        value = block.get("consumed_seconds")
+        if isinstance(value, int) and value > 0:
+            return value
+    return 0
 
 
 async def resume_parked_executions(
