@@ -1044,6 +1044,15 @@ class Settings(BaseSettings):
             "without a SaaS paywall."
         ),
     )
+    billing_subscription_reconcile_hours: int = Field(
+        6,
+        description=(
+            "How often the sync role refreshes Stripe-linked subscriptions so "
+            "a missed webhook self-heals, in hours. The task reads from "
+            "Stripe only, and no-ops without the Enterprise billing plugin or "
+            "a configured Stripe key."
+        ),
+    )
     billing_budget_notification_workers: int = Field(
         4,
         description=(
@@ -1358,6 +1367,9 @@ class Settings(BaseSettings):
                 "BILLING_ENFORCE_ENTITLEMENTS", "true"
             ).lower()
             in ("true", "1", "t", "yes"),
+            billing_subscription_reconcile_hours=int(
+                os.getenv("BILLING_SUBSCRIPTION_RECONCILE_HOURS", "6")
+            ),
             billing_budget_notification_workers=int(
                 os.getenv("BILLING_BUDGET_NOTIFICATION_WORKERS", "4")
             ),

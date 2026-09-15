@@ -511,9 +511,10 @@ export async function startCheckout(
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
       const detail = body.detail;
-      const message = ['legacy_plan_unavailable', 'catalog_not_ready'].includes(
-        detail?.code
-      )
+      // catalog_not_synced carries its own message ("not available for
+      // purchase yet"): the offer has not changed, the deployment is
+      // incomplete, so refreshing the comparison would not help.
+      const message = ['legacy_plan_unavailable'].includes(detail?.code)
         ? 'This offer has changed. Refresh the plan comparison before choosing a plan.'
         : typeof detail?.message === 'string'
           ? detail.message

@@ -557,6 +557,46 @@ class CRUDBilling:
             .all()
         ]
 
+    def stripe_subscription_page(
+        self, db: Session, *, after_id: Any = None, limit: int = 100
+    ) -> list[dict[str, str]]:
+        """Read one bounded page of subscriptions linked to a Stripe id.
+
+        Keyset paging over the primary key gives a stable order across pages
+        even while rows are reconciled underneath the walk, which a periodic
+        full-fleet pass needs. Returns identifiers only; no customer data.
+
+        Args:
+            db: Database session.
+            after_id: Exclusive cursor, the ``id`` of the last row seen.
+            limit: Page size, 1-500.
+
+        Returns:
+            ``{"id", "account_id", "stripe_subscription_id"}`` per row, in
+            ascending ``id`` order.
+
+        Raises:
+            ValueError: When ``limit`` is outside 1-500.
+        """
+        if not 1 <= limit <= 500:
+            raise ValueError("Subscription page size must be between 1 and 500")
+        query = db.query(
+            models.Subscription.id,
+            models.Subscription.account_id,
+            models.Subscription.stripe_subscription_id,
+        ).filter(models.Subscription.stripe_subscription_id.isnot(None))
+        if after_id is not None:
+            query = query.filter(models.Subscription.id > after_id)
+        query = query.order_by(models.Subscription.id).limit(limit)
+        return [
+            {
+                "id": str(row[0]),
+                "account_id": str(row[1]),
+                "stripe_subscription_id": str(row[2]),
+            }
+            for row in query.all()
+        ]
+
     def monthly_observations(
         self,
         db: Session,

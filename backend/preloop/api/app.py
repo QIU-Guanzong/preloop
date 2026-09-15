@@ -462,6 +462,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     else:
         logger.info("Skipping plugin system for %s role.", service_role)
 
+    # Plan catalog diagnostic (skip in testing mode). A deploy that ships a
+    # new plan without running the catalog sync script leaves the database
+    # projection unmapped, and the only symptom is a failed checkout. Log it
+    # once at boot, naming the plan and the command. Database reads only, no
+    # provider calls, and never a reason to fail startup. No-ops without the
+    # Enterprise billing plugin.
+    if not is_testing and is_api_role and plugin_manager is not None:
+        try:
+            check = plugin_manager.get_service("billing_catalog_check")
+            if check is not None:
+                db = next(get_db_session())
+                try:
+                    check(db)
+                finally:
+                    db.close()
+        except Exception as e:
+            logger.warning(f"Plan catalog check did not run: {e}", exc_info=True)
+
     # Register instance and send version check (skip in testing mode)
     if not is_testing and is_api_role:
         from preloop.services.instance_service import register_instance

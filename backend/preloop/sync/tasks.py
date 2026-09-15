@@ -27,6 +27,7 @@ DISPATCHABLE_TASKS: tuple[str, ...] = (
     "reprice_gateway_usage_task",
     "ingest_provider_billing",
     "send_optimization_digest",
+    "reconcile_stripe_subscriptions",
     "sync_model_catalog",
     "execute_flow",
     "resume_flow_execution",
@@ -470,6 +471,31 @@ def send_optimization_digest(account_id: str | None = None) -> object | None:
         return service(db, account_id=account_id)
     except Exception as e:
         logger.error("Optimization digest failed: %s", e, exc_info=True)
+        return None
+    finally:
+        db.close()
+
+
+def reconcile_stripe_subscriptions(account_id: str | None = None) -> object | None:
+    """Refresh Stripe-linked subscriptions so a missed webhook self-heals.
+
+    The implementation lives in the Enterprise billing plugin; this OSS shim
+    resolves it through the plugin service registry and no-ops (with a debug
+    log) when the plugin is not installed. The plugin side additionally
+    no-ops when no Stripe key is configured, which is the normal self-hosted
+    case. Provider access is read-only.
+    """
+    from preloop.plugins.base import get_plugin_manager
+
+    service = get_plugin_manager().get_service("subscription_sync")
+    if service is None:
+        logger.debug("subscription_sync service not available; skipping reconcile")
+        return None
+    db = next(get_db_session())
+    try:
+        return service(db, account_id=account_id)
+    except Exception as e:
+        logger.error("Subscription reconciliation failed: %s", e, exc_info=True)
         return None
     finally:
         db.close()
