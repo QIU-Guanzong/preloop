@@ -267,8 +267,97 @@ def test_indexing_a_source_hands_the_account_to_the_queue(db_session, test_user)
             text="a message long enough to be worth a vector",
             role="user",
             occurred_at=OCCURRED_AT,
+            commit=True,
         )
 
     assert stored
     assert all(row.embedding_state == EMBEDDING_STATE_PENDING for row in stored)
     submit.assert_called_once_with(account_id)
+
+
+def test_a_commit_false_write_does_not_nudge_before_the_host_commits(
+    db_session, test_user
+):
+    """A nudge while the writer still holds the transaction is wasted work."""
+    from preloop.services import session_search_index
+
+    account_id = str(test_user.account_id)
+    session = crud_runtime_session.upsert_by_source(
+        db_session,
+        account_id=account_id,
+        session_source_type="custom",
+        session_source_id="early-nudge-session",
+        session_reference="early-nudge-session",
+        runtime_principal_type="agent",
+        runtime_principal_id="agent-1",
+        runtime_principal_name="Test Agent",
+        started_at=OCCURRED_AT,
+        last_activity_at=OCCURRED_AT,
+    )
+    db_session.commit()
+
+    with patch(
+        "preloop.services.session_embedding_queue.submit_account_for_embedding"
+    ) as submit:
+        stored = session_search_index.index_transcript_message(
+            db_session,
+            account_id=account_id,
+            runtime_session_id=session.id,
+            source_id="message-early-nudge",
+            text="indexed inside the caller's open transaction",
+            role="user",
+            occurred_at=OCCURRED_AT,
+            commit=False,
+        )
+
+    assert stored
+    submit.assert_not_called()
+
+
+def test_drain_continues_an_account_that_exceeds_one_batch(
+    db_session, test_user, monkeypatch
+):
+    """A quiet account with more than one batch must not wait for the next write."""
+    account_id = str(test_user.account_id)
+    _chunks(db_session, account_id, count=5)
+    crud_session_embedding_setting.enable(
+        db_session,
+        account_id=account_id,
+        provider=PROVIDER_OPENAI_COMPATIBLE,
+        model_identifier="text-embedding-3-small",
+        base_url="https://embeddings.example.com/v1",
+    )
+    db_session.commit()
+    monkeypatch.setattr(settings, "session_embedding_batch_size", 2, raising=False)
+
+    queue = SessionEmbeddingQueue(max_pending=4)
+    queue.submit(account_id)
+    provider = FakeProvider()
+
+    def _worker_session():
+        yield _KeepOpen(db_session)
+
+    with (
+        patch(
+            "preloop.services.session_embedding_queue.get_db_session",
+            side_effect=lambda: _worker_session(),
+        ),
+        patch(
+            "preloop.services.session_embedding_queue.run_account_batch",
+            side_effect=lambda db, *, account_id: run_account_batch(
+                db, account_id=account_id, provider=provider
+            ),
+        ),
+    ):
+        embedded = queue.drain()
+
+    assert embedded == 5
+    assert queue.embedded == 5
+    assert queue.pending == 0
+    assert (
+        crud_session_search_document.count_embedded_for_account(
+            db_session, account_id=account_id
+        )
+        == 5
+    )
+    assert len(provider.calls) == 3

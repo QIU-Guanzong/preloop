@@ -167,12 +167,17 @@ def _build_chunks(
 
 
 def _request_embedding(account_id: Any, stored: List[SessionSearchDocument]) -> None:
-    """Nudge the embedding worker after new chunks land.
+    """Nudge the embedding worker after new chunks are durable.
 
     Only a hand-off: the submission is deduplicated and dropped when the
     queue is full, and embedding runs on the worker's own session. Whether
     anything is actually embedded is the worker's decision, made against the
     deployment kill switch and the account's opt in.
+
+    Callers must invoke this only after the host transaction has committed.
+    A nudge while the writer's transaction is still open wakes the worker
+    on rows it cannot see, burns a submission, and leaves the chunks
+    waiting for a later write.
     """
     if not stored:
         return
@@ -271,7 +276,7 @@ def write_source_chunks(
                 savepoint.commit()
         if commit:
             db.commit()
-        _request_embedding(account_id, stored)
+            _request_embedding(account_id, stored)
         return stored
     except Exception:  # noqa: BLE001 - indexing never fails its caller
         logger.warning(

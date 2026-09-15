@@ -459,9 +459,21 @@ class Settings(BaseSettings):
     session_embedding_api_key: str | None = Field(
         None,
         description=(
-            "Credential for the OpenAI-compatible embeddings endpoint the "
-            "accounts name (SESSION_EMBEDDING_API_KEY). Left unset for the "
-            "self-hosted and air-gapped endpoints that need no key."
+            "Credential for an OpenAI-compatible embeddings endpoint "
+            "(SESSION_EMBEDDING_API_KEY). Sent only when the account's "
+            "base_url is listed in SESSION_EMBEDDING_API_KEY_BASE_URLS. "
+            "Left unset for self-hosted endpoints that need no key. Never "
+            "attached to an account-chosen URL that the operator did not "
+            "allow-list."
+        ),
+    )
+    session_embedding_api_key_base_urls: str = Field(
+        "",
+        description=(
+            "Comma-separated https base URLs that may receive "
+            "SESSION_EMBEDDING_API_KEY (SESSION_EMBEDDING_API_KEY_BASE_URLS). "
+            "Empty (the shipped default) means the shared key is never sent. "
+            "Compare after stripping a trailing slash."
         ),
     )
     model_gateway_auto_index_failed_interactions: bool = Field(
@@ -1477,6 +1489,9 @@ class Settings(BaseSettings):
             session_embedding_max_attempts=session_embedding_max_attempts,
             session_embedding_timeout_seconds=session_embedding_timeout_seconds,
             session_embedding_api_key=os.getenv("SESSION_EMBEDDING_API_KEY") or None,
+            session_embedding_api_key_base_urls=(
+                os.getenv("SESSION_EMBEDDING_API_KEY_BASE_URLS") or ""
+            ).strip(),
             model_gateway_auto_index_failed_interactions=os.getenv(
                 "MODEL_GATEWAY_AUTO_INDEX_FAILED_INTERACTIONS", "false"
             ).lower()

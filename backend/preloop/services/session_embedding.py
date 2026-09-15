@@ -46,6 +46,7 @@ from preloop.models.models.session_embedding_setting import (
     DEGRADED_DIMENSION_MISMATCH,
     DEGRADED_MISCONFIGURED,
     DEGRADED_PROVIDER_ERROR,
+    DEGRADED_UNPRICED_MODEL,
     PROVIDER_LOCAL,
     PROVIDER_OPENAI_COMPATIBLE,
     SessionEmbeddingSetting,
@@ -114,7 +115,6 @@ class EmbeddingProvider(Protocol):
 
     def embed(self, texts: Sequence[str]) -> List[List[float]]:
         """Return one vector per input, in input order."""
-        ...
 
 
 class OpenAICompatibleEmbeddingProvider:
@@ -239,6 +239,24 @@ def embedding_enabled() -> bool:
     return bool(getattr(settings, "session_embedding_enabled", True))
 
 
+def _deployment_api_key_for(base_url: str) -> Optional[str]:
+    """Return the shared key only when ``base_url`` is operator allow-listed.
+
+    An empty allow-list means the key is never sent. That is the safe
+    default: the account names the endpoint, and a shared credential must
+    not ride to a host the account chose.
+    """
+    allowed = getattr(settings, "session_embedding_api_key_base_urls", "") or ""
+    wanted = (base_url or "").strip().rstrip("/")
+    if not wanted:
+        return None
+    for item in str(allowed).split(","):
+        if item.strip().rstrip("/") == wanted:
+            key = getattr(settings, "session_embedding_api_key", None)
+            return str(key) if key else None
+    return None
+
+
 def build_provider(setting: SessionEmbeddingSetting) -> EmbeddingProvider:
     """Construct the provider one account's setting names.
 
@@ -258,7 +276,7 @@ def build_provider(setting: SessionEmbeddingSetting) -> EmbeddingProvider:
         return OpenAICompatibleEmbeddingProvider(
             base_url=setting.base_url or "",
             model=model,
-            api_key=getattr(settings, "session_embedding_api_key", None),
+            api_key=_deployment_api_key_for(setting.base_url or ""),
             dimensions=int(setting.dimensions or EMBEDDING_DIMENSIONS),
             timeout=float(getattr(settings, "session_embedding_timeout_seconds", 30.0)),
         )
@@ -364,7 +382,7 @@ def run_account_batch(
         db, account_id=account_id
     )
     pending = crud_session_search_document.count_pending_embeddings(
-        db, account_id=account_id, excluded_session_ids=held_sessions
+        db, account_id=account_id, excluded_session_ids=held_sessions, now=now
     )
     if pending == 0:
         return EmbeddingBatchResult(account_id=account, status=STATUS_IDLE)
@@ -380,6 +398,20 @@ def run_account_batch(
         return _degrade(
             db, account_id=account, reason=DEGRADED_DAILY_CAP, pending=pending
         )
+
+    if setting.provider == PROVIDER_OPENAI_COMPATIBLE:
+        probe = estimate_external_model_usage_cost(
+            setting.model_identifier or "",
+            prompt_tokens=1,
+            completion_tokens=0,
+        )
+        if probe.source == "unpriced" or probe.cost is None:
+            return _degrade(
+                db,
+                account_id=account,
+                reason=DEGRADED_UNPRICED_MODEL,
+                pending=pending,
+            )
 
     try:
         active_provider = provider or build_provider(setting)
@@ -397,6 +429,7 @@ def run_account_batch(
         account_id=account_id,
         limit=size,
         excluded_session_ids=held_sessions,
+        now=now,
         commit=True,
     )
     if not claimed:
@@ -410,6 +443,19 @@ def run_account_batch(
     except EmbeddingProviderError as exc:
         logger.warning(
             "Session embedding provider failed for account %s: %s", account, exc
+        )
+        _release(db, claimed)
+        return _degrade(
+            db,
+            account_id=account,
+            reason=DEGRADED_PROVIDER_ERROR,
+            pending=pending,
+            runtime_session_id=runtime_session_id,
+        )
+    except Exception:
+        logger.exception(
+            "Session embedding failed after claiming chunks for account %s",
+            account,
         )
         _release(db, claimed)
         return _degrade(
@@ -441,12 +487,26 @@ def run_account_batch(
         )
 
     model_identity = setting.model_identity or f"{setting.provider}:{width}"
-    written = crud_session_search_document.store_embeddings(
-        db,
-        vectors=list(zip(claimed, vectors, strict=False)),
-        model_identity=model_identity,
-        commit=True,
-    )
+    try:
+        written = crud_session_search_document.store_embeddings(
+            db,
+            vectors=list(zip(claimed, vectors, strict=False)),
+            model_identity=model_identity,
+            commit=True,
+        )
+    except Exception:
+        logger.exception(
+            "Session embedding could not store vectors for account %s",
+            account,
+        )
+        _release(db, claimed)
+        return _degrade(
+            db,
+            account_id=account,
+            reason=DEGRADED_PROVIDER_ERROR,
+            pending=pending,
+            runtime_session_id=runtime_session_id,
+        )
 
     tokens, usage_source = _reported_tokens(active_provider, texts)
     estimate = estimate_external_model_usage_cost(
@@ -471,7 +531,7 @@ def run_account_batch(
     )
 
     remaining = crud_session_search_document.count_pending_embeddings(
-        db, account_id=account_id, excluded_session_ids=held_sessions
+        db, account_id=account_id, excluded_session_ids=held_sessions, now=now
     )
     return EmbeddingBatchResult(
         account_id=account,

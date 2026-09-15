@@ -118,6 +118,7 @@ class SessionEmbeddingQueue:
                 account = self._queue.get_nowait()
             except queue.Empty:
                 return embedded
+            result = None
             try:
                 result = self._run(account)
                 embedded += result.embedded if result is not None else 0
@@ -125,6 +126,8 @@ class SessionEmbeddingQueue:
                 with self._queued_lock:
                     self._queued.discard(account)
                 self._queue.task_done()
+            if result is not None and result.embedded and result.pending:
+                self.submit(account)
 
     def _ensure_worker(self) -> None:
         if not _worker_enabled():
@@ -143,12 +146,15 @@ class SessionEmbeddingQueue:
     def _loop(self) -> None:
         while True:
             account = self._queue.get()
+            result = None
             try:
-                self._run(account)
+                result = self._run(account)
             finally:
                 with self._queued_lock:
                     self._queued.discard(account)
                 self._queue.task_done()
+            if result is not None and result.embedded and result.pending:
+                self.submit(account)
 
     def _run(self, account_id: str) -> Optional[EmbeddingBatchResult]:
         """Embed one batch for one account. Failures are logged, never raised."""
@@ -166,10 +172,6 @@ class SessionEmbeddingQueue:
         try:
             result = run_account_batch(db, account_id=account_id)
             self.embedded += result.embedded
-            if result.embedded and result.pending:
-                # More waiting than one batch could take: come back for it
-                # rather than waiting for the next write to notice.
-                self.submit(account_id)
             return result
         except Exception:  # noqa: BLE001 - one bad account must not stop the rest
             self.failed += 1

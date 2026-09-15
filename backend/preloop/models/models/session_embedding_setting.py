@@ -53,12 +53,14 @@ DEGRADED_DAILY_CAP = "daily_cap_reached"
 DEGRADED_PROVIDER_ERROR = "provider_error"
 DEGRADED_DIMENSION_MISMATCH = "dimension_mismatch"
 DEGRADED_MISCONFIGURED = "misconfigured"
+DEGRADED_UNPRICED_MODEL = "unpriced_model"
 
 DEGRADED_REASONS = (
     DEGRADED_DAILY_CAP,
     DEGRADED_PROVIDER_ERROR,
     DEGRADED_DIMENSION_MISMATCH,
     DEGRADED_MISCONFIGURED,
+    DEGRADED_UNPRICED_MODEL,
 )
 
 
@@ -83,9 +85,12 @@ class SessionEmbeddingSetting(Base):
         default=PROVIDER_OPENAI_COMPATIBLE,
         server_default=PROVIDER_OPENAI_COMPATIBLE,
     )
-    #: Required for :data:`PROVIDER_OPENAI_COMPATIBLE`. The whole point of the
-    #: opt in is that this value is visible: enabling names the endpoint the
-    #: account's text is about to be posted to.
+    #: Required for :data:`PROVIDER_OPENAI_COMPATIBLE`. Enabling names the
+    #: endpoint the account's text is posted to. The deployment
+    #: ``SESSION_EMBEDDING_API_KEY`` is never sent here unless this URL is
+    #: on ``SESSION_EMBEDDING_API_KEY_BASE_URLS``; an account-chosen host
+    #: must not harvest the shared credential. ``enable()`` also refuses a
+    #: non-https URL and a private, loopback, or link-local IP host.
     base_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     model_identifier: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     dimensions: Mapped[int] = mapped_column(

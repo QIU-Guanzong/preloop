@@ -7,8 +7,10 @@ cannot end up embedding against an endpoint nobody chose.
 
 from __future__ import annotations
 
+import ipaddress
 from datetime import UTC, datetime
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from sqlalchemy.orm import Session
 
@@ -28,6 +30,56 @@ class SessionEmbeddingConfigError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def validate_openai_compatible_base_url(url: str) -> str:
+    """Return a cleaned https URL, or raise if it is not safe to POST to.
+
+    The worker may attach a deployment-wide API key to this URL, so the
+    opt-in is the last moment to refuse a private, loopback, or link-local
+    target and anything that is not https.
+    """
+    cleaned = (url or "").strip()
+    parsed = urlparse(cleaned)
+    if parsed.scheme.lower() != "https":
+        raise SessionEmbeddingConfigError(
+            "invalid_base_url",
+            "an OpenAI compatible base url must be https",
+        )
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        raise SessionEmbeddingConfigError(
+            "invalid_base_url",
+            "an OpenAI compatible base url must include a host",
+        )
+    if parsed.username or parsed.password:
+        raise SessionEmbeddingConfigError(
+            "invalid_base_url",
+            "an OpenAI compatible base url must not include credentials",
+        )
+    if host == "localhost" or host.endswith(".localhost"):
+        raise SessionEmbeddingConfigError(
+            "invalid_base_url",
+            "an OpenAI compatible base url must not target localhost",
+        )
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return cleaned
+    if (
+        address.is_loopback
+        or address.is_link_local
+        or address.is_private
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+    ):
+        raise SessionEmbeddingConfigError(
+            "invalid_base_url",
+            "an OpenAI compatible base url must not target a private, "
+            "loopback, or link-local host",
+        )
+    return cleaned
 
 
 class CRUDSessionEmbeddingSetting(CRUDBase[SessionEmbeddingSetting]):
@@ -81,7 +133,8 @@ class CRUDSessionEmbeddingSetting(CRUDBase[SessionEmbeddingSetting]):
 
         Raises:
             SessionEmbeddingConfigError: The provider is unknown, the model is
-                missing, an OpenAI compatible provider has no base url, or the
+                missing, an OpenAI compatible provider has no base url, the
+                base url is not https or targets a private host, or the
                 requested width is not the width the corpus column stores.
         """
         if provider not in EMBEDDING_PROVIDERS:
@@ -101,6 +154,8 @@ class CRUDSessionEmbeddingSetting(CRUDBase[SessionEmbeddingSetting]):
                 "base_url_required",
                 "an OpenAI compatible provider must name its base url",
             )
+        if provider == PROVIDER_OPENAI_COMPATIBLE and cleaned_base_url:
+            cleaned_base_url = validate_openai_compatible_base_url(cleaned_base_url)
         if provider == PROVIDER_LOCAL:
             # A local model runs in this process; a base url would be a lie
             # about where the text goes.

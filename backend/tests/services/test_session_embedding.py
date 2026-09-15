@@ -27,12 +27,14 @@ from preloop.models.models.session_embedding_setting import (
     DEGRADED_DAILY_CAP,
     DEGRADED_DIMENSION_MISMATCH,
     DEGRADED_PROVIDER_ERROR,
+    DEGRADED_UNPRICED_MODEL,
     PROVIDER_OPENAI_COMPATIBLE,
 )
 from preloop.models.models.session_search_document import (
     EMBEDDING_DIMENSIONS,
     EMBEDDING_STATE_EMBEDDED,
     EMBEDDING_STATE_FAILED,
+    EMBEDDING_STATE_IN_PROGRESS,
     EMBEDDING_STATE_PENDING,
     REDACTION_STATE_METADATA_ONLY,
     REDACTION_STATE_REDACTED,
@@ -45,6 +47,7 @@ from preloop.services.session_embedding import (
     STATUS_IDLE,
     STATUS_OK,
     EmbeddingProviderError,
+    build_provider,
     run_account_batch,
 )
 
@@ -603,3 +606,175 @@ def test_another_accounts_chunks_are_never_claimed(db_session, test_user):
     for row in other_chunks:
         db_session.refresh(row)
         assert row.embedding is None
+
+
+def test_a_held_runtime_session_column_keeps_chunks_pending(db_session, test_user):
+    """The #650 column is enough; a flow-execution join is not required."""
+    account_id = str(test_user.account_id)
+    held_session = _session(db_session, account_id, source_id="session-held-column")
+    free_session = _session(db_session, account_id, source_id="session-free-column")
+    held_session.legal_hold = True
+    db_session.commit()
+    held_chunks = _chunks(
+        db_session,
+        account_id=account_id,
+        session=held_session,
+        count=2,
+        source_id="message-held-column",
+        occurred_at=OCCURRED_AT - timedelta(hours=1),
+    )
+    free_chunks = _chunks(
+        db_session,
+        account_id=account_id,
+        session=free_session,
+        count=2,
+        source_id="message-free-column",
+    )
+    _opt_in(db_session, account_id)
+    provider = FakeProvider()
+
+    result = run_account_batch(db_session, account_id=account_id, provider=provider)
+
+    assert result.status == STATUS_OK
+    assert result.runtime_session_id == str(free_session.id)
+    for row in held_chunks:
+        db_session.refresh(row)
+        assert row.embedding is None
+        assert row.embedding_state == EMBEDDING_STATE_PENDING
+    for row in free_chunks:
+        db_session.refresh(row)
+        assert row.embedding is not None
+
+
+def test_a_stale_in_progress_claim_is_reclaimed(db_session, test_user):
+    """A worker death between claim and store cannot hide the backlog."""
+    account_id = str(test_user.account_id)
+    session = _session(db_session, account_id)
+    stored = _chunks(db_session, account_id=account_id, session=session, count=2)
+    _opt_in(db_session, account_id)
+    claimed = crud_session_search_document.claim_pending_chunks(
+        db_session, account_id=account_id, limit=8, commit=True
+    )
+    assert len(claimed) == 2
+    assert all(row.embedding_state == EMBEDDING_STATE_IN_PROGRESS for row in claimed)
+    assert (
+        crud_session_search_document.count_pending_embeddings(
+            db_session, account_id=account_id
+        )
+        == 0
+    )
+
+    later = datetime.now(UTC) + timedelta(minutes=10)
+    assert (
+        crud_session_search_document.count_pending_embeddings(
+            db_session, account_id=account_id, now=later
+        )
+        == 2
+    )
+    provider = FakeProvider()
+    result = run_account_batch(
+        db_session, account_id=account_id, provider=provider, now=later
+    )
+
+    assert result.status == STATUS_OK
+    assert result.embedded == 2
+    assert provider.calls
+    for row in stored:
+        db_session.refresh(row)
+        assert row.embedding_state == EMBEDDING_STATE_EMBEDDED
+        assert row.embedding is not None
+
+
+def test_a_fresh_in_progress_claim_is_not_stolen(db_session, test_user):
+    """A live provider call keeps its lease until the reclaim window."""
+    account_id = str(test_user.account_id)
+    session = _session(db_session, account_id)
+    stored = _chunks(db_session, account_id=account_id, session=session, count=1)
+    _opt_in(db_session, account_id)
+    claimed = crud_session_search_document.claim_pending_chunks(
+        db_session, account_id=account_id, limit=8, commit=True
+    )
+    assert len(claimed) == 1
+
+    provider = FakeProvider()
+    result = run_account_batch(db_session, account_id=account_id, provider=provider)
+
+    assert result.status == STATUS_IDLE
+    assert provider.calls == []
+    db_session.refresh(stored[0])
+    assert stored[0].embedding_state == EMBEDDING_STATE_IN_PROGRESS
+    assert stored[0].embedding is None
+
+
+def test_an_unexpected_error_after_claim_releases_the_chunks(db_session, test_user):
+    """A non-provider exception must not leave the batch stranded."""
+    account_id = str(test_user.account_id)
+    session = _session(db_session, account_id)
+    stored = _chunks(db_session, account_id=account_id, session=session, count=1)
+    _opt_in(db_session, account_id)
+
+    class ExplodingProvider:
+        model = "text-embedding-3-small"
+
+        def embed(self, texts: Sequence[str]) -> List[List[float]]:
+            raise RuntimeError("store exploded")
+
+    result = run_account_batch(
+        db_session, account_id=account_id, provider=ExplodingProvider()
+    )
+
+    assert result.status == STATUS_DEGRADED
+    assert result.reason == DEGRADED_PROVIDER_ERROR
+    db_session.refresh(stored[0])
+    assert stored[0].embedding_state == EMBEDDING_STATE_PENDING
+    assert stored[0].embedding is None
+    assert stored[0].embedding_attempts == 1
+
+
+def test_an_unpriced_openai_compatible_model_never_reaches_the_provider(
+    db_session, test_user
+):
+    """A catalogue miss must not disable the daily cap by recording $0."""
+    account_id = str(test_user.account_id)
+    session = _session(db_session, account_id)
+    stored = _chunks(db_session, account_id=account_id, session=session, count=1)
+    _opt_in(db_session, account_id, model_identifier="not-in-the-catalogue")
+    provider = FakeProvider()
+
+    result = run_account_batch(db_session, account_id=account_id, provider=provider)
+
+    assert result.status == STATUS_DEGRADED
+    assert result.reason == DEGRADED_UNPRICED_MODEL
+    assert provider.calls == []
+    db_session.refresh(stored[0])
+    assert stored[0].embedding_state == EMBEDDING_STATE_PENDING
+    setting = crud_session_embedding_setting.get_for_account(
+        db_session, account_id=account_id
+    )
+    db_session.refresh(setting)
+    assert setting.degraded_reason == DEGRADED_UNPRICED_MODEL
+
+
+def test_the_shared_api_key_is_omitted_unless_the_url_is_allow_listed(monkeypatch):
+    """An account-chosen host must not receive the deployment credential."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(settings, "session_embedding_api_key", "shared-secret")
+    monkeypatch.setattr(settings, "session_embedding_api_key_base_urls", "")
+    setting = SimpleNamespace(
+        provider=PROVIDER_OPENAI_COMPATIBLE,
+        model_identifier="text-embedding-3-small",
+        base_url="https://embeddings.example.com/v1",
+        dimensions=EMBEDDING_DIMENSIONS,
+    )
+
+    omitted = build_provider(setting)
+    assert omitted.api_key is None
+
+    monkeypatch.setattr(
+        settings,
+        "session_embedding_api_key_base_urls",
+        "https://embeddings.example.com/v1/",
+    )
+    allowed = build_provider(setting)
+    assert allowed.api_key == "shared-secret"

@@ -287,6 +287,31 @@ gateway:
   # GATEWAY_USAGE_INDEX_QUEUE_MAX_PENDING (default 256) and
   # GATEWAY_USAGE_INDEX_QUEUE_ENABLED (default true). A full queue drops
   # documents rather than growing. See docs/operations/gateway-memory.md.
+  # Session-embedding knobs (process env, not chart keys):
+  # SESSION_EMBEDDING_ENABLED (default true) is the kill switch for vectors
+  # only; keyword indexing keeps running. SESSION_EMBEDDING_DAILY_CAP_USD
+  # (default 2.0) is the per-account money cap. SESSION_EMBEDDING_API_KEY
+  # is sent only to URLs listed in SESSION_EMBEDDING_API_KEY_BASE_URLS
+  # (empty default: the shared key is never attached). Also
+  # SESSION_EMBEDDING_BATCH_SIZE (32), QUEUE_MAX_PENDING (128),
+  # QUEUE_WORKER_ENABLED (true), MAX_ATTEMPTS (3), TIMEOUT_SECONDS (30).
+  # See docs/operations/session-embedding.md.
+  # Session embedding knobs (process env, not chart keys). Embedding is
+  # off until an account opts in, even when the kill switch is on:
+  # SESSION_EMBEDDING_ENABLED (default true) stops embedding only;
+  # keyword indexing keeps running.
+  # SESSION_EMBEDDING_BATCH_SIZE (default 32)
+  # SESSION_EMBEDDING_QUEUE_MAX_PENDING (default 128)
+  # SESSION_EMBEDDING_QUEUE_WORKER_ENABLED (default true; TESTING=true
+  # disables the thread)
+  # SESSION_EMBEDDING_DAILY_CAP_USD (default 2.0, UTC day, one-batch
+  # overshoot possible)
+  # SESSION_EMBEDDING_MAX_ATTEMPTS (default 3)
+  # SESSION_EMBEDDING_TIMEOUT_SECONDS (default 30)
+  # SESSION_EMBEDDING_API_KEY (optional; put in the secret, not values)
+  # SESSION_EMBEDDING_API_KEY_BASE_URLS (comma-separated https URLs that
+  # may receive that key; empty means the key is never sent)
+  # See docs/operations/session-embedding.md.
   resources:
     requests:
       cpu: "100m"

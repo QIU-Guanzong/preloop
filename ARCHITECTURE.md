@@ -103,6 +103,14 @@ graph LR
 Execution environment profiles and hosted checkpoint recovery are documented in
 [Environments and recovery](docs/guide/flows/environments-and-recovery.md).
 
+Session search stores chunked runtime-session content in
+`session_search_document`. Keyword indexing is a separate kill switch
+from embedding. Vectors are written only when both `SESSION_EMBEDDING_ENABLED`
+and the per-account `session_embedding_setting` opt-in are on, by a bounded
+worker that records purpose-tagged `session_embedding` usage against a daily
+cap. Operator knobs and the shared-key allow-list are in
+[Session embedding](docs/operations/session-embedding.md).
+
 ### Agent launch payload (custom images and runners)
 
 Linux caps one `execve` string (a single argv element or a single
@@ -160,3 +168,11 @@ Audit/recheck completion observes frozen Git bundles from evidence when the
 flow names repository URLs and the pin is an exact git SHA; `HEAD.txt` is
 not checkout proof.
 See [Supported-release vulnerability maintenance](docs/guide/flows/security-maintenance.md).
+
+Session search writes one `session_search_document` chunk per source row
+(gateway interaction, transcript, tool call, operator note, summary). Keyword
+indexing is gated by `SESSION_SEARCH_INDEX_ENABLED`. Optional vectors are a
+separate per-account opt-in (`session_embedding_setting`) plus the
+deployment kill switch `SESSION_EMBEDDING_ENABLED`; a bounded worker posts
+batches to an OpenAI-compatible endpoint or a local model, caps spend, and
+records purpose-tagged usage. Operator knobs: `docs/operations/session-embedding.md`.

@@ -11,15 +11,18 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
+
+from preloop.config import settings
 
 from ..models.api_usage import ApiUsage
 from ..models.flow import Flow
 from ..models.flow_execution import FlowExecution
+from ..models.runtime_session import RuntimeSession
 from ..models.session_search_document import (
     EMBEDDING_STATE_EMBEDDED,
     EMBEDDING_STATE_FAILED,
@@ -232,17 +235,26 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
     def held_runtime_session_ids(self, db: Session, *, account_id: Any) -> set[str]:
         """Sessions frozen by an active legal hold, for this account.
 
-        The base this branch is stacked on has no hold flag on
-        ``runtime_session``, so a session is treated as held when any of its
-        metered gateway rows belongs to a flow execution under hold.
-        Issue #650 has since added ``runtime_session.legal_hold`` on main:
-        when this stack lands, that column belongs in the union here, and
-        this comment is the pointer to do it.
+        A session is held when ``runtime_session.legal_hold`` is true, or
+        when any of its metered gateway rows belongs to a flow execution
+        under hold. The column is the stronger check (issue #650); the
+        execution path covers sessions whose hold was recorded only on the
+        flow.
 
         Evaluated as a set rather than a join in the claim query because the
         common case is an empty set, and an empty set costs one cheap index
         lookup instead of a correlated subquery per candidate chunk.
         """
+        held: set[str] = {
+            str(value)
+            for value in db.execute(
+                select(RuntimeSession.id).where(
+                    RuntimeSession.account_id == account_id,
+                    RuntimeSession.legal_hold.is_(True),
+                )
+            ).scalars()
+            if value is not None
+        }
         held_executions = select(FlowExecution.id).where(
             FlowExecution.legal_hold.is_(True),
             FlowExecution.flow_id.in_(
@@ -258,19 +270,50 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
             )
             .distinct()
         ).scalars()
-        return {str(value) for value in rows if value is not None}
+        held.update(str(value) for value in rows if value is not None)
+        return held
 
-    def _embeddable_filters(self, *, account_id: Any) -> list[Any]:
+    def _stale_claim_cutoff(self, now: Optional[datetime] = None) -> datetime:
+        """When an ``in_progress`` claim is old enough to reclaim.
+
+        The window is twice the provider timeout plus a 30s margin, so a
+        live call cannot be stolen by another worker, but a daemon-thread
+        death or unexpected exception cannot strand the batch forever.
+        Compared as naive UTC to match ``Base.updated_at``.
+        """
+        timeout = float(getattr(settings, "session_embedding_timeout_seconds", 30.0))
+        window = timedelta(seconds=max(1.0, (2.0 * timeout) + 30.0))
+        stamp = now or datetime.now(UTC)
+        if stamp.tzinfo is not None:
+            stamp = stamp.astimezone(UTC).replace(tzinfo=None)
+        return stamp - window
+
+    def _embeddable_filters(
+        self, *, account_id: Any, now: Optional[datetime] = None
+    ) -> list[Any]:
         """Conditions every embeddable chunk must satisfy.
 
         Only ``clear`` chunks qualify. A redacted chunk has had a credential
         masked and a metadata-only chunk never captured content at all;
         embedding either would put a vector of the mask, or of a descriptor,
         into a corpus that a semantic query then treats as the real thing.
+
+        ``pending`` rows are always claimable. ``in_progress`` rows whose
+        ``updated_at`` is older than the reclaim window are claimable too,
+        so a worker crash between the claim commit and store cannot hide
+        the backlog from the pending count or from the next run.
         """
+        stale_before = self._stale_claim_cutoff(now)
+        claimable_state = or_(
+            SessionSearchDocument.embedding_state == EMBEDDING_STATE_PENDING,
+            and_(
+                SessionSearchDocument.embedding_state == EMBEDDING_STATE_IN_PROGRESS,
+                SessionSearchDocument.updated_at < stale_before,
+            ),
+        )
         return [
             SessionSearchDocument.account_id == account_id,
-            SessionSearchDocument.embedding_state == EMBEDDING_STATE_PENDING,
+            claimable_state,
             SessionSearchDocument.redaction_state == REDACTION_STATE_CLEAR,
             SessionSearchDocument.embedding.is_(None),
             SessionSearchDocument.content != "",
@@ -282,10 +325,11 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         *,
         account_id: Any,
         excluded_session_ids: Optional[Iterable[Any]] = None,
+        now: Optional[datetime] = None,
     ) -> int:
         """How many chunks this account still has waiting for a vector."""
         stmt = db.query(func.count(SessionSearchDocument.id)).filter(
-            *self._embeddable_filters(account_id=account_id)
+            *self._embeddable_filters(account_id=account_id, now=now)
         )
         excluded = [str(value) for value in (excluded_session_ids or [])]
         if excluded:
@@ -301,6 +345,7 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         account_id: Any,
         limit: int,
         excluded_session_ids: Optional[Iterable[Any]] = None,
+        now: Optional[datetime] = None,
         commit: bool = False,
     ) -> List[SessionSearchDocument]:
         """Claim the oldest waiting chunks of one session, oldest first.
@@ -314,13 +359,16 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         Claiming moves the rows to ``in_progress`` and commits, so a provider
         call that takes seconds does not hold row locks for its duration and
         a second worker skips these rows instead of waiting behind them.
+        A claim left ``in_progress`` past the reclaim window is treated as
+        pending again, so a restart cannot strand the batch.
         """
         if limit <= 0:
             return []
         excluded = [str(value) for value in (excluded_session_ids or [])]
+        filters = self._embeddable_filters(account_id=account_id, now=now)
 
         oldest_stmt = db.query(SessionSearchDocument.runtime_session_id).filter(
-            *self._embeddable_filters(account_id=account_id)
+            *filters
         )
         if excluded:
             oldest_stmt = oldest_stmt.filter(
@@ -341,7 +389,7 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         claimed = (
             db.query(SessionSearchDocument)
             .filter(
-                *self._embeddable_filters(account_id=account_id),
+                *filters,
                 SessionSearchDocument.runtime_session_id == runtime_session_id,
             )
             .order_by(
