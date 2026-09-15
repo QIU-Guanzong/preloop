@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from preloop.models.crud import crud_flow_execution
 from preloop.services.mcp_config_service import MCPConfigService
+from preloop.utils.execve_limits import prompt_transport_env
 
 LAUNCH_VERSION = 1
 MAX_RESULT_BYTES = 256 * 1024
@@ -157,6 +158,11 @@ async def build_runner_launch(context: dict[str, Any]) -> dict[str, Any]:
     env["MCP_CONFIG_JSON"] = json.dumps(mcp_config)
     # The script builder resolves repository credentials into transient env refs.
     script = build_script(context)
+    # The script reads the prompt from a file it materializes out of these
+    # chunks (preloop.utils.execve_limits). The runner applies `env` to the
+    # container it starts, so the chunks must be part of the launch or the
+    # script aborts with PRELOOP_LAUNCH_PAYLOAD_MISSING.
+    env.update(prompt_transport_env(context["prompt"]))
     agent._apply_git_credential_env(env, context)
     return {"version": LAUNCH_VERSION, "script": script, "env": env}
 

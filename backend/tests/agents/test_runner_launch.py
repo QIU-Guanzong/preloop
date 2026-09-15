@@ -9,6 +9,8 @@ from uuid import uuid4
 
 import pytest
 
+from preloop.utils.execve_limits import PROMPT_ENV_PREFIX, PROMPT_FILE_PATH
+
 from preloop.agents.runner_launch import (
     build_runner_launch,
     hydrate_runner_job,
@@ -43,12 +45,16 @@ async def test_shared_launch_has_model_mcp_prompt_and_no_script_secrets(
     assert launch["version"] == 1
     assert "gateway-alias" in launch["script"]
     assert "${PRELOOP_URL}/openai/v1" in launch["script"]
-    prompt_fragment = (
-        "Implement a focused fix"
-        if agent_type == "codex"
-        else base64.b64encode(b"Implement a focused fix").decode()[:24]
-    )
-    assert prompt_fragment in launch["script"]
+    # The prompt is not in the script any more: it travels as base64 chunks
+    # in the launch environment and the script decodes them into a file, so
+    # neither the script nor any one variable can cross MAX_ARG_STRLEN.
+    assert "Implement a focused fix" not in launch["script"]
+    assert PROMPT_FILE_PATH in launch["script"]
+    chunks = int(launch["env"][f"{PROMPT_ENV_PREFIX}CHUNKS"])
+    delivered = base64.b64decode(
+        "".join(launch["env"][f"{PROMPT_ENV_PREFIX}{i}"] for i in range(chunks))
+    ).decode()
+    assert delivered.startswith("Implement a focused fix")
     assert "/workspace/result.json" in launch["script"]
     assert "PRELOOP_AGENT_EXEC_START" in launch["script"]
     assert launch["env"]["PRELOOP_API_TOKEN"] == "mcp-secret"
