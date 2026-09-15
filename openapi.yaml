@@ -11751,13 +11751,15 @@ paths:
       description: 'Rank the caller''s runtime sessions by relevance to a query.
 
 
-        Returns sessions ordered by a fused relevance score, each with snippets
+        Returns sessions ordered by relevance, each with snippets that name the
 
-        that name the turn the match came from. A mode other than ``keyword`` is
+        turn the match came from and a reason saying whether the words, the
 
-        answered with keyword results and a degraded marker rather than an error,
+        vector or both put it there. ``semantic`` and ``hybrid`` embed the query
 
-        so a client written against the eventual hybrid contract works today.'
+        and search the corpus vectors; when that half cannot run, the answer is
+
+        keyword results with a degraded marker naming the cause, never an error.'
       operationId: search_runtime_sessions_api_v1_runtime_sessions_search_post
       requestBody:
         content:
@@ -25599,14 +25601,19 @@ components:
         semantic:
           type: boolean
           title: Semantic
-          description: Whether semantic ranking contributed to this answer.
+          description: Whether vector ranking contributed to this answer. False when
+            the query could not be embedded and false when it could but the corpus
+            holds no vector the query may be compared with.
           default: false
         reasons:
           items:
             type: string
           type: array
           title: Reasons
-          description: Machine readable reason codes, empty when nothing degraded.
+          description: 'Machine readable reason codes, empty when nothing degraded.
+            One of: semantic_not_enabled, semantic_disabled_by_deployment, semantic_daily_cap_reached,
+            semantic_provider_error, semantic_provider_misconfigured, semantic_model_mismatch,
+            semantic_no_vectors, semantic_backfill_incomplete, fusion_candidates_truncated.'
         detail:
           anyOf:
           - type: string
@@ -25615,7 +25622,16 @@ components:
           description: One sentence a console can show without decoding a code.
       type: object
       title: SessionSearchDegraded
-      description: What the answer could not do, stated rather than implied.
+      description: 'What the answer could not do, stated rather than implied.
+
+
+        The two booleans are coverage, not health: they say which halves of the
+
+        search are actually behind these results. ``reasons`` names every case
+
+        that reduced coverage, and there can be more than one (a provider that
+
+        failed while a backfill was also behind).'
     SessionSearchFilters:
       properties:
         start_date:
@@ -25704,8 +25720,10 @@ components:
           - semantic
           - hybrid
           title: Mode
-          description: Requested ranking mode. Anything other than keyword is answered
-            with keyword results and a degraded marker until semantic ranking exists.
+          description: Requested ranking mode. A semantic or hybrid request whose
+            semantic half cannot run (no opt in, cap reached, provider down) is answered
+            with keyword results and a degraded marker naming the reason, never with
+            an error.
           default: keyword
         filters:
           $ref: '#/components/schemas/SessionSearchFilters'
@@ -25765,7 +25783,10 @@ components:
           - semantic
           - hybrid
           title: Effective Mode
-          description: Mode that actually ran.
+          description: Mode that actually ran. A semantic or hybrid request falls
+            back to keyword when the query could not be embedded at all; it stays
+            semantic or hybrid when the vector half ran, even if the corpus had nothing
+            for it.
         degraded:
           $ref: '#/components/schemas/SessionSearchDegraded'
         indexed_through:
@@ -25777,10 +25798,23 @@ components:
           description: Newest content this account has in the corpus. The corpus fills
             forward, so an empty answer older than this marker means no match, and
             one newer means not indexed yet.
+        embedded_through:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Embedded Through
+          description: Newest content this account has a vector for, from the model
+            that embedded this query. Null in keyword mode and whenever the vector
+            half did not run. Read against indexed_through it says how far behind
+            the corpus the semantic half is.
         total:
           type: integer
           title: Total
-          description: Distinct sessions matching, before paging.
+          description: Sessions a caller can page through. In keyword mode it is the
+            exact number of distinct sessions matching. In a fused mode it is the
+            size of the fused candidate set, which the documented fusion depth bounds;
+            the degraded block says so when that bound was reached.
         limit:
           type: integer
           title: Limit
@@ -25849,15 +25883,50 @@ components:
         score:
           type: number
           title: Score
-          description: Fused session score the ordering uses.
+          description: The number this result was ordered by. In keyword mode it is
+            the fused chunk relevance of the session; in a mode that ran the vector
+            half it is the rank fusion score, which is on a different scale and is
+            not comparable across modes.
+        match_reason:
+          type: string
+          enum:
+          - keyword
+          - semantic
+          - both
+          title: Match Reason
+          description: 'Which half of the search produced this session: the words
+            (keyword), the vector (semantic) or both (both).'
+          default: keyword
+        similarity:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Similarity
+          description: Cosine similarity of this session's closest chunk to the query
+            vector. Null for a session the vector half did not return.
+        keyword_score:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Keyword Score
+          description: The session's keyword score, kept alongside the fused score
+            so a fused ordering can still be read against the keyword one. Null for
+            a session only the vector half returned.
         best_chunk_rank:
           type: number
           title: Best Chunk Rank
-          description: Relevance of the single best chunk in this session.
+          description: Relevance of the single best keyword matched chunk. Zero for
+            a session no keyword term matched.
         matched_chunk_count:
           type: integer
           title: Matched Chunk Count
-          description: How many distinct chunks of this session matched.
+          description: How many distinct chunks of this session matched the words.
+        semantic_chunk_count:
+          type: integer
+          title: Semantic Chunk Count
+          description: How many distinct chunks of this session the vector half returned
+            above the similarity floor.
+          default: 0
         first_match_at:
           anyOf:
           - type: string
@@ -25882,7 +25951,7 @@ components:
       - best_chunk_rank
       - matched_chunk_count
       title: SessionSearchResult
-      description: One session that matched, with its fused score.
+      description: One session that matched, with its score and why it is here.
     SessionSearchSnippet:
       properties:
         document_id:
@@ -25932,7 +26001,27 @@ components:
           - type: 'null'
           title: Text
           description: Database generated headline with the matching terms marked,
-            or null when the request disabled snippet text.
+            or null when the request disabled snippet text. A chunk the vector half
+            found and the keyword half did not carries no marked term, so the headline
+            is that chunk's opening words.
+        match_reason:
+          type: string
+          enum:
+          - keyword
+          - semantic
+          - both
+          title: Match Reason
+          description: 'Which half of the search produced this chunk: the words, the
+            vector, or both.'
+          default: keyword
+        similarity:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Similarity
+          description: Cosine similarity between the query vector and this chunk.
+            Null for a chunk the vector half never scored, because a keyword match
+            has no similarity to report.
       type: object
       required:
       - document_id

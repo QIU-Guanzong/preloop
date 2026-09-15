@@ -168,4 +168,7 @@ separate per-account opt-in (`session_embedding_setting`) plus the
 deployment kill switch `SESSION_EMBEDDING_ENABLED`; a bounded worker posts
 batches to an OpenAI-compatible endpoint or a local model, caps spend, and
 records purpose-tagged usage. The shared API key is allow-listed.
+`POST /api/v1/runtime-sessions/search` reads it in `keyword`, `semantic` or
+`hybrid` mode, fusing the two candidate lists by rank; a half that cannot run
+is reported in a degraded block with keyword results, never as an error.
 Operator knobs: [Session embedding](docs/operations/session-embedding.md).

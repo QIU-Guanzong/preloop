@@ -467,6 +467,26 @@ class Settings(BaseSettings):
             "allow-list."
         ),
     )
+    session_search_query_embedding_ttl_seconds: float = Field(
+        300.0,
+        ge=0.0,
+        description=(
+            "How long a search query's vector stays in the process cache "
+            "(SESSION_SEARCH_QUERY_EMBEDDING_TTL_SECONDS). Paging a result "
+            "set sends the same query with a new offset, and re-embedding it "
+            "per page multiplies the cost of one search by the pages a user "
+            "scrolls. Zero disables the cache."
+        ),
+    )
+    session_search_query_embedding_cache_size: int = Field(
+        256,
+        ge=1,
+        description=(
+            "Query vectors one process may cache "
+            "(SESSION_SEARCH_QUERY_EMBEDDING_CACHE_SIZE). The entry closest "
+            "to expiry is evicted when the cache is full."
+        ),
+    )
     session_embedding_api_key_base_urls: str = Field(
         "",
         description=(
@@ -1539,6 +1559,18 @@ class Settings(BaseSettings):
             "SESSION_EMBEDDING_TIMEOUT_SECONDS", 30.0
         )
         try:
+            # Zero is a real choice here: "never cache a query vector", which
+            # costs one provider call per page and leaks nothing between them.
+            session_search_query_embedding_ttl_seconds = max(
+                0.0,
+                float(os.getenv("SESSION_SEARCH_QUERY_EMBEDDING_TTL_SECONDS", "300")),
+            )
+        except ValueError:
+            session_search_query_embedding_ttl_seconds = 300.0
+        session_search_query_embedding_cache_size = _positive_int(
+            "SESSION_SEARCH_QUERY_EMBEDDING_CACHE_SIZE", 256
+        )
+        try:
             # A cap of exactly zero is a real choice: "priced, but spend
             # nothing", which leaves the backlog pending and degraded.
             session_embedding_daily_cap_usd = max(
@@ -1590,6 +1622,12 @@ class Settings(BaseSettings):
             session_embedding_daily_cap_usd=session_embedding_daily_cap_usd,
             session_embedding_max_attempts=session_embedding_max_attempts,
             session_embedding_timeout_seconds=session_embedding_timeout_seconds,
+            session_search_query_embedding_ttl_seconds=(
+                session_search_query_embedding_ttl_seconds
+            ),
+            session_search_query_embedding_cache_size=(
+                session_search_query_embedding_cache_size
+            ),
             session_embedding_api_key=os.getenv("SESSION_EMBEDDING_API_KEY") or None,
             session_embedding_api_key_base_urls=(
                 os.getenv("SESSION_EMBEDDING_API_KEY_BASE_URLS") or ""

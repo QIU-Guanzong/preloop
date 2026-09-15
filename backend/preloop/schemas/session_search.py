@@ -21,21 +21,67 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from preloop.models.crud.session_search_document import (
+    MATCH_REASON_BOTH,
+    MATCH_REASON_KEYWORD,
+    MATCH_REASON_SEMANTIC,
     MAX_SESSION_RESULTS,
     MAX_SNIPPETS_PER_SESSION,
     normalize_query,
 )
 from preloop.models.models.session_search_document import SOURCE_KINDS
 
-#: Search modes the contract accepts. Only ``keyword`` is implemented; the
-#: other two are accepted today and answered with keyword results plus a
-#: degraded marker, so the contract does not change shape when semantic
-#: ranking lands.
+#: Search modes the contract accepts. ``keyword`` ranks on the words,
+#: ``semantic`` on the query vector, ``hybrid`` fuses both. A mode whose half
+#: cannot run is answered with what can run plus a degraded marker naming what
+#: is missing, never with an error.
 SessionSearchMode = Literal["keyword", "semantic", "hybrid"]
 
-#: Reason code published in the degraded block for a mode that needs
-#: embeddings nothing computes yet.
+#: Why one result is in the answer: the words, the vector, or both.
+SessionSearchMatchReason = Literal["keyword", "semantic", "both"]
+
+# Degraded reason codes. Each one names a specific thing this answer could not
+# do, because a hybrid result set that silently drops its semantic half is a
+# search interface lying about its own coverage. They are grouped by what a
+# reader can act on: the first five are a semantic half that never ran, the
+# next three a corpus that cannot answer, and the last a page bounded by the
+# fusion depth.
+
+#: The account has not opted in to embedding its session content, so there is
+#: nothing to search semantically and nothing was sent to a provider.
 DEGRADED_SEMANTIC_NOT_ENABLED = "semantic_not_enabled"
+#: The deployment kill switch is off. No account on this deployment embeds.
+DEGRADED_SEMANTIC_DISABLED = "semantic_disabled_by_deployment"
+#: Today's embedding spend has reached the account's daily cap. Keyword
+#: results are unaffected; the semantic half resumes tomorrow.
+DEGRADED_SEMANTIC_DAILY_CAP = "semantic_daily_cap_reached"
+#: The embedding provider could not answer, so the query has no vector.
+DEGRADED_SEMANTIC_PROVIDER_ERROR = "semantic_provider_error"
+#: The account's embedding setting does not name a usable provider or model.
+DEGRADED_SEMANTIC_MISCONFIGURED = "semantic_provider_misconfigured"
+#: The corpus holds vectors, but none from the model that embedded this
+#: query. A distance between two models' spaces is not a similarity, so the
+#: query scores none of them rather than scoring them wrongly.
+DEGRADED_SEMANTIC_MODEL_MISMATCH = "semantic_model_mismatch"
+#: The corpus holds no vectors at all for this account yet.
+DEGRADED_SEMANTIC_NO_VECTORS = "semantic_no_vectors"
+#: Some of this account's chunks are still waiting for a vector, so the
+#: semantic half searched less than the keyword half did.
+DEGRADED_SEMANTIC_BACKFILL_INCOMPLETE = "semantic_backfill_incomplete"
+#: A candidate list filled its documented depth, so a fused page cannot see
+#: past it. The keyword half of a keyword search is never truncated this way.
+DEGRADED_FUSION_CANDIDATES_TRUNCATED = "fusion_candidates_truncated"
+
+DEGRADED_REASONS = (
+    DEGRADED_SEMANTIC_NOT_ENABLED,
+    DEGRADED_SEMANTIC_DISABLED,
+    DEGRADED_SEMANTIC_DAILY_CAP,
+    DEGRADED_SEMANTIC_PROVIDER_ERROR,
+    DEGRADED_SEMANTIC_MISCONFIGURED,
+    DEGRADED_SEMANTIC_MODEL_MISMATCH,
+    DEGRADED_SEMANTIC_NO_VECTORS,
+    DEGRADED_SEMANTIC_BACKFILL_INCOMPLETE,
+    DEGRADED_FUSION_CANDIDATES_TRUNCATED,
+)
 
 #: Longest query accepted. Past this a caller is pasting a document, not
 #: searching for one.
@@ -133,9 +179,10 @@ class SessionSearchRequest(BaseModel):
     mode: SessionSearchMode = Field(
         "keyword",
         description=(
-            "Requested ranking mode. Anything other than keyword is answered "
-            "with keyword results and a degraded marker until semantic "
-            "ranking exists."
+            "Requested ranking mode. A semantic or hybrid request whose "
+            "semantic half cannot run (no opt in, cap reached, provider "
+            "down) is answered with keyword results and a degraded marker "
+            "naming the reason, never with an error."
         ),
     )
     filters: SessionSearchFilters = Field(
@@ -202,13 +249,30 @@ class SessionSearchSnippet(BaseModel):
         None,
         description=(
             "Database generated headline with the matching terms marked, or "
-            "null when the request disabled snippet text."
+            "null when the request disabled snippet text. A chunk the vector "
+            "half found and the keyword half did not carries no marked term, "
+            "so the headline is that chunk's opening words."
+        ),
+    )
+    match_reason: SessionSearchMatchReason = Field(
+        MATCH_REASON_KEYWORD,
+        description=(
+            "Which half of the search produced this chunk: the words, the "
+            "vector, or both."
+        ),
+    )
+    similarity: Optional[float] = Field(
+        None,
+        description=(
+            "Cosine similarity between the query vector and this chunk. Null "
+            "for a chunk the vector half never scored, because a keyword "
+            "match has no similarity to report."
         ),
     )
 
 
 class SessionSearchResult(BaseModel):
-    """One session that matched, with its fused score."""
+    """One session that matched, with its score and why it is here."""
 
     runtime_session_id: UUID
     session_source_type: Optional[str] = None
@@ -217,12 +281,54 @@ class SessionSearchResult(BaseModel):
     title: Optional[str] = None
     started_at: Optional[datetime] = None
     last_activity_at: Optional[datetime] = None
-    score: float = Field(..., description="Fused session score the ordering uses.")
+    score: float = Field(
+        ...,
+        description=(
+            "The number this result was ordered by. In keyword mode it is "
+            "the fused chunk relevance of the session; in a mode that ran "
+            "the vector half it is the rank fusion score, which is on a "
+            "different scale and is not comparable across modes."
+        ),
+    )
+    match_reason: SessionSearchMatchReason = Field(
+        MATCH_REASON_KEYWORD,
+        description=(
+            "Which half of the search produced this session: the words "
+            f"({MATCH_REASON_KEYWORD}), the vector ({MATCH_REASON_SEMANTIC}) "
+            f"or both ({MATCH_REASON_BOTH})."
+        ),
+    )
+    similarity: Optional[float] = Field(
+        None,
+        description=(
+            "Cosine similarity of this session's closest chunk to the query "
+            "vector. Null for a session the vector half did not return."
+        ),
+    )
+    keyword_score: Optional[float] = Field(
+        None,
+        description=(
+            "The session's keyword score, kept alongside the fused score so "
+            "a fused ordering can still be read against the keyword one. "
+            "Null for a session only the vector half returned."
+        ),
+    )
     best_chunk_rank: float = Field(
-        ..., description="Relevance of the single best chunk in this session."
+        ...,
+        description=(
+            "Relevance of the single best keyword matched chunk. Zero for a "
+            "session no keyword term matched."
+        ),
     )
     matched_chunk_count: int = Field(
-        ..., description="How many distinct chunks of this session matched."
+        ..., description="How many distinct chunks of this session matched the words."
+    )
+    semantic_chunk_count: int = Field(
+        0,
+        description=(
+            "How many distinct chunks of this session the vector half "
+            "returned above the similarity floor."
+        ),
     )
     first_match_at: Optional[datetime] = None
     last_match_at: Optional[datetime] = None
@@ -230,17 +336,31 @@ class SessionSearchResult(BaseModel):
 
 
 class SessionSearchDegraded(BaseModel):
-    """What the answer could not do, stated rather than implied."""
+    """What the answer could not do, stated rather than implied.
+
+    The two booleans are coverage, not health: they say which halves of the
+    search are actually behind these results. ``reasons`` names every case
+    that reduced coverage, and there can be more than one (a provider that
+    failed while a backfill was also behind).
+    """
 
     keyword: bool = Field(
         True, description="Whether keyword ranking contributed to this answer."
     )
     semantic: bool = Field(
-        False, description="Whether semantic ranking contributed to this answer."
+        False,
+        description=(
+            "Whether vector ranking contributed to this answer. False when "
+            "the query could not be embedded and false when it could but the "
+            "corpus holds no vector the query may be compared with."
+        ),
     )
     reasons: List[str] = Field(
         default_factory=list,
-        description="Machine readable reason codes, empty when nothing degraded.",
+        description=(
+            "Machine readable reason codes, empty when nothing degraded. One "
+            "of: " + ", ".join(DEGRADED_REASONS) + "."
+        ),
     )
     detail: Optional[str] = Field(
         None, description="One sentence a console can show without decoding a code."
@@ -253,7 +373,13 @@ class SessionSearchResponse(BaseModel):
     query: str = Field(..., description="Query as parsed, with whitespace collapsed.")
     mode: SessionSearchMode = Field(..., description="Mode the caller asked for.")
     effective_mode: SessionSearchMode = Field(
-        ..., description="Mode that actually ran."
+        ...,
+        description=(
+            "Mode that actually ran. A semantic or hybrid request falls back "
+            "to keyword when the query could not be embedded at all; it stays "
+            "semantic or hybrid when the vector half ran, even if the corpus "
+            "had nothing for it."
+        ),
     )
     degraded: SessionSearchDegraded
     indexed_through: Optional[datetime] = Field(
@@ -264,7 +390,25 @@ class SessionSearchResponse(BaseModel):
             "match, and one newer means not indexed yet."
         ),
     )
-    total: int = Field(..., description="Distinct sessions matching, before paging.")
+    embedded_through: Optional[datetime] = Field(
+        None,
+        description=(
+            "Newest content this account has a vector for, from the model "
+            "that embedded this query. Null in keyword mode and whenever the "
+            "vector half did not run. Read against indexed_through it says "
+            "how far behind the corpus the semantic half is."
+        ),
+    )
+    total: int = Field(
+        ...,
+        description=(
+            "Sessions a caller can page through. In keyword mode it is the "
+            "exact number of distinct sessions matching. In a fused mode it "
+            "is the size of the fused candidate set, which the documented "
+            "fusion depth bounds; the degraded block says so when that "
+            "bound was reached."
+        ),
+    )
     limit: int
     offset: int
     elapsed_ms: float = Field(..., description="Server side time spent on the search.")

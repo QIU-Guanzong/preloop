@@ -17,7 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports what it dropped. Default-off, so a flow selects it in its allow-list
   or an account enables it on the Tools page, and an access rule that denies it
   stops the call. Docs at `docs/guide/agent-session-search.md`.
-
+- Semantic and hybrid ranking on `POST /api/v1/runtime-sessions/search`.
+  `mode` accepts `keyword`, `semantic` or `hybrid`. The vector half only
+  scores chunks stamped with the model that embedded the query, and the two
+  candidate lists are fused by reciprocal rank (`RRF_K = 60`, both weights
+  `1.0`, ties broken on session id; the constants are tunable and not yet
+  validated against a labelled set). Every result says which half found it
+  (`keyword`, `semantic`, `both`) and carries the similarity when the vector
+  half scored it. A semantic half that cannot run (no account opt-in,
+  deployment kill switch off, daily cap reached, provider failure, vectors
+  from another model, backfill behind) returns keyword results with a named
+  reason in the degraded block instead of an error, except in `semantic`
+  mode, which returns an empty set with the same marker rather than a silent
+  keyword fallback. Query vectors are cached per process for
+  `SESSION_SEARCH_QUERY_EMBEDDING_TTL_SECONDS` (default 300, size
+  `SESSION_SEARCH_QUERY_EMBEDDING_CACHE_SIZE`, default 256), so paging a
+  result set does not re-embed the query; query embedding spend is recorded
+  against the same daily cap as the indexing worker.
 - Callable-flows picker on the flow editor. When the delegation tool is
   on, the form lists the account's other flows (paging past the 100-row
   list default) and lets the operator choose which this flow may call,

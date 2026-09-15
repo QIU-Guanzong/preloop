@@ -20,7 +20,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple
 
 from sqlalchemy import (
     Float,
@@ -32,6 +32,7 @@ from sqlalchemy import (
     delete,
     distinct,
     func,
+    literal,
     null,
     or_,
     select,
@@ -89,18 +90,48 @@ MULTI_CHUNK_BONUS_WEIGHT = 0.15
 
 #: ``ts_headline`` options. ``MaxFragments`` above zero selects the fragment
 #: based headline generator, which picks the densest window rather than simply
-#: truncating from the start of the chunk.
+#: truncating from the start of the chunk. A chunk that carries none of the
+#: query terms (which is every chunk a vector found and keyword did not) gets
+#: its opening words instead, which is what a semantic hit has to show.
 HEADLINE_OPTIONS = (
     "StartSel=<mark>, StopSel=</mark>, "
     "MaxWords=35, MinWords=10, ShortWord=3, "
     "MaxFragments=2, FragmentDelimiter= ... "
 )
 
+#: Chunks the vector pass reads before anything is grouped into sessions.
+#: This is the nearest neighbour depth: the HNSW index answers "the closest
+#: N", and everything after it (session grouping, fusion, paging) happens over
+#: that set. Too small and a session with one very close chunk is invisible;
+#: too large and every search pays for vectors nobody will read.
+VECTOR_CANDIDATE_CHUNKS = 200
+
+#: Sessions the vector pass hands to fusion, after grouping.
+MAX_VECTOR_SESSIONS = MAX_SESSION_RESULTS
+
+#: Cosine similarity a chunk needs before it counts as a semantic match at
+#: all. Without a floor every query returns the whole corpus in nearest
+#: neighbour order, which reads as an answer and is not one.
+MIN_SEMANTIC_SIMILARITY = 0.20
+
+#: How a result matched: on the words, on the vector, or on both. Published
+#: per result and per snippet, because a hybrid answer that does not say which
+#: half produced a row is asking the reader to guess.
+MatchReason = Literal["keyword", "semantic", "both"]
+
+MATCH_REASON_KEYWORD: MatchReason = "keyword"
+MATCH_REASON_SEMANTIC: MatchReason = "semantic"
+MATCH_REASON_BOTH: MatchReason = "both"
+
+MATCH_REASONS = (MATCH_REASON_KEYWORD, MATCH_REASON_SEMANTIC, MATCH_REASON_BOTH)
+
 #: The constants above are tunable and unvalidated: they were chosen to make
 #: the documented orderings hold on the fixtures in
-#: ``backend/tests/models/crud/test_session_search_ranking.py``, not from
+#: ``backend/tests/models/crud/test_session_search_ranking.py`` and
+#: ``backend/tests/models/crud/test_session_search_vector.py``, not from
 #: measured relevance on real corpora. Treat a change to them as a product
-#: change, not a refactor.
+#: change, not a refactor. The fusion weights live beside them in
+#: ``preloop.services.session_search_fusion``.
 
 
 def _held_session_exists() -> Any:
@@ -161,7 +192,13 @@ class SessionSearchFilters:
 
 @dataclass
 class RankedSnippet:
-    """One matching chunk, with the identity needed to reopen that turn."""
+    """One matching chunk, with the identity needed to reopen that turn.
+
+    ``match_reason`` and ``similarity`` say which half of a hybrid search
+    produced the chunk. A keyword snippet carries no similarity, because it
+    was never compared with a vector, and reporting one would be inventing a
+    number.
+    """
 
     document_id: Any
     runtime_session_id: Any
@@ -173,6 +210,57 @@ class RankedSnippet:
     rank: float
     redaction_state: str
     text: Optional[str] = None
+    match_reason: MatchReason = MATCH_REASON_KEYWORD
+    similarity: Optional[float] = None
+
+
+@dataclass
+class VectorChunkHit:
+    """One chunk a vector query found, with its cosine similarity.
+
+    Deliberately not a session: the vector pass answers in chunks, and the
+    grouping into sessions is a ranking decision that belongs to the service
+    that also owns fusion.
+    """
+
+    document_id: Any
+    runtime_session_id: Any
+    source_kind: str
+    source_id: str
+    chunk_index: int
+    occurred_at: datetime
+    role: Optional[str]
+    redaction_state: str
+    similarity: float
+
+
+@dataclass
+class SessionIdentity:
+    """The session columns a search result names, without its content."""
+
+    runtime_session_id: Any
+    session_source_type: Optional[str] = None
+    session_source_id: Optional[str] = None
+    session_reference: Optional[str] = None
+    title: Optional[str] = None
+    started_at: Optional[datetime] = None
+    last_activity_at: Optional[datetime] = None
+
+
+@dataclass
+class EmbeddingCoverage:
+    """What the corpus can answer semantically, for one account and model.
+
+    Every field exists to make a degraded marker specific rather than vague.
+    ``vectors`` with no ``model_vectors`` is a model mismatch, no vectors at
+    all is a corpus that was never embedded, and ``pending`` is a backfill
+    that has not reached this far yet.
+    """
+
+    vectors: int = 0
+    model_vectors: int = 0
+    pending: int = 0
+    embedded_through: Optional[datetime] = None
 
 
 @dataclass
@@ -688,22 +776,22 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
             for row in db.execute(stmt).all()
         ]
 
-    def _match_conditions(
+    def _scoped_conditions(
         self,
         *,
         account_id: Any,
-        tsquery: ColumnElement[Any],
         filters: Optional[SessionSearchFilters],
     ) -> List[ColumnElement[bool]]:
-        """Build the WHERE terms shared by the count, rank and snippet passes.
+        """The account bound and the caller's filters, without a match term.
 
         ``account_id`` is first and unconditional. The account bound lives
         here, in the query, so there is no code path that can produce a row
         from another account for a serialiser to have to remember to drop.
+        Shared by the keyword passes and the vector pass, so the two halves of
+        a hybrid answer cannot end up searching different sets of rows.
         """
         conditions: List[ColumnElement[bool]] = [
             SessionSearchDocument.account_id == account_id,
-            SessionSearchDocument.search_vector.op("@@")(tsquery),
         ]
         active = filters or SessionSearchFilters()
         if active.start_date is not None:
@@ -727,6 +815,18 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
             conditions.append(SessionSearchDocument.flow_id == active.flow_id)
         if active.source_kind:
             conditions.append(SessionSearchDocument.source_kind == active.source_kind)
+        return conditions
+
+    def _match_conditions(
+        self,
+        *,
+        account_id: Any,
+        tsquery: ColumnElement[Any],
+        filters: Optional[SessionSearchFilters],
+    ) -> List[ColumnElement[bool]]:
+        """The scoped conditions plus the full text match term."""
+        conditions = self._scoped_conditions(account_id=account_id, filters=filters)
+        conditions.insert(1, SessionSearchDocument.search_vector.op("@@")(tsquery))
         return conditions
 
     def indexed_through(self, db: Session, *, account_id: Any) -> Optional[datetime]:
@@ -1009,6 +1109,261 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
             db.query(func.min(SessionSearchDocument.occurred_at))
             .filter(SessionSearchDocument.account_id == account_id)
             .scalar()
+        )
+
+    def snippets_for_sessions(
+        self,
+        db: Session,
+        *,
+        account_id: Any,
+        query: str,
+        session_ids: Sequence[Any],
+        filters: Optional[SessionSearchFilters] = None,
+        max_per_session: int = 3,
+        include_text: bool = True,
+    ) -> Dict[str, List[RankedSnippet]]:
+        """Keyword snippets for a named set of sessions.
+
+        The ranking pass fetches its own snippets, but a fused answer cannot:
+        the page it ends up showing is only known after the two candidate
+        lists have been merged. This is the same window and the same headline
+        as the ranking pass, over the sessions that actually made the page, so
+        snippets are never generated for rows nobody will read.
+        """
+        normalized = normalize_query(query)
+        wanted = [value for value in session_ids if value is not None]
+        budget = max(0, min(int(max_per_session), MAX_SNIPPETS_PER_SESSION))
+        if not normalized or not wanted or not budget:
+            return {}
+        tsquery = func.websearch_to_tsquery(SEARCH_CONFIG, normalized)
+        return self._snippets_for_sessions(
+            db,
+            conditions=self._match_conditions(
+                account_id=account_id, tsquery=tsquery, filters=filters
+            ),
+            tsquery=tsquery,
+            session_ids=wanted,
+            max_per_session=budget,
+            include_text=include_text,
+        )
+
+    def search_vector_chunks(
+        self,
+        db: Session,
+        *,
+        account_id: Any,
+        embedding: Sequence[float],
+        embedding_model: str,
+        filters: Optional[SessionSearchFilters] = None,
+        limit: int = VECTOR_CANDIDATE_CHUNKS,
+        min_similarity: float = MIN_SEMANTIC_SIMILARITY,
+    ) -> List[VectorChunkHit]:
+        """Return the chunks nearest to ``embedding``, nearest first.
+
+        Two restrictions are not optional and are both in the query:
+
+        ``embedding_model`` pins the candidates to vectors produced by the
+        same model as the query vector. A corpus can legitimately hold
+        vectors from more than one model (a provider change, a dimension
+        change, a half finished re-embedding sweep), and a cosine distance
+        between two models' spaces is a number with no meaning. A query
+        therefore never scores across models: it sees the part of the corpus
+        that speaks its own language and the degraded block says so.
+
+        ``redaction_state`` is pinned to ``clear``, which is the only state
+        the worker embeds. It matters after the fact too: a chunk withheld
+        *after* it was embedded keeps its vector, and without this term a
+        semantic query would still surface the row whose text was taken away.
+
+        Args:
+            db: Request scoped session.
+            account_id: The caller's account, bound in the query.
+            embedding: The query vector.
+            embedding_model: Model identity of ``embedding``.
+            filters: The same filter block the keyword pass uses.
+            limit: Nearest neighbour depth.
+            min_similarity: Cosine similarity floor a chunk must clear.
+
+        Returns:
+            Candidate chunks ordered by similarity, then by chunk id so the
+            ordering is stable when two vectors are equally close.
+        """
+        if not embedding or not embedding_model:
+            return []
+        depth = max(1, min(int(limit), VECTOR_CANDIDATE_CHUNKS))
+        distance = SessionSearchDocument.embedding.cosine_distance(list(embedding))
+        similarity = (literal(1.0) - distance).label("similarity")
+        conditions = self._scoped_conditions(account_id=account_id, filters=filters)
+        conditions.extend(
+            [
+                SessionSearchDocument.embedding.isnot(None),
+                SessionSearchDocument.embedding_model == embedding_model,
+                SessionSearchDocument.redaction_state == REDACTION_STATE_CLEAR,
+                distance <= (1.0 - float(min_similarity)),
+            ]
+        )
+        rows = db.execute(
+            select(
+                SessionSearchDocument.id.label("document_id"),
+                SessionSearchDocument.runtime_session_id.label("runtime_session_id"),
+                SessionSearchDocument.source_kind.label("source_kind"),
+                SessionSearchDocument.source_id.label("source_id"),
+                SessionSearchDocument.chunk_index.label("chunk_index"),
+                SessionSearchDocument.occurred_at.label("occurred_at"),
+                SessionSearchDocument.role.label("role"),
+                SessionSearchDocument.redaction_state.label("redaction_state"),
+                similarity,
+            )
+            .where(*conditions)
+            .order_by(distance.asc(), SessionSearchDocument.id.asc())
+            .limit(depth)
+        ).all()
+        return [
+            VectorChunkHit(
+                document_id=row.document_id,
+                runtime_session_id=row.runtime_session_id,
+                source_kind=row.source_kind,
+                source_id=row.source_id,
+                chunk_index=int(row.chunk_index or 0),
+                occurred_at=row.occurred_at,
+                role=row.role,
+                redaction_state=row.redaction_state,
+                similarity=float(row.similarity or 0.0),
+            )
+            for row in rows
+        ]
+
+    def snippet_text_for_documents(
+        self,
+        db: Session,
+        *,
+        account_id: Any,
+        document_ids: Sequence[Any],
+        query: str,
+    ) -> Dict[str, Optional[str]]:
+        """Headline text for named chunks, keyed by chunk id as text.
+
+        This is how a semantically matched chunk gets something to show. The
+        same ``ts_headline`` call is used as for a keyword snippet, so a chunk
+        that happens to carry a query term still gets it marked, and a chunk
+        that carries none gets its opening words. Withheld text is the empty
+        string in the projection, the same rule as everywhere else in this
+        module: the stored body never leaves the database.
+        """
+        normalized = normalize_query(query)
+        wanted = [value for value in document_ids if value is not None]
+        if not normalized or not wanted:
+            return {}
+        tsquery = func.websearch_to_tsquery(SEARCH_CONFIG, normalized)
+        returnable = SessionSearchDocument.redaction_state.in_(
+            TEXT_RETURNABLE_REDACTION_STATES
+        )
+        guarded_content = case(
+            (returnable, SessionSearchDocument.content),
+            else_="",
+        )
+        rows = db.execute(
+            select(
+                SessionSearchDocument.id.label("document_id"),
+                SessionSearchDocument.redaction_state.label("redaction_state"),
+                func.ts_headline(
+                    SEARCH_CONFIG, guarded_content, tsquery, HEADLINE_OPTIONS
+                ).label("snippet"),
+            ).where(
+                SessionSearchDocument.account_id == account_id,
+                SessionSearchDocument.id.in_(wanted),
+            )
+        ).all()
+        return {
+            str(row.document_id): (
+                row.snippet
+                if row.redaction_state in TEXT_RETURNABLE_REDACTION_STATES
+                else None
+            )
+            for row in rows
+        }
+
+    def session_identities(
+        self, db: Session, *, account_id: Any, session_ids: Sequence[Any]
+    ) -> Dict[str, SessionIdentity]:
+        """Identity columns for named sessions, keyed by session id as text.
+
+        The keyword pass joins these columns while it ranks. The vector pass
+        answers in chunks, so the sessions it found need them looked up, and
+        the lookup is account scoped for the same reason every other read
+        here is: a session id from another account must resolve to nothing.
+        """
+        wanted = [value for value in session_ids if value is not None]
+        if not wanted:
+            return {}
+        rows = db.execute(
+            select(
+                RuntimeSession.id,
+                RuntimeSession.session_source_type,
+                RuntimeSession.session_source_id,
+                RuntimeSession.session_reference,
+                RuntimeSession.title,
+                RuntimeSession.started_at,
+                RuntimeSession.last_activity_at,
+            ).where(
+                RuntimeSession.account_id == account_id,
+                RuntimeSession.id.in_(wanted),
+            )
+        ).all()
+        return {
+            str(row.id): SessionIdentity(
+                runtime_session_id=row.id,
+                session_source_type=row.session_source_type,
+                session_source_id=row.session_source_id,
+                session_reference=row.session_reference,
+                title=row.title,
+                started_at=row.started_at,
+                last_activity_at=row.last_activity_at,
+            )
+            for row in rows
+        }
+
+    def embedding_coverage(
+        self, db: Session, *, account_id: Any, embedding_model: str
+    ) -> EmbeddingCoverage:
+        """What one account's corpus can answer with vectors of one model.
+
+        One statement, four conditional aggregates, because a search should
+        not pay four round trips to be able to say why its semantic half
+        returned little. The counts are what turn "no semantic results" into
+        one of "nothing is embedded", "everything is embedded with a
+        different model" or "the backfill has not got there yet".
+        """
+        embedded = SessionSearchDocument.embedding.isnot(None)
+        same_model = and_(
+            embedded, SessionSearchDocument.embedding_model == embedding_model
+        )
+        waiting = and_(
+            SessionSearchDocument.embedding.is_(None),
+            SessionSearchDocument.redaction_state == REDACTION_STATE_CLEAR,
+            SessionSearchDocument.content != "",
+        )
+        row = db.execute(
+            select(
+                func.count(SessionSearchDocument.id).filter(embedded).label("vectors"),
+                func.count(SessionSearchDocument.id)
+                .filter(same_model)
+                .label("model_vectors"),
+                func.count(SessionSearchDocument.id).filter(waiting).label("pending"),
+                func.max(SessionSearchDocument.occurred_at)
+                .filter(same_model)
+                .label("embedded_through"),
+            ).where(SessionSearchDocument.account_id == account_id)
+        ).one()
+        return EmbeddingCoverage(
+            vectors=int(row.vectors or 0),
+            model_vectors=int(row.model_vectors or 0),
+            pending=int(row.pending or 0),
+            embedded_through=(
+                row.embedded_through
+                if isinstance(row.embedded_through, datetime)
+                else None
+            ),
         )
 
     def count_for_session(
