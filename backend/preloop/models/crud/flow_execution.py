@@ -192,11 +192,53 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         return {candidates[row[0]] for row in rows}
 
     def create(self, db: Session, obj_in: FlowExecutionCreate) -> FlowExecution:
-        """Create a new flow execution (synchronous)."""
+        """Create a new flow execution (synchronous).
+
+        The lineage columns (``parent_execution_id``, ``root_execution_id``,
+        ``delegation_depth``) are plain inputs: a caller that knows which run
+        this one continues passes them and they are stored as given. Nothing
+        derives them here, so the creation paths that know nothing about
+        lineage keep writing the defaults (null, null, 0).
+        """
         db_obj = FlowExecution(**obj_in.model_dump())
         db.add(db_obj)
         db.flush()  # Use flush instead of commit to stay in transaction
         return db_obj
+
+    def get_children(
+        self,
+        db: Session,
+        parent_execution_id: Any,
+        *,
+        skip: int = 0,
+        limit: Optional[int] = None,
+    ) -> List[FlowExecution]:
+        """Direct children of one execution, in a deterministic order.
+
+        Only rows whose ``parent_execution_id`` is exactly the given id are
+        returned: the whole chain is reachable from its root by joining on
+        ``root_execution_id``, but "what did this run start" is this one
+        lookup. A leaf (or an unknown id) returns an empty list.
+
+        Args:
+            db: Database session.
+            parent_execution_id: Id of the execution whose children to list.
+            skip: Rows to skip, for paging.
+            limit: Maximum rows to return; None means every child.
+
+        Returns:
+            The direct children, oldest first, ties broken by id so paging
+            cannot repeat or drop a row.
+        """
+        query = (
+            db.query(FlowExecution)
+            .filter(FlowExecution.parent_execution_id == parent_execution_id)
+            .order_by(FlowExecution.created_at.asc(), FlowExecution.id.asc())
+            .offset(skip)
+        )
+        if limit is not None:
+            query = query.limit(limit)
+        return query.all()
 
     def update(
         self, db: Session, db_obj: FlowExecution, obj_in: FlowExecutionUpdate
@@ -680,6 +722,11 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
                     FlowExecution.runner_id,
                     FlowExecution.agent_session_reference,
                     FlowExecution.retry_of_execution_id,
+                    # Lineage: a chain listing projects these, so they must
+                    # not lazy-load one row at a time.
+                    FlowExecution.parent_execution_id,
+                    FlowExecution.root_execution_id,
+                    FlowExecution.delegation_depth,
                     FlowExecution.batch_id,
                     FlowExecution.tool_calls_count,
                     FlowExecution.total_tokens,

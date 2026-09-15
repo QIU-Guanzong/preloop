@@ -52,6 +52,35 @@ The separate private native-host execution profile supports only Cursor and reta
 
 Failing GitHub `check_run`, `check_suite`, and `workflow_run` events on a PR this flow opened resume the same way as a review comment, with `{{execution.ci_failure}}` filled in. The skip/resume filter is GitHub-only: existing GitLab `pipeline` / `job` flows keep firing on every event. GitLab payload extractors stay in `flow_ci_feedback` so an opt-in can reuse them later.
 
+## Execution lineage
+
+`flow_execution` carries three lineage columns, so a run that continues
+another run can say so directly instead of leaving the link to be inferred:
+`parent_execution_id` (the run it retries, resumes or continues),
+`root_execution_id` (the first run of the chain) and `delegation_depth` (how
+many derivations separate it from that root). They land before their writer -
+the `run_flow` continuation that fills them - so every row reads parent null,
+root null and depth 0 for now.
+
+`parent_execution_id` is an indexed, nullable self-reference, like
+`retry_of_execution_id`, with one difference: it is `ON DELETE SET NULL`. A
+flow delete cascades to its executions as one batch of DELETEs in load order,
+so a root older than the child pointing at it is removed while the child still
+references it, which a plain self-reference refuses; the link is derived data,
+so a survivor keeps NULL rather than failing the delete. `root_execution_id`
+is indexed for the chain listing and `delegation_depth` is an integer that is
+not null, defaulting to 0.
+
+Both execution response shapes (`FlowExecutionListResponse` for the console's
+list and `FlowExecutionResponse` for the detail page) project the three
+fields. `CRUDFlowExecution.create` stores whatever lineage a caller passes and
+derives nothing, and `CRUDFlowExecution.get_children` returns an execution's
+direct children oldest first (ties broken by id, so paging is stable). The
+migration's backfill rule for rows that predate the columns is
+`delegation_depth` 0 with both id columns null; parentage is deliberately not
+reconstructed from `retry_of_execution_id`, because a guessed chain is worse
+than an honest "not recorded".
+
 ## Matrix / Batch Fan-Out
 
 One flow definition can drive an agent-harness × model evaluation grid without cloning the flow per combination:

@@ -148,8 +148,46 @@ class ExecutionPark(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ExecutionLineage(BaseModel):
+    """Where an execution sits in the chain of runs derived from it.
+
+    A run that continues another one - a retry, the resume of a parked run, a
+    CI-failure or PR-comment resume, a durable-feedback repair turn - records
+    the run it continues here, along with the first run of its chain and how
+    far from that root it sits. The columns and this projection land before
+    the writer that fills them, so a row today reads null, null and 0.
+    """
+
+    parent_execution_id: Optional[uuid.UUID] = Field(
+        None,
+        description=(
+            "Execution this run was derived from: the run it retries, "
+            "resumes or continues. Null when the run started its own chain, "
+            "and for rows written before the link was recorded."
+        ),
+    )
+    root_execution_id: Optional[uuid.UUID] = Field(
+        None,
+        description=(
+            "First execution of this run's chain; every run of one chain "
+            "shares it, so a single indexed lookup lists the whole chain. "
+            "Null for rows written before the link was recorded."
+        ),
+    )
+    delegation_depth: Optional[int] = Field(
+        0,
+        description=(
+            "How many derivations separate this run from its root: 0 for the "
+            "run that started the chain, 1 for a retry or resume of it, and "
+            "so on. 0 for rows written before the column existed."
+        ),
+    )
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 # Base Pydantic model for FlowExecution attributes
-class FlowExecutionBase(BaseModel):
+class FlowExecutionBase(ExecutionLineage):
     flow_id: uuid.UUID = Field(..., description="Foreign Key to Flows.id")
     trigger_event_id: Optional[str] = Field(
         None,
@@ -297,7 +335,7 @@ class FlowExecutionResponse(FlowExecutionBase, ExecutionModelProjection):
     # flow: Optional[FlowResponse] = None # Assuming a FlowResponse Pydantic schema exists
 
 
-class FlowExecutionListResponse(ExecutionModelProjection):
+class FlowExecutionListResponse(ExecutionModelProjection, ExecutionLineage):
     """Lightweight flow execution row for list views."""
 
     id: uuid.UUID

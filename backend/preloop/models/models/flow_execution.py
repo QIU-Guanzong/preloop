@@ -226,6 +226,38 @@ class FlowExecution(Base):
         index=True,
     )  # Links to the original execution this is a retry of
 
+    # Execution lineage. Every run derived from another run of the same flow -
+    # a retry, the resume of a parked run, a CI-failure or PR-comment resume,
+    # a durable-feedback repair turn - records the run it continues in
+    # parent_execution_id, names the first run of its chain in
+    # root_execution_id and counts its distance from that root in
+    # delegation_depth (0 for the run that started the chain). Together they
+    # make one PR's or one failing delivery's whole history answerable with an
+    # indexed lookup (root_execution_id = :id ordered by delegation_depth)
+    # instead of repeated retry_of_execution_id walks.
+    #
+    # The columns land before their writer, so nothing sets a non-default
+    # value yet: until the run_flow continuation writes them, every row reads
+    # parent null, root null, delegation_depth 0. CRUDFlowExecution.create
+    # stores whatever the caller passes, which is all the writer needs.
+    #
+    # parent_execution_id is ON DELETE SET NULL, unlike the plain
+    # self-references on retry_of_execution_id and resume_execution_id.
+    # Deleting a flow cascades to its executions as one batch of DELETEs in
+    # load order, so a root older than the child pointing at it is removed
+    # while the child still references it, which a plain self-FK refuses. The
+    # link is derived data: a survivor keeps NULL ("not recorded") instead of
+    # failing the whole delete. root_execution_id is indexed for the chain
+    # listing but carries no constraint of its own.
+    parent_execution_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("flow_execution.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    root_execution_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    delegation_depth = Column(Integer, nullable=False, default=0, server_default="0")
+
     # Delivery-level idempotency key of the webhook delivery that created this
     # execution: "delivery:<X-GitHub-Delivery / X-Gitlab-Event-UUID>", or
     # "content:<sha256 prefix>" for tracker sources that send no delivery id.

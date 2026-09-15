@@ -37,6 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   asset-register` and `preloop export incident-candidates` in the CLI, and
   docs at `docs/guide/dora-agent-slice.md`.
 
+- Flow-execution lineage columns. `flow_execution` gains
+  `parent_execution_id` (indexed, nullable self-reference),
+  `root_execution_id` (indexed) and `delegation_depth` (not null, default 0),
+  so a run that is derived from another run can record the chain it continues.
+  Both the execution list and the detail response expose the three fields.
+  Nothing writes a non-default value yet: the `run_flow` continuation that
+  fills them lands separately. Rows that predate the columns read
+  `delegation_depth` 0 with both ids null, and their parentage is not
+  reconstructed.
+
 ### Removed
 
 - Flow failure comments. `notifications.on_failure.comment_on_trigger_issue`

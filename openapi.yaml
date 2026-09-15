@@ -15142,6 +15142,33 @@ components:
         release.
     BatchExecutionListItem:
       properties:
+        parent_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Parent Execution Id
+          description: 'Execution this run was derived from: the run it retries, resumes
+            or continues. Null when the run started its own chain, and for rows written
+            before the link was recorded.'
+        root_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Root Execution Id
+          description: First execution of this run's chain; every run of one chain
+            shares it, so a single indexed lookup lists the whole chain. Null for
+            rows written before the link was recorded.
+        delegation_depth:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Delegation Depth
+          description: 'How many derivations separate this run from its root: 0 for
+            the run that started the chain, 1 for a retry or resume of it, and so
+            on. 0 for rows written before the column existed.'
+          default: 0
         model_alias:
           anyOf:
           - type: string
@@ -17072,6 +17099,33 @@ components:
       title: FlowExecutionCommand
     FlowExecutionListResponse:
       properties:
+        parent_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Parent Execution Id
+          description: 'Execution this run was derived from: the run it retries, resumes
+            or continues. Null when the run started its own chain, and for rows written
+            before the link was recorded.'
+        root_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Root Execution Id
+          description: First execution of this run's chain; every run of one chain
+            shares it, so a single indexed lookup lists the whole chain. Null for
+            rows written before the link was recorded.
+        delegation_depth:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Delegation Depth
+          description: 'How many derivations separate this run from its root: 0 for
+            the run that started the chain, 1 for a retry or resume of it, and so
+            on. 0 for rows written before the column existed.'
+          default: 0
         model_alias:
           anyOf:
           - type: string
@@ -17250,6 +17304,33 @@ components:
           description: Tokens this execution's gateway traffic consumed, split by
             direction and cache participation. Null when the run has no attributable
             gateway usage, which is not the same as zero.
+        parent_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Parent Execution Id
+          description: 'Execution this run was derived from: the run it retries, resumes
+            or continues. Null when the run started its own chain, and for rows written
+            before the link was recorded.'
+        root_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Root Execution Id
+          description: First execution of this run's chain; every run of one chain
+            shares it, so a single indexed lookup lists the whole chain. Null for
+            rows written before the link was recorded.
+        delegation_depth:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Delegation Depth
+          description: 'How many derivations separate this run from its root: 0 for
+            the run that started the chain, 1 for a retry or resume of it, and so
+            on. 0 for rows written before the column existed.'
+          default: 0
         flow_id:
           type: string
           format: uuid
