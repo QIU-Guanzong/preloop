@@ -211,6 +211,9 @@ export function containerTerminationNotice(
     typeof record.reason === 'string' ? record.reason.trim() : '';
   const oomKilled =
     record.oom_killed === true || rawReason.toLowerCase() === 'oomkilled';
+  // A clean Kubernetes exit also carries a reason ("Completed"); that is
+  // not a failure and must not render as one.
+  if (!oomKilled && rawReason.toLowerCase() === 'completed') return null;
   // A runtime that reports the kill only as a flag still has a reason to show.
   const reason = rawReason || (oomKilled ? 'OOMKilled' : '');
   if (!reason) return null;

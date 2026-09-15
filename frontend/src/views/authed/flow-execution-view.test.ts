@@ -1355,6 +1355,28 @@ describe('FlowExecutionView', () => {
       ).to.not.exist;
     });
 
+    it('says nothing about the container after a successful Kubernetes exit', async () => {
+      const element = await load('exec-1');
+      (element as any).execution = {
+        ...(element as any).execution,
+        result: {
+          container_termination: {
+            runtime: 'kubernetes',
+            reason: 'Completed',
+            exit_code: 0,
+            oom_killed: false,
+          },
+        },
+      };
+      await element.updateComplete;
+
+      expect(
+        element.shadowRoot!.querySelector(
+          '[data-testid="container-termination"]'
+        )
+      ).to.not.exist;
+    });
+
     it('reads a memory kill reported only as a flag', () => {
       const notice = containerTerminationNotice({
         container_termination: { runtime: 'docker', oom_killed: true },
@@ -1365,6 +1387,19 @@ describe('FlowExecutionView', () => {
       // Nothing to say without a termination record.
       expect(containerTerminationNotice({ status: 'success' })).to.equal(null);
       expect(containerTerminationNotice(null)).to.equal(null);
+    });
+
+    it('returns null for a successful Kubernetes Completed exit', () => {
+      expect(
+        containerTerminationNotice({
+          container_termination: {
+            runtime: 'kubernetes',
+            reason: 'Completed',
+            exit_code: 0,
+            oom_killed: false,
+          },
+        })
+      ).to.equal(null);
     });
 
     it('searches the raw log lines in place', async () => {
