@@ -30,6 +30,10 @@ function makeSession(overrides: Partial<ObservedSession>): ObservedSession {
     optimizationWasteScore: null,
     optimizationPotentialSavingsTokens: null,
     optimizationPotentialSavingsUsd: null,
+    noteCount: 0,
+    latestNoteAuthorDisplay: null,
+    latestNoteAuthorAuthMethod: null,
+    latestNoteAt: null,
     raw: null,
     ...overrides,
   };
@@ -128,5 +132,92 @@ describe('session-list-panel figures', () => {
     // Cost follows the tokens in the same line, not the other way round.
     const rowText = (metric?.textContent || '').replace(/\s+/g, ' ');
     expect(rowText.trim().endsWith('$0.42')).to.be.true;
+  });
+});
+
+describe('session-list-panel note indicator', () => {
+  it('shows the count and the most recent author on a noted session', async () => {
+    const el = await renderPanel([
+      makeSession({
+        id: 'session-noted',
+        noteCount: 3,
+        latestNoteAuthorDisplay: 'Reviewer',
+        latestNoteAuthorAuthMethod: 'agent',
+        latestNoteAt: '2026-03-09T20:00:00Z',
+      }),
+    ]);
+
+    const row = el.shadowRoot?.querySelector(
+      '[data-testid="session-notes-session-noted"]'
+    );
+    expect(row).to.exist;
+    expect(row?.textContent).to.contain('3 notes');
+    expect(row?.textContent).to.contain('Reviewer');
+    expect(row?.getAttribute('title')).to.equal(
+      'Most recent note from Reviewer (agent)'
+    );
+  });
+
+  it('shows nothing at all on a session nobody noted', async () => {
+    const el = await renderPanel([makeSession({ id: 'session-quiet' })]);
+
+    expect(
+      el.shadowRoot?.querySelector(
+        '[data-testid="session-notes-session-quiet"]'
+      )
+    ).to.equal(null);
+    expect(el.shadowRoot?.textContent).to.not.contain('note');
+  });
+
+  it('marks an agent author apart from a human one', async () => {
+    const el = await renderPanel([
+      makeSession({
+        id: 'by-agent',
+        noteCount: 1,
+        latestNoteAuthorDisplay: 'Reviewer',
+        latestNoteAuthorAuthMethod: 'agent',
+      }),
+      makeSession({
+        id: 'by-human',
+        noteCount: 1,
+        latestNoteAuthorDisplay: 'Jane Doe',
+        latestNoteAuthorAuthMethod: 'jwt',
+      }),
+    ]);
+
+    const byAgent = el.shadowRoot?.querySelector(
+      '[data-testid="session-notes-by-agent"]'
+    )!;
+    const byHuman = el.shadowRoot?.querySelector(
+      '[data-testid="session-notes-by-human"]'
+    )!;
+
+    expect(byAgent.getAttribute('data-note-author-kind')).to.equal('agent');
+    expect(byHuman.getAttribute('data-note-author-kind')).to.equal('human');
+    expect(byAgent.querySelector('sl-icon')?.getAttribute('name')).to.not.equal(
+      byHuman.querySelector('sl-icon')?.getAttribute('name')
+    );
+    expect(byAgent.textContent).to.contain('1 note');
+    expect(byAgent.textContent).to.not.contain('1 notes');
+  });
+
+  it('names an author the server did not record', async () => {
+    const el = await renderPanel([
+      makeSession({
+        id: 'session-anon',
+        noteCount: 2,
+        latestNoteAuthorDisplay: null,
+        latestNoteAuthorAuthMethod: null,
+      }),
+    ]);
+
+    const row = el.shadowRoot?.querySelector(
+      '[data-testid="session-notes-session-anon"]'
+    );
+    expect(row?.textContent).to.contain('Unknown author');
+    expect(row?.getAttribute('data-note-author-kind')).to.equal('unknown');
+    expect(row?.querySelector('sl-icon')?.getAttribute('name')).to.equal(
+      'question-circle'
+    );
   });
 });
