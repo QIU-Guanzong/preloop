@@ -1,0 +1,108 @@
+{
+  "harness": "Cursor CLI",
+  "harness_version": "2026.09.02-c22c1a3",
+  "source": "cursor",
+  "captured_from": "cursor-agent --version reported 2026.09.02-c22c1a3 on the machine this fixture was written on. In that build additional_context is accepted only for the hook steps sessionStart, beforeSubmitPrompt, preToolUse, postToolUse and postToolUseFailure, and the preToolUse response is mapped onto a message carrying permission, user_message, agent_message, updated_input and additional_context, with the additional context collected for the model on allow and on deny. beforeShellExecution and beforeMCPExecution read only permission and user_message, and additional_context is stripped from their responses, so a note claimed there waits for the next preToolUse. Cursor drops an additional_context over 10000 characters.",
+  "operator_note": "<operator-notes count=\"1\" source=\"preloop-control-plane\">\nThe block below is an instruction from the human operating this agent,\ndelivered out of band by the Preloop control plane at a turn boundary.\n<operator-note id=\"a1b2c3d4e5f60718\" from=\"Jane Doe\" auth=\"jwt\"\n               at=\"2026-09-15T09:14:02+00:00\">\nDeploy to eu-west-1, not us-east-1.\n</operator-note>\n</operator-notes>",
+  "cases": [
+    {
+      "name": "preToolUse allow",
+      "hook_event": "preToolUse",
+      "carries_note": true,
+      "hook_event_payload": {
+        "conversation_id": "session-fixture-cursor",
+        "hook_event_name": "preToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+          "file_path": "src/app.ts",
+          "content": "export const answer = 42;\n"
+        }
+      },
+      "permission_check_response": {
+        "decision": "allow",
+        "reason": "Approved via Preloop."
+      },
+      "without_note": {
+        "permission": "allow"
+      },
+      "with_note": {
+        "permission": "allow",
+        "additional_context": "<operator-notes count=\"1\" source=\"preloop-control-plane\">\nThe block below is an instruction from the human operating this agent,\ndelivered out of band by the Preloop control plane at a turn boundary.\n<operator-note id=\"a1b2c3d4e5f60718\" from=\"Jane Doe\" auth=\"jwt\"\n               at=\"2026-09-15T09:14:02+00:00\">\nDeploy to eu-west-1, not us-east-1.\n</operator-note>\n</operator-notes>"
+      }
+    },
+    {
+      "name": "preToolUse deny",
+      "hook_event": "preToolUse",
+      "carries_note": true,
+      "hook_event_payload": {
+        "conversation_id": "session-fixture-cursor",
+        "hook_event_name": "preToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+          "file_path": "src/app.ts",
+          "content": "export const answer = 43;\n"
+        }
+      },
+      "permission_check_response": {
+        "decision": "deny",
+        "reason": "Denied by a native rule."
+      },
+      "without_note": {
+        "permission": "deny",
+        "agent_message": "Denied by a native rule.",
+        "user_message": "Denied by a native rule."
+      },
+      "with_note": {
+        "permission": "deny",
+        "agent_message": "Denied by a native rule.",
+        "user_message": "Denied by a native rule.",
+        "additional_context": "<operator-notes count=\"1\" source=\"preloop-control-plane\">\nThe block below is an instruction from the human operating this agent,\ndelivered out of band by the Preloop control plane at a turn boundary.\n<operator-note id=\"a1b2c3d4e5f60718\" from=\"Jane Doe\" auth=\"jwt\"\n               at=\"2026-09-15T09:14:02+00:00\">\nDeploy to eu-west-1, not us-east-1.\n</operator-note>\n</operator-notes>"
+      }
+    },
+    {
+      "name": "beforeShellExecution allow",
+      "hook_event": "beforeShellExecution",
+      "carries_note": false,
+      "hook_event_payload": {
+        "conversation_id": "session-fixture-cursor",
+        "hook_event_name": "beforeShellExecution",
+        "command": "npm run build",
+        "cwd": "/workspace/project"
+      },
+      "permission_check_response": {
+        "decision": "allow",
+        "reason": "Approved via Preloop."
+      },
+      "without_note": {
+        "permission": "allow"
+      },
+      "with_note": {
+        "permission": "allow"
+      }
+    },
+    {
+      "name": "beforeMCPExecution allow",
+      "hook_event": "beforeMCPExecution",
+      "carries_note": false,
+      "hook_event_payload": {
+        "conversation_id": "session-fixture-cursor",
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": "search_issues",
+        "mcp_server_name": "tracker",
+        "tool_input": {
+          "query": "is:open label:bug"
+        }
+      },
+      "permission_check_response": {
+        "decision": "allow",
+        "reason": "Approved via Preloop."
+      },
+      "without_note": {
+        "permission": "allow"
+      },
+      "with_note": {
+        "permission": "allow"
+      }
+    }
+  ]
+}

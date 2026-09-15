@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Operator notes reach hook path agents. The permission hook writes the
+  rendered note block into the Claude Code `PreToolUse` and Codex CLI
+  `PreToolUse` `hookSpecificOutput.additionalContext`, and into the Cursor CLI
+  `preToolUse` `additional_context`. Codex `PermissionRequest` and the Cursor
+  `before*` hooks have no field that reaches the model, so a note claimed there
+  is held for its session and rides the next tool call's carrying hook, once. A
+  turn with no pending note produces the same response as before.
 - Flow-execution workers run up to `FLOW_EXECUTION_MAX_INFLIGHT` hosted
   monitors per process (default 10). The monitor loop is wait-bound; other
   worker pools stay serial. Helm sets `flowExecution.maxInflight` and a
