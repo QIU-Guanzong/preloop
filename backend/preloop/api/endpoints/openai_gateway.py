@@ -206,7 +206,9 @@ def create_embedding(
 
     Same authentication, account scoping, budget preflight and usage
     accounting as the completions routes; embeddings carry no stream, so
-    there is no SSE branch here.
+    there is no SSE branch here. Parent lineage is read on the same terms
+    as chat and responses: a subagent whose first request is an embedding
+    must still record who spawned it.
     """
     service = OpenAIGatewayService(
         db,
@@ -215,5 +217,12 @@ def create_embedding(
         owns_db_session=True,
         client_session_id=x_preloop_session_id
         or native_session_id_from_headers(request.headers, auth_context=auth_context),
+        client_parent_session_id=(
+            None
+            if x_preloop_session_id
+            else native_parent_session_id_from_headers(
+                request.headers, auth_context=auth_context
+            )
+        ),
     )
     return _with_alias_collision_warning(service.create_embedding(payload), service)

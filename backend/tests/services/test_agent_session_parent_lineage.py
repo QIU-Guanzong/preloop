@@ -87,6 +87,35 @@ def _durable_key(db_session, test_user, principal_type: str) -> Any:
     return runtime_api_key
 
 
+def _create_embedding_model(db_session, account_id) -> Any:
+    return crud_ai_model.create_with_account(
+        db=db_session,
+        obj_in={
+            "name": "Gateway Embedding Model",
+            "provider_name": "openai",
+            "model_identifier": "text-embedding-3-small",
+            "api_key": "provider-secret",
+            "meta_data": {
+                "gateway": {
+                    "enabled": True,
+                    "model_alias": "openai/text-embedding-3-small",
+                    "provider_adapter": "preloop",
+                }
+            },
+            "is_default": False,
+        },
+        account_id=account_id,
+    )
+
+
+_LITELLM_EMBEDDING = {
+    "object": "list",
+    "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}],
+    "model": "text-embedding-3-small",
+    "usage": {"prompt_tokens": 4, "total_tokens": 4},
+}
+
+
 def _run_turn(
     db_session,
     test_user,
@@ -111,10 +140,43 @@ def _run_turn(
         )
 
 
+def _run_embedding(
+    db_session,
+    test_user,
+    api_key,
+    *,
+    client_session_id: Optional[str] = None,
+    client_parent_session_id: Optional[str] = None,
+) -> None:
+    """Run one embeddings request the way the OpenAI embeddings endpoint would."""
+    service = OpenAIGatewayService(
+        db_session,
+        ModelGatewayAuthContext(token="t", user=test_user, api_key=api_key),
+        client_session_id=client_session_id,
+        client_parent_session_id=client_parent_session_id,
+    )
+    with patch(
+        "preloop.services.openai_gateway.litellm.embedding",
+        return_value=_LITELLM_EMBEDDING,
+    ):
+        service.create_embedding(
+            {"model": "openai/text-embedding-3-small", "input": "hello"}
+        )
+
+
 def _usage_rows(db_session) -> List[ApiUsage]:
     return (
         db_session.query(ApiUsage)
         .filter(ApiUsage.endpoint == "/openai/v1/chat/completions")
+        .order_by(ApiUsage.timestamp.asc())
+        .all()
+    )
+
+
+def _embedding_usage_rows(db_session) -> List[ApiUsage]:
+    return (
+        db_session.query(ApiUsage)
+        .filter(ApiUsage.endpoint == "/openai/v1/embeddings")
         .order_by(ApiUsage.timestamp.asc())
         .all()
     )
@@ -250,6 +312,78 @@ def test_session_id_derivation_is_unchanged_by_the_parent_read(db_session, test_
 # ---------------------------------------------------------------------------
 # Capture, one test per harness the spike found capable
 # ---------------------------------------------------------------------------
+
+
+def test_embedding_first_opencode_subagent_records_its_parent(db_session, test_user):
+    """A subagent whose first request is an embedding still records its parent.
+
+    Later chat on the same session must not leave that parent NULL.
+    """
+    _create_gateway_model(db_session, test_user.account_id)
+    _create_embedding_model(db_session, test_user.account_id)
+    api_key = _durable_key(db_session, test_user, "opencode")
+
+    _run_embedding(
+        db_session,
+        test_user,
+        api_key,
+        client_session_id="ses_child",
+        client_parent_session_id="ses_parent",
+    )
+    child = _session_for(db_session, test_user, _embedding_usage_rows(db_session)[0])
+    assert child.parent_session_id is not None
+
+    _run_turn(
+        db_session,
+        test_user,
+        api_key,
+        client_session_id="ses_child",
+        client_parent_session_id="ses_parent",
+    )
+    db_session.refresh(child)
+    chat_row = _usage_rows(db_session)[0]
+    assert str(chat_row.runtime_session_id) == str(child.id)
+    assert child.parent_session_id is not None
+    parent = crud_runtime_session.get_account_session(
+        db_session,
+        account_id=str(test_user.account_id),
+        runtime_session_id=str(child.parent_session_id),
+    )
+    assert parent is not None
+    assert parent.session_source_id.endswith(":ses_parent")
+
+
+def test_later_chat_turn_backfills_a_null_parent(db_session, test_user):
+    """An already-open child with no parent is filled on the next parented turn."""
+    _create_gateway_model(db_session, test_user.account_id)
+    _create_embedding_model(db_session, test_user.account_id)
+    api_key = _durable_key(db_session, test_user, "opencode")
+
+    _run_embedding(
+        db_session,
+        test_user,
+        api_key,
+        client_session_id="ses_child",
+    )
+    child = _session_for(db_session, test_user, _embedding_usage_rows(db_session)[0])
+    assert child.parent_session_id is None
+
+    _run_turn(
+        db_session,
+        test_user,
+        api_key,
+        client_session_id="ses_child",
+        client_parent_session_id="ses_parent",
+    )
+    db_session.refresh(child)
+    assert child.parent_session_id is not None
+    parent = crud_runtime_session.get_account_session(
+        db_session,
+        account_id=str(test_user.account_id),
+        runtime_session_id=str(child.parent_session_id),
+    )
+    assert parent is not None
+    assert parent.session_source_id.endswith(":ses_parent")
 
 
 def test_opencode_subagent_session_records_its_parent(db_session, test_user):
