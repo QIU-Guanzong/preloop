@@ -50,6 +50,20 @@ class FlowExecutionBase(BaseModel):
     openhands_session_reference: Optional[str] = Field(
         None, description="Reference to OpenHands session (e.g., ID, K8s job ID)"
     )
+    parent_execution_id: Optional[uuid.UUID] = Field(
+        None,
+        description=(
+            "The execution that started this one, when another execution did. "
+            "Null for a trigger-started run and for rows that predate lineage."
+        ),
+    )
+    root_execution_id: Optional[uuid.UUID] = Field(
+        None,
+        description="Top of this execution's lineage chain; null until recorded.",
+    )
+    delegation_depth: int = Field(
+        0, description="Hops from root_execution_id; 0 for a root execution."
+    )
     error_message: Optional[str] = Field(
         None, description="Error message if the execution failed"
     )
@@ -71,6 +85,9 @@ class FlowExecutionListResponse(BaseModel):
     status: str
     start_time: datetime
     end_time: Optional[datetime] = None
+    parent_execution_id: Optional[uuid.UUID] = None
+    root_execution_id: Optional[uuid.UUID] = None
+    delegation_depth: int = 0
     created_at: datetime
 
     @field_serializer("id", "flow_id")

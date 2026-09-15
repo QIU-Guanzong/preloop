@@ -1,4 +1,5 @@
 import uuid
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
@@ -851,6 +852,58 @@ def test_lightweight_execution_list_loads_the_failure_category():
     assert "FlowExecution.failure_category" in source
     assert "FlowExecution.runner_id" in source
     assert "FlowExecution.agent_session_reference" in source
+
+
+def test_flow_execution_schemas_expose_lineage():
+    """Parent, root and depth must be readable wherever an execution is read.
+
+    A row's lineage is what lets a console group a chain and an operator
+    answer "what did this run cause?", so it belongs on the detail response
+    and on the lightweight list row the tree is built from.
+    """
+    for schema in (
+        schemas.FlowExecutionResponse,
+        schemas.FlowExecutionListResponse,
+    ):
+        assert "parent_execution_id" in schema.model_fields
+        assert "root_execution_id" in schema.model_fields
+        assert "delegation_depth" in schema.model_fields
+
+
+def test_lightweight_execution_list_loads_lineage():
+    """The lineage columns must be in load_only, like the other row fields."""
+    import inspect
+
+    from preloop.models.crud.flow_execution import CRUDFlowExecution
+
+    source = inspect.getsource(CRUDFlowExecution.get_multi)
+    assert "FlowExecution.parent_execution_id" in source
+    assert "FlowExecution.root_execution_id" in source
+    assert "FlowExecution.delegation_depth" in source
+
+
+def test_execution_response_defaults_lineage_when_the_row_has_none():
+    """A row that carries no lineage renders as no parent, no root, depth 0.
+
+    Rows written before the columns existed read back that way from the
+    database; this pins the response side of the same promise, so a consumer
+    never has to special-case an old execution.
+    """
+    row = SimpleNamespace(
+        id=uuid.uuid4(),
+        flow_id=uuid.uuid4(),
+        status="SUCCEEDED",
+        start_time=datetime.now(timezone.utc),
+        end_time=None,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    response = schemas.FlowExecutionResponse.model_validate(row)
+
+    assert response.parent_execution_id is None
+    assert response.root_execution_id is None
+    assert response.delegation_depth == 0
 
 
 @pytest.mark.asyncio

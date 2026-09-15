@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   manifest. Console buttons on the Audit page, `preloop export
   asset-register` and `preloop export incident-candidates` in the CLI, and
   docs at `docs/guide/dora-agent-slice.md`.
+- Flow executions carry lineage columns: `parent_execution_id` (the execution
+  that started this one), `root_execution_id` (the top of its chain) and
+  `delegation_depth` (hops from that root, 0 for a root). They are exposed on
+  the execution response and default to no parent, no root and depth 0 for
+  rows that predate them. Nothing writes a non-default value yet; the
+  `run_flow` child, park and console tree build on them.
 
 ### Removed
 

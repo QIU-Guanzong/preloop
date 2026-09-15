@@ -604,6 +604,32 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             query = query.join(Flow).filter(Flow.account_id == account_id)
         return query.all()
 
+    def list_children(
+        self,
+        db: Session,
+        parent_execution_id: uuid.UUID,
+        account_id: Optional[str] = None,
+    ) -> List[FlowExecution]:
+        """Direct children of one execution, oldest first.
+
+        Ordered by ``(created_at, id)``: creation order is what a tree wants to
+        render, and the id tiebreak keeps the order deterministic when two
+        children share a timestamp (UUIDs alone would shuffle rows between
+        reads). Only direct children come back, so a subtree is walked level by
+        level through ``delegation_depth`` instead of one recursive query, and
+        a leaf returns an empty list. The flow relationship is eagerly loaded
+        because callers render flow names per row.
+        """
+        query = (
+            db.query(FlowExecution)
+            .options(joinedload(FlowExecution.flow))
+            .filter(FlowExecution.parent_execution_id == parent_execution_id)
+            .order_by(FlowExecution.created_at.asc(), FlowExecution.id.asc())
+        )
+        if account_id:
+            query = query.join(Flow).filter(Flow.account_id == account_id)
+        return query.all()
+
     def get_running_by_flow(
         self,
         db: Session,
@@ -680,6 +706,11 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
                     FlowExecution.runner_id,
                     FlowExecution.agent_session_reference,
                     FlowExecution.retry_of_execution_id,
+                    # Lineage is small and is what a console tree groups a
+                    # list by; deferring it would lazy-load one row at a time.
+                    FlowExecution.parent_execution_id,
+                    FlowExecution.root_execution_id,
+                    FlowExecution.delegation_depth,
                     FlowExecution.batch_id,
                     FlowExecution.tool_calls_count,
                     FlowExecution.total_tokens,

@@ -231,6 +231,28 @@ class FlowExecutionBase(BaseModel):
     retry_of_execution_id: Optional[uuid.UUID] = Field(
         None, description="ID of the original execution if this is a retry"
     )
+    parent_execution_id: Optional[uuid.UUID] = Field(
+        None,
+        description=(
+            "The execution that started this one, when another execution did "
+            "(a run_flow child, a continuation, a retry, ...). Null for a "
+            "trigger-started run and for rows that predate lineage."
+        ),
+    )
+    root_execution_id: Optional[uuid.UUID] = Field(
+        None,
+        description=(
+            "Top of this execution's lineage chain; every hop of one chain "
+            "shares it. Null until lineage is recorded."
+        ),
+    )
+    delegation_depth: int = Field(
+        0,
+        description=(
+            "Hops from root_execution_id; 0 for a root execution and for "
+            "rows that predate lineage."
+        ),
+    )
     batch_id: Optional[uuid.UUID] = Field(
         None,
         description="Shared ID linking executions created by one matrix/batch trigger",
@@ -315,6 +337,20 @@ class FlowExecutionListResponse(ExecutionModelProjection):
         ),
     )
     retry_of_execution_id: Optional[uuid.UUID] = None
+    parent_execution_id: Optional[uuid.UUID] = Field(
+        None,
+        description=(
+            "The execution that started this one, when another execution did. "
+            "Null for a trigger-started run and for rows that predate lineage."
+        ),
+    )
+    root_execution_id: Optional[uuid.UUID] = Field(
+        None,
+        description="Top of this execution's lineage chain; null until recorded.",
+    )
+    delegation_depth: int = Field(
+        0, description="Hops from root_execution_id; 0 for a root execution."
+    )
     batch_id: Optional[uuid.UUID] = None
     tool_calls_count: Optional[int] = 0
     total_tokens: Optional[int] = 0

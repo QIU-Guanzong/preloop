@@ -15209,6 +15209,26 @@ components:
             format: uuid
           - type: 'null'
           title: Retry Of Execution Id
+        parent_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Parent Execution Id
+          description: The execution that started this one, when another execution
+            did. Null for a trigger-started run and for rows that predate lineage.
+        root_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Root Execution Id
+          description: Top of this execution's lineage chain; null until recorded.
+        delegation_depth:
+          type: integer
+          title: Delegation Depth
+          description: Hops from root_execution_id; 0 for a root execution.
+          default: 0
         batch_id:
           anyOf:
           - type: string
@@ -17139,6 +17159,26 @@ components:
             format: uuid
           - type: 'null'
           title: Retry Of Execution Id
+        parent_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Parent Execution Id
+          description: The execution that started this one, when another execution
+            did. Null for a trigger-started run and for rows that predate lineage.
+        root_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Root Execution Id
+          description: Top of this execution's lineage chain; null until recorded.
+        delegation_depth:
+          type: integer
+          title: Delegation Depth
+          description: Hops from root_execution_id; 0 for a root execution.
+          default: 0
         batch_id:
           anyOf:
           - type: string
@@ -17406,6 +17446,29 @@ components:
           - type: 'null'
           title: Retry Of Execution Id
           description: ID of the original execution if this is a retry
+        parent_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Parent Execution Id
+          description: The execution that started this one, when another execution
+            did (a run_flow child, a continuation, a retry, ...). Null for a trigger-started
+            run and for rows that predate lineage.
+        root_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Root Execution Id
+          description: Top of this execution's lineage chain; every hop of one chain
+            shares it. Null until lineage is recorded.
+        delegation_depth:
+          type: integer
+          title: Delegation Depth
+          description: Hops from root_execution_id; 0 for a root execution and for
+            rows that predate lineage.
+          default: 0
         batch_id:
           anyOf:
           - type: string

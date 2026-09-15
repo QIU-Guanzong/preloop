@@ -258,3 +258,39 @@ class TestFlowExecutionDetailResponse:
 
         # Detail response should have at least all base fields
         assert base_fields.issubset(detail_fields)
+
+
+class TestLineageFields:
+    """Execution lineage (parent, root, depth) on the response schemas."""
+
+    def test_defaults_are_no_parent_no_root_depth_zero(self):
+        flow_id = uuid.uuid4()
+        execution = FlowExecutionBase(
+            id=uuid.uuid4(),
+            flow_id=flow_id,
+            status="PENDING",
+            start_time=datetime.now(),
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        )
+
+        assert execution.parent_execution_id is None
+        assert execution.root_execution_id is None
+        assert execution.delegation_depth == 0
+
+    def test_list_response_carries_the_same_lineage(self):
+        parent_id = uuid.uuid4()
+        response = FlowExecutionListResponse(
+            id=uuid.uuid4(),
+            flow_id=uuid.uuid4(),
+            status="RUNNING",
+            start_time=datetime.now(),
+            created_at=datetime.now(),
+            parent_execution_id=parent_id,
+            root_execution_id=parent_id,
+            delegation_depth=1,
+        )
+
+        assert response.parent_execution_id == parent_id
+        assert response.root_execution_id == parent_id
+        assert response.delegation_depth == 1
