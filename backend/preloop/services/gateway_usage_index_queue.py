@@ -28,6 +28,7 @@ import queue
 import threading
 from typing import Optional
 
+from preloop.config import settings
 from preloop.models.crud import crud_gateway_usage_search_document
 from preloop.models.db.session import get_db_session
 from preloop.services.gateway_usage_search import GatewayUsageIndexDocument
@@ -40,10 +41,8 @@ DEFAULT_MAX_PENDING = 256
 def _max_pending() -> int:
     """Pending documents allowed before new ones are dropped."""
     try:
-        configured = int(
-            os.getenv("GATEWAY_USAGE_INDEX_QUEUE_MAX_PENDING", DEFAULT_MAX_PENDING)
-        )
-    except ValueError:
+        configured = int(settings.gateway_usage_index_queue_max_pending)
+    except (TypeError, ValueError):
         return DEFAULT_MAX_PENDING
     return max(1, configured)
 
@@ -56,12 +55,7 @@ def _worker_enabled() -> bool:
     """
     if os.getenv("TESTING") == "true":
         return False
-    return os.getenv("GATEWAY_USAGE_INDEX_QUEUE_ENABLED", "true").lower() in (
-        "true",
-        "1",
-        "t",
-        "yes",
-    )
+    return bool(settings.gateway_usage_index_queue_enabled)
 
 
 class GatewayUsageIndexQueue:

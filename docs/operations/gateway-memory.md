@@ -21,6 +21,9 @@ of rows for every account it visits. Two independent working sets sharing
 one memory limit is what turned a normal burst into an OOMKill, so a
 dedicated gateway process now runs no background passes at all
 (`preloop.services.service_roles`, enforced in each sweeper's `start()`).
+A split deploy therefore needs at least one `api` or `all` process:
+gateway-only pods will not seal the audit chain, purge retention, or run
+optimization jobs.
 
 ## Measurement
 
@@ -93,3 +96,17 @@ on hosted clusters plus the per-response numbers above.
 
 If these numbers are revisited, state the measurement next to the values,
 the way the comment in `values.yaml` does.
+
+## Operator knobs
+
+The off-path indexing queue is bounded so a backed-up writer cannot grow
+memory. Both knobs are environment variables, read through
+`preloop.config.settings`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GATEWAY_USAGE_INDEX_QUEUE_MAX_PENDING` | 256 | Documents waiting to be written. New ones are dropped when the queue is full. |
+| `GATEWAY_USAGE_INDEX_QUEUE_ENABLED` | true | Whether the process may start the writer thread. `TESTING=true` always disables it. |
+
+A full queue is the correct failure: the corpus is an opt-in convenience,
+and memory pressure is the problem this exists to avoid.

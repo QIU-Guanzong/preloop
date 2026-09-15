@@ -45,6 +45,18 @@ def mock_openai_client():
         yield mock_client
 
 
+@pytest.fixture(autouse=True)
+def reset_gateway_usage_index_queue_between_tests():
+    """Isolate the process-wide indexing queue across tests."""
+    from preloop.services.gateway_usage_index_queue import (
+        reset_gateway_usage_index_queue,
+    )
+
+    reset_gateway_usage_index_queue()
+    yield
+    reset_gateway_usage_index_queue()
+
+
 def pytest_configure(config):
     """
     Load environment variables from .env file before tests run.

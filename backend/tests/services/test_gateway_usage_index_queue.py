@@ -8,7 +8,11 @@ import pytest
 
 from preloop.config import settings
 from preloop.models.crud import crud_api_usage, crud_gateway_usage_search_document
-from preloop.services.gateway_usage_index_queue import GatewayUsageIndexQueue
+from preloop.services.gateway_usage_index_queue import (
+    GatewayUsageIndexQueue,
+    get_gateway_usage_index_queue,
+    reset_gateway_usage_index_queue,
+)
 from preloop.services.gateway_usage_search import (
     GatewayUsageIndexDocument,
     GatewayUsageSearchService,
@@ -169,6 +173,30 @@ def test_write_failure_is_isolated_from_the_caller():
 
     assert queue.failed == 1
     assert queue.pending == 0
+
+
+def test_reset_gateway_usage_index_queue_drops_the_singleton():
+    """Tests can drop the process-wide queue so later cases see a fresh one."""
+    first = get_gateway_usage_index_queue()
+    assert get_gateway_usage_index_queue() is first
+    reset_gateway_usage_index_queue()
+    assert get_gateway_usage_index_queue() is not first
+
+
+def test_process_queue_max_pending_follows_settings():
+    """The singleton queue depth is the settings knob, not a hardcoded size."""
+    with patch.object(settings, "gateway_usage_index_queue_max_pending", 1):
+        reset_gateway_usage_index_queue()
+        queue = get_gateway_usage_index_queue()
+        first = GatewayUsageIndexDocument(
+            api_usage_id="usage-1", searchable_text="first", meta_data={}
+        )
+        second = GatewayUsageIndexDocument(
+            api_usage_id="usage-2", searchable_text="second", meta_data={}
+        )
+        assert queue.submit(first) is True
+        assert queue.submit(second) is False
+        assert queue.dropped == 1
 
 
 @pytest.mark.parametrize("status_code", [200, 500])
