@@ -20,12 +20,15 @@ Cost analytics turns gateway telemetry into explainable spend and budget health.
 
 After an initial rollout and explicit configuration, each API, dedicated gateway,
 and worker polls the same trusted HTTPS price artifact. A reviewed publication
-updates supported flat token rates and native DeepSeek UTC peak/off-peak tariff
-revisions without deploying application code. Unknown policy structures require
+updates supported flat token rates, native DeepSeek UTC peak/off-peak tariff
+revisions, and dedicated Alibaba USD regional token tiers without deploying application code. Unknown policy structures require
 an estimator change, boundary tests, and a deployment. Refresh validates evidence,
 effective dates, model scope, and historical tariff continuity before replacing
 the current map; existing usage records, account overrides, and provider-reported
 costs are unchanged. On failure it retains last-known rates as potentially stale
-estimates and logs the failure. The disabled weekly factory review template
-produces an evidence-backed PR and generated feed, reporting providers it could
-not verify. See [configuration and publication](../guide/model-price-refresh.md).
+estimates and logs the failure. The public weekly model-price review preset and idempotent installer bind the
+account's existing model and repository, prepare an evidence-backed PR and
+regional feed, and report providers or cache policies that could not be verified.
+Alibaba prices land in the dedicated region store of each process; scoped regional
+allowlists can admit newly reviewed SKUs, while freshness and effective dates
+prevent stale native overlays or newer tariffs from corrupting historical estimates. See [configuration and publication](../guide/model-price-refresh.md).

@@ -42,6 +42,10 @@ from preloop.services.runner_service import (
     resolve_runner_pool,
     runner_id_from_session_reference,
 )
+from preloop.services.flow_delegation import (
+    CallableFlowsError,
+    validate_callable_flows,
+)
 from preloop.services.model_routing import (
     ModelRoutingError,
     model_usable_for_agent as _model_usable_for_agent,
@@ -214,6 +218,19 @@ def create_flow(
     try:
         validate_stored_model_routing(db, flow_in.agent_config, current_user.account_id)
     except ModelRoutingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Delegation allowlist: every entry has to name a flow in this account.
+    # Nothing enforces the list at call time yet, but an entry stored now that
+    # resolves to nothing would be an allowlist nobody can read.
+    try:
+        validate_callable_flows(
+            db,
+            callable_flows=flow_in.callable_flows,
+            account_id=current_user.account_id,
+            flow_name=flow_in.name,
+        )
+    except CallableFlowsError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     flow = crud_flow.create(db=db, flow_in=flow_in, account_id=current_user.account_id)
@@ -2040,6 +2057,21 @@ def update_flow(
                 db, flow_in.agent_config, current_user.account_id
             )
         except ModelRoutingError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Only validate the allowlist when this write carries one: an update that
+    # does not mention callable_flows leaves the stored list alone, and an
+    # explicit null or [] revokes it (which always validates).
+    if "callable_flows" in flow_in.model_fields_set:
+        try:
+            validate_callable_flows(
+                db,
+                callable_flows=flow_in.callable_flows,
+                account_id=current_user.account_id,
+                flow_id=flow.id,
+                flow_name=flow_in.name or flow.name,
+            )
+        except CallableFlowsError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     _reject_host_exec_flow(

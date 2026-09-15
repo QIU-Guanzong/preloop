@@ -6,6 +6,11 @@ from unittest.mock import patch, AsyncMock
 import pytest
 
 from preloop.agents.gemini import GeminiAgent
+from preloop.utils.execve_limits import (
+    PROMPT_ENV_PREFIX,
+    PROMPT_FILE_PATH,
+    prompt_transport_env,
+)
 
 
 class TestGeminiAgentInit:
@@ -117,8 +122,14 @@ class TestGeminiModelResolution:
 class TestGeminiBuildScript:
     """Test _build_gemini_script method."""
 
-    def test_script_contains_prompt(self):
-        """Generated script contains the base64-encoded prompt."""
+    def test_script_carries_no_prompt_bytes_at_all(self):
+        """Neither the prompt nor its base64 appears in the script.
+
+        Base64 was safe against shell metacharacters but not against
+        MAX_ARG_STRLEN: it is a 4/3 expansion, so embedding it made the
+        script grow faster than the prompt it carried. The chunks live in the
+        environment now and the script only names the decoded file.
+        """
         import base64
 
         agent = GeminiAgent({})
@@ -129,9 +140,9 @@ class TestGeminiBuildScript:
             "flow_name": "test-flow",
         }
         script = agent._build_gemini_script(context)
-        # Prompt is base64-encoded for shell safety
-        expected_b64 = base64.b64encode(prompt.encode()).decode()
-        assert expected_b64 in script
+        assert prompt not in script
+        assert base64.b64encode(prompt.encode()).decode() not in script
+        assert f'--prompt "$(cat {PROMPT_FILE_PATH})"' in script
 
     def test_script_contains_model(self):
         """Generated script uses the configured model."""
@@ -187,8 +198,8 @@ class TestGeminiBuildScript:
         assert "-H" in script
         assert "$PRELOOP_API_TOKEN" in script
 
-    def test_prompt_with_single_quotes(self):
-        """Prompt with single quotes is handled safely via base64 encoding."""
+    def test_prompt_with_single_quotes_round_trips_through_the_environment(self):
+        """A quote-bearing prompt survives the chunked transport intact."""
         import base64
 
         agent = GeminiAgent({})
@@ -199,9 +210,13 @@ class TestGeminiBuildScript:
             "flow_name": "test-flow",
         }
         script = agent._build_gemini_script(context)
-        # Prompt is base64-encoded, so single quotes are safe
-        expected_b64 = base64.b64encode(prompt.encode()).decode()
-        assert expected_b64 in script
+        assert prompt not in script
+        env = prompt_transport_env(prompt)
+        joined = "".join(
+            env[f"{PROMPT_ENV_PREFIX}{index}"]
+            for index in range(int(env[f"{PROMPT_ENV_PREFIX}CHUNKS"]))
+        )
+        assert base64.b64decode(joined).decode() == prompt
 
 
 class TestGeminiPrepareEnvironment:

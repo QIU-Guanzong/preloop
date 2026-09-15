@@ -6,6 +6,7 @@ from unittest.mock import patch, AsyncMock
 import pytest
 
 from preloop.agents.codex import CodexAgent
+from preloop.utils.execve_limits import PROMPT_FILE_PATH
 
 
 class TestCodexAgentInit:
@@ -151,8 +152,12 @@ class TestCodexModelResolution:
 class TestCodexBuildScript:
     """Test _build_codex_script method."""
 
-    def test_script_contains_prompt(self):
-        """Generated script contains the escaped prompt."""
+    def test_script_reads_the_prompt_from_a_file_not_from_its_own_text(self):
+        """The prompt is delivered out of band, never inlined in the script.
+
+        Inlining it made the script grow with the trigger payload, and one
+        execve string cannot exceed MAX_ARG_STRLEN.
+        """
         agent = CodexAgent({})
         context = {
             "prompt": "Fix the bug in main.py",
@@ -160,20 +165,31 @@ class TestCodexBuildScript:
             "flow_name": "test-flow",
         }
         script = agent._build_codex_script(context)
-        assert "Fix the bug in main.py" in script
+        assert "Fix the bug in main.py" not in script
+        assert f'cat "{PROMPT_FILE_PATH}" | codex exec' in script
 
-    def test_script_escapes_special_chars(self):
-        """Prompt with special shell characters is properly escaped."""
+    def test_shell_metacharacters_never_reach_the_script(self):
+        """A prompt full of shell syntax leaves no trace in the script.
+
+        There is nothing left to escape: the prompt travels as base64 in the
+        environment, so backticks and dollar signs cannot be misquoted into
+        command substitution.
+        """
         agent = CodexAgent({})
+        prompt = 'Run `echo "hello $USER"` please'
         context = {
-            "prompt": 'Run `echo "hello $USER"` please',
+            "prompt": prompt,
             "execution_id": "exec-1",
             "flow_name": "test-flow",
         }
         script = agent._build_codex_script(context)
-        # Backticks, dollar signs, and double quotes should be escaped
-        assert "\\`" in script
-        assert "\\$" in script
+        assert 'echo "hello $USER"' not in script
+        assert (
+            "`"
+            not in script.split("PRELOOP_AGENT_EXEC_START")[0].split("codex --version")[
+                -1
+            ]
+        )
 
     def test_script_contains_model(self):
         """Generated script uses the configured model."""
