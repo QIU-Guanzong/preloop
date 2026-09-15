@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Callable-flows picker on the flow editor. When the delegation tool is
+  on, the form lists the account's other flows (paging past the 100-row
+  list default) and lets the operator choose which this flow may call,
+  with optional per-entry ceilings. Entries that do not name a flow in
+  the account get a row they can clear, but only once the full list has
+  loaded. The field is omitted from a save that did not edit it, and
+  from a save while the tool is off.
 - Operator notes reach hook path agents. The permission hook writes the
   rendered note block into the Claude Code `PreToolUse` and Codex CLI
   `PreToolUse` `hookSpecificOutput.additionalContext`, and into the Cursor CLI
@@ -39,11 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   monitors per process (default 10). The monitor loop is wait-bound; other
   worker pools stay serial. Helm sets `flowExecution.maxInflight` and a
   dedicated `flowExecution.databasePool` on the flow-execution pool.
-- Issue-triage builtin tools `get_issue_triage_context` and
-  `apply_issue_triage`. They are GitHub and GitLab only, require
-  `edit_issues`, and follow the existing MCP approval path. Context reads
-  a fresh provider snapshot and the permitted complexity scheme; apply
-  writes the managed assessment and an exact complexity label. Docs at
+- Issue triage on the standard issue tools. `get_issue` takes an optional
+  `include` list (`label_catalog`, `revision`) that returns a fresh provider
+  snapshot, the permitted complexity scheme and an expected revision.
+  `update_issue` takes optional `expected_revision`, `assessment` and
+  `complexity_label` and then returns the triage receipt. Triage writes are
+  GitHub and GitLab only, require `edit_issues`, and follow the existing MCP
+  approval path. No separate triage tools are advertised. The preset's
+  triage-only write restriction is prompt-enforced; owners who want a
+  mechanical gate can attach an approval policy to `update_issue`. Docs at
   `docs/guide/flows/issue-triage.md`.
 - DORA agent-slice exports. `GET /api/v1/exports/asset-register` lists agents,
   tools, MCP servers, models, providers and runner hosts as one flat table
@@ -107,6 +118,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A result larger than `FLOW_DELEGATION_RESULT_MAX_BYTES` (default 16384) is
   truncated, flagged and pointed at `GET /flows/executions/{id}/result`. One
   audit row per call, permitted or refused.
+- `run_flow(wait=true)` waits for every child the calling execution has
+  started. It waits in process for `FLOW_DELEGATION_WAIT_SECONDS` (default
+  90) so a fast child never costs a park cycle, then parks the run on the
+  new `WAITING_FOR_CHILDREN` status: the container, the runner and the
+  runtime token are released and the flow timeout budget pauses, exactly as
+  a park on a human decision does. The parent resumes as a new execution
+  that natively continues the same agent session once every tracked child
+  is terminal (completed, failed, stopped or refused), with one completion
+  record per call in the trigger payload under `children` and a prompt block
+  with one row per call: execution id, flow, label, final state, cost and a
+  result pointer. The results arrive as that next turn, not as the return
+  value of the `run_flow` call, which is the same honest limitation the
+  human park has. A parent whose children are still running at
+  `FLOW_DELEGATION_CHILD_WAIT_SECONDS` (default 6 hours) resumes anyway with
+  an expired record for each of them; the children are not stopped. The
+  execution monitor sweep recovers a parent whose resume never landed, and
+  concurrent child completions resume it exactly once. Docs at
+  `docs/guide/flows/flow-delegation.md`.
 - Per-account flow-execution admission cap
   `FLOW_EXECUTION_MAX_RUNNING_PER_ACCOUNT` (default 3, Helm
   `flowExecution.maxRunningPerAccount`). An account may override it through

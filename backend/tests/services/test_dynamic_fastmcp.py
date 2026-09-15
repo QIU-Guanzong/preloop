@@ -493,18 +493,16 @@ class TestListTools:
         assert "improve_compliance" not in names
         assert "get_issue" in names
 
-    async def test_list_tools_excludes_issue_triage_tools_without_config(
+    async def test_list_tools_advertises_only_the_folded_issue_tools(
         self, dynamic_mcp, user_context
     ):
-        """Triage tools are default-disabled: a tracker alone does not
-        advertise them to a fresh agent (#660)."""
+        """Triage lives on get_issue/update_issue; the old pair is gone (#661)."""
         dynamic_mcp._user_context_provider = lambda: user_context
         user_context.tracker_types = ["github"]
 
         default_tools = [
-            Tool(name="get_issue_triage_context", description="GTC", parameters={}),
-            Tool(name="apply_issue_triage", description="AIT", parameters={}),
             Tool(name="get_issue", description="Get issue", parameters={}),
+            Tool(name="update_issue", description="Update issue", parameters={}),
         ]
 
         with patch("preloop.services.dynamic_fastmcp.get_db") as mock_get_db:
@@ -531,15 +529,14 @@ class TestListTools:
                 result = await dynamic_mcp.list_tools()
 
         names = {t.name for t in result}
+        assert names == {"get_issue", "update_issue"}
         assert "get_issue_triage_context" not in names
         assert "apply_issue_triage" not in names
-        assert "get_issue" in names
 
-    async def test_list_tools_flow_allow_list_exposes_issue_triage_tools(
+    async def test_list_tools_flow_allow_list_exposes_folded_issue_tools(
         self, dynamic_mcp
     ):
-        """The triage preset selects both tools, so its execution still gets
-        them despite the default-off flag (#660)."""
+        """The triage preset now selects the standard issue tools (#661)."""
         user_context = UserContext(
             user_id="1",
             account_id="1",
@@ -549,13 +546,13 @@ class TestListTools:
             enabled_proxied_tools=[],
             tracker_types=["github"],
             flow_execution_id="flow-exec-triage",
-            allowed_flow_tools=["get_issue_triage_context", "apply_issue_triage"],
+            allowed_flow_tools=["get_issue", "update_issue"],
         )
         dynamic_mcp._user_context_provider = lambda: user_context
 
         default_tools = [
-            Tool(name="get_issue_triage_context", description="GTC", parameters={}),
-            Tool(name="apply_issue_triage", description="AIT", parameters={}),
+            Tool(name="get_issue", description="Get issue", parameters={}),
+            Tool(name="update_issue", description="Update issue", parameters={}),
             Tool(name="create_issue", description="Create issue", parameters={}),
         ]
 
@@ -583,7 +580,7 @@ class TestListTools:
                 result = await dynamic_mcp.list_tools()
 
         names = {t.name for t in result}
-        assert names == {"get_issue_triage_context", "apply_issue_triage"}
+        assert names == {"get_issue", "update_issue"}
 
     async def test_list_tools_explicit_enable_overrides_default_disabled(
         self, dynamic_mcp, user_context

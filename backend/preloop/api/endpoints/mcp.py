@@ -60,6 +60,7 @@ from preloop.schemas.mcp import (
     SuggestedUpdate,
     UpdateIssueRequest,
 )
+from preloop.tools.builtin_defs import GET_ISSUE_SCHEMA
 
 from preloop.services.duplicate_detection import DuplicateDetector
 from preloop.config import get_settings
@@ -542,7 +543,7 @@ def _enrich_compliance_results(db_results):
     return enriched_results
 
 
-async def _triage_user(db: Session) -> Any:
+async def _tool_user(db: Session) -> Any:
     """Resolve the principal without accepting account IDs from tool arguments."""
     authorization = get_http_request().headers.get("authorization", "")
     user = None
@@ -573,15 +574,14 @@ async def _triage_provider(
     return issue_obj, provider
 
 
-@_with_tool_db
-async def get_issue_triage_context(issue: str) -> "IssueTriageContext":
+async def _read_triage_context(
+    db: Session, current_user: Any, issue: str
+) -> "IssueTriageContext":
     """Read authoritative issue content and a complete scoped label catalogue."""
     from preloop.services.issue_triage import get_context
     from preloop.sync.exceptions import TrackerError
 
-    db = _get_tool_db()
-    user = await _triage_user(db)
-    _, provider = await _triage_provider(db, user, issue)
+    _, provider = await _triage_provider(db, current_user, issue)
     try:
         async with asyncio.timeout(90):
             return await get_context(provider)
@@ -666,43 +666,34 @@ async def _apply_authorized_issue_triage(
     return result
 
 
-@_with_tool_db
-async def apply_issue_triage(
-    issue: str,
-    expected_revision: str,
-    assessment: str,
-    complexity_label: str | None = None,
-    title: str | None = None,
-) -> "IssueTriageResult":
-    """Update issue assessment and complexity through scoped provider deltas."""
-    db = _get_tool_db()
-    user = await _triage_user(db)
-    return await _apply_authorized_issue_triage(
-        db=db,
-        current_user=user,
-        issue=issue,
-        expected_revision=expected_revision,
-        complexity_label=complexity_label,
-        assessment=assessment,
-        title=title,
-    )
+TRIAGE_INCLUDES = tuple(GET_ISSUE_SCHEMA["properties"]["include"]["items"]["enum"])
 
 
 @_with_tool_db
 async def get_issue(
     issue: str,
+    include: Optional[List[str]] = None,
 ) -> GetIssueResponse:
     """
     Handles the 'get_issue' tool call.
+
+    ``include`` asks for extra triage blocks read live from the tracker:
+    ``label_catalog`` for the complete project label catalogue and the
+    recognized complexity scheme, ``revision`` for the authoritative provider
+    snapshot and the ``expected_revision`` that ``update_issue`` verifies.
     """
     db = _get_tool_db()
-    current_user = None
-    authorization = get_http_request().headers.get("authorization")
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.split("Bearer ")[1]
-        current_user = await get_user_from_token_if_valid(token, db)
-    if not current_user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+    current_user = await _tool_user(db)
+    requested = list(include or [])
+    unknown = [name for name in requested if name not in TRIAGE_INCLUDES]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail="Unsupported include values: "
+            + ", ".join(sorted(set(unknown)))
+            + ". Supported: "
+            + ", ".join(TRIAGE_INCLUDES),
+        )
     try:
         issue_obj = _find_issue_by_identifier(db, issue, current_user.account_id)
     except IssueNotFoundError as e:
@@ -720,6 +711,18 @@ async def get_issue(
     meta_data = issue_obj.meta_data or {}
     labels_list = extract_label_strings(meta_data.get("labels", []))
     assignee = _extract_assignee_name(meta_data.get("assignee"))
+
+    triage: Dict[str, Any] = {}
+    if requested:
+        context = await _read_triage_context(db, current_user, issue)
+        triage["triage_limitations"] = context.limitations
+        triage["concurrency"] = context.concurrency
+        if "label_catalog" in requested:
+            triage["label_catalog"] = context.catalogue
+            triage["complexity_scheme"] = context.complexity_scheme
+        if "revision" in requested:
+            triage["expected_revision"] = context.expected_revision
+            triage["provider_issue"] = context.issue
 
     return GetIssueResponse(
         id=str(issue_obj.id),
@@ -741,6 +744,7 @@ async def get_issue(
         labels=labels_list,
         assignee=assignee,
         compliance_results=_enrich_compliance_results(compliance_results),
+        **triage,
     )
 
 
@@ -846,18 +850,68 @@ async def update_issue(
     labels: Optional[List[str]] = None,
     add_reaction: Optional[str] = None,
     remove_reaction: Optional[str] = None,
-) -> UpdateIssueResponse:
+    expected_revision: Optional[str] = None,
+    assessment: Optional[str] = None,
+    complexity_label: Optional[str] = None,
+) -> UpdateIssueResponse | IssueTriageResult:
     """
     Handles the 'update_issue' tool call.
+
+    ``expected_revision`` plus ``assessment`` switch the call to the managed
+    triage write: the assessment replaces one managed section and preserves
+    the human text around it, ``complexity_label`` moves only labels in the
+    recognized complexity family, and the return value is a triage receipt
+    instead of the plain update response. Take ``expected_revision`` from
+    ``get_issue(issue, include=["revision"])``.
     """
     db = _get_tool_db()
-    current_user = None
-    authorization = get_http_request().headers.get("authorization")
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.split("Bearer ")[1]
-        current_user = await get_user_from_token_if_valid(token, db)
-    if not current_user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+    current_user = await _tool_user(db)
+
+    triage_requested = any(
+        value is not None for value in (expected_revision, assessment, complexity_label)
+    )
+    if triage_requested:
+        if expected_revision is None or assessment is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "A triage write needs both expected_revision and "
+                    "assessment. Read them with get_issue(issue, "
+                    'include=["revision"]).'
+                ),
+            )
+        conflicting = sorted(
+            name
+            for name, value in (
+                ("description", description),
+                ("status", status),
+                ("priority", priority),
+                ("assignee", assignee),
+                ("labels", labels),
+                ("add_reaction", add_reaction),
+                ("remove_reaction", remove_reaction),
+            )
+            if value is not None
+        )
+        if conflicting:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "A triage write manages issue content and complexity "
+                    "labels only. Remove " + ", ".join(conflicting) + " or "
+                    "make that change in a separate update_issue call."
+                ),
+            )
+        return await _apply_authorized_issue_triage(
+            db=db,
+            current_user=current_user,
+            issue=issue,
+            expected_revision=expected_revision,
+            complexity_label=complexity_label,
+            assessment=assessment,
+            title=title,
+        )
+
     try:
         issue_obj = _find_issue_by_identifier(db, issue, current_user.account_id)
     except IssueNotFoundError as e:

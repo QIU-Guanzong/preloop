@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
+from preloop.models.crud.agent_control_command import SessionNoteSummary
 from preloop.services import runtime_session_explorer as rse_mod
 from preloop.services.analytics_history import AnalyticsHistoryWindow
 from preloop.services.runtime_session_explorer import (
@@ -428,6 +429,82 @@ def test_attach_optimization_badges_swallows_db_error(service):
         )
     # No badge applied, no exception raised.
     assert item.optimization_waste_score is None
+
+
+# --- _attach_note_badges ---------------------------------------------------
+
+
+def test_attach_note_badges_sets_count_and_newest_author(service):
+    account = _make_account()
+    item = RuntimeSessionExplorerService._summary_row_to_schema(_make_summary_row())
+    noted_at = datetime(2026, 1, 1, 12, 30, tzinfo=timezone.utc)
+    summary = SessionNoteSummary(
+        note_count=3,
+        latest_author_display="Reviewer",
+        latest_author_auth_method="agent",
+        latest_note_at=noted_at,
+    )
+    with patch.object(
+        rse_mod.crud_agent_control_command,
+        "note_summaries_for_sessions",
+        return_value={item.id: summary},
+    ):
+        service._attach_note_badges(account=account, items=[item])
+    assert item.note_count == 3
+    assert item.latest_note_author_display == "Reviewer"
+    assert item.latest_note_author_auth_method == "agent"
+    assert item.latest_note_at == noted_at
+
+
+def test_attach_note_badges_leaves_a_session_without_notes_blank(service):
+    item = RuntimeSessionExplorerService._summary_row_to_schema(_make_summary_row())
+    with patch.object(
+        rse_mod.crud_agent_control_command,
+        "note_summaries_for_sessions",
+        return_value={},
+    ):
+        service._attach_note_badges(account=_make_account(), items=[item])
+    assert item.note_count == 0
+    assert item.latest_note_author_display is None
+    assert item.latest_note_author_auth_method is None
+    assert item.latest_note_at is None
+
+
+def test_attach_note_badges_reads_the_whole_page_in_one_query(service):
+    """One lookup per page, never one per row: the console renders fifty."""
+    items = [
+        RuntimeSessionExplorerService._summary_row_to_schema(_make_summary_row())
+        for _ in range(5)
+    ]
+    with patch.object(
+        rse_mod.crud_agent_control_command,
+        "note_summaries_for_sessions",
+        return_value={},
+    ) as lookup:
+        service._attach_note_badges(account=_make_account(), items=items)
+    assert lookup.call_count == 1
+    assert lookup.call_args.kwargs["runtime_session_ids"] == [item.id for item in items]
+
+
+def test_attach_note_badges_empty_items_noop(service):
+    with patch.object(
+        rse_mod.crud_agent_control_command, "note_summaries_for_sessions"
+    ) as lookup:
+        service._attach_note_badges(account=_make_account(), items=[])
+    lookup.assert_not_called()
+
+
+def test_attach_note_badges_swallows_db_error(service):
+    from sqlalchemy.exc import SQLAlchemyError
+
+    item = RuntimeSessionExplorerService._summary_row_to_schema(_make_summary_row())
+    with patch.object(
+        rse_mod.crud_agent_control_command,
+        "note_summaries_for_sessions",
+        side_effect=SQLAlchemyError("boom"),
+    ):
+        service._attach_note_badges(account=_make_account(), items=[item])
+    assert item.note_count == 0
 
 
 # --- get_account_session_detail / 404 paths --------------------------------

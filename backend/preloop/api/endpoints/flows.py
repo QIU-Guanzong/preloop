@@ -1785,6 +1785,8 @@ RESERVED_TRIGGER_KEYS = frozenset(
         "_resume",
         "_answers",
         "_answers_prompt",
+        "_children",
+        "_children_prompt",
         "_feedback_prompt",
         "_ci_failure",
         "_workspace_file_paths",

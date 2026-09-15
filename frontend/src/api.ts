@@ -2939,6 +2939,33 @@ export async function getAIModelGatewayUsageSearch(
 }
 
 // Flows
+/** Server default on `GET /api/v1/flows` (`limit: int = 100`). */
+export const FLOW_LIST_PAGE_SIZE = 100;
+/** Stop paging so a broken skip cannot loop forever. */
+export const FLOW_LIST_MAX_PAGES = 50;
+
+/**
+ * One row per flow id. Offset paging with no ORDER BY can surface the
+ * same flow on two pages when a row is inserted or renamed between
+ * fetches; the first occurrence wins so a rename keeps a single name.
+ * Rows with no id stay in the list (they cannot be keyed).
+ */
+export function uniqueFlowsById<T extends { id?: unknown }>(flows: T[]): T[] {
+  const seen = new Set<string>();
+  const unique: T[] = [];
+  for (const flow of flows) {
+    if (flow?.id == null || flow.id === '') {
+      unique.push(flow);
+      continue;
+    }
+    const key = String(flow.id);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(flow);
+  }
+  return unique;
+}
+
 /**
  * The account's flows.
  *
@@ -2947,18 +2974,61 @@ export async function getAIModelGatewayUsageSearch(
  * list states a single period, and counting runs client-side from a sample
  * of recent executions while reading spend from a separate range endpoint is
  * how a row came to say "No run in the last 30d" beside $0.33.
+ *
+ * `skip` and `limit` map to the list endpoint. Omitting them keeps the
+ * server default of the first 100 rows.
  */
 export async function getFlows(
-  options: { statsSince?: string } = {}
+  options: { statsSince?: string; skip?: number; limit?: number } = {}
 ): Promise<any[]> {
-  const query = options.statsSince
-    ? `?stats_since=${encodeURIComponent(options.statsSince)}`
-    : '';
+  const params = new URLSearchParams();
+  if (options.statsSince) {
+    params.set('stats_since', options.statsSince);
+  }
+  if (options.skip !== undefined) {
+    params.set('skip', String(options.skip));
+  }
+  if (options.limit !== undefined) {
+    params.set('limit', String(options.limit));
+  }
+  const query = params.toString() ? `?${params.toString()}` : '';
   const response = await fetchWithAuth(`/api/v1/flows${query}`);
   if (!response.ok) {
     throw new Error('Failed to fetch flows');
   }
   return response.json();
+}
+
+/**
+ * Every flow in the account, paging past the server default of 100.
+ *
+ * The callable-flows picker names an entry "not in this account" from this
+ * list, so a truncated first page would invite the operator to clear a
+ * valid row. Failures throw; callers must not treat them as an empty
+ * account.
+ */
+export async function getAllFlows(
+  options: { statsSince?: string; pageSize?: number } = {}
+): Promise<{ flows: any[]; truncated: boolean }> {
+  const pageSize = options.pageSize ?? FLOW_LIST_PAGE_SIZE;
+  const flows: any[] = [];
+  let skip = 0;
+  for (let page = 0; page < FLOW_LIST_MAX_PAGES; page += 1) {
+    const batch = await getFlows({
+      statsSince: options.statsSince,
+      skip,
+      limit: pageSize,
+    });
+    if (!Array.isArray(batch)) {
+      throw new Error('Failed to fetch flows');
+    }
+    flows.push(...batch);
+    if (batch.length < pageSize) {
+      return { flows: uniqueFlowsById(flows), truncated: false };
+    }
+    skip += pageSize;
+  }
+  return { flows: uniqueFlowsById(flows), truncated: true };
 }
 
 export async function getFlow(flowId: string): Promise<any> {
@@ -2969,6 +3039,39 @@ export async function getFlow(flowId: string): Promise<any> {
   return response.json();
 }
 
+/**
+ * The reason a flow write was refused, as a sentence.
+ *
+ * The API refuses a write in two shapes: `detail` as a string (an explicit
+ * refusal, such as a `callable_flows` entry that names no flow in the
+ * account) and `detail` as a list of field errors from schema validation.
+ * Stringifying the list yields "[object Object]", which turns a refusal that
+ * names the offending entry into a generic failure on the form, so the list
+ * is flattened into the messages it carries.
+ */
+export function flowWriteErrorMessage(
+  errorData: unknown,
+  fallback: string
+): string {
+  const detail = (errorData as { detail?: unknown } | null)?.detail;
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        const record = (item || {}) as { msg?: unknown; loc?: unknown };
+        const msg = typeof record.msg === 'string' ? record.msg : '';
+        const loc = Array.isArray(record.loc)
+          ? record.loc.filter((part) => part !== 'body').join('.')
+          : '';
+        return loc && msg ? `${loc}: ${msg}` : msg;
+      })
+      .filter((message) => Boolean(message));
+    if (messages.length > 0) return messages.join('; ');
+  }
+  return fallback;
+}
+
 export async function createFlow(flow: any): Promise<any> {
   const response = await fetchWithAuth('/api/v1/flows', {
     method: 'POST',
@@ -2977,7 +3080,7 @@ export async function createFlow(flow: any): Promise<any> {
   });
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.detail || 'Failed to create flow');
+    throw new Error(flowWriteErrorMessage(errorData, 'Failed to create flow'));
   }
   return response.json();
 }
@@ -2990,7 +3093,7 @@ export async function updateFlow(flowId: string, flow: any): Promise<any> {
   });
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.detail || 'Failed to update flow');
+    throw new Error(flowWriteErrorMessage(errorData, 'Failed to update flow'));
   }
   return response.json();
 }
