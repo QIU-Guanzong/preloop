@@ -16,6 +16,7 @@ from preloop.services.otel_export import (
     ATTR_ESTIMATED_COST,
     ATTR_INPUT_TOKENS,
     ATTR_OPERATION_NAME,
+    _operation_name,
     attributes_from_usage,
     configure_for_tests,
     emit_gateway_usage,
@@ -95,6 +96,25 @@ def test_attributes_include_conversation_id_and_usage() -> None:
 def test_attributes_omit_conversation_id_when_session_missing() -> None:
     attrs = attributes_from_usage(_usage(runtime_session_id=None))
     assert ATTR_CONVERSATION_ID not in attrs
+
+
+def test_operation_name_maps_embeddings_to_embed() -> None:
+    """Embeddings traffic must not collapse onto the chat operation name."""
+    assert _operation_name("embeddings") == "embed"
+    assert _operation_name("chat_completions") == "chat"
+    assert _operation_name("gemini_generate_content") == "generate_content"
+
+
+def test_attributes_use_embed_operation_for_embeddings_usage() -> None:
+    attrs = attributes_from_usage(
+        _usage(
+            meta_data={
+                "endpoint_kind": "embeddings",
+                "requested_model": "openai/emb",
+            }
+        )
+    )
+    assert attrs[ATTR_OPERATION_NAME] == "embed"
 
 
 def test_disabled_exporter_is_noop(monkeypatch) -> None:
