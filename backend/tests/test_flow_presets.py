@@ -507,6 +507,7 @@ PRESET_COMPLETION_MARKERS = {
     "010-standards-compliance-walk.yaml": '"status": "success" | "error"',
     "011-automated-issue-implementation.yaml": '"status": "success" | "failure"',
     "014-security-maintenance-implementation.yaml": ('"status": "success" | "failure"'),
+    "015-weekly-model-price-review.yaml": '"status": "success" | "failure"',
 }
 
 

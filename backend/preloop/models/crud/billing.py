@@ -15,8 +15,9 @@ from sqlalchemy.orm import Session
 
 from preloop.models import models
 from .api_usage import exclude_replay_usage_condition
+from .entitlement import ENTITLED_STATUSES, entitlement_clause
 
-ENTITLED_STATUSES = ("active", "trialing", "past_due")
+__all__ = ["ENTITLED_STATUSES", "CRUDBilling", "billing"]
 
 
 class CRUDBilling:
@@ -97,11 +98,18 @@ class CRUDBilling:
     def entitled_subscription(
         self, db: Session, account_id: str
     ) -> models.Subscription | None:
+        """Newest subscription row that actually entitles this account.
+
+        Returns None for an account whose trial has ended, exactly as for an
+        account that never subscribed, so every caller falls through to Free
+        instead of honouring a stale ``trialing`` status. See
+        :mod:`preloop.models.crud.entitlement` for the rule.
+        """
         return (
             db.query(models.Subscription)
             .filter(
                 models.Subscription.account_id == account_id,
-                models.Subscription.status.in_(ENTITLED_STATUSES),
+                entitlement_clause(models.Subscription),
             )
             .order_by(models.Subscription.created_at.desc())
             .first()

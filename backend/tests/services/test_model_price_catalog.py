@@ -230,7 +230,7 @@ def test_alibaba_negative_cache_is_scoped_to_usd_region(monkeypatch) -> None:
 
     monkeypatch.setattr(config_mod, "settings", _Settings())
     monkeypatch.setattr(
-        "preloop.services.alibaba_price_catalog.refresh_from_model",
+        "preloop.services.alibaba_price_catalog.prepare_refresh",
         lambda ai_model: CatalogRefreshStatus.unreachable,
     )
     submitted: list[object] = []
@@ -264,7 +264,10 @@ def test_alibaba_negative_cache_is_scoped_to_usd_region(monkeypatch) -> None:
         _yield_lookup_models({us_id: us_model, sg_id: sg_model}),
     )
     assert model_price_catalog.schedule_price_lookup(ai_model_id=us_id) is True
-    assert "alibaba:united-states:qwen3.8-flash" in model_price_catalog._negative_cache
+    assert (
+        "alibaba:united-states:ws.us-east-1.maas.aliyuncs.com:qwen3.8-flash"
+        in model_price_catalog._negative_cache
+    )
     submitted.clear()
     assert model_price_catalog.schedule_price_lookup(ai_model_id=us_id) is False
     assert model_price_catalog.schedule_price_lookup(ai_model_id=sg_id) is True
@@ -304,13 +307,13 @@ def test_schedule_price_lookup_resolves_credentials_from_persisted_model_id(
     seen_keys: list[str | None] = []
     refreshed: list[object] = []
 
-    def _refresh(ai_model):
-        refreshed.append(ai_model)
-        seen_keys.append(_api_key(ai_model))
+    def _refresh(prepared):
+        refreshed.append(prepared)
+        seen_keys.append(prepared.api_key)
         return CatalogRefreshStatus.ingested
 
     monkeypatch.setattr(
-        "preloop.services.alibaba_price_catalog.refresh_from_model",
+        "preloop.services.alibaba_price_catalog.refresh_prepared",
         _refresh,
     )
 
@@ -334,7 +337,8 @@ def test_schedule_price_lookup_resolves_credentials_from_persisted_model_id(
     assert seen_keys == ["sk-persisted-alibaba"]
     assert refreshed
     assert not isinstance(refreshed[0], GatewayModelSnapshot)
-    assert refreshed[0].id == snapshot.id
+    assert refreshed[0].url == "https://dashscope-intl.aliyuncs.com/api/v1/models"
+    assert "sk-persisted-alibaba" not in repr(refreshed[0])
 
 
 # ---------------------------------------------------------------------------
@@ -510,3 +514,267 @@ def test_negative_cache_evicts_oldest_when_full() -> None:
     finally:
         model_price_catalog._MAX_NEGATIVE_CACHE_ENTRIES = original_max
         model_price_catalog.reset_lookup_state_for_tests()
+
+
+def test_pending_rows_recover_before_alerts_without_duplicate_fetch(
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    model_price_catalog.reset_lookup_state_for_tests()
+    monkeypatch.setenv("TESTING", "false")
+    monkeypatch.setattr("preloop.config.settings.model_price_live_lookup_enabled", True)
+    monkeypatch.setattr(
+        model_price_catalog,
+        "_ai_model_price_lookup_session",
+        _yield_lookup_model(
+            SimpleNamespace(
+                provider_name="openai",
+                model_identifier="recovery-example",
+                meta_data=None,
+                model_parameters=None,
+            )
+        ),
+    )
+    workers = []
+    monkeypatch.setattr(model_price_catalog._LOOKUP_EXECUTOR, "submit", workers.append)
+    events = []
+    monkeypatch.setattr(
+        model_price_catalog, "lookup_model_price_now", lambda _: "recovery-example"
+    )
+    monkeypatch.setattr(
+        model_price_catalog,
+        "_reprice_usage_row",
+        lambda row: events.append(("reprice", row)),
+    )
+    monkeypatch.setattr(
+        "preloop.services.unpriced_model_alert.notify_unpriced_usage_row",
+        lambda row, **kwargs: events.append((kwargs["refresh_status"], row)),
+    )
+    for row in ("row-1", "row-2"):
+        assert model_price_catalog.schedule_price_lookup(
+            ai_model_id="model-1", api_usage_id=row, notify_after_lookup=True
+        )
+    assert len(workers) == 1
+    assert events == []
+    workers[0]()
+    assert events == [
+        ("reprice", "row-1"),
+        ("ingested", "row-1"),
+        ("reprice", "row-2"),
+        ("ingested", "row-2"),
+    ]
+
+
+def test_failed_lookup_keeps_unresolved_notification(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    model_price_catalog.reset_lookup_state_for_tests()
+    monkeypatch.setenv("TESTING", "false")
+    monkeypatch.setattr("preloop.config.settings.model_price_live_lookup_enabled", True)
+    monkeypatch.setattr(
+        model_price_catalog,
+        "_ai_model_price_lookup_session",
+        _yield_lookup_model(
+            SimpleNamespace(
+                provider_name="openai",
+                model_identifier="recovery-failure",
+                meta_data=None,
+                model_parameters=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        model_price_catalog._LOOKUP_EXECUTOR, "submit", lambda worker: worker()
+    )
+    monkeypatch.setattr(model_price_catalog, "lookup_model_price_now", lambda _: None)
+    notifications = []
+    monkeypatch.setattr(
+        "preloop.services.unpriced_model_alert.notify_unpriced_usage_row",
+        lambda row, **kwargs: notifications.append(kwargs["refresh_status"]),
+    )
+    assert model_price_catalog.schedule_price_lookup(
+        ai_model_id="model-1", api_usage_id="row-1", notify_after_lookup=True
+    )
+    assert notifications == ["unavailable"]
+
+
+def test_submit_failure_notifies_queued_rows(monkeypatch) -> None:
+    """Executor reject after queue ownership still alerts notify=True rows."""
+    from types import SimpleNamespace
+
+    model_price_catalog.reset_lookup_state_for_tests()
+    monkeypatch.setenv("TESTING", "false")
+    monkeypatch.setattr("preloop.config.settings.model_price_live_lookup_enabled", True)
+    monkeypatch.setattr(
+        model_price_catalog,
+        "_ai_model_price_lookup_session",
+        _yield_lookup_model(
+            SimpleNamespace(
+                provider_name="openai",
+                model_identifier="recovery-submit-failure",
+                meta_data=None,
+                model_parameters=None,
+            )
+        ),
+    )
+
+    def _fail_submit(_worker):
+        key = next(iter(model_price_catalog._pending_lookups))
+        model_price_catalog._pending_usage[key].append(("row-joined", True))
+        model_price_catalog._pending_usage[key].append(("row-silent", False))
+        raise RuntimeError("synthetic executor reject")
+
+    monkeypatch.setattr(model_price_catalog._LOOKUP_EXECUTOR, "submit", _fail_submit)
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "preloop.services.unpriced_model_alert.notify_unpriced_usage_row",
+        lambda row, **kwargs: events.append((kwargs["refresh_status"], row)),
+    )
+
+    raised: RuntimeError | None = None
+    try:
+        model_price_catalog.schedule_price_lookup(
+            ai_model_id="model-1",
+            api_usage_id="row-current",
+            notify_after_lookup=True,
+        )
+    except RuntimeError as exc:
+        raised = exc
+    assert raised is not None
+    assert "synthetic executor reject" in str(raised)
+    assert events == [
+        ("submit_failed", "row-current"),
+        ("submit_failed", "row-joined"),
+    ]
+    assert model_price_catalog._pending_usage == {}
+    assert model_price_catalog._pending_lookups == set()
+
+
+def test_repricing_failure_still_notifies_unresolved_usage(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    model_price_catalog.reset_lookup_state_for_tests()
+    monkeypatch.setenv("TESTING", "false")
+    monkeypatch.setattr("preloop.config.settings.model_price_live_lookup_enabled", True)
+    monkeypatch.setattr(
+        model_price_catalog,
+        "_ai_model_price_lookup_session",
+        _yield_lookup_model(
+            SimpleNamespace(
+                provider_name="openai",
+                model_identifier="recovery-update-failure",
+                meta_data=None,
+                model_parameters=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        model_price_catalog._LOOKUP_EXECUTOR, "submit", lambda worker: worker()
+    )
+    monkeypatch.setattr(
+        model_price_catalog,
+        "lookup_model_price_now",
+        lambda _: "recovery-update-failure",
+    )
+
+    def failed_reprice(row):
+        raise RuntimeError("synthetic update failure")
+
+    monkeypatch.setattr(model_price_catalog, "_reprice_usage_row", failed_reprice)
+    notifications = []
+    monkeypatch.setattr(
+        "preloop.services.unpriced_model_alert.notify_unpriced_usage_row",
+        lambda row, **kwargs: notifications.append(kwargs["refresh_status"]),
+    )
+    assert model_price_catalog.schedule_price_lookup(
+        ai_model_id="model-1", api_usage_id="row-1", notify_after_lookup=True
+    )
+    assert notifications == ["ingested_repricing_failed"]
+
+
+def test_ingested_alibaba_catalog_missing_dimension_is_not_repeated(
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+    from preloop.services import alibaba_price_catalog as catalog
+
+    model_price_catalog.reset_lookup_state_for_tests()
+    monkeypatch.setenv("TESTING", "false")
+    monkeypatch.setattr("preloop.config.settings.model_price_live_lookup_enabled", True)
+    model = SimpleNamespace(
+        provider_name="qwen",
+        model_identifier="qwen-cache-example",
+        api_endpoint="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        meta_data=None,
+    )
+    monkeypatch.setattr(
+        model_price_catalog,
+        "_ai_model_price_lookup_session",
+        _yield_lookup_model(model),
+    )
+    monkeypatch.setattr(
+        catalog,
+        "prepare_refresh",
+        lambda _: catalog.PreparedCatalogRefresh(
+            catalog.SINGAPORE_NATIVE_URL, "international", "synthetic"
+        ),
+    )
+    downloads = []
+    monkeypatch.setattr(
+        catalog,
+        "refresh_prepared",
+        lambda _: downloads.append(1) or catalog.CatalogRefreshStatus.ingested,
+    )
+    monkeypatch.setattr(
+        model_price_catalog._LOOKUP_EXECUTOR, "submit", lambda worker: worker()
+    )
+    monkeypatch.setattr(model_price_catalog, "_reprice_usage_row", lambda _: None)
+    assert model_price_catalog.schedule_price_lookup(
+        ai_model_id="model-example", api_usage_id="usage-1"
+    )
+    assert not model_price_catalog.schedule_price_lookup(
+        ai_model_id="model-example", api_usage_id="usage-2"
+    )
+    assert downloads == [1]
+
+
+def test_workspace_refresh_failure_does_not_throttle_classic_host(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from preloop.services import alibaba_price_catalog as catalog
+
+    model_price_catalog.reset_lookup_state_for_tests()
+    monkeypatch.setenv("TESTING", "false")
+    monkeypatch.setattr("preloop.config.settings.model_price_live_lookup_enabled", True)
+    models = {
+        "workspace": SimpleNamespace(
+            provider_name="qwen",
+            model_identifier="qwen-cache-example",
+            api_endpoint="https://example.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+            meta_data=None,
+        ),
+        "classic": SimpleNamespace(
+            provider_name="qwen",
+            model_identifier="qwen-cache-example",
+            api_endpoint="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            meta_data=None,
+        ),
+    }
+    monkeypatch.setattr(
+        model_price_catalog,
+        "_ai_model_price_lookup_session",
+        _yield_lookup_models(models),
+    )
+    calls = []
+
+    def prepare(model):
+        calls.append(model.api_endpoint)
+        return catalog.CatalogRefreshStatus.host_mismatch
+
+    monkeypatch.setattr(catalog, "prepare_refresh", prepare)
+    monkeypatch.setattr(
+        model_price_catalog._LOOKUP_EXECUTOR, "submit", lambda worker: worker()
+    )
+    assert model_price_catalog.schedule_price_lookup(ai_model_id="workspace")
+    assert model_price_catalog.schedule_price_lookup(ai_model_id="classic")
+    assert len(calls) == 2

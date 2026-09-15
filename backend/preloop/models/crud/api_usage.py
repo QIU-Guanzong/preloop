@@ -17,7 +17,7 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session, aliased, joinedload
 
 from preloop.models import models
 from ...services.cache_accounting import uncached_input_tokens
@@ -435,6 +435,42 @@ class CRUDApiUsage(CRUDBase[ApiUsage]):
             }
             for row in rows
         ]
+
+    def list_models_for_repricing(
+        self,
+        db: Session,
+        *,
+        account_id: Union[uuid.UUID, str],
+        start: datetime,
+        end: datetime,
+        limit: int = 200,
+    ) -> list[models.AIModel]:
+        """Load a bounded model set and credentials for catalog preflight.
+
+        One query covers models referenced by this account's usage window;
+        eager credentials avoid per-model lazy queries during preparation.
+        """
+        if limit <= 0:
+            return []
+        return (
+            db.query(models.AIModel)
+            .join(ApiUsage, ApiUsage.ai_model_id == models.AIModel.id)
+            .options(joinedload(models.AIModel.credentials_secret))
+            .filter(
+                ApiUsage.account_id == account_id,
+                ApiUsage.action_type == "model_gateway",
+                ApiUsage.timestamp >= start,
+                ApiUsage.timestamp < end,
+                or_(
+                    models.AIModel.account_id == account_id,
+                    models.AIModel.account_id.is_(None),
+                ),
+            )
+            .distinct()
+            .order_by(models.AIModel.id)
+            .limit(limit)
+            .all()
+        )
 
     def iter_gateway_rows_for_repricing(
         self,

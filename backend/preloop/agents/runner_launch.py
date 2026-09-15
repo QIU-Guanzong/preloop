@@ -16,6 +16,11 @@ from sqlalchemy.orm import Session
 
 from preloop.models.crud import crud_flow_execution
 from preloop.services.mcp_config_service import MCPConfigService
+from preloop.utils.execve_limits import (
+    LaunchPayloadTooLargeError,
+    check_launch_payload,
+    prompt_transport_env,
+)
 
 LAUNCH_VERSION = 1
 MAX_RESULT_BYTES = 256 * 1024
@@ -90,6 +95,11 @@ async def prepare_runner_delivery(
             **public_job,
             "launch_error": "Flow configuration changed after leasing; retry the execution",
         }
+    except LaunchPayloadTooLargeError as exc:
+        return {
+            **public_job,
+            "launch_error": str(exc),
+        }
     except Exception:
         logger.warning(
             "Could not prepare private runner launch for %s", job.get("execution_id")
@@ -157,7 +167,13 @@ async def build_runner_launch(context: dict[str, Any]) -> dict[str, Any]:
     env["MCP_CONFIG_JSON"] = json.dumps(mcp_config)
     # The script builder resolves repository credentials into transient env refs.
     script = build_script(context)
+    # The script reads the prompt from a file it materializes out of these
+    # chunks (preloop.utils.execve_limits). The runner applies `env` to the
+    # container it starts, so the chunks must be part of the launch or the
+    # script aborts with PRELOOP_LAUNCH_PAYLOAD_MISSING.
+    env.update(prompt_transport_env(context["prompt"]))
     agent._apply_git_credential_env(env, context)
+    check_launch_payload(command=None, args=None, env=env, what="private runner launch")
     return {"version": LAUNCH_VERSION, "script": script, "env": env}
 
 

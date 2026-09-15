@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -95,7 +96,7 @@ def _tariff_from_seed_entry(entry: dict[str, Any]) -> Tariff | None:
             out = float(row["output"])
         except (KeyError, TypeError, ValueError):
             continue
-        if inp < 0 or out < 0:
+        if inp < 0 or out < 0 or not math.isfinite(inp) or not math.isfinite(out):
             continue
         max_input = row.get("max_input")
         parsed.append(
@@ -129,7 +130,7 @@ def _optional_rate(value: Any) -> float | None:
         rate = float(value)
     except (TypeError, ValueError):
         return None
-    if rate < 0 or math.isnan(rate):
+    if rate < 0 or not math.isfinite(rate):
         return None
     return rate
 
@@ -155,7 +156,53 @@ def _load_seed() -> dict[str, Tariff]:
 _SEED = _load_seed()
 
 
-def tariff_for(ai_model: models.AIModel) -> Tariff | None:
+def _load_seed_cache_dates() -> dict[str, datetime]:
+    """Read independently dated console cache evidence without dating base rates."""
+    try:
+        entries = json.loads(SEED_PATH.read_text()).get("models", {})
+    except (OSError, ValueError, AttributeError):
+        return {}
+    if not isinstance(entries, dict):
+        return {}
+    dates = {}
+    for ident, entry in entries.items():
+        if not isinstance(entry, dict) or "cache_effective_from" not in entry:
+            continue
+        try:
+            stamp = datetime.fromisoformat(
+                entry["cache_effective_from"].replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if stamp.tzinfo is not None:
+            dates[ident] = stamp
+    return dates
+
+
+_SEED_CACHE_DATES = _load_seed_cache_dates()
+
+
+def _seed_cache_predates_evidence(
+    ai_model: models.AIModel,
+    tariff: Tariff,
+    observed_at: datetime | None,
+) -> bool:
+    """Do not apply a current console cache quote to an unverified older period."""
+    ident = (ai_model.model_identifier or "").strip()
+    effective = _SEED_CACHE_DATES.get(ident)
+    if effective is None or tariff is not _SEED.get(ident) or observed_at is None:
+        return False
+    when = (
+        observed_at
+        if observed_at.tzinfo is not None
+        else observed_at.replace(tzinfo=timezone.utc)
+    )
+    return when < effective
+
+
+def tariff_for(
+    ai_model: models.AIModel, *, observed_at: datetime | None = None
+) -> Tariff | None:
     """Resolve an exact SKU on a USD Alibaba host.
 
     Live native-catalog overlay wins. The Singapore International seed covers
@@ -167,11 +214,19 @@ def tariff_for(ai_model: models.AIModel) -> Tariff | None:
     ident = (ai_model.model_identifier or "").strip()
     if not ident:
         return None
-    from preloop.services.alibaba_price_catalog import live_tariff
+    from preloop.services.alibaba_price_catalog import (
+        live_tariff,
+        reviewed_before_effective,
+    )
 
-    live = live_tariff(ai_model)
+    if reviewed_before_effective(ai_model, observed_at=observed_at):
+        return None
+    live = live_tariff(ai_model, observed_at=observed_at)
     if live is not None:
         return live
+    # Concurrent install_reviewed_catalogs() must not fall through to seed.
+    if reviewed_before_effective(ai_model, observed_at=observed_at):
+        return None
     if region == "singapore-international":
         return _SEED.get(ident)
     return None
@@ -194,17 +249,10 @@ def catalog_entry(ai_model: models.AIModel) -> tuple[str, dict[str, Any]] | None
         tariff.implicit_read,
     ):
         entry["cache_read_input_token_cost"] = tariff.implicit_read / 1_000_000
-    prefix = (
-        "alibaba/native-catalog" if _is_live(ai_model, tariff) else f"alibaba/{region}"
-    )
+    from preloop.services.alibaba_price_catalog import tariff_source
+
+    prefix = f"alibaba/{tariff_source(ai_model) or region}"
     return f"{prefix}/{ai_model.model_identifier}", entry
-
-
-def _is_live(ai_model: models.AIModel, tariff: Tariff) -> bool:
-    from preloop.services.alibaba_price_catalog import live_tariff
-
-    live = live_tariff(ai_model)
-    return live is tariff
 
 
 def select_tier(tariff: Tariff, prompt_tokens: int) -> Tariff | None:
@@ -224,12 +272,93 @@ def select_tier(tariff: Tariff, prompt_tokens: int) -> Tariff | None:
     return tariff
 
 
+def tariff_for_usage(
+    ai_model: models.AIModel,
+    *,
+    prompt_tokens: int,
+    usage_details: dict[str, Any] | None,
+    observed_at: datetime | None = None,
+) -> Tariff | None:
+    """Keep a partial native listing from hiding an identical verified seed policy."""
+    from preloop.services.alibaba_price_catalog import tariff_source
+
+    resolved = tariff_for(ai_model, observed_at=observed_at)
+    if resolved is None or tariff_source(ai_model) != "native-catalog":
+        return resolved
+    seed = _SEED.get((ai_model.model_identifier or "").strip())
+    if (
+        seed is None
+        or usd_region(ai_model) != "singapore-international"
+        or _seed_cache_predates_evidence(ai_model, seed, observed_at)
+    ):
+        return resolved
+
+    # Select the entire seed only when every base tier/bound agrees. Never
+    # splice cached rates from a different native price or context policy.
+    def signature(tariff: Tariff) -> tuple[tuple[float, float, int | None], ...]:
+        return tuple(
+            (t.input, t.output, t.max_input) for t in (tariff.tiers or (tariff,))
+        )
+
+    native_rows = resolved.tiers or (resolved,)
+    seed_rows = seed.tiers or (seed,)
+    flat_unspecified_bound = (
+        len(native_rows) == len(seed_rows) == 1
+        and resolved.max_input is None
+        and resolved.input == seed.input
+        and resolved.output == seed.output
+        and select_tier(seed, prompt_tokens) is not None
+    )
+    if signature(seed) != signature(resolved) and not flat_unspecified_bound:
+        return resolved
+    # Missing context metadata on a single flat native row may use the seed
+    # only within its known bound. Known native cache rates must all agree.
+    for native_row, seed_row in zip(native_rows, seed_rows, strict=True):
+        for field in ("implicit_read", "explicit_read", "creation"):
+            known_rate = getattr(native_row, field)
+            if known_rate is not None and known_rate != getattr(seed_row, field):
+                return resolved
+    native_tier = select_tier(resolved, prompt_tokens)
+    seed_tier = select_tier(seed, prompt_tokens)
+    if native_tier is None or seed_tier is None:
+        return resolved
+    usage = usage_details or {}
+    details = usage.get("prompt_tokens_details") or {}
+    if not isinstance(details, dict):
+        return resolved
+    try:
+        cached = int(details.get("cached_tokens") or 0)
+        nested = details.get("cache_creation") or {}
+        if not isinstance(nested, dict):
+            return resolved
+        created = int(
+            details.get("cache_creation_input_tokens")
+            or details.get("cache_creation_tokens")
+            or nested.get("ephemeral_5m_input_tokens")
+            or usage.get("cache_creation_input_tokens")
+            or 0
+        )
+    except (ValueError, TypeError, OverflowError):
+        return resolved
+    mode = usage.get("_preloop_cache_mode")
+    read_field = "explicit_read" if mode == "explicit" else "implicit_read"
+    needs_read = cached > 0 and mode in {"implicit", "explicit"}
+    seed_covers = (not needs_read or getattr(seed_tier, read_field) is not None) and (
+        not created or seed_tier.creation is not None
+    )
+    native_missing = (needs_read and getattr(native_tier, read_field) is None) or (
+        created > 0 and native_tier.creation is None
+    )
+    return seed if seed_covers and native_missing else resolved
+
+
 def estimate(
     ai_model: models.AIModel,
     *,
     prompt_tokens: int,
     completion_tokens: int,
     usage_details: dict[str, Any] | None,
+    observed_at: datetime | None = None,
 ) -> float | None:
     """Estimate known token classes; unknown tariff/mode yields no estimate.
 
@@ -237,7 +366,12 @@ def estimate(
     already include reasoning tokens, which must never be added a second time.
     The internal cache-mode tag comes from the forwarded request, not the model.
     """
-    resolved = tariff_for(ai_model)
+    resolved = tariff_for_usage(
+        ai_model,
+        prompt_tokens=prompt_tokens,
+        usage_details=usage_details,
+        observed_at=observed_at,
+    )
     if resolved is None:
         return None
     tariff = select_tier(resolved, prompt_tokens)
@@ -265,6 +399,10 @@ def estimate(
         return None
     if cached + created > prompt_tokens:
         return None
+    if (cached or created) and _seed_cache_predates_evidence(
+        ai_model, resolved, observed_at
+    ):
+        return None
     mode = usage.get("_preloop_cache_mode")
     read_rate = tariff.explicit_read if mode == "explicit" else tariff.implicit_read
     if cached and (mode not in {"implicit", "explicit"} or read_rate is None):
@@ -281,3 +419,64 @@ def estimate(
         / 1_000_000,
         6,
     )
+
+
+def pricing_failure_reason(
+    ai_model: models.AIModel,
+    *,
+    prompt_tokens: int = 0,
+    usage_details: dict[str, Any] | None = None,
+    observed_at: datetime | None = None,
+) -> str | None:
+    """Explain an unsupported pricing dimension without guessing a tariff."""
+    from preloop.services.alibaba_price_catalog import reviewed_before_effective
+
+    if usd_region(ai_model) is None:
+        return "unsupported_region"
+    if reviewed_before_effective(ai_model, observed_at=observed_at):
+        return "tariff_not_effective"
+    resolved = tariff_for_usage(
+        ai_model,
+        prompt_tokens=prompt_tokens,
+        usage_details=usage_details,
+        observed_at=observed_at,
+    )
+    if resolved is None:
+        return "missing_model_tariff"
+    tariff = select_tier(resolved, prompt_tokens)
+    if tariff is None:
+        return "context_out_of_range"
+    usage = usage_details or {}
+    details = usage.get("prompt_tokens_details") or {}
+    if not isinstance(details, dict):
+        return "invalid_usage"
+    creation = details.get("cache_creation") or {}
+    if not isinstance(creation, dict):
+        return "invalid_usage"
+    try:
+        cached = int(details.get("cached_tokens") or 0)
+        created = int(
+            details.get("cache_creation_input_tokens")
+            or details.get("cache_creation_tokens")
+            or creation.get("ephemeral_5m_input_tokens")
+            or usage.get("cache_creation_input_tokens")
+            or 0
+        )
+    except (TypeError, ValueError, OverflowError):
+        return "invalid_usage"
+    if min(prompt_tokens, cached, created) < 0 or cached + created > prompt_tokens:
+        return "invalid_usage"
+    if (cached or created) and _seed_cache_predates_evidence(
+        ai_model, resolved, observed_at
+    ):
+        return "cache_tariff_not_effective"
+    mode = usage.get("_preloop_cache_mode")
+    if cached:
+        if mode not in {"implicit", "explicit"}:
+            return "unknown_cache_mode"
+        rate = tariff.explicit_read if mode == "explicit" else tariff.implicit_read
+        if rate is None:
+            return f"missing_{mode}_cache_tariff"
+    if created and tariff.creation is None:
+        return "missing_cache_creation_tariff"
+    return None

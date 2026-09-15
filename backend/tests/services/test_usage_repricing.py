@@ -867,3 +867,179 @@ def test_reprice_does_not_scan_another_accounts_usage(db_session, test_user) -> 
     assert own.estimated_cost is not None
     assert foreign.estimated_cost is None
     assert foreign.cost_source == "unpriced"
+
+
+def test_alibaba_preflight_bounds_catalogs_and_closes_session_before_network(
+    monkeypatch,
+):
+    from unittest.mock import MagicMock
+    from preloop.models import models
+    from preloop.services import alibaba_price_catalog as catalog
+
+    db = MagicMock()
+    model = models.AIModel(
+        provider_name="qwen",
+        model_identifier="qwen-example",
+        api_endpoint="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    )
+    another_region = models.AIModel(
+        provider_name="qwen",
+        model_identifier="qwen-example",
+        api_endpoint="https://example.us-east-1.maas.aliyuncs.com/compatible-mode/v1",
+    )
+
+    def sessions():
+        yield db
+
+    monkeypatch.setattr("preloop.models.db.session.get_db_session", sessions)
+    monkeypatch.setattr("preloop.config.settings.model_price_live_lookup_enabled", True)
+    monkeypatch.setattr(
+        crud_api_usage,
+        "list_models_for_repricing",
+        lambda *args, **kwargs: [model, model, another_region],
+    )
+    prepared_count = []
+
+    def prepare(ai_model):
+        prepared_count.append(ai_model)
+        url, site = catalog.native_catalog_target(ai_model)
+        return catalog.PreparedCatalogRefresh(
+            url=url, service_site=site, api_key="synthetic"
+        )
+
+    monkeypatch.setattr(catalog, "prepare_refresh", prepare)
+
+    def refresh(prepared, **kwargs):
+        db.close.assert_called_once()
+        return catalog.CatalogRefreshStatus.ingested
+
+    monkeypatch.setattr(catalog, "refresh_prepared", refresh)
+    start, end = _window()
+    assert usage_repricing.hydrate_alibaba_prices_for_repricing(
+        account_id="account-example",
+        start=start,
+        end=end,
+        max_catalogs=1,
+        progress=lambda: db.close.assert_called_once(),
+    ) == {"ingested": 1}
+    assert prepared_count == [model]
+    assert (
+        usage_repricing.hydrate_alibaba_prices_for_repricing(
+            account_id="account-example", start=start, end=end, max_catalogs=0
+        )
+        == {}
+    )
+
+
+@pytest.mark.parametrize("mode", ["implicit", "explicit", None])
+def test_alibaba_historical_cache_mode_is_preserved_never_inferred(
+    db_session, test_user, monkeypatch, mode
+):
+    from preloop.services import alibaba_price_catalog as catalog
+    from preloop.services.alibaba_pricing import Tariff
+
+    monkeypatch.setattr(
+        usage_repricing, "hydrate_alibaba_prices_for_repricing", lambda **kwargs: {}
+    )
+    ai_model = crud_ai_model.create_with_account(
+        db=db_session,
+        account_id=test_user.account_id,
+        obj_in={
+            "name": "Example Alibaba model",
+            "provider_name": "qwen",
+            "model_identifier": "qwen-history-example",
+            "api_endpoint": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            "api_key": "synthetic",
+        },
+    )
+    catalog.install_live_tariff(
+        "singapore-international",
+        "qwen-history-example",
+        Tariff(input=1, output=2, implicit_read=0.1, explicit_read=0.2, creation=1.25),
+    )
+    details = {"prompt_tokens": 1000, "prompt_tokens_details": {"cached_tokens": 500}}
+    if mode:
+        details["_preloop_cache_mode"] = mode
+    row = crud_api_usage.log_gateway_request(
+        db_session,
+        endpoint="/openai/v1/chat/completions",
+        method="POST",
+        status_code=200,
+        duration=0.1,
+        account_id=str(test_user.account_id),
+        user_id=str(test_user.id),
+        ai_model_id=str(ai_model.id),
+        model_alias="qwen/qwen-history-example",
+        provider_name="qwen",
+        prompt_tokens=1000,
+        completion_tokens=100,
+        total_tokens=1100,
+        estimated_cost=None,
+        cost_source="unpriced",
+        meta_data={"usage_details": details},
+    )
+    start, end = _window()
+    try:
+        usage_repricing.reprice_gateway_usage(
+            db_session, account_id=test_user.account_id, start=start, end=end
+        )
+        db_session.refresh(row)
+        assert row.meta_data["usage_details"] == details
+        assert row.estimated_cost == (
+            {"implicit": 0.00075, "explicit": 0.0008}.get(mode)
+        )
+        assert row.cost_source == ("catalog" if mode else "unpriced")
+    finally:
+        catalog.reset_live_state_for_tests()
+
+
+def test_alibaba_preflight_total_time_budget_stops_further_catalogs(monkeypatch):
+    from unittest.mock import MagicMock
+    from preloop.models import models
+    from preloop.services import alibaba_price_catalog as catalog
+
+    db = MagicMock()
+
+    def sessions():
+        yield db
+
+    monkeypatch.setattr("preloop.models.db.session.get_db_session", sessions)
+    monkeypatch.setattr("preloop.config.settings.model_price_live_lookup_enabled", True)
+    ai_models = [
+        models.AIModel(
+            provider_name="qwen",
+            model_identifier="qwen-budget-example",
+            api_endpoint=endpoint,
+        )
+        for endpoint in (
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            "https://example.us-east-1.maas.aliyuncs.com/compatible-mode/v1",
+        )
+    ]
+    monkeypatch.setattr(
+        crud_api_usage, "list_models_for_repricing", lambda *args, **kwargs: ai_models
+    )
+    monkeypatch.setattr(
+        catalog,
+        "prepare_refresh",
+        lambda model: catalog.PreparedCatalogRefresh(
+            *catalog.native_catalog_target(model), "synthetic"
+        ),
+    )
+    clock = [0.0]
+    monkeypatch.setattr(usage_repricing.time, "monotonic", lambda: clock[0])
+    calls = []
+
+    def refresh(prepared, *, max_duration_seconds):
+        db.close.assert_called_once()
+        calls.append(max_duration_seconds)
+        clock[0] += 30
+        return catalog.CatalogRefreshStatus.unreachable
+
+    monkeypatch.setattr(catalog, "refresh_prepared", refresh)
+    start, end = _window()
+    summary = usage_repricing.hydrate_alibaba_prices_for_repricing(
+        account_id="account-example", start=start, end=end
+    )
+    assert calls == [30]
+    assert summary == {"unreachable": 1, "time_budget_exhausted": 1}
