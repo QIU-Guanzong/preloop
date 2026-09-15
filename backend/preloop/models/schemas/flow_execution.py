@@ -246,9 +246,10 @@ class FlowExecutionBase(BaseModel):
     root_execution_id: Optional[uuid.UUID] = Field(
         None,
         description=(
-            "First execution of this lineage, so everything one delegation "
-            "tree did can be queried as a unit. Null on the root itself and "
-            "on executions created before lineage was recorded."
+            "First execution of this lineage. Null on the root itself and "
+            "on executions created before lineage was recorded. The whole "
+            "tree is the root row matched by its own id plus rows whose "
+            "root_execution_id points at that root."
         ),
     )
     delegation_depth: int = Field(

@@ -608,29 +608,32 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         self,
         db: Session,
         parent_execution_id: uuid.UUID,
-        account_id: Optional[str] = None,
+        account_id: uuid.UUID,
     ) -> List[FlowExecution]:
         """Get the executions started directly by one execution.
 
         Direct children only: a grandchild carries its own parent id, so a
-        caller that wants the whole tree filters on ``root_execution_id``
-        instead. Ordered deterministically (``start_time``, with ``id`` as the
-        tiebreak for rows that share a timestamp) so a tree renders in a
-        stable order across calls. Returns an empty list for a leaf, which is
-        the common case: most executions start nothing.
+        caller that wants the whole tree matches the root by its own id and
+        the descendants by ``root_execution_id``. Ordered deterministically
+        (``start_time``, with ``id`` as the tiebreak for rows that share a
+        timestamp) so a tree renders in a stable order across calls. Returns
+        an empty list for a leaf, which is the common case: most executions
+        start nothing.
 
-        The account filter joins through ``flow`` for the same reason every
-        other read does: an execution id alone must not cross accounts.
+        ``account_id`` is required and joins through ``flow``: an execution
+        id alone must not cross accounts.
         """
-        query = (
+        return (
             db.query(FlowExecution)
             .options(joinedload(FlowExecution.flow))
-            .filter(FlowExecution.parent_execution_id == parent_execution_id)
+            .join(Flow)
+            .filter(
+                FlowExecution.parent_execution_id == parent_execution_id,
+                Flow.account_id == account_id,
+            )
             .order_by(FlowExecution.start_time.asc(), FlowExecution.id.asc())
+            .all()
         )
-        if account_id:
-            query = query.join(Flow).filter(Flow.account_id == account_id)
-        return query.all()
 
     def get_running_by_flow(
         self,

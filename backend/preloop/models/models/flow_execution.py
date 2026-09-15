@@ -234,10 +234,12 @@ class FlowExecution(Base):
     #
     # parent_execution_id is the direct caller (indexed: the children lookup
     # is "who did I start?"). root_execution_id is the first execution of the
-    # chain (indexed: "everything this tree did" is one filter), and is also
-    # NULL on the root itself. delegation_depth is the distance from the root
-    # (0 = root, 1 = direct child), so a budget or depth cap can be enforced
-    # with a single comparison instead of a recursive query.
+    # chain (indexed so descendants of a root can be listed together) and is
+    # also NULL on the root itself. The whole tree is the root row matched
+    # by its own id plus rows whose root_execution_id points at that root.
+    # delegation_depth is the distance from the root (0 = root, 1 = direct
+    # child), so a budget or depth cap can be enforced with a single
+    # comparison instead of a recursive query.
     parent_execution_id = Column(
         UUID(as_uuid=True),
         ForeignKey("flow_execution.id"),

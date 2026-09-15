@@ -257,7 +257,8 @@ def test_deleting_a_parent_leaves_its_child_readable(db_session, flow):
     db_session.flush()
     child_id = child.id
 
-    crud_flow_execution.remove(db_session, id=root.id)
+    db_session.delete(root)
+    db_session.flush()
     db_session.expire_all()
 
     detached = db_session.get(models.FlowExecution, child_id)
@@ -300,16 +301,27 @@ def test_get_children_returns_direct_children_in_a_stable_order(db_session, flow
     db_session.flush()
 
     assert [
-        row.id for row in crud_flow_execution.get_children(db_session, root.id)
+        row.id
+        for row in crud_flow_execution.get_children(
+            db_session, root.id, account_id=flow.account_id
+        )
     ] == [
         first.id,
         second.id,
     ]
     # A grandchild is not a direct child of the root, and a leaf is empty.
     assert [
-        row.id for row in crud_flow_execution.get_children(db_session, first.id)
+        row.id
+        for row in crud_flow_execution.get_children(
+            db_session, first.id, account_id=flow.account_id
+        )
     ] == [grandchild.id]
-    assert crud_flow_execution.get_children(db_session, grandchild.id) == []
+    assert (
+        crud_flow_execution.get_children(
+            db_session, grandchild.id, account_id=flow.account_id
+        )
+        == []
+    )
 
 
 def test_get_children_does_not_cross_accounts(db_session, flow, test_user):
@@ -342,4 +354,9 @@ def test_get_children_does_not_cross_accounts(db_session, flow, test_user):
             db_session, root.id, account_id=test_user.account_id
         )
     ] == [mine.id]
-    assert len(crud_flow_execution.get_children(db_session, root.id)) == 2
+    assert [
+        row.id
+        for row in crud_flow_execution.get_children(
+            db_session, root.id, account_id=other_account.id
+        )
+    ] == [theirs.id]
