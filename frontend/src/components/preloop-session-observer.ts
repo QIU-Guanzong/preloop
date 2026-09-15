@@ -192,6 +192,17 @@ export class PreloopSessionObserver extends LitElement {
   @property({ type: Boolean })
   syncModeToUrl = false;
 
+  /**
+   * Turn to open the transcript at, as the identifier the search corpus
+   * publishes for a matching turn (the gateway interaction id).
+   *
+   * A search result that drops the reader at the top of a two hour session
+   * has not answered their question, so the transcript scrolls to the turn
+   * and flashes it once.
+   */
+  @property({ type: String })
+  focusTurnId: string | null = null;
+
   /** Optional override for the sidebar's no-sessions message. */
   @property({ type: String })
   emptyText = '';
@@ -1596,6 +1607,18 @@ export class PreloopSessionObserver extends LitElement {
     window.history.replaceState(window.history.state, '', url.toString());
   }
 
+  updated(changed: Map<string | number | symbol, unknown>): void {
+    if (
+      changed.has('focusTurnId') &&
+      this.focusTurnId &&
+      this.replayMode === 'conversation'
+    ) {
+      // The conversation view has no per turn anchor and the transcript does,
+      // so a link to a turn lands where that turn can actually be shown.
+      this.setReplayMode('timeline');
+    }
+  }
+
   private setReplayMode(mode: SessionReplayMode): void {
     if (this.replayMode === mode) return;
     this.replayMode = mode;
@@ -2059,6 +2082,7 @@ export class PreloopSessionObserver extends LitElement {
               : []
           }
           .activity=${this.activeActivity}
+          .focusEventId=${this.focusTurnId}
           .replayMode=${this.replayMode}
           .loading=${
             this.activeSessionId !== null &&

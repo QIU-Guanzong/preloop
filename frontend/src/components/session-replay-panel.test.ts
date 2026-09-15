@@ -1137,4 +1137,39 @@ describe('SessionReplayPanel', () => {
     expect(text).to.include('extra');
     expect(text).to.include('8,000');
   });
+  it('jumps to a deep linked turn named by its api usage id', async () => {
+    // A search snippet names the turn by the api usage id the corpus stores,
+    // and the transcript keys turns by event id, so the payload bridges them.
+    const events: FlowGatewayEvent[] = [
+      previewEvent(
+        'e1',
+        '2026-06-07T12:00:00Z',
+        [{ role: 'user', text: 'FIRST_TURN' }],
+        { api_usage_id: 'usage-1' }
+      ),
+      previewEvent(
+        'e2',
+        '2026-06-07T12:01:00Z',
+        [{ role: 'user', text: 'SECOND_TURN' }],
+        { api_usage_id: 'usage-2' }
+      ),
+    ];
+    const element = await fixture<SessionReplayPanel>(html`
+      <session-replay-panel
+        replayMode="timeline"
+        .session=${SESSION}
+        .events=${events}
+        .focusEventId=${'usage-2'}
+      ></session-replay-panel>
+    `);
+    await waitUntil(
+      () =>
+        Boolean(element.shadowRoot?.querySelector('.chat-turn.jump-highlight')),
+      'The deep linked turn was never jumped to'
+    );
+    const highlighted = element.shadowRoot!.querySelector(
+      '.chat-turn.jump-highlight'
+    )!;
+    expect(highlighted.getAttribute('data-event-id')).to.equal('e2');
+  });
 });

@@ -506,6 +506,62 @@ export interface AccountRuntimeSessionDetailResponse {
   activity_timeline: RuntimeSessionActivityItem[];
 }
 
+/**
+ * Ranked content search over session transcripts (POST
+ * /api/v1/runtime-sessions/search). The request is a body rather than a query
+ * string so the operator's search text stays out of proxy access logs.
+ */
+export type SessionSearchMode = 'keyword' | 'semantic' | 'hybrid';
+
+export interface SessionSearchSnippet {
+  document_id: string;
+  runtime_session_id: string;
+  source_kind: string;
+  source_id: string;
+  chunk_index: number;
+  occurred_at: string;
+  role: string | null;
+  rank: number;
+  redaction_state: string;
+  text: string | null;
+}
+
+export interface SessionSearchResult {
+  runtime_session_id: string;
+  session_source_type: string | null;
+  session_source_id: string | null;
+  session_reference: string | null;
+  title: string | null;
+  started_at: string | null;
+  last_activity_at: string | null;
+  score: number;
+  best_chunk_rank: number;
+  matched_chunk_count: number;
+  first_match_at: string | null;
+  last_match_at: string | null;
+  snippets: SessionSearchSnippet[];
+}
+
+export interface SessionSearchDegraded {
+  keyword: boolean;
+  semantic: boolean;
+  reasons: string[];
+  detail: string | null;
+}
+
+export interface SessionSearchResponse {
+  query: string;
+  mode: SessionSearchMode;
+  effective_mode: SessionSearchMode;
+  degraded: SessionSearchDegraded;
+  indexed_through: string | null;
+  total: number;
+  limit: number;
+  offset: number;
+  elapsed_ms: number;
+  results: SessionSearchResult[];
+}
+
 export interface ManagedAgentSummary {
   id: string;
   runtime_session_id: string | null;

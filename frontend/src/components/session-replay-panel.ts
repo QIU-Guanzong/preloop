@@ -186,6 +186,17 @@ export class SessionReplayPanel extends LitElement {
   @property({ type: String })
   replayMode: SessionReplayMode = 'timeline';
 
+  /**
+   * Turn to open at, as either a gateway event id or the api usage id the
+   * search corpus names a matching turn by.
+   *
+   * Set by a deep link (a search snippet, today): the turn is scrolled into
+   * view and flashed once, rather than leaving the reader at the top of a
+   * session that may be hours long.
+   */
+  @property({ type: String })
+  focusEventId: string | null = null;
+
   @property({ type: Boolean })
   loading = false;
 
@@ -1553,6 +1564,9 @@ export class SessionReplayPanel extends LitElement {
     }
     if (changed.has('replayMode')) {
       this.handleReplayModeChange();
+    }
+    if (changed.has('focusEventId') || changed.has('events')) {
+      this.jumpToFocusedTurn();
     }
     if (changed.has('timelineEvents') && this.replayViewActive) {
       const messages = this.getVisibleReplayMessages();
@@ -4566,6 +4580,33 @@ export class SessionReplayPanel extends LitElement {
   // reactive state) because the highlight is transient eye-candy — routing it
   // through Lit state would force a full re-render just to fade an outline.
   private jumpHighlightTimer: number | null = null;
+
+  // The focus id already honoured, so a re-render does not re-scroll a reader
+  // who has since scrolled somewhere else.
+  private jumpedFocusEventId: string | null = null;
+
+  /**
+   * Resolve the deep linked turn and jump to it once.
+   *
+   * The search corpus names a gateway turn by its api usage id, while the
+   * transcript keys turns by activity event id, so both are accepted and the
+   * payload's api usage id is the bridge between them.
+   */
+  private jumpToFocusedTurn(): void {
+    const focusId = this.focusEventId;
+    if (!focusId) {
+      this.jumpedFocusEventId = null;
+      return;
+    }
+    if (this.jumpedFocusEventId === focusId) return;
+    const match = (this.events || []).find(
+      (event) => event.id === focusId || event.payload?.api_usage_id === focusId
+    );
+    if (!match) return;
+    this.jumpedFocusEventId = focusId;
+    // After the turns for these events have painted.
+    void this.updateComplete.then(() => this.jumpToTurn(match.id));
+  }
 
   private jumpToTurn(eventId: string): void {
     const turn = this.shadowRoot?.querySelector(
