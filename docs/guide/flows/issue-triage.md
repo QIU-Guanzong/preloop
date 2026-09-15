@@ -10,15 +10,16 @@ The preset ships as `backend/presets/001-issue-triage-assistant.yaml`
 
 ## How it updates an issue
 
-1. `get_issue_triage_context` reads fresh provider content and a complete, bounded
-   label catalogue for the authorized project. It supplies an expected revision
-   and the permitted complexity scheme.
+1. `get_issue` with `include: ["label_catalog", "revision"]` reads fresh provider
+   content and a complete, bounded label catalogue for the authorized project. It
+   supplies an expected revision and the permitted complexity scheme.
 2. The agent reconciles linked PRs and available source evidence with the original
    acceptance. It assesses description quality, readiness, complexity and risk
    independently, and selects an exact label from the returned scheme.
-3. `apply_issue_triage` writes the assessment and applies that complexity label.
-   It preserves human text outside the managed section and changes labels through
-   provider deltas, removing only obsolete siblings in the selected family.
+3. `update_issue` with `expected_revision`, `assessment` and `complexity_label`
+   writes the assessment and applies that complexity label. It preserves human text
+   outside the managed section and changes labels through provider deltas, removing
+   only obsolete siblings in the selected family.
 4. The tool reads the provider state back and synchronizes the observed issue
    through CRUD. Its receipt identifies completed operations, conflicts and
    partial failures. `result.json` records that diagnostic receipt.
@@ -31,15 +32,30 @@ scheme exists. If complexity cannot be estimated, the issue can still receive it
 assessment with the missing information, but the run reports the absent tag as
 incomplete. It never invents an estimate to fill a field.
 
-Both tools are off by default. They are advertised only to a flow whose
-`allowed_mcp_tools` selects them, such as this preset, or to an account or agent
-that enables them explicitly on the Tools page. Connecting a GitHub or GitLab
-tracker alone does not add them to every agent's tool list.
+Triage has no tools of its own. It is an option on the standard `get_issue` and
+`update_issue` tools, so an agent that already has them needs no extra unlock, and
+no agent receives a separate triage schema. Passing no `include` leaves `get_issue`
+on its existing snapshot-only path, and omitting `expected_revision` and
+`assessment` leaves `update_issue` on its existing metadata path. A triage write
+must not be mixed with `description`, `status`, `priority`, `assignee`, `labels` or
+reactions; such a call is rejected rather than half applied.
 
-The write tool requires the existing `edit_issues` permission and follows normal
+The triage write requires the existing `edit_issues` permission and follows normal
 MCP availability and approval policies. Project and tracker identity come from
-account-scoped stored records. The preset does not use broad issue mutation tools,
-change assignees or dispatch labels, create follow-up issues, or start implementation.
+account-scoped stored records. The preset prompt restricts `update_issue` to the
+triage write: it does not change assignees or dispatch labels, create follow-up
+issues, or start implementation.
+
+The previous `apply_issue_triage` tool advertised a bounded schema
+(`expected_revision`, `assessment`, `complexity_label`, and optional `title`
+only). That mechanical bound is gone: the preset's write tool is full
+`update_issue`, and the triage-only restriction is prompt-enforced. Issue text
+and comments are untrusted data, so a prompt-injected agent could issue a
+non-triage write (replace the description, close the issue) that the old tool
+pair made impossible. Account owners who want a mechanical gate should attach an
+approval policy to `update_issue` for this flow. The preset does not pin one:
+approval gates are deployment-specific.
+
 The first provider adapters support GitHub and GitLab. Other providers report an
 unsupported operation rather than claiming an update.
 
@@ -52,9 +68,11 @@ a documented limitation.
 
 Automatic triage suppresses matching self-generated updates using server-written
 receipts, expected edit fields and provider snapshots. Final receipts also match
-the observed provider update time; pending write expectations expire. Marker text
-alone does not suppress an event. Manual runs and unrelated flows remain eligible,
-as do assignment, reopening and later human edits. Rapid human edits can still
+the observed provider update time; pending write expectations expire. Suppression
+keys on the receipt, not on which tools a flow selected, so an event that carries no
+trusted receipt stays eligible for every flow. Marker text alone does not suppress
+an event. Manual runs remain eligible, as do assignment, reopening and later human
+edits. Rapid human edits can still
 enqueue multiple runs; this is not durable per-revision coalescing.
 
 ## Manual runs

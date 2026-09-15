@@ -119,10 +119,14 @@ logger = logging.getLogger(__name__)
 # token must keep working.
 TERMINAL_EXECUTION_STATUSES = frozenset({"SUCCEEDED", "FAILED", "STOPPED", "CANCELLED"})
 
-# A run parked on a human decision is not terminal (it will resume) but it is
-# over for THIS worker: the container is gone, the runner is released and the
-# runtime token must be retired, because the resume mints its own.
+# A parked run is not terminal (it will resume) but it is over for THIS
+# worker: the container is gone, the runner is released and the runtime token
+# must be retired, because the resume mints its own. Two things a run can be
+# parked on, one handshake: a human decision (approval_park.py) or the child
+# executions it started (flow_child_wait.py, #633).
 WAITING_FOR_HUMAN_STATUS = "WAITING_FOR_HUMAN"
+WAITING_FOR_CHILDREN_STATUS = "WAITING_FOR_CHILDREN"
+PARKED_STATUSES = frozenset({WAITING_FOR_HUMAN_STATUS, WAITING_FOR_CHILDREN_STATUS})
 
 # Sentinel string that agents print when completing successfully.
 FLOW_SUCCESS_SENTINEL = "FLOW_EXECUTION_SUCCESS"
@@ -1320,6 +1324,13 @@ class FlowExecutionOrchestrator:
         if isinstance(answers_prompt, str) and answers_prompt.strip():
             resolved_prompt += "\n\n" + answers_prompt[:8000]
 
+        # Same shape, same honest limitation, for a run resumed because the
+        # flows it started with run_flow have finished: one row per child with
+        # its final state and where its result lives (see flow_child_wait.py).
+        children_prompt = (self.trigger_event_data or {}).get("_children_prompt")
+        if isinstance(children_prompt, str) and children_prompt.strip():
+            resolved_prompt += "\n\n" + children_prompt[:8000]
+
         # Resume runs always learn to inspect rebase-conflict.txt, because
         # the rebase happens after this prompt is resolved. Keep this before
         # the success-confirmation instruction, which must stay last.
@@ -1521,9 +1532,7 @@ class FlowExecutionOrchestrator:
         if row is None:
             return False
         status = str(row.status).upper()
-        return (
-            status in TERMINAL_EXECUTION_STATUSES or status == WAITING_FOR_HUMAN_STATUS
-        )
+        return status in TERMINAL_EXECUTION_STATUSES or status in PARKED_STATUSES
 
     def _revoke_execution_runtime_tokens(self) -> int:
         """Revoke every runtime token minted for this execution."""
@@ -3240,7 +3249,7 @@ class FlowExecutionOrchestrator:
         """Deny a successful release when CRA persist validation failed closed."""
         from preloop.cra.persist import apply_cra_fail_closed_completion
 
-        if final_status == WAITING_FOR_HUMAN_STATUS:
+        if final_status in PARKED_STATUSES:
             # A parked run has not finished, so there is no release to deny.
             # The artifact captured at park time is a mid-flight snapshot;
             # the CRA verdict belongs to the resumed run that writes the real
@@ -4393,15 +4402,21 @@ class FlowExecutionOrchestrator:
     async def _park_if_requested(
         self, agent_executor: Any, session_reference: str, elapsed: float
     ) -> Optional[Dict[str, Any]]:
-        """Park this run if the approval path asked for it; else None.
+        """Park this run if something asked for it; else None.
 
         Called from two places in the monitor loop, and that is the point.
         The park request is written by a different process (the approval
-        path) and observed here on a 5 second poll, while the agent that
-        received ``parked_for_human`` stops on its own. Checking only at the
-        top of the loop leaves a window in which the agent exits first and
-        the run is completed, fail-closed and notified as terminal while a
-        human still holds the question. So the terminal branch asks again.
+        path, or the ``run_flow`` tool call waiting for children) and observed
+        here on a 5 second poll, while the agent that received
+        ``parked_for_human`` or ``parked_for_children`` stops on its own.
+        Checking only at the top of the loop leaves a window in which the
+        agent exits first and the run is completed, fail-closed and notified
+        as terminal while a human still holds the question, or while the
+        children are still running. So the terminal branch asks again.
+
+        The park kind on the row decides which parked status is confirmed;
+        everything else about the handshake is identical, which is exactly
+        why children reuse it instead of getting a second mechanism.
         """
         from preloop.models.crud import crud_flow_execution
 
@@ -4413,15 +4428,19 @@ class FlowExecutionOrchestrator:
         )
         if not park_request or park_request.get("parked_at") is not None:
             return None
+        park_kind = str(park_request.get("kind") or "human")
+        parked_status = crud_flow_execution.parked_status_for_kind(park_kind)
         logger.info(
-            "Parking execution %s on approval %s (expires %s)",
+            "Parking execution %s on %s %s (expires %s)",
             self.execution_log.id,
+            park_kind,
             park_request["request_id"],
             park_request.get("expires_at"),
         )
         self.execution_logger.log_milestone(
             "execution_parked",
             {
+                "park_kind": park_kind,
                 "approval_request_id": str(park_request["request_id"]),
                 "expires_at": (
                     park_request["expires_at"].isoformat()
@@ -4450,18 +4469,20 @@ class FlowExecutionOrchestrator:
         await self._publish_update(
             "execution_parked",
             {
+                "park_kind": park_kind,
                 "approval_request_id": str(park_request["request_id"]),
                 "elapsed": elapsed,
             },
         )
         return {
-            "status": WAITING_FOR_HUMAN_STATUS,
+            "status": parked_status,
             "output_summary": None,
             "error_message": None,
             "actions_taken": self.execution_logger.get_actions_taken(),
             "mcp_usage_logs": self.execution_logger.get_mcp_usage_logs(),
             "result": result_artifact,
             "park": {
+                "kind": park_kind,
                 "approval_request_id": str(park_request["request_id"]),
                 "compute_seconds": (self._chain_consumed_seconds() + int(elapsed)),
             },
@@ -5198,8 +5219,9 @@ class FlowExecutionOrchestrator:
         claims against.
         """
         park = agent_result.get("park") or {}
+        park_kind = str(park.get("kind") or crud_flow_execution.PARK_KIND_HUMAN)
         await self._update_execution_log(
-            status=WAITING_FOR_HUMAN_STATUS,
+            status=crud_flow_execution.parked_status_for_kind(park_kind),
             model_output_summary=output_summary,
             failure_category=None,
             actions_taken_summary=agent_result.get("actions_taken"),
@@ -5217,6 +5239,7 @@ class FlowExecutionOrchestrator:
                 self.db,
                 execution_id=str(self.execution_log.id),
                 compute_seconds=int(park.get("compute_seconds") or 0),
+                kind=park_kind,
             )
         except Exception:
             logger.exception(
@@ -5224,9 +5247,9 @@ class FlowExecutionOrchestrator:
                 self.execution_log.id,
             )
         logger.info(
-            "Flow execution %s parked on approval request %s (%ss of agent "
-            "time spent so far)",
+            "Flow execution %s parked on %s %s (%ss of agent time spent so far)",
             self.execution_log.id,
+            park_kind,
             park.get("approval_request_id"),
             park.get("compute_seconds"),
         )
@@ -5276,6 +5299,21 @@ class FlowExecutionOrchestrator:
                 )
             except Exception:
                 logger.exception("Security maintenance completion needs reconciliation")
+            # A parent parked on this run is waiting for exactly this moment.
+            # Best effort on purpose: the sweep in execution_monitor.py covers
+            # the parent whose resume never landed, so a failure here delays a
+            # resume by one sweep instead of losing it.
+            try:
+                from preloop.services.flow_child_wait import (
+                    notify_parent_child_finished,
+                )
+
+                await notify_parent_child_finished(str(self.execution_log.id))
+            except Exception:
+                logger.exception(
+                    "Could not resume the parent of execution %s; the sweep will retry",
+                    self.execution_log.id,
+                )
             notifications = getattr(self.flow, "notifications", None)
             if not notifications:
                 return
@@ -5865,7 +5903,7 @@ class FlowExecutionOrchestrator:
 
     async def _finish_isolated_publication(self, agent_result: Dict[str, Any]) -> None:
         """Run trusted publication after runtime cleanup; failure changes status."""
-        if agent_result.get("status") == WAITING_FOR_HUMAN_STATUS:
+        if agent_result.get("status") in PARKED_STATUSES:
             # A parked run is mid-flight: publishing its work now would ship
             # exactly the change the human has not approved yet. The resumed
             # execution publishes when it finishes.
@@ -6267,7 +6305,7 @@ class FlowExecutionOrchestrator:
             # commit status, no terminal notification and no queued follow-up.
             # The runtime is released (the container is gone) and the row
             # records what the decision needs to resume it.
-            if final_status == WAITING_FOR_HUMAN_STATUS:
+            if final_status in PARKED_STATUSES:
                 await self._finalize_park(
                     agent_result=agent_result,
                     output_summary=output_summary,

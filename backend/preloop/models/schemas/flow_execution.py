@@ -194,16 +194,24 @@ class FlowExecutionBase(BaseModel):
     parked_at: Optional[datetime] = Field(
         None,
         description=(
-            "When this execution was parked waiting for a human decision. "
-            "Set only while status is WAITING_FOR_HUMAN and cleared when the "
-            "decision resumes it."
+            "When this execution was parked waiting for a human decision "
+            "(status WAITING_FOR_HUMAN) or for the flows it started (status "
+            "WAITING_FOR_CHILDREN). Cleared when the run is resumed."
         ),
     )
     park_expires_at: Optional[datetime] = Field(
-        None, description="When the pending approval window closes"
+        None,
+        description=(
+            "When the pending approval window closes, or when a run parked "
+            "on its children is resumed anyway"
+        ),
     )
     park_request_id: Optional[uuid.UUID] = Field(
-        None, description="The approval request this execution is parked on"
+        None,
+        description=(
+            "The approval request this execution is parked on, or the wait "
+            "grouping the children it is parked on"
+        ),
     )
     stop_requested_at: Optional[datetime] = None
     stop_reason: Optional[str] = None

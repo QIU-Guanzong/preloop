@@ -89,6 +89,12 @@ RUN_FLOW_TOOL_NAME = "run_flow"
 #: reading the row) can tell a child from a webhook or a schedule.
 DELEGATION_SOURCE = "flow_delegation"
 
+#: ``log_type`` of the row that keeps a refused call on the calling
+#: execution's timeline. A refusal creates no child execution, so this is the
+#: only durable place a parent can read back what it asked for and did not
+#: get (#633 reports one row per attempt, refusals included).
+DELEGATION_REFUSAL_LOG_TYPE = "delegation_refusal"
+
 #: Hard stop for the ancestor walk, independent of the configured depth cap:
 #: lineage is written by this module and cannot loop, but a walk over data is
 #: bounded anyway rather than trusted.
@@ -449,7 +455,11 @@ def clamp_timeout(
 
 
 def console_url_for(execution_id: Any) -> Optional[str]:
-    """Deep link to one execution in the console, when a base url is set."""
+    """Deep link to one execution in the console, when a base url is set.
+
+    Public because get_execution (#632) and the child wait (#633) link the
+    same executions, and two spellings of one url is one spelling too many.
+    """
     import os
 
     base = os.getenv("PRELOOP_URL", "").strip()
@@ -592,6 +602,43 @@ def audit_delegation_refusal(
         logger.debug("Failed to audit delegation refusal", exc_info=True)
 
 
+def record_refusal_on_parent(
+    db: Session,
+    *,
+    parent_execution_id: Any,
+    record: Dict[str, Any],
+    label: Optional[str] = None,
+) -> None:
+    """Keep a refused call on the parent's own timeline (#633).
+
+    A refusal creates no child row, so without this the only trace of it is
+    the tool audit log. A parent that later parks on its children has to
+    report what it asked for and did not get, so the refusal record is stored
+    as one log row on the calling execution and read back by
+    ``flow_child_wait`` when the parent is resumed. Never raises: a refusal
+    that could not be written down is still a refusal.
+    """
+    try:
+        crud_flow_execution.append_log(
+            db,
+            execution_id=str(parent_execution_id),
+            log_data={
+                "type": DELEGATION_REFUSAL_LOG_TYPE,
+                "message": (
+                    "run_flow refused: "
+                    f"{record.get('metadata', {}).get('preloop.ai/refusalReason')}"
+                ),
+                "metadata": {
+                    "milestone": DELEGATION_REFUSAL_LOG_TYPE,
+                    "label": str(label)[:200] if label else None,
+                    "task": record,
+                },
+            },
+        )
+    except Exception:  # pragma: no cover - a log row must not break a refusal
+        logger.debug("Could not record the refusal on the parent", exc_info=True)
+
+
 def _child_trigger_details(
     *,
     decision: DelegationDecision,
@@ -718,7 +765,7 @@ async def delegate_flow(
                 db, reference=reference, account_id=parent_flow.account_id
             )
         named = target if target is not None else parent_flow
-        return refusal_record(
+        record = refusal_record(
             reason=refusal.reason,
             message=refusal.message,
             flow_id=named.id,
@@ -728,6 +775,13 @@ async def delegate_flow(
             root_execution_id=root_execution_id,
             attempt_id=correlation_id or str(uuid.uuid4()),
         )
+        record_refusal_on_parent(
+            db,
+            parent_execution_id=parent_execution.id,
+            record=record,
+            label=label,
+        )
+        return record
 
     child, child_flow = await _start_child(
         db,

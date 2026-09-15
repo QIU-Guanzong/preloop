@@ -91,8 +91,6 @@ EXPECTED_TOOLS = {
     "search",
     "estimate_compliance",
     "improve_compliance",
-    "get_issue_triage_context",
-    "apply_issue_triage",
     "request_approval",
     "permission_prompt",
     "add_comment",
@@ -188,7 +186,7 @@ class TestRegisteredToolBehaviour:
         ):
             result = await fn(issue="ABC-1")
         assert result == '{"issue": "ok"}'
-        mock_router.assert_awaited_once_with("ABC-1")
+        mock_router.assert_awaited_once_with("ABC-1", include=None)
 
     async def test_resolve_sbom_upstreams_no_user_context(self, mcp_server):
         fn = await self._fn(mcp_server, "resolve_sbom_upstreams")

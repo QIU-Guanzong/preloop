@@ -1464,10 +1464,32 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
     # (decision path, exactly once).
 
     WAITING_FOR_HUMAN_STATUS = "WAITING_FOR_HUMAN"
+    #: Sibling park: the run is waiting for the executions it started (#633).
+    WAITING_FOR_CHILDREN_STATUS = "WAITING_FOR_CHILDREN"
     RESUMING_STATUS = "RESUMING"
+    #: What a parked run is waiting on. Closed vocabulary, written on the row
+    #: by whoever requests the park and read by the orchestrator to decide
+    #: which parked status to confirm into.
+    PARK_KIND_HUMAN = "human"
+    PARK_KIND_CHILDREN = "children"
+    PARKED_STATUS_BY_KIND = {
+        PARK_KIND_HUMAN: WAITING_FOR_HUMAN_STATUS,
+        PARK_KIND_CHILDREN: WAITING_FOR_CHILDREN_STATUS,
+    }
     PARK_PARENT_CLOSE_STATUSES = frozenset(
         {"SUCCEEDED", "FAILED", "STOPPED", "CANCELLED"}
     )
+
+    def parked_status_for_kind(self, kind: Optional[str]) -> str:
+        """Which parked status one park kind confirms into.
+
+        An unknown or missing kind reads as a human park: rows written before
+        the column existed are all approval parks, and a typo must not invent
+        a status nothing sweeps.
+        """
+        return self.PARKED_STATUS_BY_KIND.get(
+            str(kind or self.PARK_KIND_HUMAN), self.WAITING_FOR_HUMAN_STATUS
+        )
 
     def request_park(
         self,
@@ -1476,6 +1498,7 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         execution_id: Any,
         approval_request_id: Any,
         expires_at: Optional[datetime] = None,
+        kind: str = PARK_KIND_HUMAN,
         commit: bool = True,
     ) -> bool:
         """Ask the orchestrator to park this execution on an approval.
@@ -1483,6 +1506,10 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         Only a live execution can be parked; a run that already finished
         (the human answered a question its agent had abandoned) must not be
         resurrected into a park. Returns True when the request was recorded.
+
+        ``kind`` says what the run is waiting on: an approval request by
+        default, or the children it started (``PARK_KIND_CHILDREN``, #633),
+        in which case ``approval_request_id`` is the wait id grouping them.
         """
         count = (
             db.query(models.FlowExecution)
@@ -1494,6 +1521,7 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             .update(
                 {
                     models.FlowExecution.park_request_id: approval_request_id,
+                    models.FlowExecution.park_kind: kind,
                     models.FlowExecution.park_requested_at: datetime.now(timezone.utc),
                     models.FlowExecution.park_expires_at: expires_at,
                 },
@@ -1509,6 +1537,7 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         row = (
             db.query(
                 models.FlowExecution.park_request_id,
+                models.FlowExecution.park_kind,
                 models.FlowExecution.park_requested_at,
                 models.FlowExecution.park_expires_at,
                 models.FlowExecution.parked_at,
@@ -1520,6 +1549,7 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             return None
         return {
             "request_id": row.park_request_id,
+            "kind": str(row.park_kind or self.PARK_KIND_HUMAN),
             "requested_at": row.park_requested_at,
             "expires_at": row.park_expires_at,
             "parked_at": row.parked_at,
@@ -1531,19 +1561,21 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         *,
         execution_id: Any,
         compute_seconds: int,
+        kind: str = PARK_KIND_HUMAN,
         commit: bool = True,
     ) -> None:
         """Record that the runtime is released and the run is genuinely parked.
 
         ``compute_seconds`` is the agent wall clock this park chain has spent
-        so far. Human waiting time is never added to it, which is what makes
-        the flow's timeout budget pause while parked.
+        so far. Time spent waiting (for a human, or for a child) is never
+        added to it, which is what makes the flow's timeout budget pause
+        while parked.
         """
         db.query(models.FlowExecution).filter(
             models.FlowExecution.id == execution_id,
         ).update(
             {
-                models.FlowExecution.status: self.WAITING_FOR_HUMAN_STATUS,
+                models.FlowExecution.status: self.parked_status_for_kind(kind),
                 models.FlowExecution.parked_at: datetime.now(timezone.utc),
                 models.FlowExecution.parked_compute_seconds: max(0, compute_seconds),
             },
@@ -1587,6 +1619,77 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         )
         db.commit()
         return bool(count)
+
+    def claim_parked_children_for_resume(
+        self, db: Session, *, execution_id: Any, wait_id: Any
+    ) -> bool:
+        """Claim a parent parked on children for exactly one resume (#633).
+
+        The sibling of ``claim_parked_for_resume``, and the same single
+        conditional UPDATE: two children finishing at the same instant both
+        try to resume the parent, and the second one claims zero rows. The
+        wait id is matched too, so a park that was already consumed and
+        re-requested cannot be claimed by a late child of the previous wait.
+        """
+        now = datetime.now(timezone.utc)
+        count = (
+            db.query(models.FlowExecution)
+            .filter(
+                models.FlowExecution.id == execution_id,
+                models.FlowExecution.status == self.WAITING_FOR_CHILDREN_STATUS,
+                models.FlowExecution.park_request_id == wait_id,
+                models.FlowExecution.resume_execution_id.is_(None),
+            )
+            .update(
+                {
+                    models.FlowExecution.status: self.RESUMING_STATUS,
+                    models.FlowExecution.orchestrator_claimed_at: now,
+                    models.FlowExecution.orchestrator_heartbeat_at: now,
+                },
+                synchronize_session=False,
+            )
+        )
+        db.commit()
+        return bool(count)
+
+    def release_children_claim(self, db: Session, *, execution_id: Any) -> bool:
+        """Return an unconsumed children claim to WAITING_FOR_CHILDREN.
+
+        Used when the resume could not be created: the row goes back to
+        parked so the sweep retries it. A claim that already has a resume
+        execution is left alone, or the sweep would start a second one.
+        """
+        count = (
+            db.query(models.FlowExecution)
+            .filter(
+                models.FlowExecution.id == execution_id,
+                models.FlowExecution.status == self.RESUMING_STATUS,
+                models.FlowExecution.resume_execution_id.is_(None),
+            )
+            .update(
+                {
+                    models.FlowExecution.status: self.WAITING_FOR_CHILDREN_STATUS,
+                    models.FlowExecution.orchestrator_worker_id: None,
+                    models.FlowExecution.orchestrator_claimed_at: None,
+                    models.FlowExecution.orchestrator_heartbeat_at: None,
+                },
+                synchronize_session=False,
+            )
+        )
+        db.commit()
+        return bool(count)
+
+    def list_parked_on_children(
+        self, db: Session, *, limit: int = 200
+    ) -> List[FlowExecution]:
+        """Every execution currently parked on the children it started."""
+        return (
+            db.query(FlowExecution)
+            .filter(FlowExecution.status == self.WAITING_FOR_CHILDREN_STATUS)
+            .order_by(FlowExecution.park_requested_at.asc(), FlowExecution.id.asc())
+            .limit(limit)
+            .all()
+        )
 
     def mark_park_resumed(
         self,
@@ -1670,7 +1773,48 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         at that status. Same stale window as orchestrator worker claims.
         Consumed claims (``resume_execution_id`` set) are left alone so a
         failed dispatch cannot double-run.
+
+        Human parks only: a claim on a children park goes back to
+        WAITING_FOR_CHILDREN instead, which is
+        ``reclaim_stale_children_claims``. Rows written before ``park_kind``
+        existed are human parks, so a NULL kind belongs here.
         """
+        return self._reclaim_stale_claims(
+            db,
+            now=now,
+            stale_after_seconds=stale_after_seconds,
+            kind=self.PARK_KIND_HUMAN,
+        )
+
+    def reclaim_stale_children_claims(
+        self,
+        db: Session,
+        *,
+        now: datetime,
+        stale_after_seconds: Optional[int] = None,
+    ) -> int:
+        """Return stranded children-park claims to WAITING_FOR_CHILDREN (#633).
+
+        Same lease, same reasoning, different parked status: a parent whose
+        resume was never created has to become claimable again by the next
+        child completion or by the sweep.
+        """
+        return self._reclaim_stale_claims(
+            db,
+            now=now,
+            stale_after_seconds=stale_after_seconds,
+            kind=self.PARK_KIND_CHILDREN,
+        )
+
+    def _reclaim_stale_claims(
+        self,
+        db: Session,
+        *,
+        now: datetime,
+        stale_after_seconds: Optional[int],
+        kind: str,
+    ) -> int:
+        """One conditional UPDATE returning expired claims of one park kind."""
         from preloop.config import settings
 
         stale_after = (
@@ -1679,6 +1823,13 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             else int(settings.flow_execution_claim_stale_seconds)
         )
         stale_before = now - timedelta(seconds=max(1, stale_after))
+        if kind == self.PARK_KIND_CHILDREN:
+            kind_filter = models.FlowExecution.park_kind == self.PARK_KIND_CHILDREN
+        else:
+            kind_filter = or_(
+                models.FlowExecution.park_kind.is_(None),
+                models.FlowExecution.park_kind != self.PARK_KIND_CHILDREN,
+            )
         count = (
             db.query(models.FlowExecution)
             .filter(
@@ -1688,10 +1839,11 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
                     models.FlowExecution.orchestrator_heartbeat_at.is_(None),
                     models.FlowExecution.orchestrator_heartbeat_at < stale_before,
                 ),
+                kind_filter,
             )
             .update(
                 {
-                    models.FlowExecution.status: self.WAITING_FOR_HUMAN_STATUS,
+                    models.FlowExecution.status: self.parked_status_for_kind(kind),
                     models.FlowExecution.orchestrator_worker_id: None,
                     models.FlowExecution.orchestrator_claimed_at: None,
                     models.FlowExecution.orchestrator_heartbeat_at: None,
@@ -1868,9 +2020,10 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
     ) -> Dict[Any, int]:
         """How many executions each account currently has admitted.
 
-        Parked runs (WAITING_FOR_HUMAN) are deliberately absent: they hold no
-        container, no runner and no worker, so counting them would let one
-        human decision block an account's remaining slots for days.
+        Parked runs (WAITING_FOR_HUMAN, WAITING_FOR_CHILDREN) are deliberately
+        absent: they hold no container, no runner and no worker, so counting
+        them would let one human decision, or one slow child, block an
+        account's remaining slots for days.
         """
         from datetime import datetime, timedelta, timezone
 
