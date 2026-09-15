@@ -464,6 +464,14 @@ export interface RuntimeSessionSummary {
   optimization_waste_score?: number | null;
   optimization_potential_savings_tokens?: number | null;
   optimization_potential_savings_usd?: number | null;
+  /**
+   * Notes on this session, carried on the row so the list can show who
+   * steered it without a second request per row.
+   */
+  note_count?: number | null;
+  latest_note_author_display?: string | null;
+  latest_note_author_auth_method?: string | null;
+  latest_note_at?: string | null;
 }
 
 export interface AccountRuntimeSessionListResponse {
@@ -615,7 +623,10 @@ export interface OperatorNote {
   runtime_session_id?: string | null;
   author: {
     user_id?: string | null;
+    /** Set instead of `user_id` when another agent wrote the note. */
+    agent_id?: string | null;
     display?: string | null;
+    /** `agent`, or the human credential: `session`, `jwt`, `api_key`. */
     auth_method?: string | null;
   };
   created_at?: string | null;
