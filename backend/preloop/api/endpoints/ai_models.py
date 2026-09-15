@@ -19,7 +19,6 @@ from sqlalchemy.orm import Session
 from preloop.api.auth.jwt import get_current_active_user
 from preloop.models.crud import crud_account
 from preloop.schemas.ai_model import (
-    AIModelAliasFailure,
     AIModelCatalogSyncProviderResult,
     AIModelCatalogSyncRequest,
     AIModelCatalogSyncResponse,
@@ -61,6 +60,7 @@ from preloop.services.ai_model_pricing import (
 )
 from preloop.services.model_gateway_usage import (
     ModelGatewayUsageService,
+    _alias_failures,
     normalize_usage_period,
 )
 from preloop.services.runtime_session_explorer import RuntimeSessionExplorerService
@@ -167,7 +167,7 @@ def _collapse_usage_by_model(usage_rows: List[Dict]) -> Dict[str, Dict]:
         Mapping of model id to summed counters, with the latest
         ``last_request_at`` across that model's aliases, the latest
         ``last_failure_at`` and the alias that failure was recorded under,
-        plus ``alias_failures`` (one group per inbox key).
+        plus the raw per-alias rows ``_alias_failures`` folds.
     """
     totals: Dict[str, Dict] = {}
     for row in usage_rows:
@@ -188,7 +188,7 @@ def _collapse_usage_by_model(usage_rows: List[Dict]) -> Dict[str, Dict]:
                 "last_request_at": None,
                 "last_failure_at": None,
                 "last_failure_alias": None,
-                "alias_failures": {},
+                "failure_groups": [],
             },
         )
         for key in (
@@ -221,30 +221,8 @@ def _collapse_usage_by_model(usage_rows: List[Dict]) -> Dict[str, Dict]:
             total["last_failure_alias"] = row.get("model_alias") or row.get(
                 "provider_name"
             )
-        failed_for_alias = row.get("failed_request_count") or 0
-        if last_failure_at is not None and failed_for_alias:
-            # Same key the inbox uses: alias, or the provider when there is
-            # no alias, so a Models row can take the worst of those items.
-            alias = (
-                row.get("model_alias") or row.get("provider_name") or "Unknown model"
-            )
-            groups = total["alias_failures"]
-            existing = groups.get(alias)
-            if existing is None:
-                groups[alias] = {
-                    "alias": alias,
-                    "last_failure_at": last_failure_at,
-                    "failed_requests": failed_for_alias,
-                    "failed_request_count_since": row.get("failed_request_count_since")
-                    or 0,
-                }
-            else:
-                existing["failed_requests"] += failed_for_alias
-                existing["failed_request_count_since"] += (
-                    row.get("failed_request_count_since") or 0
-                )
-                if last_failure_at > existing["last_failure_at"]:
-                    existing["last_failure_at"] = last_failure_at
+        # Same groups the detail summary folds: one inbox key per alias.
+        total["failure_groups"].append(row)
     return totals
 
 
@@ -382,23 +360,10 @@ def get_ai_models_overview(
         requests = usage["request_count"] if usage else 0
         failed = usage["failed_request_count"] if usage else 0
         asked_since = model_id in failed_since_by_model
-        alias_failures: List[AIModelAliasFailure] = []
-        if usage:
-            for group in sorted(
-                usage["alias_failures"].values(),
-                key=lambda item: item["last_failure_at"],
-                reverse=True,
-            ):
-                alias_failures.append(
-                    AIModelAliasFailure(
-                        alias=group["alias"],
-                        last_failure_at=group["last_failure_at"],
-                        failed_requests=group["failed_requests"],
-                        failed_requests_since=(
-                            group["failed_request_count_since"] if asked_since else None
-                        ),
-                    )
-                )
+        alias_failures = _alias_failures(
+            usage["failure_groups"] if usage else [],
+            asked_since=asked_since,
+        )
         items.append(
             AIModelOverviewItem(
                 ai_model_id=model_id,

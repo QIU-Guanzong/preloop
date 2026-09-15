@@ -107,6 +107,9 @@ def _alias_failures(
 ) -> List[AIModelAliasFailure]:
     """Build the per-alias list the inbox keys, from the same groups.
 
+    Shared by the Models overview and the per-model summary so the two
+    pages cannot disagree about which aliases failed.
+
     Args:
         usage_groups: Grouped rows for a single model.
         asked_since: Whether the caller asked for failed_requests_since.
