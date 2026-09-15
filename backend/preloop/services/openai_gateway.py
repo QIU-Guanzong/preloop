@@ -1251,9 +1251,10 @@ class OpenAIGatewayService:
                     elif (
                         rs.parent_session_id is None and self._client_parent_session_id
                     ):
-                        # Embeddings used to create the row with no parent.
-                        # A later chat turn fills a NULL the same way hook
-                        # ingest does. Lineage stays write-once on top.
+                        # Fill a NULL lineage the way hook ingest does: rows
+                        # created before this column landed, and rows whose
+                        # parent lookup failed transiently. Lineage stays
+                        # write-once on top.
                         observed_at = datetime.now(timezone.utc)
                         parent_session_id = self._resolve_parent_runtime_session_id(
                             session_source_type=session_source_type,
