@@ -1278,6 +1278,12 @@ describe('AIModelDetailView attention dismissals', () => {
   let dismissalWrites: { url: string; method: string; body: any }[];
   let summaryRequests: string[];
   let lastFailureAt: string;
+  let extraAliasFailures: {
+    alias: string;
+    last_failure_at: string;
+    failed_requests: number;
+    failed_requests_since: number | null;
+  }[];
 
   const json = (data: unknown) =>
     new Response(JSON.stringify(data), {
@@ -1291,6 +1297,7 @@ describe('AIModelDetailView attention dismissals', () => {
     dismissalWrites = [];
     summaryRequests = [];
     lastFailureAt = '2026-09-14T09:00:00Z';
+    extraAliasFailures = [];
 
     fetchStub = sinon
       .stub(window, 'fetch')
@@ -1333,6 +1340,15 @@ describe('AIModelDetailView attention dismissals', () => {
             last_failure_at: lastFailureAt,
             last_failure_alias: 'example/reviewer',
             failed_requests_since: url.includes('failed_since') ? 2 : null,
+            alias_failures: [
+              {
+                alias: 'example/reviewer',
+                last_failure_at: lastFailureAt,
+                failed_requests: 9,
+                failed_requests_since: url.includes('failed_since') ? 2 : null,
+              },
+              ...extraAliasFailures,
+            ],
             token_usage: {
               prompt_tokens: 100,
               completion_tokens: 100,
@@ -1465,6 +1481,48 @@ describe('AIModelDetailView attention dismissals', () => {
     expect(
       element.shadowRoot!.querySelector('[data-testid="dismiss-model"]')
     ).to.equal(null);
+  });
+
+  it('keeps a two-alias page flagged until every alias item is dismissed', async () => {
+    extraAliasFailures = [
+      {
+        alias: 'example/reviewer-old',
+        last_failure_at: '2026-09-13T08:00:00Z',
+        failed_requests: 4,
+        failed_requests_since: null,
+      },
+    ];
+    dismissalsResponse = [
+      {
+        id: 'dismissal-1',
+        item_id: 'model:example/reviewer',
+        fingerprint: `last:${lastFailureAt}`,
+        reason: 'fixed',
+        snooze_until: null,
+        dismissed_by_user_id: 'user-1',
+        dismissed_by_username: 'Jane Doe',
+        created_at: '2026-09-14T09:30:00Z',
+      },
+    ];
+
+    let element = await mount();
+    expect(attentionBadge(element).textContent!.trim()).to.equal('Attention');
+
+    dismissalsResponse = [
+      ...dismissalsResponse,
+      {
+        id: 'dismissal-2',
+        item_id: 'model:example/reviewer-old',
+        fingerprint: 'last:2026-09-13T08:00:00Z',
+        reason: 'fixed',
+        snooze_until: null,
+        dismissed_by_user_id: 'user-1',
+        dismissed_by_username: 'Jane Doe',
+        created_at: '2026-09-14T09:35:00Z',
+      },
+    ];
+    element = await mount();
+    expect(attentionBadge(element).textContent!.trim()).to.equal('Healthy');
   });
 
   it('counts only the failures newer than an overtaken marker', async () => {

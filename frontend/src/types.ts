@@ -1376,6 +1376,11 @@ export interface AIModelGatewayUsageSummaryResponse {
   last_failure_alias?: string | null;
   /** Failures newer than the requested `failed_since`, null when unasked. */
   failed_requests_since?: number | null;
+  /**
+   * Per-alias failure groups, one inbox item each. The page is Attention
+   * if any of these is still unacknowledged.
+   */
+  alias_failures?: AIModelAliasFailure[];
   token_usage: GatewayTokenUsage;
   estimated_cost: number;
   requests_by_day: GatewayUsageByDay[];

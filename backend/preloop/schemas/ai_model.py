@@ -564,6 +564,13 @@ class AIModelGatewayUsageSummaryResponse(BaseModel):
             "the caller asked for no such moment."
         ),
     )
+    alias_failures: List[AIModelAliasFailure] = Field(
+        default_factory=list,
+        description=(
+            "Per-alias failure groups for this model, one item per inbox "
+            "key. The page is Attention if any group is unacknowledged."
+        ),
+    )
     token_usage: GatewayTokenUsage
     estimated_cost: float = 0.0
     requests_by_day: List[GatewayUsageByDay] = Field(default_factory=list)

@@ -1301,6 +1301,8 @@ def test_ai_model_summary_reports_failure_marker_fields(client, db_session, test
     assert body["failed_requests_since"] == 1
     assert body["last_failure_alias"] == "openai/gpt-5"
     assert body["last_failure_at"] is not None
+    assert [group["alias"] for group in body["alias_failures"]] == ["openai/gpt-5"]
+    assert body["alias_failures"][0]["failed_requests"] == 3
 
 
 def test_ai_model_summary_leaves_failures_since_null_when_unasked(
@@ -1325,3 +1327,4 @@ def test_ai_model_summary_leaves_failures_since_null_when_unasked(
     assert body["failed_requests_since"] is None
     assert body["last_failure_at"] is None
     assert body["last_failure_alias"] is None
+    assert body["alias_failures"] == []

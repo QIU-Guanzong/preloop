@@ -12028,6 +12028,13 @@ components:
           title: Failed Requests Since
           description: Failures newer than the failed_since query parameter. Null
             when the caller asked for no such moment.
+        alias_failures:
+          items:
+            $ref: '#/components/schemas/AIModelAliasFailure'
+          type: array
+          title: Alias Failures
+          description: Per-alias failure groups for this model, one item per inbox
+            key. The page is Attention if any group is unacknowledged.
         token_usage:
           $ref: '#/components/schemas/GatewayTokenUsage'
         estimated_cost:

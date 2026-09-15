@@ -15,7 +15,10 @@ from preloop.models.crud import (
 from preloop.models.models.account import Account
 from preloop.models.models.ai_model import AIModel
 from preloop.models.models.flow import Flow
-from preloop.schemas.ai_model import AIModelGatewayUsageSummaryResponse
+from preloop.schemas.ai_model import (
+    AIModelAliasFailure,
+    AIModelGatewayUsageSummaryResponse,
+)
 from preloop.schemas.gateway_usage import (
     AccountGatewayUsageSearchResponse,
     AccountGatewayUsageSummaryResponse,
@@ -95,6 +98,60 @@ def _latest_failure(
             last_failure_at = moment
             last_failure_alias = row.get("model_alias") or row.get("provider_name")
     return last_failure_at, last_failure_alias, failures_since
+
+
+def _alias_failures(
+    usage_groups: List[Dict[str, Any]],
+    *,
+    asked_since: bool,
+) -> List[AIModelAliasFailure]:
+    """Build the per-alias list the inbox keys, from the same groups.
+
+    Args:
+        usage_groups: Grouped rows for a single model.
+        asked_since: Whether the caller asked for failed_requests_since.
+
+    Returns:
+        One ``AIModelAliasFailure`` per inbox key, newest failure first.
+    """
+    groups: Dict[str, Dict[str, Any]] = {}
+    for row in usage_groups:
+        last_failure_at = row.get("last_failure_at")
+        failed_requests = row.get("failed_request_count") or 0
+        if last_failure_at is None or not failed_requests:
+            continue
+        alias = row.get("model_alias") or row.get("provider_name") or "Unknown model"
+        existing = groups.get(alias)
+        if existing is None:
+            groups[alias] = {
+                "alias": alias,
+                "last_failure_at": last_failure_at,
+                "failed_requests": failed_requests,
+                "failed_request_count_since": row.get("failed_request_count_since")
+                or 0,
+            }
+            continue
+        existing["failed_requests"] += failed_requests
+        existing["failed_request_count_since"] += (
+            row.get("failed_request_count_since") or 0
+        )
+        if last_failure_at > existing["last_failure_at"]:
+            existing["last_failure_at"] = last_failure_at
+    return [
+        AIModelAliasFailure(
+            alias=group["alias"],
+            last_failure_at=group["last_failure_at"],
+            failed_requests=group["failed_requests"],
+            failed_requests_since=(
+                group["failed_request_count_since"] if asked_since else None
+            ),
+        )
+        for group in sorted(
+            groups.values(),
+            key=lambda item: item["last_failure_at"],
+            reverse=True,
+        )
+    ]
 
 
 class ModelGatewayUsageService:
@@ -365,6 +422,9 @@ class ModelGatewayUsageService:
             last_failure_alias=last_failure_alias,
             failed_requests_since=(
                 failures_since if failed_since is not None else None
+            ),
+            alias_failures=_alias_failures(
+                failure_groups, asked_since=failed_since is not None
             ),
             token_usage=GatewayTokenUsage.from_row(totals),
             estimated_cost=totals["estimated_cost"],
