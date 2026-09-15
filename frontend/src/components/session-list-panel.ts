@@ -5,6 +5,11 @@ import '@shoelace-style/shoelace/dist/components/badge/badge.js';
 import '@shoelace-style/shoelace/dist/components/icon/icon.js';
 import type { ObservedSession } from '../utils/session-observer';
 import { formatCost, formatNumber } from '../utils/session-observer';
+import {
+  noteAuthorIcon,
+  noteAuthorKind,
+  noteAuthorLabel,
+} from '../utils/note-author';
 import consoleStyles from '../styles/console-styles.css?inline';
 import './token-figures.ts';
 
@@ -107,8 +112,60 @@ export class SessionListPanel extends LitElement {
         font-size: var(--sl-font-size-x-small);
         font-weight: 600;
       }
+
+      .note-row {
+        align-items: center;
+        display: flex;
+        gap: var(--sl-spacing-x-small);
+        margin-top: var(--sl-spacing-2x-small);
+      }
+
+      .note-author {
+        color: var(--sl-color-neutral-600);
+        font-size: var(--sl-font-size-x-small);
+        overflow-wrap: anywhere;
+      }
+
+      /* An agent author is a different fact, so it is a different tint, not a
+         differently worded neutral chip. */
+      .note-author.agent {
+        color: var(--sl-color-primary-700);
+      }
     `,
   ];
+
+  /**
+   * "This session was steered, and here is who last steered it."
+   *
+   * Notes ride the list row, so this costs no request. A session nobody
+   * noted renders nothing at all: an indicator that is always there stops
+   * being an indicator.
+   */
+  private renderNoteIndicator(session: ObservedSession) {
+    const count = session.noteCount;
+    if (!count) return '';
+    const kind = noteAuthorKind(session.latestNoteAuthorAuthMethod);
+    const author = noteAuthorLabel(
+      session.latestNoteAuthorDisplay,
+      session.latestNoteAuthorAuthMethod
+    );
+    return html`
+      <div
+        class="note-row"
+        data-testid="session-notes-${session.id}"
+        data-note-author-kind=${kind}
+        title="Most recent note from ${author}"
+      >
+        <sl-badge class="chip" variant="neutral" pill>
+          <sl-icon
+            name=${noteAuthorIcon(session.latestNoteAuthorAuthMethod)}
+          ></sl-icon>
+          ${count} note${count === 1 ? '' : 's'}
+        </sl-badge>
+        <span class="note-author ${kind}">Last from ${author}</span>
+      </div>
+    `;
+  }
 
   private getWasteVariant(score: number) {
     if (score >= 40) return 'danger';
@@ -221,6 +278,7 @@ export class SessionListPanel extends LitElement {
                 </div>
               </div>
               ${this.renderWasteBadge(session)}
+              ${this.renderNoteIndicator(session)}
             </button>
           `
         )}

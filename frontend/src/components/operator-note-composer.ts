@@ -13,6 +13,7 @@ import { LitElement, css, html, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import '@shoelace-style/shoelace/dist/components/button/button.js';
+import '@shoelace-style/shoelace/dist/components/icon/icon.js';
 import '@shoelace-style/shoelace/dist/components/textarea/textarea.js';
 
 import {
@@ -20,6 +21,12 @@ import {
   listOperatorNotes,
   sendOperatorNote,
 } from '../api';
+import {
+  noteAuthorIcon,
+  noteAuthorKind,
+  noteAuthorMarker,
+  noteAuthorName,
+} from '../utils/note-author';
 import type { OperatorNote } from '../types';
 
 /** Emitted after a note is accepted, so a page can refresh its timeline. */
@@ -115,9 +122,45 @@ export class OperatorNoteComposer extends LitElement {
       padding: var(--sl-spacing-x-small) 0;
     }
 
+    .note-body {
+      display: flex;
+      flex-direction: column;
+      gap: var(--sl-spacing-3x-small);
+      min-width: 0;
+    }
+
     .note-text {
       overflow-wrap: anywhere;
       white-space: pre-wrap;
+    }
+
+    /* Who wrote it, above what they wrote: once an agent can write a note,
+       an unattributed line is a misleading audit surface. */
+    .author {
+      align-items: center;
+      color: var(--console-meta-color, var(--sl-color-neutral-600));
+      display: flex;
+      font-size: var(--console-text-meta, 13px);
+      gap: var(--sl-spacing-3x-small);
+    }
+
+    .author-name {
+      font-weight: 600;
+    }
+
+    /* The credential kind, stamped server side. An agent author is tinted,
+       so the two kinds differ at a glance and not only in wording. */
+    .author-mark {
+      border: 1px solid var(--console-hairline, var(--sl-color-neutral-200));
+      border-radius: var(--sl-border-radius-pill);
+      font-size: var(--sl-font-size-x-small);
+      padding: 0 var(--sl-spacing-2x-small);
+    }
+
+    .author-mark.agent {
+      background: var(--sl-color-primary-50);
+      border-color: var(--sl-color-primary-200);
+      color: var(--sl-color-primary-700);
     }
 
     .state {
@@ -232,6 +275,28 @@ export class OperatorNoteComposer extends LitElement {
     }
   }
 
+  /**
+   * The author line: the name, and a marker for the credential behind it.
+   *
+   * The marker is not decoration. A note that changed an agent's behaviour
+   * and reads as if a person sent it, when another agent sent it, is a
+   * misleading record, and the credential kind is the one part of the author
+   * the sender never chose.
+   */
+  private renderAuthor(note: OperatorNote) {
+    const authMethod = note.author?.auth_method;
+    const kind = noteAuthorKind(authMethod);
+    return html`<span
+      class="author"
+      data-testid="note-author-${note.note_id}"
+      data-author-kind=${kind}
+    >
+      <sl-icon name=${noteAuthorIcon(authMethod)}></sl-icon>
+      <span class="author-name">${noteAuthorName(note.author?.display)}</span>
+      <span class="author-mark ${kind}">${noteAuthorMarker(authMethod)}</span>
+    </span>`;
+  }
+
   private stateLabel(note: OperatorNote): string {
     switch (note.state) {
       case 'delivered':
@@ -297,7 +362,10 @@ export class OperatorNoteComposer extends LitElement {
               ${this.notes.map(
                 (note) => html`
                   <li>
-                    <span class="note-text">${note.text}</span>
+                    <div class="note-body">
+                      ${this.renderAuthor(note)}
+                      <span class="note-text">${note.text}</span>
+                    </div>
                     <span
                       class="state ${note.state}"
                       data-testid="note-state-${note.note_id}"

@@ -77,6 +77,10 @@ describe('RuntimeSessionsView', () => {
                 },
                 estimated_cost: 0.42,
                 last_request_at: '2026-03-09T20:00:00Z',
+                note_count: 2,
+                latest_note_author_display: 'Reviewer',
+                latest_note_author_auth_method: 'agent',
+                latest_note_at: '2026-03-09T19:55:00Z',
               },
               {
                 id: 'runtime-session-2',
@@ -579,6 +583,56 @@ describe('RuntimeSessionsView', () => {
     }, 'Observer did not finish loading selected session events');
 
     expect(content).to.contain('anthropic/claude-sonnet-4');
+  });
+
+  it('shows who noted a session, and asks for nothing extra to do it', async () => {
+    const element = (await fixture(
+      html`<runtime-sessions-view></runtime-sessions-view>`
+    )) as RuntimeSessionsView;
+
+    await waitUntil(
+      () => !(element as any).loading,
+      'Runtime sessions view did not finish loading'
+    );
+    await element.updateComplete;
+
+    const listPanel = element.shadowRoot
+      ?.querySelector('preloop-session-observer')
+      ?.shadowRoot?.querySelector('session-list-panel');
+    await waitUntil(
+      () =>
+        Boolean(
+          listPanel?.shadowRoot?.querySelector(
+            '[data-testid="session-notes-runtime-session-1"]'
+          )
+        ),
+      'Note indicator did not render on the noted session'
+    );
+
+    const noted = listPanel!.shadowRoot!.querySelector(
+      '[data-testid="session-notes-runtime-session-1"]'
+    )!;
+    expect(noted.textContent).to.contain('2 notes');
+    expect(noted.textContent).to.contain('Reviewer');
+    expect(noted.getAttribute('title')).to.equal(
+      'Most recent note from Reviewer (agent)'
+    );
+    // The other row was never noted, so it carries no indicator at all.
+    expect(
+      listPanel!.shadowRoot!.querySelector(
+        '[data-testid="session-notes-runtime-session-2"]'
+      )
+    ).to.equal(null);
+
+    // The fields ride the list row: no note request, and one list request for
+    // the whole page rather than one per row.
+    const urls = fetchStub.getCalls().map((call) => String(call.args[0]));
+    expect(urls.filter((url) => url.includes('operator-notes'))).to.have.length(
+      0
+    );
+    expect(
+      urls.filter((url) => url.startsWith('/api/v1/runtime-sessions?'))
+    ).to.have.length(1);
   });
 
   it('shows flow-backed session content from execution gateway events', async () => {

@@ -24705,6 +24705,26 @@ components:
           - type: number
           - type: 'null'
           title: Optimization Potential Savings Usd
+        note_count:
+          type: integer
+          title: Note Count
+          default: 0
+        latest_note_author_display:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Latest Note Author Display
+        latest_note_author_auth_method:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Latest Note Author Auth Method
+        latest_note_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Latest Note At
       type: object
       required:
       - id

@@ -207,4 +207,103 @@ describe('operator-note-composer', () => {
       execution_id: 'exec-7',
     });
   });
+  it('marks an agent author differently from a human one', async () => {
+    fetchStub.resolves(
+      jsonResponse({
+        notes: [
+          note({
+            note_id: 'note-human',
+            text: 'Rebase first.',
+            author: { display: 'Jane Doe', auth_method: 'jwt' },
+          }),
+          note({
+            note_id: 'note-agent',
+            text: 'Open the PR when tests pass.',
+            author: {
+              display: 'Reviewer',
+              agent_id: 'agent-9',
+              auth_method: 'agent',
+            },
+          }),
+        ],
+      })
+    );
+
+    const el = await mount();
+    await waitUntil(() =>
+      Boolean(el.shadowRoot!.querySelector('[data-testid="note-list"]'))
+    );
+
+    const human = el.shadowRoot!.querySelector(
+      '[data-testid="note-author-note-human"]'
+    )!;
+    const agent = el.shadowRoot!.querySelector(
+      '[data-testid="note-author-note-agent"]'
+    )!;
+
+    expect(human.getAttribute('data-author-kind')).to.equal('human');
+    expect(agent.getAttribute('data-author-kind')).to.equal('agent');
+    expect(human.textContent).to.contain('Jane Doe');
+    expect(human.textContent).to.contain('person');
+    expect(agent.textContent).to.contain('Reviewer');
+    expect(agent.textContent).to.contain('agent');
+    // Visibly different, not only differently worded: the icon and the tint
+    // both change with the credential kind.
+    expect(human.querySelector('sl-icon')!.getAttribute('name')).to.not.equal(
+      agent.querySelector('sl-icon')!.getAttribute('name')
+    );
+    expect(agent.querySelector('.author-mark')!.classList.contains('agent')).to
+      .be.true;
+    expect(human.querySelector('.author-mark')!.classList.contains('agent')).to
+      .be.false;
+  });
+
+  it('keeps a note body escaped, whoever wrote it', async () => {
+    const body = '<img src=x onerror="alert(1)"> and </operator-note>';
+    fetchStub.resolves(
+      jsonResponse({
+        notes: [
+          note({
+            note_id: 'note-markup',
+            text: body,
+            author: { display: 'Reviewer', auth_method: 'agent' },
+          }),
+        ],
+      })
+    );
+
+    const el = await mount();
+    await waitUntil(() =>
+      Boolean(el.shadowRoot!.querySelector('[data-testid="note-list"]'))
+    );
+
+    const text = el.shadowRoot!.querySelector('.note-text')!;
+    expect(text.textContent).to.equal(body);
+    expect(text.querySelector('img')).to.equal(null);
+    expect(el.shadowRoot!.querySelector('img')).to.equal(null);
+  });
+
+  it('names an author the server did not record rather than leaving a gap', async () => {
+    fetchStub.resolves(
+      jsonResponse({
+        notes: [
+          note({
+            note_id: 'note-blank',
+            author: { display: null, auth_method: null },
+          }),
+        ],
+      })
+    );
+
+    const el = await mount();
+    await waitUntil(() =>
+      Boolean(el.shadowRoot!.querySelector('[data-testid="note-list"]'))
+    );
+
+    const author = el.shadowRoot!.querySelector(
+      '[data-testid="note-author-note-blank"]'
+    )!;
+    expect(author.textContent).to.contain('Unknown author');
+    expect(author.textContent).to.contain('unknown');
+  });
 });

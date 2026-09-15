@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from preloop.models.models.ai_model import AIModel
 from preloop.models.crud import (
+    crud_agent_control_command,
     crud_ai_model,
     crud_api_usage,
     crud_gateway_usage_search_document,
@@ -143,6 +144,7 @@ class RuntimeSessionExplorerService:
         self._attach_optimization_badges(
             account=account, items=items, history_window=history_window
         )
+        self._attach_note_badges(account=account, items=items)
         return AccountRuntimeSessionListResponse(
             period_start=start_date,
             period_end=end_date,
@@ -154,6 +156,50 @@ class RuntimeSessionExplorerService:
             offset=offset,
             items=items,
         )
+
+    def _attach_note_badges(
+        self,
+        *,
+        account: Account,
+        items: list[RuntimeSessionSummary],
+    ) -> None:
+        """Attach the note count and newest author to each row, in place.
+
+        Attribution stops being cosmetic once an agent can write a note, so
+        the list says which sessions were steered and by whom. One batched
+        query covers the whole page: the alternative, a request per row, would
+        turn a fifty row page into fifty requests for a field most rows do not
+        have.
+
+        Best effort, like the optimization badges beside it: a session list
+        that cannot read notes is still a session list.
+
+        Args:
+            account: Owning account.
+            items: Session summaries for the current page.
+        """
+        if not items:
+            return
+        try:
+            summaries = crud_agent_control_command.note_summaries_for_sessions(
+                self.db,
+                account_id=account.id,
+                runtime_session_ids=[item.id for item in items],
+            )
+        except SQLAlchemyError:
+            logger.debug(
+                "Note badge lookup failed; returning the list without them",
+                exc_info=True,
+            )
+            return
+        for item in items:
+            summary = summaries.get(item.id)
+            if summary is None:
+                continue
+            item.note_count = summary.note_count
+            item.latest_note_author_display = summary.latest_author_display
+            item.latest_note_author_auth_method = summary.latest_author_auth_method
+            item.latest_note_at = summary.latest_note_at
 
     def _attach_optimization_badges(
         self,
