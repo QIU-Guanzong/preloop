@@ -16,6 +16,7 @@ from preloop.utils.workspace_seed import (
     SEED_ENV_PREFIX,
     parse_workspace_files,
     seed_env_var,
+    workspace_containment_shell_body,
     workspace_seed_env,
     workspace_seed_env_from_payload,
     workspace_seed_paths,
@@ -235,6 +236,7 @@ class TestBuildWorkspaceSeedShell:
         assert "cd -P" in shell
         assert "set -e" in shell
         assert '[ -L "$t" ]' in shell
+        assert workspace_containment_shell_body("workspace_files") in shell
 
     def test_paths_are_shell_quoted(self):
         files = parse_workspace_files(

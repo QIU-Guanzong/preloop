@@ -16733,6 +16733,15 @@ components:
           title: Timezone
           description: IANA timezone name the schedule is evaluated in
           default: UTC
+        payload:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Payload
+          description: Static trigger payload merged into every scheduled run, for
+            options a schedule has no other way to state (e.g. previous_result_execution_id).
+            Bounded and inline only.
         type:
           type: string
           const: cron
@@ -16770,6 +16779,15 @@ components:
           title: Timezone
           description: IANA timezone name the schedule is evaluated in
           default: UTC
+        payload:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Payload
+          description: Static trigger payload merged into every scheduled run, for
+            options a schedule has no other way to state (e.g. previous_result_execution_id).
+            Bounded and inline only.
         type:
           type: string
           const: daily
@@ -19402,6 +19420,15 @@ components:
           title: Timezone
           description: IANA timezone name the schedule is evaluated in
           default: UTC
+        payload:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Payload
+          description: Static trigger payload merged into every scheduled run, for
+            options a schedule has no other way to state (e.g. previous_result_execution_id).
+            Bounded and inline only.
         type:
           type: string
           const: interval
@@ -27578,6 +27605,15 @@ components:
           title: Timezone
           description: IANA timezone name the schedule is evaluated in
           default: UTC
+        payload:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Payload
+          description: Static trigger payload merged into every scheduled run, for
+            options a schedule has no other way to state (e.g. previous_result_execution_id).
+            Bounded and inline only.
         type:
           type: string
           const: weekly
