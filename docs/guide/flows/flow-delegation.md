@@ -32,6 +32,7 @@ delegate at all.
 | `payload` | Trigger payload for the child, readable as `{{trigger_event.payload.<key>}}` |
 | `label` | Short label recorded on the child so siblings are distinguishable |
 | `timeout_seconds` | Window for the child, clamped to the caller's own remaining time |
+| `max_cost_usd` | Cost ceiling for the child and anything it delegates, clamped by the allowlist entry |
 
 Model and harness overrides inside `payload` are stripped: a child runs on
 its own flow's routing, never on routing chosen by the calling agent.
@@ -58,6 +59,7 @@ agent reads a reason instead of parsing prose.
 | `depth_exceeded` | The child would sit deeper than the configured maximum depth |
 | `cycle_detected` | The target is already running above this execution |
 | `fanout_exceeded` | This execution has reached its cap on direct children |
+| `budget_exceeded` | The delegation tree cannot afford the child's cost ceiling |
 
 Each check fails closed and each refusal is audited with the correlation id
 of the call that was refused, so a refused delegation is visible next to the
@@ -74,12 +76,75 @@ call while the `tools` scope is halted and every new execution while the
 that the allowlist would otherwise have permitted. A delegated start is
 refused by the halt exactly as a manual start is.
 
+## What a tree may cost
+
+Delegation makes one tool call able to start twenty five runs, so money is
+a rule like any other and it is the last one checked.
+
+Every child is admitted under a **cost ceiling** in USD. The agent may ask
+for one with `max_cost_usd`; the allowlist entry's `max_usd_per_child`
+lowers an ask that is too large (it clamps, it does not refuse, because the
+operator has already answered that question); and
+`FLOW_DELEGATION_DEFAULT_CHILD_USD` applies when neither says anything.
+
+A ceiling covers a **subtree**, not one run. A child admitted at 5 USD may
+spend 5 itself, or spend 2 and let the children it starts spend 3. That is
+what stops a ceiling being avoided by delegating one level deeper.
+
+A tree nobody delegated is covered by `FLOW_DELEGATION_MAX_TREE_USD`, which
+counts the starting run's own spend as well: the ceiling is what the tree
+costs, not what its children cost.
+
+What is counted against an allowance:
+
+| Row | Counts as |
+| --- | --- |
+| The execution the allowance belongs to | Its `estimated_cost` so far |
+| A child that has finished | Its `estimated_cost`: what it did cost |
+| A child still running | Its ceiling, or its subtree's spend if that is already larger: what it may still cost |
+
+A running child counts at its ceiling on purpose. Counting it at its
+current spend would admit a second fan out on the strength of work that has
+not been paid for yet.
+
+A child that does not fit is refused **before it starts**, with
+`budget_exceeded` and a message naming what is left, so an agent can split
+its remaining work instead of guessing. Children already running are never
+killed to make room: a run killed halfway has been paid for and has
+produced nothing.
+
+This is an admission rule layered on the existing budget policies, not a
+replacement for them. `BudgetPolicy` (account, flow, api key, managed
+agent) is unchanged and still applies to every execution in a tree exactly
+as it applies to a run nobody delegated.
+
+## Rolling the cost up
+
+Every child of one execution is created with the same `batch_id`, derived
+from the parent execution, so one fan out is a batch in the same sense a
+matrix trigger is:
+
+```
+GET /flows/batches/{batch_id}/executions
+```
+
+returns the siblings and a rollup of their status, tokens, tool calls and
+estimated cost, with no query written for delegation. The `flow_id` on that
+response is the first row's: a fan out may call more than one flow, and each
+row names the flow it ran.
+
+The lineage columns answer the other question: the whole tree, at any depth,
+is the root row plus every row whose `root_execution_id` names it, which is
+the query the ceiling above is enforced with.
+
 ## Limits an operator can set
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `FLOW_DELEGATION_MAX_DEPTH` | `2` | Deepest a delegation tree may grow. A root run is depth 0, its child 1, its grandchild 2, so the default refuses a great grandchild. `0` disables delegation on the instance. |
 | `FLOW_DELEGATION_MAX_CHILDREN` | `25` | How many direct children one execution may start. Defaults to the matrix fan out ceiling, so one execution cannot start more work by delegating than by matrixing. |
+| `FLOW_DELEGATION_MAX_TREE_USD` | `50` | How much one delegation tree may commit in USD. `0` removes the instance ceiling and leaves only the per entry ones. |
+| `FLOW_DELEGATION_DEFAULT_CHILD_USD` | `2` | Ceiling for a child nobody named one for. `0` means an unnamed ceiling is unbounded, which inside a tree that has a ceiling is refused rather than admitted: pass `max_cost_usd`. |
 
 An allowlist entry's own `max_children` is applied on top of the instance
 ceiling: whichever refuses first, refuses.

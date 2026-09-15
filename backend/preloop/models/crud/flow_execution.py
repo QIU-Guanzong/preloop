@@ -685,6 +685,37 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             .all()
         )
 
+    def get_by_root(
+        self,
+        db: Session,
+        root_execution_id: uuid.UUID,
+        account_id: uuid.UUID,
+    ) -> List[FlowExecution]:
+        """Get every descendant of one root execution, at any depth.
+
+        The root row itself is NOT in the result: ``root_execution_id`` is
+        null on the root (it is the root), so the whole tree is this list
+        plus the row whose id is ``root_execution_id``. One indexed query
+        rather than a recursive walk over ``parent_execution_id``, which is
+        the reason the column exists (#626): a cost rollup over a tree is a
+        single filter.
+
+        ``account_id`` is required and joins through ``flow``: an execution
+        id alone must not cross accounts. Ordered by start time so a tree
+        renders in a stable order.
+        """
+        return (
+            db.query(FlowExecution)
+            .options(joinedload(FlowExecution.flow))
+            .join(Flow)
+            .filter(
+                FlowExecution.root_execution_id == root_execution_id,
+                Flow.account_id == account_id,
+            )
+            .order_by(FlowExecution.start_time.asc(), FlowExecution.id.asc())
+            .all()
+        )
+
     def get_running_by_flow(
         self,
         db: Session,

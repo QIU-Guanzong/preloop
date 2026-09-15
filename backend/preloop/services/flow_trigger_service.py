@@ -1864,6 +1864,7 @@ class FlowTriggerService:
         parent_execution_id: Optional[uuid.UUID] = None,
         root_execution_id: Optional[uuid.UUID] = None,
         delegation_depth: int = 0,
+        batch_id: Optional[uuid.UUID] = None,
     ) -> Dict[str, Any]:
         """
         Manually trigger a flow execution for testing purposes or as a retry.
@@ -1885,6 +1886,10 @@ class FlowTriggerService:
                 a root run. Controller owned, as above.
             delegation_depth: Distance from the root of the tree, 0 for a run
                 nobody delegated. Controller owned, as above.
+            batch_id: Group this execution belongs to, shared by the children
+                of one delegated fan out (#631) exactly as a matrix trigger
+                shares one across its cells, so the batch rollup endpoint
+                reports the fan out as a unit. Controller owned, as above.
 
         Returns:
             Dict with execution_id and status
@@ -1961,6 +1966,7 @@ class FlowTriggerService:
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id,
             delegation_depth=delegation_depth,
+            batch_id=batch_id,
         )
 
         execution = crud_flow_execution.create(self.db, obj_in=execution_data)
