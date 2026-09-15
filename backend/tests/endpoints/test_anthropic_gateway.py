@@ -521,9 +521,16 @@ def test_claude_code_agent_id_header_records_parent_over_http(
         .all()
     )
     assert len(sessions) == 2
-    parent, child = sessions
-    assert parent.session_source_id.endswith(f":{session_uuid}")
-    assert child.session_source_id.endswith(f":{session_uuid}:a1e37403a36fc420c")
+    parent = next(
+        session
+        for session in sessions
+        if session.session_source_id.endswith(f":{session_uuid}")
+    )
+    child = next(
+        session
+        for session in sessions
+        if session.session_source_id.endswith(f":{session_uuid}:a1e37403a36fc420c")
+    )
     assert parent.parent_session_id is None
     assert child.parent_session_id == parent.id
 
