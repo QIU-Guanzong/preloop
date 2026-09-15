@@ -18,7 +18,8 @@ the two are the same failure, and the message names the entry either way.
 """
 
 import logging
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
+from uuid import UUID
 
 from sqlalchemy import String, cast, func
 from sqlalchemy.orm import Session
@@ -36,9 +37,13 @@ class CallableFlowsError(ValueError):
 
 
 def _flow_by_name_case_insensitive(
-    db: Session, *, name: str, account_id: Any
+    db: Session, *, name: str, account_id: Optional[Union[str, UUID]]
 ) -> Optional[Flow]:
-    """Find an account flow whose name matches ignoring case."""
+    """Find an account flow whose name matches ignoring case.
+
+    Write-path only: func.lower and cast skip indexes. Call-time
+    enforcement must not reuse this helper.
+    """
     return (
         db.query(Flow)
         .filter(
@@ -51,7 +56,7 @@ def _flow_by_name_case_insensitive(
 
 
 def resolve_callable_flow(
-    db: Session, *, reference: str, account_id: Any
+    db: Session, *, reference: str, account_id: Optional[Union[str, UUID]]
 ) -> Optional[Flow]:
     """Resolve one allowlist reference inside ``account_id``.
 
@@ -95,8 +100,8 @@ def validate_callable_flows(
     db: Session,
     *,
     callable_flows: Any,
-    account_id: Any,
-    flow_id: Any = None,
+    account_id: Optional[Union[str, UUID]],
+    flow_id: Optional[Union[str, UUID]] = None,
     flow_name: Optional[str] = None,
 ) -> List[CallableFlowEntry]:
     """Validate an allowlist about to be written to a flow row.
