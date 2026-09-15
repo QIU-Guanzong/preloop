@@ -35,7 +35,12 @@ logger = logging.getLogger(__name__)
 
 # Known ``meta_data.purpose`` tags for internal model-gateway usage rows.
 GATEWAY_USAGE_PURPOSES = frozenset(
-    {"session_title", "session_optimization", "replay_validation"}
+    {
+        "session_title",
+        "session_optimization",
+        "replay_validation",
+        "session_embedding",
+    }
 )
 
 # Replay-validation re-executions are Preloop-driven measurement traffic: real

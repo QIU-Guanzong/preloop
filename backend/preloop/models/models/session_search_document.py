@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from sqlalchemy import (
     Computed,
@@ -30,6 +30,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from ..db.vector_types import VectorType
 from .base import Base
 
 if TYPE_CHECKING:
@@ -67,18 +68,32 @@ REDACTION_STATES = (
     REDACTION_STATE_METADATA_ONLY,
 )
 
-#: The chunk is waiting for an embedding that nothing computes yet.
+#: The chunk is waiting for an embedding worker to pick it up.
 EMBEDDING_STATE_PENDING = "pending"
 #: The chunk is deliberately excluded from embedding.
 EMBEDDING_STATE_SKIPPED = "skipped"
+#: A worker has claimed this chunk and is calling the provider for it.
+EMBEDDING_STATE_IN_PROGRESS = "in_progress"
 #: An embedding exists for this chunk elsewhere.
 EMBEDDING_STATE_EMBEDDED = "embedded"
+#: Embedding was attempted too many times and is not retried again.
+EMBEDDING_STATE_FAILED = "failed"
 
 EMBEDDING_STATES = (
     EMBEDDING_STATE_PENDING,
     EMBEDDING_STATE_SKIPPED,
+    EMBEDDING_STATE_IN_PROGRESS,
     EMBEDDING_STATE_EMBEDDED,
+    EMBEDDING_STATE_FAILED,
 )
+
+#: Width of the stored vector column. The number is a decision, not a fact
+#: (issue #624 open decision 1): 1536 is what the OpenAI compatible defaults
+#: return, and the storage difference against 512 is roughly threefold. A
+#: vector column and an HNSW index both need a fixed width, so a later change
+#: is a migration; ``embedding_model`` is what makes that change survivable,
+#: because every stored vector says which model and width produced it.
+EMBEDDING_DIMENSIONS = 1536
 
 
 class SessionSearchDocument(Base):
@@ -111,6 +126,16 @@ class SessionSearchDocument(Base):
             "ix_session_search_document_embedding_pending",
             "occurred_at",
             postgresql_where=text("embedding_state = 'pending'"),
+        ),
+        # Restricted to rows that actually carry a vector: an HNSW build over
+        # a mostly NULL column would index nothing and cost the whole table.
+        Index(
+            "ix_session_search_document_embedding",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_where=text("embedding IS NOT NULL"),
         ),
     )
 
@@ -145,6 +170,22 @@ class SessionSearchDocument(Base):
     )
     embedding_state: Mapped[str] = mapped_column(
         String(32), nullable=False, default=EMBEDDING_STATE_PENDING
+    )
+    embedding: Mapped[Optional[List[float]]] = mapped_column(
+        VectorType(EMBEDDING_DIMENSIONS), nullable=True
+    )
+    #: The model identity that produced ``embedding``, as
+    #: ``<provider>:<model>@<dimensions>``. Stored per chunk so a corpus
+    #: written across a provider or dimension change stays interpretable and
+    #: a re-embedding sweep can find exactly the rows it has to redo.
+    embedding_model: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    embedded_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    #: Provider attempts spent on this chunk. Bounds the retry of a chunk the
+    #: provider keeps refusing, so one poison row cannot hold a queue forever.
+    embedding_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
     )
     # Denormalised filter columns: snapshots of the source row taken at write
     # time, so a filtered search never has to join the source table.

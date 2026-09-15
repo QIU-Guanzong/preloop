@@ -204,4 +204,6 @@ def test_flow_runners_revision_chains_onto_approval_rule_context() -> None:
     }
     session_search = script.get_revision("20260915_session_search")
     assert session_search.down_revision == "20260915_queued_lineage_merge"
-    assert script.get_heads() == ["20260915_session_search"]
+    session_embedding = script.get_revision("20260915_session_embedding")
+    assert session_embedding.down_revision == "20260915_session_search"
+    assert script.get_heads() == ["20260915_session_embedding"]
