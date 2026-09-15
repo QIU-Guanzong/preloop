@@ -915,6 +915,30 @@ class TestRuntimeSessions:
         db_session.refresh(session)
         assert len(session.activities) == 4
 
+        # Each stored message is also one chunk in the session search corpus.
+        from preloop.models.crud import crud_session_search_document
+        from preloop.models.models.session_search_document import (
+            SOURCE_KIND_TRANSCRIPT_MESSAGE,
+        )
+
+        chunks = crud_session_search_document.search_account_chunks(
+            db_session,
+            account_id=test_user.account_id,
+            runtime_session_id=session.id,
+            source_kind=SOURCE_KIND_TRANSCRIPT_MESSAGE,
+            limit=50,
+        )
+        assert len(chunks) == 4
+        assert {chunk.role for chunk in chunks} == {"user", "assistant", "tool_use"}
+        assert any("List the Go files" in chunk.content for chunk in chunks)
+        matched = crud_session_search_document.search_account_chunks(
+            db_session,
+            account_id=test_user.account_id,
+            query="Go files",
+            source_kind=SOURCE_KIND_TRANSCRIPT_MESSAGE,
+        )
+        assert [chunk.id for chunk in matched] != []
+
     def test_transcript_over_cap_is_rejected(self, client, db_session, test_user):
         _make_cursor_agent(db_session, test_user.account_id)
         db_session.commit()

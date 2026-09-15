@@ -103,7 +103,41 @@ class CRUDRuntimeSessionActivity(CRUDBase[RuntimeSessionActivity]):
         if commit:
             db.commit()
             db.refresh(db_obj)
+
+        self._index_tool_call_chunks(db, activity=db_obj, commit=commit)
         return db_obj
+
+    @staticmethod
+    def _index_tool_call_chunks(
+        db: Session, *, activity: RuntimeSessionActivity, commit: bool
+    ) -> None:
+        """Write the activity into the session search corpus.
+
+        Imported here rather than at module import time because the indexing
+        service imports the CRUD package. The writer swallows its own
+        failures, so a broken corpus never loses a tool call.
+        """
+        from preloop.services.session_search_index import index_tool_call
+
+        if activity.id is None:
+            # The row id is a column default, so an uncommitted activity only
+            # has one after a flush; the chunk keys on it.
+            db.flush()
+
+        index_tool_call(
+            db,
+            account_id=activity.account_id,
+            runtime_session_id=activity.runtime_session_id,
+            source_id=activity.id,
+            server_name=activity.server_name,
+            tool_name=activity.tool_name,
+            status=activity.status,
+            summary=activity.summary,
+            occurred_at=activity.timestamp,
+            api_key_id=activity.api_key_id,
+            meta_data={"activity_type": activity.activity_type},
+            commit=commit,
+        )
 
     def log_model_gateway_call(
         self,

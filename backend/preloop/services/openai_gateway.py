@@ -186,6 +186,7 @@ from preloop.services.gateway_usage_index_queue import (
     get_gateway_usage_index_queue,
 )
 from preloop.services.gateway_usage_search import GatewayUsageSearchService
+from preloop.services.session_search_index import index_gateway_interaction
 from preloop.services.model_content_policy import (
     enforce_request_policy,
     enforce_response_policy,
@@ -9251,6 +9252,16 @@ class OpenAIGatewayService:
                 "Automatic gateway interaction indexing failed for usage %s",
                 usage_row.id,
             )
+        # Session search corpus. Separate from the gateway document above: it
+        # is chunked, session scoped and has its own kill switch. The writer
+        # swallows its own failures, so there is nothing to catch here.
+        index_gateway_interaction(
+            self.db,
+            usage=usage_row,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            commit=True,
+        )
         try:
             runtime_session = None
             if usage_row.runtime_session_id:

@@ -672,6 +672,39 @@ def test_every_gateway_entry_point_delivers_notes_for_its_protocol() -> None:
         assert f"operator_notes.{constant}" in body, method_name
 
 
+def test_delivered_note_lands_in_the_session_search_corpus(
+    db_session, account, agent, runtime_session
+) -> None:
+    """A note delivered into a session is chunked where it is claimed."""
+    from preloop.models.crud import crud_session_search_document
+    from preloop.models.models.session_search_document import (
+        SOURCE_KIND_OPERATOR_NOTE,
+    )
+
+    note = _send(db_session, account, agent, runtime_session)
+    payload = {"model": "gpt-5", "messages": [{"role": "user", "content": "hi"}]}
+
+    _deliver(
+        db_session,
+        account,
+        agent,
+        runtime_session,
+        protocol=operator_notes.PROTOCOL_OPENAI_CHAT,
+        payload=payload,
+        key="messages",
+    )
+
+    chunks = crud_session_search_document.list_for_source(
+        db_session,
+        source_kind=SOURCE_KIND_OPERATOR_NOTE,
+        source_id=str(note.id),
+    )
+    assert len(chunks) == 1
+    assert "Ship the fix behind a flag." in chunks[0].content
+    assert chunks[0].runtime_session_id == runtime_session.id
+    assert chunks[0].role == "operator"
+
+
 # --- author-aware block framing ---------------------------------------------
 
 _HUMAN_FRAMING_PIN = (

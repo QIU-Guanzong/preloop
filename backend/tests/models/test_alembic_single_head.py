@@ -212,4 +212,6 @@ def test_flow_runners_revision_chains_onto_approval_rule_context() -> None:
     assert child_park.down_revision == "20260915_agent_note_author"
     redispatch_backoff = script.get_revision("20260915_redispatch_backoff")
     assert redispatch_backoff.down_revision == "20260915_child_park"
-    assert script.get_heads() == ["20260915_redispatch_backoff"]
+    session_search = script.get_revision("20260915_session_search")
+    assert session_search.down_revision == "20260915_redispatch_backoff"
+    assert script.get_heads() == ["20260915_session_search"]
