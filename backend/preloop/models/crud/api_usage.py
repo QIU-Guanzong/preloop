@@ -2307,6 +2307,47 @@ class CRUDApiUsage(CRUDBase[ApiUsage]):
             .count()
         )
 
+    def list_execution_ids_for_session(
+        self,
+        db: Session,
+        *,
+        account_id: Union[uuid.UUID, str],
+        runtime_session_id: Union[uuid.UUID, str],
+        limit: int = 25,
+    ) -> List[uuid.UUID]:
+        """List the flow executions attributed to one runtime session.
+
+        A runtime session carries the governed calls a run makes, and that
+        usage is the only link between a session and the execution behind it.
+        Newest first and bounded: the callers of this (note scoping, #637)
+        want the runs a session is or was recently carrying, not its history.
+
+        Args:
+            db: Database session.
+            account_id: Account scope. A session id alone must not cross it.
+            runtime_session_id: The session to look under.
+            limit: Most recent distinct executions to return.
+
+        Returns:
+            Distinct ``flow_execution_id`` values, newest usage first.
+        """
+        rows = (
+            db.query(
+                self.model.flow_execution_id,
+                func.max(self.model.timestamp).label("last_seen"),
+            )
+            .filter(
+                self.model.account_id == account_id,
+                self.model.runtime_session_id == runtime_session_id,
+                self.model.flow_execution_id.isnot(None),
+            )
+            .group_by(self.model.flow_execution_id)
+            .order_by(func.max(self.model.timestamp).desc())
+            .limit(limit)
+            .all()
+        )
+        return [row.flow_execution_id for row in rows]
+
     def list_session_request_rows(
         self,
         db: Session,

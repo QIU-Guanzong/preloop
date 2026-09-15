@@ -16,13 +16,17 @@ share a delivery, so the prompt does not grant the sibling the operator's
 stop-authority. Per-note ``from`` and ``auth`` attributes still name the
 author either way.
 
-Three properties this module owes the caller, all of them enforced here and
+Four properties this module owes the caller, all of them enforced here and
 tested directly:
 
 * **Account boundary.** The target is resolved with the same account-scoped
   resolver the REST route uses, against the account on the *caller's* identity.
   An id from another account resolves to nothing and comes back as "not found",
   which is also the only thing the caller learns about it.
+* **Scope inside the account.** Resolving a target is not reaching it. An
+  agent may note the runs it started and nothing else, unless a tool access
+  rule grants more; :mod:`preloop.services.agent_note_scope` decides that and
+  this module refuses before the rate limit is even read.
 * **Structured refusals.** Naming zero targets or two is an answer, not an
   exception: the model gets a refusal that names the problem and can correct
   it on the next turn, and no row is written either way.
@@ -47,7 +51,7 @@ from preloop.models.crud import (
     crud_audit_log,
     crud_managed_agent,
 )
-from preloop.services import operator_notes
+from preloop.services import agent_note_scope, operator_notes
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +69,16 @@ ERROR_BODY_TOO_LONG = "body_too_long"
 ERROR_RATE_LIMITED = "rate_limited"
 
 
-def _refusal(code: str, message: str) -> Dict[str, Any]:
-    """One refusal, shaped so the model can act on it without parsing prose."""
-    return {"ok": False, "error": {"code": code, "message": message}}
+def _refusal(code: str, message: str, **extra: Any) -> Dict[str, Any]:
+    """One refusal, shaped so the model can act on it without parsing prose.
+
+    ``extra`` lands inside the error object: a scope refusal names the scope
+    the call would have needed, which is the one thing that tells the model
+    whether to rephrase the call or stop asking.
+    """
+    error: Dict[str, Any] = {"code": code, "message": message}
+    error.update({key: value for key, value in extra.items() if value is not None})
+    return {"ok": False, "error": error}
 
 
 def _agent_display(agent: Any) -> str:
@@ -94,6 +105,8 @@ def send_note_from_agent(
     agent_id: Optional[Any] = None,
     runtime_session_id: Optional[Any] = None,
     execution_id: Optional[Any] = None,
+    author_execution_id: Optional[Any] = None,
+    subject_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Write one note authored by a managed agent, or refuse and write none.
 
@@ -107,6 +120,14 @@ def send_note_from_agent(
         agent_id: Target managed agent, current or next session.
         runtime_session_id: Target runtime session, and only that session.
         execution_id: Target flow execution, resolved to its live session.
+        author_execution_id: The execution the call was made from, as the
+            platform recorded it on the caller's identity. It is what the
+            note scope is keyed on, and it is never read from an argument:
+            an agent that could name its own lineage could name any.
+        subject_context: The same caller attributes the preceding ``send_note``
+            policy evaluation used, so a grant consults API-key-scoped
+            rules under the same subject chain. Target identity is not
+            copied here.
 
     Returns:
         ``{"ok": True, "note": {...}}`` on success, or a structured refusal.
@@ -192,6 +213,34 @@ def send_note_from_agent(
         # refusal must not tell the caller that an id exists elsewhere.
         return _refusal(ERROR_TARGET_NOT_FOUND, exc.detail)
 
+    # Resolving a target is not reaching it. Which agents this one may steer
+    # is a policy question, and it is answered before anything is counted or
+    # written, so a refused note leaves no note row and spends no budget.
+    scope = agent_note_scope.evaluate_note_scope(
+        db,
+        account_id=account_id,
+        author_agent_id=author.id,
+        author_execution_id=author_execution_id,
+        target_agent_id=target_agent_id,
+        target_session_id=target_session_id,
+        named_execution_id=execution_id,
+        text=body,
+        subject_context=subject_context,
+    )
+    if not scope.allowed:
+        agent_note_scope.audit_refusal(
+            db,
+            account_id=account_id,
+            author_agent_id=author.id,
+            decision=scope,
+        )
+        return _refusal(
+            scope.reason_code or agent_note_scope.REASON_OUT_OF_SCOPE,
+            scope.message or "This target is out of the note scope.",
+            required_scope=scope.required_scope,
+            target_relation=scope.relation,
+        )
+
     now = datetime.now(timezone.utc)
     recent = crud_agent_control_command.count_recent_notes_by_author(
         db,
@@ -271,6 +320,15 @@ def send_note_from_agent(
             "expires_at": expires_at.isoformat(),
             "body_chars": len(body),
             "source": NOTE_SOURCE_AGENT_TOOL,
+            # Which scope carried this note, and the rule that widened it when
+            # one did: an account-scoped note is the interesting row in a
+            # review, and it should not take a second lookup to find it.
+            "note_scope": scope.scope,
+            "target_relation": scope.relation,
+            "scope_rule_description": scope.rule_description,
+            "author_execution_id": (
+                str(author_execution_id) if author_execution_id else None
+            ),
         },
         commit=False,
     )
