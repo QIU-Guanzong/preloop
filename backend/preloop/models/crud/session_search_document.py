@@ -988,6 +988,20 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
             )
         return grouped
 
+    def earliest_occurred_at(
+        self, db: Session, *, account_id: Any
+    ) -> Optional[datetime]:
+        """Return the oldest chunk timestamp an account holds, if any.
+
+        This is how far back the corpus currently reaches for content indexed
+        on write; the backfill watermark is what moves it further back.
+        """
+        return (
+            db.query(func.min(SessionSearchDocument.occurred_at))
+            .filter(SessionSearchDocument.account_id == account_id)
+            .scalar()
+        )
+
     def count_for_session(
         self, db: Session, *, account_id: Any, runtime_session_id: Any
     ) -> int:

@@ -16,6 +16,7 @@ from sqlalchemy import (
     literal,
     literal_column,
     or_,
+    tuple_,
 )
 from sqlalchemy.orm import Session, aliased
 
@@ -486,6 +487,39 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
         db.add(db_obj)
         db.flush()
         return db_obj
+
+    def list_for_search_backfill(
+        self,
+        db: Session,
+        *,
+        account_id: Any,
+        before_started_at: Optional[datetime] = None,
+        before_session_id: Optional[Any] = None,
+        not_before: Optional[datetime] = None,
+        limit: int = 50,
+    ) -> list[RuntimeSession]:
+        """Return one page of an account's sessions, newest first.
+
+        The page is keyed on ``(started_at, id)`` rather than an offset: the
+        search backfill walks an account across passes, and an offset would
+        skip or repeat sessions whenever a new one is written between two
+        passes. ``not_before`` stops the walk at the retention horizon.
+        """
+        stmt = db.query(RuntimeSession).filter(RuntimeSession.account_id == account_id)
+        if before_started_at is not None and before_session_id is not None:
+            stmt = stmt.filter(
+                tuple_(RuntimeSession.started_at, RuntimeSession.id)
+                < tuple_(before_started_at, before_session_id)
+            )
+        elif before_started_at is not None:
+            stmt = stmt.filter(RuntimeSession.started_at < before_started_at)
+        if not_before is not None:
+            stmt = stmt.filter(RuntimeSession.started_at >= not_before)
+        return (
+            stmt.order_by(RuntimeSession.started_at.desc(), RuntimeSession.id.desc())
+            .limit(max(1, int(limit)))
+            .all()
+        )
 
     def list_account_sessions(
         self,
