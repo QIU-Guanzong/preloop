@@ -425,6 +425,15 @@ export class PublicPricingView extends LitElement {
     return this._dedicatedOptions().length > 0;
   }
 
+  /**
+   * Resolve the visible pane in one place. Cloud is the default when it has
+   * cards; if every configured plan is dedicated (or the brand only ships
+   * deployment options) fall back so the page is not an empty container.
+   */
+  private _activeDeployment(): 'cloud' | 'dedicated' {
+    return this._cloudPlans().length ? this._deployment : 'dedicated';
+  }
+
   /** Hosted subscriptions: the cards and the comparison table. */
   private _cloudPlans(): Plan[] {
     return this._plans.filter((p) => p.deployment !== 'dedicated');
@@ -583,24 +592,32 @@ export class PublicPricingView extends LitElement {
   private _renderDedicated() {
     const options = this._dedicatedOptions();
     if (!options.length) return '';
-    return html`<div
-      class="deployment-options"
-      aria-label="Dedicated and self-hosted options"
+    // Landmark + visible heading match the SSR crawler block
+    // (`Dedicated and self-hosted options`) so hydration does not drop the
+    // heading, and aria-labelledby is valid on <section>.
+    return html`<section
+      class="main-section"
+      aria-labelledby="dedicated-heading"
     >
-      ${options.map((option) => {
-        const external = /^https?:\/\//.test(option.cta_url);
-        return html`<article>
-          <h3>${option.title}</h3>
-          <p>${option.description}</p>
-          <a
-            href=${option.cta_url}
-            target=${external ? '_blank' : '_self'}
-            rel=${external ? 'noopener noreferrer' : ''}
-            >${option.cta_text}</a
-          >
-        </article>`;
-      })}
-    </div>`;
+      <div class="section-container">
+        <h2 id="dedicated-heading">Dedicated and self-hosted options</h2>
+        <div class="deployment-options">
+          ${options.map((option) => {
+            const external = /^https?:\/\//.test(option.cta_url);
+            return html`<article>
+              <h3>${option.title}</h3>
+              <p>${option.description}</p>
+              <a
+                href=${option.cta_url}
+                target=${external ? '_blank' : '_self'}
+                rel=${external ? 'noopener noreferrer' : ''}
+                >${option.cta_text}</a
+              >
+            </article>`;
+          })}
+        </div>
+      </div>
+    </section>`;
   }
 
   private _renderFaqs() {
@@ -630,6 +647,7 @@ export class PublicPricingView extends LitElement {
   }
 
   render() {
+    const deployment = this._activeDeployment();
     return html`
       <app-header></app-header>
       <main>
@@ -652,7 +670,7 @@ export class PublicPricingView extends LitElement {
                 this._hasDedicated()
                   ? html`<deployment-toggle
                       .dark=${true}
-                      .deployment=${this._deployment}
+                      .deployment=${deployment}
                       @deployment-change=${(e: CustomEvent) =>
                         (this._deployment = e.detail.value)}
                     ></deployment-toggle>`
@@ -662,7 +680,7 @@ export class PublicPricingView extends LitElement {
                 // The billing period only exists for hosted subscriptions:
                 // nothing on the Dedicated tab is priced per month, so the
                 // toggle is removed there rather than left inert.
-                this._billingToggle && this._deployment === 'cloud'
+                this._billingToggle && deployment === 'cloud'
                   ? html`<billing-toggle
                       .dark=${true}
                       .interval=${this._interval}
@@ -672,16 +690,11 @@ export class PublicPricingView extends LitElement {
                   : ''
               }
             </div>
-            ${
-              this._deployment === 'dedicated'
-                ? this._renderDedicated()
-                : this._cloudPlans().length
-                  ? this._renderCards()
-                  : ''
-            }
+            ${deployment === 'cloud' ? this._renderCards() : ''}
           </div>
         </section>
-        ${this._deployment === 'cloud' ? this._renderComparison() : ''}
+        ${deployment === 'dedicated' ? this._renderDedicated() : ''}
+        ${deployment === 'cloud' ? this._renderComparison() : ''}
         ${this._renderFaqs()}
       </main>
       <app-footer></app-footer>

@@ -133,8 +133,10 @@ export interface PricingPlan {
    * Which pricing tab the plan belongs to. `cloud` plans are the hosted
    * subscriptions shown with the billing period toggle and the comparison
    * table; `dedicated` plans are quoted (self-managed or dedicated) and are
-   * shown alongside the deployment options instead. Defaults to `cloud` when
-   * a brand config predates the tabs.
+   * shown alongside the deployment options instead. An explicit value is
+   * honoured so EE brands.yaml can route a plan without a catalog change.
+   * When unset, a configured `catalog_path` tags the plan from the billing
+   * catalog; otherwise the tab defaults to `cloud`.
    */
   deployment?: 'cloud' | 'dedicated';
   features: string[];

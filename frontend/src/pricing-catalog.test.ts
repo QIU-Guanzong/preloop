@@ -116,6 +116,45 @@ describe('Public pricing from billing catalog', () => {
     }
   });
 
+  it('honours an explicit brand deployment so EE can route a plan', () => {
+    const branded: PricingConfig = {
+      ...config,
+      plans: config.plans.map((p) =>
+        p.id === 'team' ? { ...p, deployment: 'dedicated' as const } : p
+      ),
+    };
+    const result = applyPricingCatalog(branded, catalog());
+    expect(result.plans.map((p) => [p.id, p.deployment])).to.deep.equal([
+      ['free', 'cloud'],
+      ['pro', 'cloud'],
+      ['team', 'dedicated'],
+      ['enterprise', 'dedicated'],
+    ]);
+    for (const group of result.comparison!.groups) {
+      for (const row of group.rows) {
+        expect(Object.keys(row.values), row.label).to.deep.equal([
+          'free',
+          'pro',
+        ]);
+      }
+    }
+  });
+
+  it('tags a non-enterprise unpurchasable plan as dedicated via isQuoted', () => {
+    const source = catalog();
+    const team = source.plans.find((p) => p.id === 'team')!;
+    team.purchasable = false;
+    const result = applyPricingCatalog(config, source);
+    expect(result.plans.find((p) => p.id === 'team')!.deployment).to.equal(
+      'dedicated'
+    );
+    expect(result.plans.find((p) => p.id === 'team')!.cta_text).to.equal(
+      'Contact us'
+    );
+    const row = result.comparison!.groups[0].rows[0];
+    expect(Object.keys(row.values)).to.deep.equal(['free', 'pro']);
+  });
+
   it('drops the deployment group that only restated the tab name', () => {
     const result = applyPricingCatalog(config, catalog());
     const titles = result.comparison!.groups.map((g) => g.title);

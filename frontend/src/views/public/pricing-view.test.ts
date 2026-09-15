@@ -297,6 +297,13 @@ describe('PublicPricingView', () => {
       'team',
       'business',
     ]);
+    const toggle = el.shadowRoot?.querySelector('deployment-toggle') as
+      HTMLElement | undefined;
+    const cloudBtn = toggle?.shadowRoot?.querySelector(
+      '.tab-cloud'
+    ) as HTMLButtonElement | null;
+    expect(cloudBtn?.tagName).to.equal('BUTTON');
+    expect(cloudBtn?.getAttribute('aria-pressed')).to.equal('true');
 
     const table = el.shadowRoot?.querySelector('.comparison-table');
     expect(table, 'comparison table renders').to.exist;
@@ -354,6 +361,17 @@ describe('PublicPricingView', () => {
 
     await selectTab(el, 'dedicated');
 
+    const heading = el.shadowRoot?.querySelector('#dedicated-heading');
+    expect(heading, 'Dedicated heading matches SSR').to.exist;
+    expect(heading?.textContent?.trim()).to.equal(
+      'Dedicated and self-hosted options'
+    );
+    expect(heading?.tagName).to.equal('H2');
+    expect(
+      el.shadowRoot?.querySelector('[aria-labelledby="dedicated-heading"]')
+        ?.tagName
+    ).to.equal('SECTION');
+
     const options = Array.from(
       el.shadowRoot?.querySelectorAll('.deployment-options article') || []
     );
@@ -378,6 +396,19 @@ describe('PublicPricingView', () => {
       'https://github.com/preloop/preloop'
     );
     expect(community?.getAttribute('target')).to.equal('_blank');
+
+    const toggle = el.shadowRoot?.querySelector('deployment-toggle') as
+      HTMLElement | undefined;
+    const cloudBtn = toggle?.shadowRoot?.querySelector(
+      '.tab-cloud'
+    ) as HTMLButtonElement | null;
+    const dedicatedBtn = toggle?.shadowRoot?.querySelector(
+      '.tab-dedicated'
+    ) as HTMLButtonElement | null;
+    expect(cloudBtn?.tagName).to.equal('BUTTON');
+    expect(dedicatedBtn?.tagName).to.equal('BUTTON');
+    expect(cloudBtn?.getAttribute('aria-pressed')).to.equal('false');
+    expect(dedicatedBtn?.getAttribute('aria-pressed')).to.equal('true');
   });
 
   it('switches back to Cloud and restores the cards and the period toggle', async () => {
@@ -585,6 +616,70 @@ describe('PublicPricingView', () => {
 
     expect((el as any)._comparison).to.equal(null);
     expect(el.shadowRoot?.querySelectorAll('pricing-card').length).to.equal(1);
+  });
+
+  it('falls back to Dedicated when the cloud list is empty', async () => {
+    fetchStub = sinon
+      .stub(window, 'fetch')
+      .callsFake(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/landing-content.json')) {
+          return new Response(
+            JSON.stringify({
+              pricing: {
+                title: 'Pricing',
+                lead: 'Dedicated only.',
+                billing_toggle: true,
+                plans: [
+                  {
+                    id: 'enterprise',
+                    name: 'Enterprise',
+                    price_monthly: null,
+                    price_annually: null,
+                    price_label: 'from $30k/yr',
+                    deployment: 'dedicated',
+                    tagline: 'Quoted.',
+                    cta_text: 'Contact us',
+                    cta_url: '/request-demo',
+                    features: [],
+                  },
+                ],
+                deployment_options: [
+                  {
+                    title: 'Community: free and self-hosted',
+                    description: 'Run it yourself.',
+                    cta_text: 'Explore',
+                    cta_url: 'https://github.com/preloop/preloop',
+                  },
+                ],
+                faqs: [],
+              },
+            }),
+            { status: 200 }
+          );
+        }
+        return new Response(JSON.stringify({ features: {} }), { status: 200 });
+      });
+    const el = (await fixture(
+      html`<public-pricing-view></public-pricing-view>`
+    )) as PublicPricingView;
+    await tick();
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelectorAll('pricing-card').length).to.equal(0);
+    expect(el.shadowRoot?.querySelector('billing-toggle')).to.not.exist;
+    expect(
+      el.shadowRoot?.querySelector('#dedicated-heading')?.textContent?.trim()
+    ).to.equal('Dedicated and self-hosted options');
+    expect(
+      el.shadowRoot?.querySelectorAll('.deployment-options article').length
+    ).to.equal(2);
+    const toggle = el.shadowRoot?.querySelector('deployment-toggle') as
+      HTMLElement | undefined;
+    const dedicatedBtn = toggle?.shadowRoot?.querySelector(
+      '.tab-dedicated'
+    ) as HTMLButtonElement | null;
+    expect(dedicatedBtn?.getAttribute('aria-pressed')).to.equal('true');
   });
 
   it('falls back gracefully when content fails to load (no plans)', async () => {

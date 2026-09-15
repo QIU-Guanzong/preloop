@@ -49,19 +49,31 @@ export function applyPricingCatalog(
     return entry;
   });
   /**
-   * Which tab a plan belongs to. Quoted plans (Enterprise, anything the
-   * catalog marks unpurchasable) are self-managed or dedicated deals, so they
-   * sit on the Dedicated tab next to the deployment options. Everything else
-   * is a hosted subscription on the Cloud tab.
+   * Quoted plans (Enterprise, anything the catalog marks unpurchasable) are
+   * self-managed or dedicated deals. One predicate drives both the tab split
+   * and the contact-only CTA so those cannot drift.
    */
-  const deploymentOf = (p: BillingPlan): 'cloud' | 'dedicated' =>
-    p.id === 'enterprise' || p.purchasable === false ? 'dedicated' : 'cloud';
+  const isQuoted = (p: BillingPlan) =>
+    p.id === 'enterprise' || p.purchasable === false;
+  const catalogDeployment = (p: BillingPlan): 'cloud' | 'dedicated' =>
+    isQuoted(p) ? 'dedicated' : 'cloud';
+  /**
+   * Brand config wins so EE brands.yaml can route a plan between tabs
+   * without a catalog change. Catalog is the default when the brand leaves
+   * `deployment` unset.
+   */
+  const deploymentOf = (
+    configPlan: { deployment?: 'cloud' | 'dedicated' },
+    entry: BillingPlan
+  ): 'cloud' | 'dedicated' => configPlan.deployment ?? catalogDeployment(entry);
   /**
    * The comparison table describes cloud subscriptions only. A quoted plan has
    * no fixed quota to put in a cell, and the founder review rejected the fifth
-   * column it produced.
+   * column it produced. Honour the same brand override as the tab split.
    */
-  const cloudPlans = plans.filter((p) => deploymentOf(p) === 'cloud');
+  const cloudPlans = plans.filter(
+    (entry, index) => deploymentOf(configured[index], entry) === 'cloud'
+  );
   const row = (
     label: string,
     value: (p: BillingPlan) => string | boolean
@@ -131,8 +143,7 @@ export function applyPricingCatalog(
     ...pricing,
     plans: configured.map((p) => {
       const entry = plans.find((c) => c.id === p.id)!;
-      const isContact =
-        entry.id === 'enterprise' || entry.purchasable === false;
+      const isContact = isQuoted(entry);
       const annual = entry.price_annually;
       const monthly = entry.price_monthly;
       if (
@@ -143,7 +154,7 @@ export function applyPricingCatalog(
       const users = number(entry, 'max_users');
       return {
         ...p,
-        deployment: deploymentOf(entry),
+        deployment: deploymentOf(p, entry),
         name: entry.name,
         price_monthly: monthly ?? null,
         price_annually: annual ?? null,

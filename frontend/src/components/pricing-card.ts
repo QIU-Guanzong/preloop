@@ -285,12 +285,6 @@ export class PricingCard extends LitElement {
       color: rgba(255, 255, 255, 0.85);
     }
 
-    /* The tagline is the other line printed over the gradient: keep it at the
-       card's full foreground colour rather than a secondary token. */
-    .plan-card.popular .tagline {
-      color: #ffffff;
-    }
-
     .divider {
       border: none;
       height: 1px;

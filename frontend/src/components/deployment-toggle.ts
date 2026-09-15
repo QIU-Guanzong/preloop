@@ -38,24 +38,24 @@ export class DeploymentToggle extends LitElement {
       <div
         class="segmented-toggle deployment-toggle ${this.dark ? 'dark' : ''}"
       >
-        <sl-button-group label="Deployment">
-          <sl-button
+        <div class="tab-list" role="group" aria-label="Deployment">
+          <button
+            type="button"
             class="tab-cloud"
             aria-pressed=${this.deployment === 'cloud' ? 'true' : 'false'}
-            variant=${this.deployment === 'cloud' ? 'primary' : 'default'}
             @click=${() => this._select('cloud')}
           >
             Cloud
-          </sl-button>
-          <sl-button
+          </button>
+          <button
+            type="button"
             class="tab-dedicated"
             aria-pressed=${this.deployment === 'dedicated' ? 'true' : 'false'}
-            variant=${this.deployment === 'dedicated' ? 'primary' : 'default'}
             @click=${() => this._select('dedicated')}
           >
             Dedicated
-          </sl-button>
-        </sl-button-group>
+          </button>
+        </div>
       </div>
     `;
   }
