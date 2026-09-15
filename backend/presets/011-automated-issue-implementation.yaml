@@ -115,9 +115,15 @@ prompt_template: |
   1. Implement the change in the checkout.
   2. Add or update tests. Prefer a test that fails before your change and
      passes after it. Do not delete or skip existing tests to get green.
-  3. Run the project's checks: the relevant test suite, the linter, the
-     formatter, and the type checker when they exist. Prefer the targeted
-     suite over the whole run when the whole run is slow.
+  3. Run the project's checks: the tests for the modules you touched, the
+     linter, the formatter, and the type checker when they exist. Select
+     tests by the directory or the file that covers your change. Never run
+     a repository-wide suite: this container has a bounded memory limit and
+     a whole-suite run is the usual way to exceed it, and CI runs the full
+     suite on the pull request anyway. When a broader run is genuinely
+     needed, run one top-level test directory at a time with `-x` and `-q`,
+     and stop at the first failure instead of starting the next directory.
+     Never run the same suite again just to confirm a pass.
   4. If a check cannot run in this environment (a missing database, a
      missing network service, a missing secret), do not fake it. Record
      the exact command and the reason under "skipped" in your summary.
@@ -140,10 +146,11 @@ prompt_template: |
   2. Address every unresolved human review comment and requested change.
      If you disagree with a comment, say so in your summary and explain
      why instead of silently ignoring it.
-  3. Run the tests and linter affected by the repair. Repeat checks when code
-     or inputs change, failures persist or evidence is inconclusive; do not
-     rerun unrelated suites merely because another message arrived. Required
-     invariant checks and the trusted publication gate still apply.
+  3. Run the tests and linter affected by the repair, scoped to the touched
+     modules under the same memory limit as the first run. Repeat checks when
+     code or inputs change, failures persist or evidence is inconclusive; do
+     not rerun unrelated suites merely because another message arrived.
+     Required invariant checks and the trusted publication gate still apply.
   4. Commit locally. Do not create a new branch and do not open a second
      pull request.
   5. Before you finish, re-read the pull request comments once. If new
@@ -160,7 +167,9 @@ prompt_template: |
 
   - Run the relevant checks yourself while you work, and fix failures
     before you commit. The gate re-running a check you already ran is the
-    safety net, not the plan.
+    safety net, not the plan. Keep those runs scoped to what you touched;
+    the gate and CI own the wide runs, and your container does not have the
+    memory for them.
   - Never leave the tree dirty: commit everything the change needs and
     remove scratch files. Uncommitted tracked changes refuse publication.
   - If a required check cannot run because the environment lacks a

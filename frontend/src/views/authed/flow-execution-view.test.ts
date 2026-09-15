@@ -3,7 +3,10 @@ import sinon from 'sinon';
 
 import './flow-execution-view';
 import type { FlowExecutionView } from './flow-execution-view';
-import { liftLogfmtErrorField } from './flow-execution-view';
+import {
+  containerTerminationNotice,
+  liftLogfmtErrorField,
+} from './flow-execution-view';
 import { unifiedWebSocketManager } from '../../services/unified-websocket-manager';
 import {
   FINISHED_EXECUTION,
@@ -1276,6 +1279,92 @@ describe('FlowExecutionView', () => {
       expect(output.textContent).to.contain(
         'Traceback (most recent call last)'
       );
+    });
+
+    it('explains an OOMKilled container in the failure summary', async () => {
+      const element = await load('exec-1');
+      (element as any).execution = {
+        ...(element as any).execution,
+        status: 'FAILED',
+        result: {
+          container_termination: {
+            runtime: 'kubernetes',
+            reason: 'OOMKilled',
+            exit_code: 137,
+            oom_killed: true,
+          },
+        },
+      };
+      await element.updateComplete;
+
+      const reason = element.shadowRoot!.querySelector(
+        '[data-testid="termination-reason"]'
+      )!;
+      expect(reason.textContent!.replace(/\s+/g, ' ').trim()).to.equal(
+        'OOMKilled (exit code 137)'
+      );
+
+      const hint = element.shadowRoot!.querySelector(
+        '[data-testid="termination-hint"]'
+      )!;
+      expect(hint.textContent!.replace(/\s+/g, ' ').trim()).to.equal(
+        'The agent exceeded the container memory limit; running fewer tests ' +
+          'at once usually fixes it.'
+      );
+    });
+
+    it('states another termination reason without the memory hint', async () => {
+      const element = await load('exec-1');
+      (element as any).execution = {
+        ...(element as any).execution,
+        status: 'FAILED',
+        result: {
+          container_termination: {
+            runtime: 'docker',
+            reason: 'Error',
+            exit_code: 1,
+            oom_killed: false,
+          },
+        },
+      };
+      await element.updateComplete;
+
+      expect(
+        element
+          .shadowRoot!.querySelector('[data-testid="termination-reason"]')!
+          .textContent!.replace(/\s+/g, ' ')
+          .trim()
+      ).to.equal('Error (exit code 1)');
+      expect(
+        element.shadowRoot!.querySelector('[data-testid="termination-hint"]')
+      ).to.not.exist;
+    });
+
+    it('says nothing about the container when the runtime reported no exit', async () => {
+      const element = await load('exec-1');
+      (element as any).execution = {
+        ...(element as any).execution,
+        result: { status: 'success' },
+      };
+      await element.updateComplete;
+
+      expect(
+        element.shadowRoot!.querySelector(
+          '[data-testid="container-termination"]'
+        )
+      ).to.not.exist;
+    });
+
+    it('reads a memory kill reported only as a flag', () => {
+      const notice = containerTerminationNotice({
+        container_termination: { runtime: 'docker', oom_killed: true },
+      });
+      expect(notice?.reason).to.equal('OOMKilled');
+      expect(notice?.exitCode).to.equal(null);
+      expect(notice?.hint).to.contain('fewer tests');
+      // Nothing to say without a termination record.
+      expect(containerTerminationNotice({ status: 'success' })).to.equal(null);
+      expect(containerTerminationNotice(null)).to.equal(null);
     });
 
     it('searches the raw log lines in place', async () => {
