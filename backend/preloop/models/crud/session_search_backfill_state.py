@@ -74,8 +74,16 @@ class CRUDSessionSearchBackfillState(CRUDBase[SessionSearchBackfillState]):
         to ``max_seconds`` does not serialize billing, config, or the kill
         switch. ``SKIP LOCKED`` leaves the account to the replica that already
         holds it.
+
+        A never-walked account is inserted and committed before the lock is
+        taken. That makes the empty row visible so a concurrent replica skip
+        locks immediately, instead of waiting on the unique-index key-share
+        of an uncommitted INSERT for the rest of the holder's walk.
         """
+        created = self.get_for_account(db, account_id=account_id) is None
         self.get_or_create(db, account_id=account_id)
+        if created:
+            db.commit()
         return db.execute(
             select(SessionSearchBackfillState)
             .where(SessionSearchBackfillState.account_id == account_id)
