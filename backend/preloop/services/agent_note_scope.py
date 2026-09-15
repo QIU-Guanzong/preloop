@@ -333,8 +333,8 @@ def _grant_facts(
     ``execution_id`` are the target as the platform resolved it, under the
     names the tool uses: they can be present even when the caller never
     named them. A rule should key on the ``note_*`` facts, which name
-    author and target unambiguously. Top-level ``execution_id`` on this
-    evaluation is the author run, not the target.
+    author and target unambiguously. Top-level ``execution_id`` in the
+    rule context is the author run only on grant evaluation.
     """
     return {
         "text": text,
