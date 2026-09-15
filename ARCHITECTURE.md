@@ -90,10 +90,33 @@ graph LR
 | [Realtime](docs/architecture/realtime.md) | Unified WebSocket, MessageRouter topics, and account-scoped pub/sub. |
 | [Security](docs/architecture/security.md) | Auth and tenancy, redaction, secret custody, audit hash chain, record signing, security-screen scoring, and `preloop.security`. |
 | [Decisions](docs/architecture/decisions.md) | Why FastAPI, Python, and PostgreSQL, and how the stack is deployed (Compose, Helm, service roles). |
-| [Flows](docs/architecture/flows.md) | Event-driven agentic flows, remote runners, matrix/batch fan-out, label-based model routing, eval artifacts, and evidence packs. |
+| [Flows](docs/architecture/flows.md) | Event-driven agentic flows, remote runners, matrix/batch fan-out, label-based model routing, eval artifacts, evidence packs, prompt `truncate(N)`, and the chunked agent launch-payload environment. |
 
 Execution environment profiles and hosted checkpoint recovery are documented in
 [Environments and recovery](docs/guide/flows/environments-and-recovery.md).
+
+### Agent launch payload (custom images and runners)
+
+Linux caps one `execve` string (a single argv element or a single
+`NAME=value` environment entry) at `MAX_ARG_STRLEN`, 131072 bytes. The
+control plane therefore does not put an unbounded prompt or Kubernetes
+inner script in one string.
+
+The rendered prompt travels as `PRELOOP_AGENT_PROMPT_0..N` (plus
+`PRELOOP_AGENT_PROMPT_CHUNKS` and `PRELOOP_AGENT_PROMPT_BYTES`), is
+reassembled into `/tmp/preloop/prompt.txt`, and is advertised as
+`AGENT_PROMPT_FILE`. `AGENT_PROMPT` is set only when the prompt is 64 KiB
+or less. The Kubernetes inner script uses the same pattern:
+`PRELOOP_INNER_SCRIPT_0..N` into `/tmp/preloop/agent-script.sh`, with a
+legacy whole-value `PRELOOP_INNER_SCRIPT` still honoured so old and new
+images interoperate.
+
+Custom images and private runners should read `AGENT_PROMPT_FILE` (or
+reassemble the chunks) and must not require `AGENT_PROMPT` for large
+prompts. The full contract is in
+[Agent launch payload (container environment)](docs/architecture/flows.md#agent-launch-payload-container-environment).
+Private Docker launch shape is in the
+[runner image contract](docs/guide/runners/quickstart-linux.md#what-the-runner-executes).
 
 ### Issue lifecycle controller
 

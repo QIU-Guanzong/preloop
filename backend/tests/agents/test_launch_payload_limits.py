@@ -28,6 +28,7 @@ from preloop.agents.container import (
 )
 from preloop.agents.errors import AgentStartError
 from preloop.agents.gemini import GeminiAgent
+from preloop.agents.openhands import OpenHandsAgent
 from preloop.agents.opencode import OpenCodeAgent
 from preloop.services.flow_failure_category import FAILURE_CATEGORY_RUNNER_ERROR
 from preloop.utils.execve_limits import (
@@ -114,6 +115,7 @@ BUILDERS = {
     "codex": (CodexAgent, "_build_codex_script"),
     "gemini": (GeminiAgent, "_build_gemini_script"),
     "opencode": (OpenCodeAgent, "_build_opencode_script"),
+    "openhands": (OpenHandsAgent, "_build_openhands_script"),
 }
 
 
