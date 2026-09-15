@@ -130,6 +130,40 @@ class TestBaselineResolution:
         assert delivery is not None and delivery.delivered
         assert delivery.source_execution_id == str(newest.id)
 
+    def test_missing_account_scope_is_unresolvable_not_unscoped(
+        self, db_session: Session, flow: Flow
+    ):
+        """A NULL account_id must not fall through to an unfiltered get."""
+        previous = _execution(db_session, flow, result=BASELINE_RESULT)
+
+        delivery = resolve_baseline_delivery(
+            db_session,
+            trigger_event_data=_payload(previous_result_execution_id=str(previous.id)),
+            account_id=None,
+            flow_id=flow.id,
+        )
+
+        assert delivery is not None
+        assert delivery.mismatch_reason == MISMATCH_UNAVAILABLE
+        assert delivery.content_base64 == ""
+        assert delivery.source_execution_id is None
+
+    def test_missing_account_scope_refuses_the_sentinel(
+        self, db_session: Session, flow: Flow
+    ):
+        _execution(db_session, flow, result=BASELINE_RESULT)
+
+        delivery = resolve_baseline_delivery(
+            db_session,
+            trigger_event_data=_payload(previous_result_execution_id="last"),
+            account_id=None,
+            flow_id=flow.id,
+        )
+
+        assert delivery is not None
+        assert delivery.mismatch_reason == MISMATCH_UNAVAILABLE
+        assert delivery.content_base64 == ""
+
     def test_sentinel_never_picks_the_current_execution(
         self, db_session: Session, flow: Flow
     ):

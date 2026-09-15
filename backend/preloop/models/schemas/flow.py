@@ -227,7 +227,7 @@ class ScheduleBase(BaseModel):
             if reserved in v:
                 raise ValueError(f"schedule payload may not declare '{reserved}'")
         try:
-            encoded = len(json.dumps(v))
+            encoded = len(json.dumps(v, ensure_ascii=False).encode("utf-8"))
         except (TypeError, ValueError) as exc:
             raise ValueError(f"schedule payload must be JSON: {exc}") from exc
         if encoded > MAX_SCHEDULE_PAYLOAD_BYTES:

@@ -11,6 +11,9 @@ import json
 import os
 import subprocess
 
+import pytest
+from pydantic import ValidationError
+
 from preloop.utils.workspace_baseline import (
     BASELINE_CHUNK_ENCODED_BYTES,
     BASELINE_MISMATCH_PATH,
@@ -18,6 +21,7 @@ from preloop.utils.workspace_baseline import (
     MISMATCH_NO_RESULT,
     MISMATCH_UNAVAILABLE,
     PREVIOUS_RUN_SENTINEL,
+    BaselineDelivery,
     baseline_chunk_env_var,
     baseline_chunks,
     baseline_delivery,
@@ -28,6 +32,7 @@ from preloop.utils.workspace_baseline import (
     previous_result_execution_id,
     serialize_baseline,
 )
+from preloop.utils.workspace_seed import workspace_containment_shell_body
 
 EXECUTION_ID = "0f1d4c0e-7a1c-4a9a-9a8f-2f0b1d4c0e7a"
 
@@ -148,6 +153,45 @@ class TestSerialization:
         from datetime import datetime
 
         assert serialize_baseline({"at": datetime(2026, 9, 15)})
+
+
+class TestDeliveryInvariant:
+    """Never both, never neither: empty content with no reason is unusable."""
+
+    def test_neither_is_rejected_at_model_validate(self):
+        with pytest.raises(ValidationError, match="never neither"):
+            BaselineDelivery.model_validate(
+                {"content_base64": "", "mismatch_reason": None}
+            )
+
+    def test_default_construction_is_neither(self):
+        with pytest.raises(ValidationError, match="never neither"):
+            BaselineDelivery()
+
+    def test_both_is_rejected(self):
+        with pytest.raises(ValidationError, match="exactly one"):
+            BaselineDelivery(
+                content_base64="e30=", mismatch_reason=MISMATCH_UNAVAILABLE
+            )
+
+    def test_mismatch_with_empty_content_is_valid(self):
+        delivery = BaselineDelivery(mismatch_reason=MISMATCH_UNAVAILABLE)
+        assert not delivery.delivered
+        assert delivery.content_base64 == ""
+
+    def test_content_without_a_reason_is_valid(self):
+        delivery = BaselineDelivery(content_base64="e30=")
+        assert delivery.delivered
+
+
+class TestSharedContainmentGuard:
+    """The baseline dir helper is the seed module's guard, not a second copy."""
+
+    def test_baseline_helper_uses_the_shared_body(self):
+        from preloop.utils.workspace_baseline import _containment_helper
+
+        body = workspace_containment_shell_body("baseline")
+        assert body in _containment_helper()
 
 
 class TestBaselineMaterialization:

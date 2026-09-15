@@ -9,7 +9,9 @@ starts and is recorded on the context either way.
 Account scoping is the CRUD layer's, not ours: the lookup passes the
 flow's ``account_id``, so an execution in another account simply does not
 come back, and the caller cannot tell it apart from an id that never
-existed.
+existed. A missing ``account_id`` is unresolvable, not unscoped: the
+column is nullable, and an unfiltered get would deliver a foreign
+result.
 """
 
 from __future__ import annotations
@@ -111,7 +113,12 @@ def _resolve_execution(
     exclude_execution_id: Any,
 ) -> Optional[Any]:
     """The execution the payload asked for, or None if it is not readable."""
-    scope = str(account_id) if account_id else None
+    # A missing account is not "no filter": CRUD get / latest_with_result
+    # skip the Flow join when account_id is falsy, which would read
+    # across tenants. Degrade instead.
+    if not account_id:
+        return None
+    scope = str(account_id)
     if requested == PREVIOUS_RUN_SENTINEL:
         if not flow_id:
             return None

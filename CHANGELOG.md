@@ -45,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Executions that predate the columns, and every creation path that does
   not set lineage, read back as roots (no parent, no root id, depth 0).
 
+- Review runs can start from a previous execution. The trigger payload
+  accepts `previous_result_execution_id` (an execution id or the `last`
+  sentinel). The runner resolves that execution inside the same account
+  and writes its stored result to `previous/result.json`, or a mismatch
+  marker if it cannot. Schedules gain a bounded static `payload` (20 keys,
+  4096 UTF-8 bytes) so a weekly subscription can name the baseline without
+  a caller on the tick. Guide at `docs/guide/flows/repo-review-presets.md`.
+
 ### Removed
 
 - Flow failure comments. `notifications.on_failure.comment_on_trigger_issue`

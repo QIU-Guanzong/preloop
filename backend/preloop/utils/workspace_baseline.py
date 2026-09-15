@@ -67,12 +67,13 @@ import json
 import shlex
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from preloop.utils.workspace_seed import (
     MAX_SINGLE_SEED_ENCODED_BYTES,
-    WORKSPACE_ROOT,
     WORKSPACE_FILES_KEY,
+    WORKSPACE_ROOT,
+    workspace_containment_shell_body,
 )
 
 # Key on the trigger payload naming the execution whose stored result is the
@@ -128,6 +129,18 @@ class BaselineDelivery(BaseModel):
     # Id of the execution the baseline came from, for the run's audit trail.
     # Never set for a mismatch: a resolved id is the only one worth naming.
     source_execution_id: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _exactly_one_of_content_or_mismatch(self) -> "BaselineDelivery":
+        """Refuse the empty-shell case: never both, never neither."""
+        has_content = bool(self.content_base64)
+        has_reason = bool(self.mismatch_reason)
+        if has_content == has_reason:
+            raise ValueError(
+                "BaselineDelivery requires exactly one of content_base64 "
+                "or mismatch_reason; never both, never neither"
+            )
+        return self
 
     @property
     def delivered(self) -> bool:
@@ -262,26 +275,15 @@ def baseline_env(delivery: Optional[BaselineDelivery]) -> Dict[str, str]:
 def _containment_helper() -> str:
     """POSIX helper that validates one target path under ``$w``.
 
-    Same guard as the workspace seed prelude: resolve the deepest existing
-    ancestor physically and require it to stay inside the workspace root,
-    then refuse to write through a symlink at the target itself. A cloned
-    repository may contain ``previous -> /etc``, and lexical validation
-    cannot see that.
+    Same guard as the workspace seed prelude, from the shared helper in
+    ``workspace_seed``: resolve the deepest existing ancestor physically
+    and require it to stay inside the workspace root, then refuse to
+    write through a symlink at the target itself. A cloned repository
+    may contain ``previous -> /etc``, and lexical validation cannot see
+    that.
     """
     return (
-        "__pl_baseline_dir() { "
-        't="$w/$1"; d="${t%/*}"; e="$d"; '
-        'while [ ! -d "$e" ]; do e="${e%/*}"; '
-        '[ -n "$e" ] || { echo "baseline: $w does not exist" >&2; exit 1; }; '
-        "done; "
-        'r="$(cd -P "$e" && pwd)"; '
-        'case "$r" in "$w"|"$w"/*) ;; *) '
-        'echo "baseline: $1 resolves outside $w (symlink escape)" >&2; '
-        "exit 1;; esac; "
-        'if [ -L "$t" ]; then '
-        'echo "baseline: refusing to write through symlink: $1" >&2; '
-        "exit 1; fi; "
-        'mkdir -p "$d"; }'
+        "__pl_baseline_dir() { " + workspace_containment_shell_body("baseline") + "; }"
     )
 
 

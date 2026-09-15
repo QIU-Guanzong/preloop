@@ -12,6 +12,7 @@ from preloop.models.crud import crud_account, crud_flow, crud_flow_execution
 from preloop.models.models import Account, Flow
 from preloop.models.models.event import Event
 from preloop.models.schemas.flow import (
+    MAX_SCHEDULE_PAYLOAD_BYTES,
     CronSchedule,
     DailySchedule,
     FlowCreate,
@@ -156,6 +157,22 @@ class TestSchedulePayloadValidation:
     def test_oversized_payload_rejected(self):
         with pytest.raises(ValidationError, match="byte cap"):
             CronSchedule(expr="0 6 * * *", payload={"note": "x" * 5000})
+
+    def test_payload_cap_counts_utf8_bytes_not_characters(self):
+        """CJK that fits as characters can still exceed the documented byte cap."""
+        payload = {"note": "你" * 1400}
+        encoded = json.dumps(payload, ensure_ascii=False)
+        assert len(encoded) <= MAX_SCHEDULE_PAYLOAD_BYTES
+        assert len(encoded.encode("utf-8")) > MAX_SCHEDULE_PAYLOAD_BYTES
+        with pytest.raises(ValidationError, match="byte cap"):
+            CronSchedule(expr="0 6 * * *", payload=payload)
+
+    def test_utf8_payload_under_the_byte_cap_is_accepted(self):
+        payload = {"note": "你" * 1000}
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        assert len(encoded) <= MAX_SCHEDULE_PAYLOAD_BYTES
+        config = CronSchedule(expr="0 6 * * *", payload=payload)
+        assert config.payload["note"] == "你" * 1000
 
     def test_too_many_keys_rejected(self):
         with pytest.raises(ValidationError, match="max is"):
