@@ -174,8 +174,9 @@ class ExecutionLineage(BaseModel):
             "Null for rows written before the link was recorded."
         ),
     )
-    delegation_depth: Optional[int] = Field(
+    delegation_depth: int = Field(
         0,
+        ge=0,
         description=(
             "How many derivations separate this run from its root: 0 for the "
             "run that started the chain, 1 for a retry or resume of it, and "

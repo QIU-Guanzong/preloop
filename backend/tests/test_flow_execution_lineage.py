@@ -16,6 +16,8 @@ import uuid
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
+import pytest
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from preloop.models.crud.flow_execution import CRUDFlowExecution
@@ -59,6 +61,18 @@ def test_the_schema_defaults_a_row_without_lineage_to_null_null_zero():
     assert created.parent_execution_id is None
     assert created.root_execution_id is None
     assert created.delegation_depth == 0
+
+
+def test_create_rejects_explicit_none_delegation_depth():
+    """The column is NOT NULL; OpenAPI must not advertise integer | null."""
+    with pytest.raises(ValidationError):
+        FlowExecutionCreate(flow_id=uuid.uuid4(), delegation_depth=None)
+
+
+def test_create_rejects_a_negative_delegation_depth():
+    """Depth is a chain distance, so it cannot be below zero."""
+    with pytest.raises(ValidationError):
+        FlowExecutionCreate(flow_id=uuid.uuid4(), delegation_depth=-1)
 
 
 def test_a_row_without_lineage_projects_as_null_null_zero():

@@ -99,8 +99,10 @@ def test_downgrade_drops_exactly_what_upgrade_added():
     statements = _capture(migration.downgrade)
 
     assert statements == [
-        "ALTER TABLE flow_execution DROP CONSTRAINT "
-        "fk_flow_execution_parent_execution_id",
+        (
+            "ALTER TABLE flow_execution DROP CONSTRAINT "
+            + "fk_flow_execution_parent_execution_id"
+        ),
         "DROP INDEX ix_flow_execution_root_execution_id",
         "DROP INDEX ix_flow_execution_parent_execution_id",
         "ALTER TABLE flow_execution DROP COLUMN delegation_depth",

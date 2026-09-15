@@ -77,10 +77,14 @@ def _create_flow(db_session, test_user, name):
 def _insert_legacy_row(db_session, flow) -> uuid.UUID:
     """A flow_execution row as it looks with the lineage columns absent."""
     execution_id = uuid.uuid4()
+    # created_at and updated_at are NOT NULL with no server default at this
+    # revision; a raw INSERT must supply them. Lineage columns are absent
+    # after downgrade, so they are not listed.
     db_session.execute(
         text(
-            "INSERT INTO flow_execution (id, flow_id, status, start_time) "
-            "VALUES (:id, :flow_id, 'SUCCEEDED', now())"
+            "INSERT INTO flow_execution "
+            "(id, flow_id, status, start_time, created_at, updated_at) "
+            "VALUES (:id, :flow_id, 'SUCCEEDED', now(), now(), now())"
         ),
         {"id": execution_id, "flow_id": flow.id},
     )
