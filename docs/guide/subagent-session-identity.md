@@ -42,7 +42,7 @@ Observed on 2026-09-15.
 | Claude Code | 2.1.268 | Yes | Yes | `X-Claude-Code-Agent-Id` present only on subagent turns, alongside the parent's `X-Claude-Code-Session-Id` |
 | OpenCode | 1.18.31 | Yes | Yes | `X-Parent-Session-Id`, sent next to the child's own `X-Session-Id` |
 | Codex CLI | 0.154.0 | Partly, unconfirmed | Probably, unconfirmed | `agent_name` inside `X-Codex-Turn-Metadata` (a canonical task path); the in process spawn could not be exercised, see below |
-| Gemini CLI | 0.35.3 | No | No | Subagent turns are byte identical to parent turns; no conversation id on the wire at all |
+| Gemini CLI | 0.35.3 | No | No | Subagent turns are identical to parent turns apart from `content-length`; no conversation id on the wire at all |
 | Claude Desktop, Cursor, Windsurf, VS Code, OpenClaw, Hermes, Aider | not probed | No | No | No native session header is read for these today, so turns are already source keyed |
 
 ## Claude Code 2.1.268
@@ -170,8 +170,9 @@ Gemini CLI has in process subagents: the request advertises `generalist` and
 call makes the CLI run it (`[LocalAgentExecutor] Skipping subagent tool
 'codebase_investigator' for agent 'generalist' to prevent recursion`).
 
-The subagent's turns reach the endpoint with headers byte identical to the
-parent's. A full diff of parent turn against subagent turn differs only in
+The subagent's turns reach the endpoint with headers identical to the
+parent's apart from `content-length`. A full diff of parent turn against
+subagent turn differs only in
 `content-length`:
 
 ```
@@ -278,7 +279,7 @@ therefore treat lineage as **optional evidence, never a precondition**:
 
 Concretely: the scope check should be a function of (author identity, target,
 grant, optional lineage), and its behaviour with lineage set to `None` must be
-in the tests from the first commit, because for one supported harness that is
+in the tests from the first commit, because for Gemini CLI that is
 the only shape it will ever see.
 
 ## Recommendation on the capture child
