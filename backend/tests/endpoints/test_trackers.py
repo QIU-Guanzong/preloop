@@ -601,9 +601,9 @@ GITHUB_GITLAB_UNLOCKED = {
     "get_pull_request",
     "update_pull_request",
     "create_pull_request",
-    "get_issue_triage_context",
-    "apply_issue_triage",
 }
+# Default-disabled since #660: a tracker does not advertise them.
+TRIAGE_NOT_UNLOCKED = {"get_issue_triage_context", "apply_issue_triage"}
 
 
 @pytest.mark.asyncio
@@ -639,6 +639,7 @@ async def test_register_github_tracker_unlocks_pr_tools(
     assert response.status_code == 201
     unlocked = set(response.json()["unlocked_tool_names"])
     assert unlocked == ANY_TRACKER_UNLOCKED | GITHUB_GITLAB_UNLOCKED
+    assert TRIAGE_NOT_UNLOCKED.isdisjoint(unlocked)
 
 
 @pytest.mark.asyncio
