@@ -984,13 +984,16 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
         payload: dict[str, Any] | None = None,
         label: str | None = None,
         timeout_seconds: int | None = None,
+        wait: bool = False,
         ctx: Optional[Context] = None,
     ) -> str:
         """Run another flow of this account as a child of this execution.
 
-        Asynchronous by design: the call returns as soon as the child row
-        exists and never blocks this turn. Waiting for a child lands with
-        issue #633, reading one with #632.
+        Asynchronous by default: the call returns as soon as the child row
+        exists. With ``wait`` it also waits for every child this execution
+        has started (#633), in process for a short window and then parked,
+        which is why the wait runs after the delegation session is closed.
+        Reading a child lands with #632.
 
         Args:
             flow: Slug or name of the flow to run, inside this account.
@@ -998,16 +1001,24 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
             label: Short label recorded on the child.
             timeout_seconds: Window for the child, clamped to this
                 execution's own remaining time.
+            wait: Wait for this execution's children instead of returning
+                immediately.
             ctx: MCP context (injected by FastMCP).
 
         Returns:
             One A2A task record as JSON: the child execution, or a rejected
-            record naming the rule that refused the call.
+            record naming the rule that refused the call. With ``wait``, the
+            completion records of every child, or the park notice telling the
+            agent to stop working because the run is being suspended.
         """
         import json
 
         from preloop.models.db.session import get_db_session
         from preloop.services.dynamic_fastmcp_http import get_current_user_context
+        from preloop.services.flow_child_wait import (
+            ChildWaitUnavailableError,
+            wait_for_children,
+        )
         from preloop.services.flow_delegation_call import (
             DelegationUnavailableError,
             RUN_FLOW_TOOL_NAME,
@@ -1034,6 +1045,7 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
                 "payload": payload or {},
                 "label": label,
                 "timeout_seconds": timeout_seconds,
+                "wait": bool(wait),
             },
             ctx=ctx,
             workflow_id=_rule_workflow_id_var.get(None),
@@ -1067,7 +1079,24 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
             return f"Error: {exc}"
         finally:
             db.close()
-        return json.dumps(record)
+        if not wait:
+            return json.dumps(record)
+        # Wait even when this call was refused. The documented usage is
+        # "pass wait=true on the last call of a fan out"; if that last call
+        # is the one a rule declines, siblings may still be running and the
+        # parent still needs to park. wait_for_children handles every branch:
+        # refused-only (finished_payload of refusal rows), no children
+        # (no_children), pending siblings (in-process wait then park).
+        # The wait opens its own short lived sessions: this one is closed
+        # above because the wait can last minutes and ends by asking the
+        # orchestrator to park this execution.
+        try:
+            return await wait_for_children(
+                account_id=user_context.account_id,
+                parent_execution_id=user_context.flow_execution_id,
+            )
+        except ChildWaitUnavailableError as exc:
+            return f"Error: {exc}"
 
     run_flow_tool = FunctionTool.from_function(
         run_flow, description=RUN_FLOW_TOOL["description"]

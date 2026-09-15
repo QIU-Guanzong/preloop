@@ -199,6 +199,7 @@ class TestStatusMapping:
         "RUNNING": "TASK_STATE_WORKING",
         "RESUMING": "TASK_STATE_WORKING",
         "WAITING_FOR_HUMAN": "TASK_STATE_INPUT_REQUIRED",
+        "WAITING_FOR_CHILDREN": "TASK_STATE_WORKING",
         "SUCCEEDED": "TASK_STATE_COMPLETED",
         "FAILED": "TASK_STATE_FAILED",
         "TIMEOUT": "TASK_STATE_FAILED",
@@ -226,7 +227,7 @@ class TestStatusMapping:
 
     def test_unknown_status_raises_rather_than_guessing(self) -> None:
         with pytest.raises(DelegationShapeError):
-            task_state_for_status("WAITING_FOR_CHILDREN")
+            task_state_for_status("WAITING_FOR_A_STATUS_NOBODY_ADDED")
 
     def test_every_mapped_state_is_an_a2a_state(self) -> None:
         a2a_states = {

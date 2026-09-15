@@ -60,6 +60,11 @@ STATUS_TO_TASK_STATE: Final[Mapping[str, str]] = MappingProxyType(
         # Alive, holding no runtime, waiting on a human answer. Interrupted
         # in A2A terms, not terminal: the child can still finish.
         "WAITING_FOR_HUMAN": "TASK_STATE_INPUT_REQUIRED",
+        # Alive, holding no runtime, waiting for the flows it started. Nobody
+        # outside has to do anything for it to continue, so it is working:
+        # input_required would tell a caller to answer a question that does
+        # not exist.
+        "WAITING_FOR_CHILDREN": "TASK_STATE_WORKING",
         # Terminal, the work was done.
         "SUCCEEDED": "TASK_STATE_COMPLETED",
         # Terminal, the work was attempted and ended badly. A timeout and an
