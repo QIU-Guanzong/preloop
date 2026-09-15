@@ -6,6 +6,12 @@ import {
   invalidateApiCaches,
   AuthedElement,
   getFlowExecutions,
+  getFlows,
+  getAllFlows,
+  uniqueFlowsById,
+  FLOW_LIST_MAX_PAGES,
+  createFlow,
+  updateFlow,
   listProjectsForOrg,
   uploadAvatar,
   validateTrackerToken,
@@ -362,6 +368,140 @@ describe('api', () => {
     });
   });
 
+  describe('getFlows', () => {
+    const ok = (body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+    it('passes skip and limit for a paged list', async () => {
+      fetchStub.resolves(ok([]));
+
+      await getFlows({ skip: 100, limit: 100 });
+
+      const url = new URL(fetchStub.firstCall.args[0], window.location.origin);
+      expect(url.pathname).to.equal('/api/v1/flows');
+      expect(url.searchParams.get('skip')).to.equal('100');
+      expect(url.searchParams.get('limit')).to.equal('100');
+    });
+
+    it('throws when the list request fails', async () => {
+      fetchStub.resolves(new Response('error', { status: 500 }));
+      let message = '';
+      try {
+        await getFlows();
+      } catch (e: unknown) {
+        message = (e as Error).message;
+      }
+      expect(message).to.equal('Failed to fetch flows');
+    });
+  });
+
+  describe('getAllFlows', () => {
+    const ok = (body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+    it('pages until a short page', async () => {
+      fetchStub.onCall(0).resolves(
+        ok([
+          { id: '1', name: 'A' },
+          { id: '2', name: 'B' },
+        ])
+      );
+      fetchStub.onCall(1).resolves(ok([{ id: '3', name: 'C' }]));
+
+      const result = await getAllFlows({ pageSize: 2 });
+
+      expect(result.truncated).to.be.false;
+      expect(
+        result.flows.map((flow: { name: string }) => flow.name)
+      ).to.deep.equal(['A', 'B', 'C']);
+      expect(fetchStub.callCount).to.equal(2);
+      const first = new URL(
+        fetchStub.firstCall.args[0],
+        window.location.origin
+      );
+      const second = new URL(
+        fetchStub.secondCall.args[0],
+        window.location.origin
+      );
+      expect(first.searchParams.get('skip')).to.equal('0');
+      expect(first.searchParams.get('limit')).to.equal('2');
+      expect(second.searchParams.get('skip')).to.equal('2');
+      expect(second.searchParams.get('limit')).to.equal('2');
+    });
+
+    it('does not treat a failed page as an empty account', async () => {
+      fetchStub.resolves(new Response('error', { status: 500 }));
+      let message = '';
+      try {
+        await getAllFlows({ pageSize: 2 });
+      } catch (e: unknown) {
+        message = (e as Error).message;
+      }
+      expect(message).to.equal('Failed to fetch flows');
+    });
+
+    it('stops at the page cap and reports truncated', async () => {
+      let n = 0;
+      fetchStub.callsFake(async () => {
+        n += 1;
+        return ok([{ id: String(n), name: 'A' }]);
+      });
+
+      const result = await getAllFlows({ pageSize: 1 });
+
+      expect(result.truncated).to.be.true;
+      expect(result.flows).to.have.lengthOf(FLOW_LIST_MAX_PAGES);
+      expect(fetchStub.callCount).to.equal(FLOW_LIST_MAX_PAGES);
+    });
+
+    it('keeps one row when the same id appears on two pages', async () => {
+      fetchStub.onCall(0).resolves(
+        ok([
+          { id: '1', name: 'A' },
+          { id: '2', name: 'B' },
+        ])
+      );
+      fetchStub.onCall(1).resolves(
+        ok([
+          { id: '2', name: 'B-renamed' },
+          { id: '3', name: 'C' },
+        ])
+      );
+      fetchStub.onCall(2).resolves(ok([]));
+
+      const result = await getAllFlows({ pageSize: 2 });
+
+      expect(result.truncated).to.be.false;
+      expect(result.flows.map((flow: { id: string }) => flow.id)).to.deep.equal(
+        ['1', '2', '3']
+      );
+      expect(
+        result.flows.map((flow: { name: string }) => flow.name)
+      ).to.deep.equal(['A', 'B', 'C']);
+    });
+  });
+
+  describe('uniqueFlowsById', () => {
+    it('keeps the first name when the same id repeats', () => {
+      expect(
+        uniqueFlowsById([
+          { id: '1', name: 'A' },
+          { id: '1', name: 'A-renamed' },
+          { id: '2', name: 'B' },
+        ])
+      ).to.deep.equal([
+        { id: '1', name: 'A' },
+        { id: '2', name: 'B' },
+      ]);
+    });
+  });
+
   describe('AuthedElement.fetchData', () => {
     it('returns parsed JSON on success', async () => {
       const testData = { id: '1', name: 'Test' };
@@ -566,6 +706,64 @@ describe('api', () => {
       expect(
         await messageOf(listProjectsForOrg('github', 'unchanged', '9001'))
       ).to.equal('Failed to list projects for organization');
+    });
+  });
+  describe('flow write refusals', () => {
+    const refusal = (body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status: 422,
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+    const messageOf = async (call: Promise<unknown>) => {
+      try {
+        await call;
+      } catch (e: unknown) {
+        return (e as Error).message;
+      }
+      return '';
+    };
+
+    it('surfaces the detail string, which names the entry refused', async () => {
+      fetchStub.resolves(
+        refusal({
+          detail:
+            "callable_flows entry 'Child flow' does not name a flow in this account",
+        })
+      );
+
+      expect(await messageOf(updateFlow('flow-1', {}))).to.equal(
+        "callable_flows entry 'Child flow' does not name a flow in this account"
+      );
+    });
+
+    it('flattens a field error list instead of printing [object Object]', async () => {
+      fetchStub.resolves(
+        refusal({
+          detail: [
+            {
+              loc: ['body', 'callable_flows'],
+              msg: "Value error, callable_flows has a duplicate entry for 'Child flow'",
+              type: 'value_error',
+            },
+          ],
+        })
+      );
+
+      const message = await messageOf(createFlow({}));
+      expect(message).to.include("'Child flow'");
+      expect(message).to.include('callable_flows');
+      expect(message).to.not.include('object Object');
+    });
+
+    it('falls back when the body carries no reason', async () => {
+      fetchStub.resolves(refusal({}));
+      expect(await messageOf(createFlow({}))).to.equal('Failed to create flow');
+
+      fetchStub.resolves(refusal({ detail: [] }));
+      expect(await messageOf(updateFlow('flow-1', {}))).to.equal(
+        'Failed to update flow'
+      );
     });
   });
 });

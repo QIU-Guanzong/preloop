@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Callable-flows picker on the flow editor. When the delegation tool is
+  on, the form lists the account's other flows (paging past the 100-row
+  list default) and lets the operator choose which this flow may call,
+  with optional per-entry ceilings. Entries that do not name a flow in
+  the account get a row they can clear, but only once the full list has
+  loaded. The field is omitted from a save that did not edit it, and
+  from a save while the tool is off.
 - Operator notes reach hook path agents. The permission hook writes the
   rendered note block into the Claude Code `PreToolUse` and Codex CLI
   `PreToolUse` `hookSpecificOutput.additionalContext`, and into the Cursor CLI
