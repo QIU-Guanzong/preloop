@@ -29,7 +29,15 @@ RuntimeSession = models.RuntimeSession
 
 logger = logging.getLogger(__name__)
 
-_summary_columns_cache: dict[int, bool] = {}
+# Column presence for this bind. Summary fields and parent_session_id landed
+# in later revisions; list/detail queries must not SELECT them against a
+# not-yet-migrated schema.
+_runtime_session_columns_cache: dict[int, frozenset[str]] = {}
+_SUMMARY_COLUMN_NAMES = frozenset(
+    {"summary", "summary_updated_at", "title", "title_request_count"}
+)
+# Alias so tests that clear the summary probe still empty the shared cache.
+_summary_columns_cache = _runtime_session_columns_cache
 
 # Preloop-internal model-gateway calls (session summarization/optimization,
 # session-title generation, and replay-validation re-executions) are logged
@@ -617,6 +625,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
                 usage_join=usage_links.c.session_id == self.model.id,
                 usage_model=session_usage,
                 summary_columns_available=self._summary_columns_available(db),
+                parent_session_id_available=self._parent_session_id_available(db),
             )
             .order_by(
                 func.coalesce(
@@ -723,6 +732,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
         usage_join: Any,
         usage_model: Any,
         summary_columns_available: bool,
+        parent_session_id_available: bool,
     ) -> Any:
         """Build the runtime session aggregate query."""
         summary_column = (
@@ -745,6 +755,11 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
             if summary_columns_available
             else literal(None)
         )
+        parent_session_id_column = (
+            self.model.parent_session_id
+            if parent_session_id_available
+            else literal(None).label("parent_session_id")
+        )
         return (
             session_query.outerjoin(usage_model, usage_join)
             .outerjoin(Flow, usage_model.flow_id == Flow.id)
@@ -754,7 +769,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
                 self.model.session_source_type,
                 self.model.session_source_id,
                 self.model.session_reference,
-                self.model.parent_session_id,
+                parent_session_id_column,
                 self.model.runtime_principal_type,
                 self.model.runtime_principal_id,
                 self.model.runtime_principal_name,
@@ -801,7 +816,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
                 self.model.session_source_type,
                 self.model.session_source_id,
                 self.model.session_reference,
-                self.model.parent_session_id,
+                parent_session_id_column,
                 self.model.runtime_principal_type,
                 self.model.runtime_principal_id,
                 self.model.runtime_principal_name,
@@ -983,6 +998,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
             start_date=start_date, end_date=end_date, ai_model_id=ai_model_id
         )
         summary_columns_available = self._summary_columns_available(db)
+        parent_session_id_available = self._parent_session_id_available(db)
         summary_column = (
             literal_column("runtime_session.summary")
             if summary_columns_available
@@ -1003,6 +1019,11 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
             if summary_columns_available
             else literal(None)
         )
+        parent_session_id_column = (
+            self.model.parent_session_id
+            if parent_session_id_available
+            else literal(None).label("parent_session_id")
+        )
         row = (
             db.query(
                 self.model.account_id,
@@ -1010,7 +1031,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
                 self.model.session_source_type,
                 self.model.session_source_id,
                 self.model.session_reference,
-                self.model.parent_session_id,
+                parent_session_id_column,
                 self.model.runtime_principal_type,
                 self.model.runtime_principal_id,
                 self.model.runtime_principal_name,
@@ -1060,7 +1081,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
                 self.model.session_source_type,
                 self.model.session_source_id,
                 self.model.session_reference,
-                self.model.parent_session_id,
+                parent_session_id_column,
                 self.model.runtime_principal_type,
                 self.model.runtime_principal_id,
                 self.model.runtime_principal_name,
@@ -1093,31 +1114,43 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
         return summary
 
     @staticmethod
-    def _summary_columns_available(db: Session) -> bool:
-        """Return whether the runtime session summary migration has been applied."""
+    def _runtime_session_columns(db: Session) -> frozenset[str]:
+        """Return the runtime_session column names for this bind, cached."""
         bind = db.get_bind()
         if bind is None:
             bind = db.bind
         if bind is None:
-            return False
+            return frozenset()
         cache_key = id(bind)
-        if cache_key in _summary_columns_cache:
-            return _summary_columns_cache[cache_key]
+        cached = _runtime_session_columns_cache.get(cache_key)
+        if cached is not None:
+            return cached
         try:
-            columns = {
+            names = frozenset(
                 column["name"]
                 for column in inspect(bind).get_columns("runtime_session")
-            }
-            available = {
-                "summary",
-                "summary_updated_at",
-                "title",
-                "title_request_count",
-            }.issubset(columns)
+            )
         except Exception:
-            available = False
-        _summary_columns_cache[cache_key] = available
-        return available
+            names = frozenset()
+        _runtime_session_columns_cache[cache_key] = names
+        return names
+
+    @staticmethod
+    def _summary_columns_available(db: Session) -> bool:
+        """Return whether the runtime session summary migration has been applied."""
+        return _SUMMARY_COLUMN_NAMES.issubset(
+            CRUDRuntimeSession._runtime_session_columns(db)
+        )
+
+    @staticmethod
+    def _parent_session_id_available(db: Session) -> bool:
+        """Return whether the parent_session_id migration has been applied.
+
+        This column lands in a later revision than the summary set, so it has
+        its own probe. Selecting it against a not-yet-migrated schema 500s
+        every list and detail request.
+        """
+        return "parent_session_id" in CRUDRuntimeSession._runtime_session_columns(db)
 
     @staticmethod
     def _usage_join_conditions(
