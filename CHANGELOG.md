@@ -13,11 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   monitors per process (default 10). The monitor loop is wait-bound; other
   worker pools stay serial. Helm sets `flowExecution.maxInflight` and a
   dedicated `flowExecution.databasePool` on the flow-execution pool.
-- Issue-triage builtin tools `get_issue_triage_context` and
-  `apply_issue_triage`. They are GitHub and GitLab only, require
-  `edit_issues`, and follow the existing MCP approval path. Context reads
-  a fresh provider snapshot and the permitted complexity scheme; apply
-  writes the managed assessment and an exact complexity label. Docs at
+- Issue triage on the standard issue tools. `get_issue` takes an optional
+  `include` list (`label_catalog`, `revision`) that returns a fresh provider
+  snapshot, the permitted complexity scheme and an expected revision.
+  `update_issue` takes optional `expected_revision`, `assessment` and
+  `complexity_label` and then returns the triage receipt. Triage writes are
+  GitHub and GitLab only, require `edit_issues`, and follow the existing MCP
+  approval path. No separate triage tools are advertised. Docs at
   `docs/guide/flows/issue-triage.md`.
 - DORA agent-slice exports. `GET /api/v1/exports/asset-register` lists agents,
   tools, MCP servers, models, providers and runner hosts as one flat table
