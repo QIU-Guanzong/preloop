@@ -252,6 +252,7 @@ def _index_gateway_document(
         api_key_id=usage.api_key_id,
         flow_id=usage.flow_id,
         status=str(usage.status_code) if usage.status_code is not None else None,
+        existing=before,
     )
     return _count_new_rows(before, stored)
 
@@ -275,6 +276,7 @@ def _index_tool_call_activity(db: Session, *, activity: Any) -> int:
         occurred_at=activity.timestamp,
         api_key_id=activity.api_key_id,
         meta_data={"activity_type": activity.activity_type},
+        existing=before,
     )
     return _count_new_rows(before, stored)
 
@@ -361,26 +363,31 @@ def backfill_account(
     horizon: Optional[datetime] = None,
     deadline: Optional[float] = None,
     commit: bool = True,
-) -> AccountBackfillResult:
+) -> Optional[AccountBackfillResult]:
     """Walk one account's sessions newest first, within the budget.
 
     Resumes from the stored watermark and advances it only past sessions that
     were indexed in full, so a pass that stops halfway is continued by the
     next one rather than started again.
+
+    Returns ``None`` when another replica already holds this account's
+    backfill row. That is not a failure: the holder is walking it.
     """
     stamp = now or _now()
     result = AccountBackfillResult(account_id=str(account_id))
-    state = crud_session_search_backfill_state.get_for_account(
+    state = crud_session_search_backfill_state.lock_for_account(
         db, account_id=account_id
     )
-    if state is not None and state.completed_at is not None:
+    if state is None:
+        return None
+    if state.completed_at is not None:
         # Nothing to walk: a finished account costs one indexed read.
         result.completed = True
         result.watermark = _as_utc(state.cursor_started_at)
         return result
 
-    cursor_started_at = state.cursor_started_at if state else None
-    cursor_session_id = state.cursor_session_id if state else None
+    cursor_started_at = state.cursor_started_at
+    cursor_session_id = state.cursor_session_id
     remaining = max(0, int(row_budget))
     completed = False
 
@@ -510,6 +517,8 @@ def run_session_search_backfill(
                     account_id,
                     exc_info=True,
                 )
+            continue
+        if result is None:
             continue
         summary.record(result)
         remaining -= result.rows_written

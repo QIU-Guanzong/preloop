@@ -130,3 +130,38 @@ def test_accounts_never_walked_come_first(db_session, test_user):
     )
 
     assert pending.index(fresh.id) < pending.index(test_user.account_id)
+
+
+def test_an_empty_account_id_filter_matches_nothing(db_session, test_user):
+    """An empty list is 'these accounts, none of them', not 'every account'."""
+    pending = crud_state.pending_account_ids(db_session, account_ids=[])
+
+    assert pending == []
+    assert test_user.account_id in crud_state.pending_account_ids(db_session)
+
+
+def test_get_or_create_recovers_from_an_insert_race(db_session, test_user, monkeypatch):
+    """A unique-index loser re-reads the winner instead of raising."""
+    winner = crud_state.get_or_create(db_session, account_id=test_user.account_id)
+    db_session.flush()
+    calls = {"n": 0}
+    original = crud_state.get_for_account
+
+    def first_miss(db, *, account_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return original(db, account_id=account_id)
+
+    monkeypatch.setattr(crud_state, "get_for_account", first_miss)
+    recovered = crud_state.get_or_create(db_session, account_id=test_user.account_id)
+
+    assert recovered.id == winner.id
+
+
+def test_lock_for_account_returns_the_created_row(db_session, test_user):
+    """The walk lock is the backfill row, created if it did not exist."""
+    locked = crud_state.lock_for_account(db_session, account_id=test_user.account_id)
+
+    assert locked is not None
+    assert locked.account_id == test_user.account_id

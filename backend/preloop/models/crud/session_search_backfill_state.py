@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional, Sequence
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..models.account import Account
@@ -40,14 +41,47 @@ class CRUDSessionSearchBackfillState(CRUDBase[SessionSearchBackfillState]):
     def get_or_create(
         self, db: Session, *, account_id: Any
     ) -> SessionSearchBackfillState:
-        """Return the account's state row, creating an empty one if needed."""
+        """Return the account's state row, creating an empty one if needed.
+
+        Two replicas can both miss the row and insert. The unique
+        ``account_id`` index then raises; the loser rolls the savepoint back
+        and reads the committed row instead of stamping ``last_error``.
+        """
         state = self.get_for_account(db, account_id=account_id)
         if state is not None:
             return state
-        state = SessionSearchBackfillState(account_id=account_id)
-        db.add(state)
-        db.flush()
+        savepoint = db.begin_nested()
+        try:
+            state = SessionSearchBackfillState(account_id=account_id)
+            db.add(state)
+            db.flush()
+        except IntegrityError:
+            savepoint.rollback()
+            state = self.get_for_account(db, account_id=account_id)
+            if state is None:
+                raise
+            return state
+        if savepoint.is_active:
+            savepoint.commit()
         return state
+
+    def lock_for_account(
+        self, db: Session, *, account_id: Any
+    ) -> Optional[SessionSearchBackfillState]:
+        """Lock this account's backfill row, or None if another replica holds it.
+
+        The lock is on the backfill row, not the account row, so a walk of up
+        to ``max_seconds`` does not serialize billing, config, or the kill
+        switch. ``SKIP LOCKED`` leaves the account to the replica that already
+        holds it.
+        """
+        self.get_or_create(db, account_id=account_id)
+        return db.execute(
+            select(SessionSearchBackfillState)
+            .where(SessionSearchBackfillState.account_id == account_id)
+            .with_for_update(skip_locked=True)
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
 
     def record_pass(
         self,
@@ -123,6 +157,8 @@ class CRUDSessionSearchBackfillState(CRUDBase[SessionSearchBackfillState]):
         costs one row of an index scan per pass and never a session scan.
         Accounts that have never been walked come first, then the ones whose
         last pass is oldest, so no account can be starved by a busy one.
+        ``account_ids=None`` means every pending account; an empty sequence
+        means none of them.
         """
         stmt = (
             select(Account.id)
@@ -140,7 +176,9 @@ class CRUDSessionSearchBackfillState(CRUDBase[SessionSearchBackfillState]):
                 Account.id,
             )
         )
-        if account_ids:
+        if account_ids is not None:
+            if not account_ids:
+                return []
             stmt = stmt.where(Account.id.in_(list(account_ids)))
         if limit is not None:
             stmt = stmt.limit(int(limit))
