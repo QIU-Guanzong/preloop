@@ -59,6 +59,7 @@ from preloop.tools.builtin_defs import (
     REQUEST_APPROVAL_TOOL,
     RESOLVE_SBOM_UPSTREAMS_TOOL,
     RUN_FLOW_TOOL,
+    SEND_NOTE_TOOL,
 )
 from preloop.tools.native_defs import NATIVE_TOOL_NAMES, NATIVE_TOOLS
 
@@ -74,6 +75,7 @@ BUILTIN_TOOLS = [
     ASK_USER_TOOL,
     PERMISSION_PROMPT_TOOL,
     RESOLVE_SBOM_UPSTREAMS_TOOL,
+    SEND_NOTE_TOOL,
     RUN_FLOW_TOOL,
     GET_EXECUTION_TOOL,
     {

@@ -8,7 +8,7 @@ WAITING_FOR_CHILDREN (the status index) and checks the deadline in Python;
 there is no park_expires_at query, so this revision does not add one.
 
 Revision ID: 20260915_child_park
-Revises: 20260915_session_hold
+Revises: 20260915_agent_note_author
 """
 
 from typing import Sequence, Union
@@ -17,7 +17,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "20260915_child_park"
-down_revision: Union[str, None] = "20260915_session_hold"
+down_revision: Union[str, None] = "20260915_agent_note_author"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

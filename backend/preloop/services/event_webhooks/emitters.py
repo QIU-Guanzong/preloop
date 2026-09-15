@@ -498,6 +498,8 @@ def operator_note_data(
         "text": getattr(note, "body", None),
         "author": {
             "user_id": _str(getattr(note, "created_by_user_id", None)),
+            # Set instead of ``user_id`` when another agent wrote the note.
+            "agent_id": _str(getattr(note, "created_by_managed_agent_id", None)),
             "display": getattr(note, "author_display", None),
             "auth_method": getattr(note, "author_auth_method", None),
         },
