@@ -59,7 +59,7 @@ from preloop.models.crud import (
 from preloop.services.flow_delegation_call import (
     DELEGATION_DETAILS_KEY,
     DELEGATION_REFUSAL_LOG_TYPE,
-    console_url_for_execution,
+    console_url_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -281,7 +281,7 @@ def completion_record(
             metadata["preloop.ai/tokens"] = max(0, int(tokens))
         except (TypeError, ValueError):
             pass
-    console_url = console_url_for_execution(child.id)
+    console_url = console_url_for(child.id)
     if console_url:
         metadata["preloop.ai/consoleUrl"] = console_url
 

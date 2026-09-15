@@ -96,6 +96,7 @@ from preloop.utils.git_credentials import (
     strip_url_credentials,
     temporary_credential_file,
 )
+from preloop.utils.prompt_filters import parse_placeholders, truncate_value
 from preloop.utils.repo_urls import repo_url_log_location, tracker_host_kind
 from preloop.utils.workspace_seed import (
     attach_workspace_file_paths,
@@ -1233,6 +1234,13 @@ class FlowExecutionOrchestrator:
         - {{trigger_event.payload.issue.title}}
         - {{project.name}}
         - {{account.email}}
+
+        A placeholder may bound what it injects with the ``truncate`` filter,
+        ``{{trigger_event.payload.object_attributes.description|truncate(16384)}}``,
+        which caps the value at a byte count and marks it as cut. See
+        :mod:`preloop.utils.prompt_filters`: a webhook field is as large as
+        its sender made it, and an unbounded one is paid for in context
+        window, in launch-payload size and in the agent's attention.
         """
         logger.info("Resolving prompt template")
 
@@ -1250,10 +1258,19 @@ class FlowExecutionOrchestrator:
             execution_id=str(self.execution_log.id) if self.execution_log else "",
         )
 
-        # Extract all {{placeholder}} patterns
-        placeholders = re.findall(r"\{\{(\w+(?:\.\w+)*)\}\}", prompt_template)
+        # Extract all {{placeholder}} patterns, filters included. Dedup on
+        # the raw text: a string replace already rewrites every occurrence,
+        # and the same field with two different truncation caps is two
+        # different replacements.
+        seen_raw: set[str] = set()
+        placeholders = [
+            item
+            for item in parse_placeholders(prompt_template)
+            if not (item.raw in seen_raw or seen_raw.add(item.raw))
+        ]
 
-        for placeholder in placeholders:
+        for item in placeholders:
+            placeholder = item.name
             # Split prefix and path (e.g., "trigger_event.payload.title" -> "trigger_event" + "payload.title")
             parts = placeholder.split(".", 1)
             prefix = parts[0]
@@ -1270,16 +1287,16 @@ class FlowExecutionOrchestrator:
                     if value is not None:
                         # Replace the placeholder with the value
                         resolved_prompt = resolved_prompt.replace(
-                            f"{{{{{placeholder}}}}}", str(value)
+                            item.raw, truncate_value(str(value), item.limit)
                         )
-                        logger.debug(f"Resolved {{{{{placeholder}}}}}: {value}")
+                        logger.debug(f"Resolved {item.raw}: {value}")
                     else:
                         logger.warning(
-                            f"Placeholder {{{{{placeholder}}}}} resolved to None, leaving as-is"
+                            f"Placeholder {item.raw} resolved to None, leaving as-is"
                         )
                 except Exception as e:
                     logger.error(
-                        f"Error resolving placeholder {{{{{placeholder}}}}}: {e}",
+                        f"Error resolving placeholder {item.raw}: {e}",
                         exc_info=True,
                     )
             else:
@@ -1287,12 +1304,12 @@ class FlowExecutionOrchestrator:
                 value = self._simple_resolve(placeholder, self.trigger_event_data)
                 if value is not None:
                     resolved_prompt = resolved_prompt.replace(
-                        f"{{{{{placeholder}}}}}", str(value)
+                        item.raw, truncate_value(str(value), item.limit)
                     )
-                    logger.debug(f"Simple resolved {{{{{placeholder}}}}}: {value}")
+                    logger.debug(f"Simple resolved {item.raw}: {value}")
                 else:
                     logger.warning(
-                        f"No resolver found for prefix '{prefix}' and simple resolution failed for {{{{{placeholder}}}}}"
+                        f"No resolver found for prefix '{prefix}' and simple resolution failed for {item.raw}"
                     )
 
         feedback_prompt = (self.trigger_event_data or {}).get("_feedback_prompt")
@@ -2235,6 +2252,23 @@ class FlowExecutionOrchestrator:
             # Singular form used by container.py for git clone and credential lookup
             "trigger_project_id": self._resolve_trigger_project_id(),
         }
+
+        # Resolve a previous run's stored result into this run's workspace
+        # when the payload names one. Account-scoped, size-capped, and
+        # degrading: an id that does not resolve leaves a mismatch marker
+        # instead of failing the run. See preloop.utils.workspace_baseline.
+        from preloop.services.workspace_baseline import resolve_baseline_delivery
+
+        baseline = resolve_baseline_delivery(
+            self.db,
+            trigger_event_data=self.trigger_event_data,
+            account_id=self.flow.account_id,
+            flow_id=self.flow.id,
+            exclude_execution_id=self.execution_log.id,
+            seed_paths=[seed.path for seed in workspace_files],
+        )
+        if baseline is not None:
+            execution_context["baseline_delivery"] = baseline.model_dump()
 
         from preloop.services.flow_feedback import resolve_native_checkpoint
         from preloop.services.model_routing import validate_native_resume_identity

@@ -7,7 +7,7 @@ One small column carries that, plus the partial index the child wait deadline
 sweep reads.
 
 Revision ID: 20260915_child_park
-Revises: 20260915_flow_callable_flows
+Revises: 20260915_session_hold
 """
 
 from typing import Sequence, Union
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "20260915_child_park"
-down_revision: Union[str, None] = "20260915_flow_callable_flows"
+down_revision: Union[str, None] = "20260915_session_hold"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

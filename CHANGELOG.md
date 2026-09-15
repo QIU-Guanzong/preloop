@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Operator notes reach hook path agents. The permission hook writes the
+  rendered note block into the Claude Code `PreToolUse` and Codex CLI
+  `PreToolUse` `hookSpecificOutput.additionalContext`, and into the Cursor CLI
+  `preToolUse` `additional_context`. Codex `PermissionRequest` and the Cursor
+  `before*` hooks have no field that reaches the model, so a note claimed there
+  is held for its session and rides the next tool call's carrying hook, once. A
+  turn with no pending note produces the same response as before.
+- `preloop notes send` posts one operator note from the terminal to
+  `POST /api/v1/operator-notes`. Name exactly one of `--agent`,
+  `--session`, or `--execution`. The body is the argument, or stdin when
+  piped. `--expires-in` is a Go duration between 60s and 7d; omitted, the
+  server keeps the note deliverable for 24 hours. `--json` emits the note
+  id and target only.
+
+- `{{name|truncate(N)}}` prompt-template filter. `N` is a byte cap, the
+  cut is on a UTF-8 boundary, and a marker names the full size so the
+  agent can fetch the rest. Bare `|truncate` is 16 KiB. Preset 002
+  (pull-request reviewer) caps the description at 16 KiB.
+- Chunked agent launch-payload environment:
+  `PRELOOP_AGENT_PROMPT_0..N` / `_CHUNKS` / `_BYTES` reassembled at
+  `AGENT_PROMPT_FILE` (`/tmp/preloop/prompt.txt`), and
+  `PRELOOP_INNER_SCRIPT_0..N` for the Kubernetes inner script.
+  `AGENT_PROMPT` (and OpenHands `PROMPT`) is set only when the prompt
+  is 64 KiB or less. Custom images must not require `AGENT_PROMPT`
+  above 64 KiB. Docs in `ARCHITECTURE.md` and
+  `docs/architecture/flows.md`.
 - Flow-execution workers run up to `FLOW_EXECUTION_MAX_INFLIGHT` hosted
   monitors per process (default 10). The monitor loop is wait-bound; other
   worker pools stay serial. Helm sets `flowExecution.maxInflight` and a
@@ -57,6 +83,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by `FLOW_DELEGATION_MAX_DEPTH` (default 2) and
   `FLOW_DELEGATION_MAX_CHILDREN` (default 25, the matrix fan out ceiling).
   Docs at `docs/guide/flows/flow-delegation.md`.
+- Execution tree on the execution page. A delegating run lists what it
+  started: one row per child with the flow, the label the caller passed, the
+  state, the duration and the cost, expandable to grandchildren and linked to
+  each child's own page. A failed child shows its failure category and a
+  refused one is visibly distinct, carrying no cost. The panel totals the
+  subtree (launched, succeeded, failed, refused, cost, tokens) and shows the
+  run's own cost beside that total rather than added to it. A run that
+  delegated nothing says so in one line. Behind it,
+  `GET /api/v1/flows/executions/{id}/tree` returns the execution, every
+  descendant of it and a rollup over them in the same shape the batch listing
+  uses; asking a child returns that child's subtree.
+- `get_execution` builtin tool: a flow execution can read the state, cost,
+  tokens and result of an execution it started, or of itself. Default off,
+  like `run_flow`. Scope is enforced on the server and is exactly the caller
+  and its descendants; a sibling, an unrelated execution of the same
+  account, an execution of another account and an id that names nothing are
+  all refused with the same reason (`execution_not_found`) and the same
+  message, so a refusal cannot be used to learn what exists. The answer is
+  the same task record `run_flow` returns: a failed execution carries its
+  failure category on the status message, and the result comes back as an
+  artifact only when the execution is terminal and `include_result` is set.
+  A result larger than `FLOW_DELEGATION_RESULT_MAX_BYTES` (default 16384) is
+  truncated, flagged and pointed at `GET /flows/executions/{id}/result`. One
+  audit row per call, permitted or refused.
 - `run_flow(wait=true)` waits for every child the calling execution has
   started. It waits in process for `FLOW_DELEGATION_WAIT_SECONDS` (default
   90) so a fast child never costs a park cycle, then parks the run on the
@@ -82,6 +132,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   execution stays PENDING with `queued_reason=account_concurrency_cap`.
   One flow also keeps at most one active run per tracker object.
 
+- Review runs can start from a previous execution. The trigger payload
+  accepts `previous_result_execution_id` (an execution id or the `last`
+  sentinel). The runner resolves that execution inside the same account
+  and writes its stored result to `previous/result.json`, or a mismatch
+  marker if it cannot. Schedules gain a bounded static `payload` (20 keys,
+  4096 UTF-8 bytes) so a weekly subscription can name the baseline without
+  a caller on the tick. Guide at `docs/guide/flows/repo-review-presets.md`.
+
 ### Removed
 
 - Flow failure comments. `notifications.on_failure.comment_on_trigger_issue`
@@ -95,6 +153,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Agent launch no longer fails with `exec /bin/bash: argument list too
+  long` when a rendered prompt or Kubernetes inner script exceeds
+  Linux `MAX_ARG_STRLEN` (131072 bytes). The prompt and script travel
+  as base64 chunks. A pre-launch guard refuses a payload that reaches
+  or exceeds the per-string or total budget, with a named
+  `runner_error`. OpenHands (the default `agent_type`) uses the same
+  transport. Refs #609.
 - A labeled trigger matches the label the event carries, not the issue's
   whole label list. A flow already active on that issue or pull request
   coalesces further triggers instead of starting another run.
@@ -129,7 +194,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a 90% memory target. Hosted idle RSS is ~650Mi; a 256Mi request
   made HPA report ~250% and pin at maxReplicas while CPU was idle. More
   replicas copy that idle RSS. Use maxReplicas for real CPU/traffic, not to
-  paper over an undersized request.
+  paper over an undersized request. Search-corpus indexing is queued off
+  the response path, bounded by `GATEWAY_USAGE_INDEX_QUEUE_MAX_PENDING`
+  (default 256) and `GATEWAY_USAGE_INDEX_QUEUE_ENABLED`. Dedicated gateway
+  pods still run no audit-seal, retention, or optimization passes, so at
+  least one `api` or `all` process must remain.
 - CodeQL advanced setup uploads SARIF so Scorecard SAST sees every push and
   pull request. Disable GitHub default CodeQL setup or the upload is
   rejected.

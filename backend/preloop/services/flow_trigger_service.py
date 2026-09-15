@@ -1835,15 +1835,27 @@ class FlowTriggerService:
             )
             return "skipped_overlap"
 
+        # A schedule may carry a static payload (schedule_config.payload) for
+        # options it has no other way to state, such as the
+        # previous_result_execution_id a review subscription diffs against.
+        # The schedule's own fields are written last: a stored config does
+        # not get to rewrite when it fired.
+        payload: Dict[str, Any] = dict(schedule_config.get("payload") or {})
+        described_schedule = {
+            key: value for key, value in schedule_config.items() if key != "payload"
+        }
+        payload.update(
+            {
+                "schedule": described_schedule,
+                "timezone": schedule_config.get("timezone", "UTC"),
+                "scheduled_at": scheduled_at,
+            }
+        )
         event_data = {
             "source": "schedule",
             "type": "schedule",
             "account_id": str(flow.account_id) if flow.account_id else None,
-            "payload": {
-                "schedule": schedule_config,
-                "timezone": schedule_config.get("timezone", "UTC"),
-                "scheduled_at": scheduled_at,
-            },
+            "payload": payload,
         }
         nats_client = await get_nats_client()
         await self._start_flow_execution(

@@ -9,6 +9,8 @@ from uuid import uuid4
 
 import pytest
 
+from preloop.utils.execve_limits import PROMPT_ENV_PREFIX, PROMPT_FILE_PATH
+
 from preloop.agents.runner_launch import (
     build_runner_launch,
     hydrate_runner_job,
@@ -43,12 +45,16 @@ async def test_shared_launch_has_model_mcp_prompt_and_no_script_secrets(
     assert launch["version"] == 1
     assert "gateway-alias" in launch["script"]
     assert "${PRELOOP_URL}/openai/v1" in launch["script"]
-    prompt_fragment = (
-        "Implement a focused fix"
-        if agent_type == "codex"
-        else base64.b64encode(b"Implement a focused fix").decode()[:24]
-    )
-    assert prompt_fragment in launch["script"]
+    # The prompt is not in the script any more: it travels as base64 chunks
+    # in the launch environment and the script decodes them into a file, so
+    # neither the script nor any one variable can cross MAX_ARG_STRLEN.
+    assert "Implement a focused fix" not in launch["script"]
+    assert PROMPT_FILE_PATH in launch["script"]
+    chunks = int(launch["env"][f"{PROMPT_ENV_PREFIX}CHUNKS"])
+    delivered = base64.b64decode(
+        "".join(launch["env"][f"{PROMPT_ENV_PREFIX}{i}"] for i in range(chunks))
+    ).decode()
+    assert delivered.startswith("Implement a focused fix")
     assert "/workspace/result.json" in launch["script"]
     assert "PRELOOP_AGENT_EXEC_START" in launch["script"]
     assert launch["env"]["PRELOOP_API_TOKEN"] == "mcp-secret"
@@ -154,6 +160,96 @@ async def test_redelivery_rebuilds_context_with_stored_prompt_and_trigger(monkey
     assert first["account_api_token"] == second["account_api_token"] == "fresh-token"
     assert "launch" not in stored
     assert "fresh-token" not in json.dumps(persistable_job_payload(first))
+
+
+@pytest.mark.asyncio
+async def test_redelivery_uses_resolved_prompt_when_lease_omits_it(monkeypatch):
+    from preloop.services.flow_orchestrator import FlowExecutionOrchestrator
+
+    execution = SimpleNamespace(
+        id=uuid4(),
+        flow_id=uuid4(),
+        trigger_event_details={},
+        resolved_input_prompt="stored resolved prompt",
+    )
+    monkeypatch.setattr(
+        "preloop.agents.runner_launch.crud_flow_execution.get",
+        lambda *a, **k: execution,
+    )
+    monkeypatch.setattr(
+        FlowExecutionOrchestrator, "_get_flow_details", lambda self, **kwargs: None
+    )
+    captured = {}
+
+    async def prepare(self, *, resolved_prompt):
+        captured["prompt"] = resolved_prompt
+        return {"account_api_token": "fresh-token"}
+
+    monkeypatch.setattr(
+        FlowExecutionOrchestrator, "_prepare_execution_context", prepare
+    )
+    build = AsyncMock(
+        return_value={"version": 1, "script": "shared bootstrap", "env": {}}
+    )
+    monkeypatch.setattr("preloop.agents.runner_launch.build_runner_launch", build)
+    await hydrate_runner_job(
+        MagicMock(),
+        {
+            "launch_version": 1,
+            "execution_id": str(execution.id),
+            "agent_type": "codex",
+        },
+    )
+    assert captured["prompt"] == "stored resolved prompt"
+
+
+@pytest.mark.asyncio
+async def test_build_runner_launch_checks_payload_before_return(monkeypatch):
+    from preloop.agents.codex import CodexAgent
+    from preloop.utils.execve_limits import (
+        LaunchPayloadTooLargeError,
+        MAX_LAUNCH_STRING_BYTES,
+    )
+
+    original = CodexAgent._prepare_environment
+
+    async def bloated(self, context):
+        env = await original(self, context)
+        env["BLOATED"] = "x" * MAX_LAUNCH_STRING_BYTES
+        return env
+
+    monkeypatch.setattr(CodexAgent, "_prepare_environment", bloated)
+    with pytest.raises(LaunchPayloadTooLargeError, match="private runner launch"):
+        await build_runner_launch(
+            {
+                "agent_type": "codex",
+                "agent_config": {},
+                "prompt": "short",
+                "execution_id": str(uuid4()),
+                "flow_id": str(uuid4()),
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_prepare_delivers_named_launch_payload_error(monkeypatch):
+    from preloop.agents.runner_launch import prepare_runner_delivery
+    from preloop.utils.execve_limits import LaunchPayloadTooLargeError
+
+    monkeypatch.setattr(
+        "preloop.agents.runner_launch.build_runner_launch",
+        AsyncMock(
+            side_effect=LaunchPayloadTooLargeError(
+                "Cannot start private runner launch: launch payload exceeds "
+                "the execve string limit."
+            )
+        ),
+    )
+    delivered = await prepare_runner_delivery(
+        MagicMock(), {"execution_id": str(uuid4()), "launch_version": 1}, {}
+    )
+    assert "launch payload exceeds" in delivered["launch_error"]
+    assert "launch" not in delivered
 
 
 @pytest.mark.parametrize(

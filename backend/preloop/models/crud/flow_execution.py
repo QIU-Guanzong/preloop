@@ -3,13 +3,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import ColumnElement, and_, or_
+from sqlalchemy import ColumnElement, and_, func, or_
 from sqlalchemy.orm import Session, joinedload, load_only, with_expression
 from sqlalchemy.future import select
 
 from preloop.models import models
 
 from preloop.models.models.flow_execution import (
+    DELEGATION_DETAILS_KEY,
     TRIGGER_SUBJECT_KEY,
     FlowExecution,
 )
@@ -605,6 +606,38 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             query = query.join(Flow).filter(Flow.account_id == account_id)
         return query.offset(skip).limit(limit).all()
 
+    def latest_with_result(
+        self,
+        db: Session,
+        *,
+        flow_id: Any,
+        account_id: Optional[str] = None,
+        exclude_execution_id: Any = None,
+    ) -> Optional[FlowExecution]:
+        """Newest execution of this flow that stored a result artifact.
+
+        Backs the ``previous_result_execution_id: "last"`` payload
+        sentinel, which is how a scheduled review run diffs against its own
+        previous run: a schedule cannot know an execution id in advance,
+        and a pinned id would freeze every future run against one baseline.
+        The current execution is excluded explicitly, so a run started
+        before the query cannot pick itself.
+        """
+        # "Stored a result" means a JSON document, not the JSON literal
+        # ``null``: a row created with ``result=None`` persists as JSON null,
+        # which satisfies ``IS NOT NULL`` and would otherwise be picked as a
+        # baseline that contains nothing.
+        query = db.query(FlowExecution).filter(
+            FlowExecution.flow_id == flow_id,
+            FlowExecution.result.isnot(None),
+            func.jsonb_typeof(FlowExecution.result) != "null",
+        )
+        if exclude_execution_id:
+            query = query.filter(FlowExecution.id != exclude_execution_id)
+        if account_id:
+            query = query.join(Flow).filter(Flow.account_id == account_id)
+        return query.order_by(FlowExecution.start_time.desc()).first()
+
     def get_by_result_pr_url(
         self,
         db: Session,
@@ -682,6 +715,91 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
                 Flow.account_id == account_id,
             )
             .order_by(FlowExecution.start_time.asc(), FlowExecution.id.asc())
+            .all()
+        )
+
+    def get_lineage(
+        self,
+        db: Session,
+        root_execution_id: uuid.UUID,
+        account_id: uuid.UUID,
+        limit: int = 1000,
+    ) -> List[FlowExecution]:
+        """Get every execution started under one lineage root.
+
+        One query for a whole delegation tree: the root row is the caller's
+        own execution and every descendant carries the root's id in
+        ``root_execution_id`` (indexed), so no recursive walk is needed and
+        depth is read off each row. The root itself is NOT returned: its own
+        ``root_execution_id`` is NULL by definition, and a caller that has the
+        root already does not need it back.
+
+        Rows are lightly loaded on purpose. A tree row shows flow, label,
+        state, times and cost, so the large JSON columns (trigger payload,
+        result, prompt) stay out of the read and the delegation label is
+        projected out of ``trigger_event_details`` instead of shipping it.
+
+        Ordered by depth, then start time, then id, so a tree renders parents
+        before children and in a stable order across calls.
+
+        ``limit`` bounds the read: the fan-out and depth caps already bound a
+        tree, but a configurable cap is not a guarantee, so a caller can tell
+        a truncated answer from a complete one by asking for one row more than
+        it means to show.
+
+        ``account_id`` is required and joins through ``flow``: an execution
+        id alone must not cross accounts.
+        """
+        label = FlowExecution.trigger_event_details[DELEGATION_DETAILS_KEY][
+            "label"
+        ].astext
+        subject = FlowExecution.trigger_event_details[TRIGGER_SUBJECT_KEY]
+        return (
+            db.query(FlowExecution)
+            .options(
+                load_only(
+                    FlowExecution.id,
+                    FlowExecution.flow_id,
+                    FlowExecution.status,
+                    FlowExecution.start_time,
+                    FlowExecution.end_time,
+                    FlowExecution.error_message,
+                    FlowExecution.failure_category,
+                    FlowExecution.queued_reason,
+                    FlowExecution.parent_execution_id,
+                    FlowExecution.root_execution_id,
+                    FlowExecution.delegation_depth,
+                    FlowExecution.retry_of_execution_id,
+                    FlowExecution.batch_id,
+                    FlowExecution.parked_at,
+                    FlowExecution.park_expires_at,
+                    FlowExecution.tool_calls_count,
+                    FlowExecution.total_tokens,
+                    FlowExecution.estimated_cost,
+                    FlowExecution.created_at,
+                    FlowExecution.updated_at,
+                ),
+                with_expression(FlowExecution.delegation_label, label),
+                # Projected for the same reason the list view projects them:
+                # the row is rendered with a subject, and a deferred query
+                # expression that nothing populates cannot even be read.
+                with_expression(FlowExecution.trigger_subject, subject["text"].astext),
+                with_expression(
+                    FlowExecution.trigger_subject_url, subject["url"].astext
+                ),
+                joinedload(FlowExecution.flow).load_only(Flow.id, Flow.name),
+            )
+            .join(Flow)
+            .filter(
+                FlowExecution.root_execution_id == root_execution_id,
+                Flow.account_id == account_id,
+            )
+            .order_by(
+                FlowExecution.delegation_depth.asc(),
+                FlowExecution.start_time.asc(),
+                FlowExecution.id.asc(),
+            )
+            .limit(max(1, int(limit)))
             .all()
         )
 

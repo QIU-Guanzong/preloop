@@ -16,6 +16,35 @@ authorized model or harness overrides, including when nested under the
 webhook `payload`. Presence of `_resume` in the body is also not a trust
 signal.
 
+## Prompt placeholders
+
+Webhook fields are unbounded. A Dependabot pull-request body can be tens of
+KiB of release notes, and interpolating it with
+`{{trigger_event.payload.object_attributes.description}}` pays for that text
+three times: in the model's context window, in the agent's attention, and in
+the launch payload the kernel must accept (Linux caps one `execve` string at
+128 KiB). Templates may cap an interpolated value:
+
+```
+{{trigger_event.payload.object_attributes.description|truncate(16384)}}
+```
+
+`truncate(N)` is a **byte** cap, not a character cap, and it cuts on a UTF-8
+boundary so a non-ASCII body is not split mid code point. `{{name|truncate}}`
+without `N` uses 16 KiB. When the value is longer than the cap, the injected
+text is the prefix plus a marker:
+
+```
+[truncated by Preloop: showing the first 16384 bytes of 34908; fetch the full text
+with the tool that owns this object, for example get_pull_request]
+```
+
+The marker is part of the prompt on purpose: the agent can see that it has a
+prefix and fetch the rest with the tool that owns the object. Templates
+without the filter are unchanged. Preset 002 (pull-request reviewer) caps the
+description at 16 KiB. Flows cloned from that preset keep their own prompt
+copy until someone refreshes it.
+
 ## Seeding `/workspace` files (`workspace_files`)
 
 Instead of embedding large fixtures into the prompt via

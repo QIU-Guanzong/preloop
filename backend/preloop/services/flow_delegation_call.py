@@ -418,12 +418,11 @@ def clamp_timeout(
     return max(1, min(seconds, remaining))
 
 
-def console_url_for_execution(execution_id: Any) -> Optional[str]:
+def console_url_for(execution_id: Any) -> Optional[str]:
     """Deep link to one execution in the console, when a base url is set.
 
-    Public because the child wait (#633) links the same executions from the
-    completion records it hands a resumed parent, and two spellings of one
-    url is one spelling too many.
+    Public because get_execution (#632) and the child wait (#633) link the
+    same executions, and two spellings of one url is one spelling too many.
     """
     import os
 
@@ -461,7 +460,7 @@ def task_record_for_execution(
         "preloop.ai/depth": int(depth),
         "preloop.ai/status": status,
     }
-    console_url = console_url_for_execution(execution.id)
+    console_url = console_url_for(execution.id)
     if console_url:
         metadata["preloop.ai/consoleUrl"] = console_url
 
