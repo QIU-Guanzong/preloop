@@ -302,15 +302,20 @@ def consumed_seconds_from_details(details: Optional[Dict[str, Any]]) -> int:
     A resumed run is charged the remainder of its flow's budget, whether it
     was parked on a human or on its children: a park is not a way to buy a
     second full timeout.
+
+    Takes the max across chain keys, not the first hit. A run that parked on
+    a human and later on its children carries both blocks, and the older
+    ``_answers`` value is the smaller stale one.
     """
+    values: List[int] = []
     for key in PARK_CHAIN_KEYS:
         block = (details or {}).get(key)
         if not isinstance(block, dict):
             continue
         value = block.get("consumed_seconds")
         if isinstance(value, int) and value > 0:
-            return value
-    return 0
+            values.append(value)
+    return max(values) if values else 0
 
 
 async def resume_parked_executions(

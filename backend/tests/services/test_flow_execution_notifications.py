@@ -413,3 +413,47 @@ async def test_orchestrator_notify_terminal_on_a_legacy_failure_flow() -> None:
 
     tracker.add_comment.assert_not_awaited()
     resolve_tracker.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_notify_terminal_wakes_a_parked_parent() -> None:
+    """Child finish reaches notify_parent_child_finished; a failure there is swallowed."""
+
+    from types import SimpleNamespace
+
+    from preloop.services.flow_orchestrator import FlowExecutionOrchestrator
+
+    execution_id = uuid4()
+    orchestrator = FlowExecutionOrchestrator(
+        db=MagicMock(spec=Session),
+        flow_id=uuid4(),
+        trigger_event_data=_issue_trigger(42),
+        nats_client=MagicMock(),
+    )
+    orchestrator.flow = SimpleNamespace(notifications=None)
+    orchestrator.execution_log = SimpleNamespace(
+        id=execution_id,
+        trigger_event_details=_issue_trigger(42),
+        failure_category=None,
+        result=None,
+    )
+    orchestrator.execution_logger = MagicMock()
+    notify = AsyncMock()
+
+    with patch(
+        "preloop.services.flow_child_wait.notify_parent_child_finished",
+        notify,
+    ):
+        await orchestrator._notify_terminal(status="SUCCEEDED")
+
+    notify.assert_awaited_once_with(str(execution_id))
+
+    notify.reset_mock()
+    notify.side_effect = RuntimeError("parent resume blew up")
+    with patch(
+        "preloop.services.flow_child_wait.notify_parent_child_finished",
+        notify,
+    ):
+        await orchestrator._notify_terminal(status="FAILED")
+
+    notify.assert_awaited_once_with(str(execution_id))

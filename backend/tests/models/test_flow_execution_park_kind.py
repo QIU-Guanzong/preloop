@@ -108,7 +108,7 @@ def test_the_migration_backfills_existing_parks_as_human(db_session, test_user):
 
 
 def test_the_migration_reverses_cleanly(db_session):
-    """Downgrade drops exactly the column and the index upgrade added."""
+    """Downgrade drops exactly the column upgrade added."""
     _downgrade(db_session)
     assert "park_kind" not in _execution_columns(db_session)
     assert "ix_flow_execution_child_park_expires_at" not in _indexes(db_session)
@@ -120,7 +120,7 @@ def test_the_migration_reverses_cleanly(db_session):
         for entry in inspect(db_session.connection()).get_columns("flow_execution")
     }["park_kind"]
     assert column["nullable"] is True
-    assert "ix_flow_execution_child_park_expires_at" in _indexes(db_session)
+    assert "ix_flow_execution_child_park_expires_at" not in _indexes(db_session)
 
 
 def test_a_row_with_no_kind_is_read_as_a_human_park(db_session, test_user):

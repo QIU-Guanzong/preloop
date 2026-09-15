@@ -3,8 +3,9 @@
 A parent that delegated work parks the same way a run waiting for a human
 does, and the orchestrator has to tell the two apart while the row is still
 RUNNING, before either WAITING_FOR_HUMAN or WAITING_FOR_CHILDREN is written.
-One small column carries that, plus the partial index the child wait deadline
-sweep reads.
+One small column carries that. The child wait sweep lists
+WAITING_FOR_CHILDREN (the status index) and checks the deadline in Python;
+there is no park_expires_at query, so this revision does not add one.
 
 Revision ID: 20260915_child_park
 Revises: 20260915_session_hold
@@ -25,7 +26,7 @@ assert _ALEMBIC_IDENTIFIERS, "Alembic revision metadata must be defined"
 
 
 def upgrade() -> None:
-    """Add park_kind and the deadline index for parents parked on children."""
+    """Add park_kind so a parked run can say whether it waits on a human or children."""
     op.add_column(
         "flow_execution",
         sa.Column("park_kind", sa.String(length=16), nullable=True),
@@ -38,19 +39,8 @@ def upgrade() -> None:
         "UPDATE flow_execution SET park_kind = 'human' "
         "WHERE park_request_id IS NOT NULL"
     )
-    # The child wait sweep scans parents whose deadline has passed, the same
-    # shape as the approval expiry index next to it.
-    op.create_index(
-        "ix_flow_execution_child_park_expires_at",
-        "flow_execution",
-        ["park_expires_at"],
-        postgresql_where=sa.text("status = 'WAITING_FOR_CHILDREN'"),
-    )
 
 
 def downgrade() -> None:
     """Drop the park kind. Parents parked on children stay parked."""
-    op.drop_index(
-        "ix_flow_execution_child_park_expires_at", table_name="flow_execution"
-    )
     op.drop_column("flow_execution", "park_kind")

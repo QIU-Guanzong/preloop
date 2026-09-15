@@ -461,17 +461,18 @@ async def test_wait_asks_for_the_children_of_this_execution(mcp_server, monkeypa
     assert wait.await_args.kwargs["account_id"] == "acct"
 
 
-async def test_a_refused_call_with_wait_does_not_wait_for_anything(
+async def test_a_refused_call_with_wait_still_waits_for_siblings(
     mcp_server, monkeypatch
 ):
-    """Nothing started, so there is nothing new to wait for: the reason wins."""
+    """The last fan-out call can be the refused one; siblings still need the wait."""
     tool = await mcp_server.get_tool(TOOL_NAME)
     record = {
         "id": "attempt-1",
         "status": {"state": "TASK_STATE_REJECTED"},
         "metadata": {"preloop.ai/refusalReason": "fanout_exceeded"},
     }
-    wait = AsyncMock()
+    parked = json.dumps({"status": "parked_for_children"})
+    wait = AsyncMock(return_value=parked)
     monkeypatch.setattr(
         "preloop.services.dynamic_fastmcp_http.get_current_user_context",
         _flow_identity,
@@ -491,8 +492,9 @@ async def test_a_refused_call_with_wait_does_not_wait_for_anything(
 
     result = await tool.fn(flow="Child Flow", wait=True)
 
-    assert json.loads(result) == record
-    wait.assert_not_awaited()
+    assert result == parked
+    wait.assert_awaited_once()
+    assert wait.await_args.kwargs["parent_execution_id"] == "exec-1"
 
 
 async def test_the_default_call_still_never_waits(mcp_server, monkeypatch):

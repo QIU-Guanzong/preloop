@@ -1058,10 +1058,12 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
             db.close()
         if not wait:
             return json.dumps(record)
-        # A refused call started nothing, so there is nothing new to wait for;
-        # the record already names the rule that declined it.
-        if record.get("status", {}).get("state") == "TASK_STATE_REJECTED":
-            return json.dumps(record)
+        # Wait even when this call was refused. The documented usage is
+        # "pass wait=true on the last call of a fan out"; if that last call
+        # is the one a rule declines, siblings may still be running and the
+        # parent still needs to park. wait_for_children handles every branch:
+        # refused-only (finished_payload of refusal rows), no children
+        # (no_children), pending siblings (in-process wait then park).
         # The wait opens its own short lived sessions: this one is closed
         # above because the wait can last minutes and ends by asking the
         # orchestrator to park this execution.

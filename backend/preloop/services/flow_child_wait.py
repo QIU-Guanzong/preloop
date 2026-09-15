@@ -274,12 +274,15 @@ def completion_record(
         try:
             metadata["preloop.ai/cost"] = max(0.0, float(cost))
         except (TypeError, ValueError):
+            # Unparseable cost is omitted rather than crashing the completion
+            # record; the rest of the row (id, state, label) is still true.
             pass
     tokens = getattr(child, "total_tokens", None)
     if tokens is not None:
         try:
             metadata["preloop.ai/tokens"] = max(0, int(tokens))
         except (TypeError, ValueError):
+            # Same as cost: a garbage token count must not drop the record.
             pass
     console_url = console_url_for(child.id)
     if console_url:
