@@ -45,7 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `update_issue` takes optional `expected_revision`, `assessment` and
   `complexity_label` and then returns the triage receipt. Triage writes are
   GitHub and GitLab only, require `edit_issues`, and follow the existing MCP
-  approval path. No separate triage tools are advertised. Docs at
+  approval path. No separate triage tools are advertised. The preset's
+  triage-only write restriction is prompt-enforced; owners who want a
+  mechanical gate can attach an approval policy to `update_issue`. Docs at
   `docs/guide/flows/issue-triage.md`.
 - DORA agent-slice exports. `GET /api/v1/exports/asset-register` lists agents,
   tools, MCP servers, models, providers and runner hosts as one flat table

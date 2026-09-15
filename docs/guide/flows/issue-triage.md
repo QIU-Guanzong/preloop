@@ -45,6 +45,16 @@ MCP availability and approval policies. Project and tracker identity come from
 account-scoped stored records. The preset prompt restricts `update_issue` to the
 triage write: it does not change assignees or dispatch labels, create follow-up
 issues, or start implementation.
+
+The previous `apply_issue_triage` tool advertised a bounded schema
+(`expected_revision`, `assessment`, `complexity_label`, and optional `title`
+only). That mechanical bound is gone: the preset's write tool is full
+`update_issue`, and the triage-only restriction is prompt-enforced. Issue text
+and comments are untrusted data, so a prompt-injected agent could issue a
+non-triage write (replace the description, close the issue) that the old tool
+pair made impossible. Account owners who want a mechanical gate should attach an
+approval policy to `update_issue` for this flow. The preset does not pin one:
+approval gates are deployment-specific.
 The first provider adapters support GitHub and GitLab. Other providers report an
 unsupported operation rather than claiming an update.
 

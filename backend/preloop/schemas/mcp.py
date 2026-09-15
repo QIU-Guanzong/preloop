@@ -12,7 +12,13 @@ from preloop.schemas.issue_triage import ComplexityScheme, TriageIssue
 
 
 class GetIssueRequest(BaseModel):
-    """Request body for the get_issue tool."""
+    """Request body for the get_issue tool.
+
+    Unused by the MCP tool path: FastMCP calls ``get_issue`` with
+    individual parameters, and runtime validation uses
+    ``GET_ISSUE_SCHEMA`` via ``TRIAGE_INCLUDES``. Keep ``include`` in
+    lockstep with that advertised enum; tests assert the match.
+    """
 
     issue: str
     include: Optional[List[Literal["label_catalog", "revision"]]] = None

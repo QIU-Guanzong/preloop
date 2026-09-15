@@ -60,6 +60,7 @@ from preloop.schemas.mcp import (
     SuggestedUpdate,
     UpdateIssueRequest,
 )
+from preloop.tools.builtin_defs import GET_ISSUE_SCHEMA
 
 from preloop.services.duplicate_detection import DuplicateDetector
 from preloop.config import get_settings
@@ -665,7 +666,7 @@ async def _apply_authorized_issue_triage(
     return result
 
 
-TRIAGE_INCLUDES = ("label_catalog", "revision")
+TRIAGE_INCLUDES = tuple(GET_ISSUE_SCHEMA["properties"]["include"]["items"]["enum"])
 
 
 @_with_tool_db

@@ -155,6 +155,21 @@ class TestPromptContract:
         assert "—" not in yaml.dump(preset, allow_unicode=True)
 
 
+class TestPromptEnforcedWriteBound:
+    def test_guide_documents_prompt_enforced_write_bound(self) -> None:
+        guide = (
+            Path(__file__).resolve().parents[2]
+            / "docs"
+            / "guide"
+            / "flows"
+            / "issue-triage.md"
+        )
+        text = guide.read_text()
+        assert "triage-only restriction is prompt-enforced" in text
+        assert "approval policy to `update_issue`" in text
+        assert "approval gates are deployment-specific" in text
+
+
 class TestLoaderIntegration:
     def test_preset_is_in_the_shipped_catalog(self) -> None:
         from unittest.mock import patch

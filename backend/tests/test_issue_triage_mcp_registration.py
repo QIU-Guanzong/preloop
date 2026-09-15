@@ -113,6 +113,26 @@ def test_catalog_documents_the_triage_parameters() -> None:
     assert "expected_revision" not in catalog["update_issue"]["schema"]["required"]
 
 
+def test_include_vocabulary_matches_advertised_schema() -> None:
+    """Runtime validation and GetIssueRequest follow GET_ISSUE_SCHEMA."""
+    from typing import get_args
+
+    from preloop.api.endpoints.tools import BUILTIN_TOOLS
+    from preloop.schemas.mcp import GetIssueRequest
+    from preloop.tools.builtin_defs import GET_ISSUE_SCHEMA
+
+    advertised = tuple(GET_ISSUE_SCHEMA["properties"]["include"]["items"]["enum"])
+    catalog = {entry["name"]: entry for entry in BUILTIN_TOOLS}
+    assert advertised == tuple(
+        catalog["get_issue"]["schema"]["properties"]["include"]["items"]["enum"]
+    )
+    assert mcp_router.TRIAGE_INCLUDES == advertised
+
+    list_type = get_args(GetIssueRequest.model_fields["include"].annotation)[0]
+    literal = get_args(list_type)[0]
+    assert get_args(literal) == advertised
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", TOOL_ARGUMENTS)
 async def test_triage_without_context_never_calls_router(
