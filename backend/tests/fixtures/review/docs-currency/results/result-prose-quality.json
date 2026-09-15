@@ -1,0 +1,146 @@
+{
+  "schema": "preloop.review.docscurrency/v1",
+  "flow": "docs-currency-review",
+  "status": "success",
+  "run_at": "2026-09-15T09:00:00Z",
+  "git": {
+    "remote": "https://example.com/example/sample-repo.git",
+    "commit": "0000000000000000000000000000000000000000",
+    "branch": "main",
+    "dirty": false
+  },
+  "tool_versions": {
+    "git": "2.43.0"
+  },
+  "inputs_declared": {
+    "target_repo_path": "/workspace/sample-repo",
+    "project_path": "prose-quality",
+    "previous_result_path": "not delivered"
+  },
+  "runner": {
+    "kind": null,
+    "id": null
+  },
+  "project": {
+    "path": "prose-quality",
+    "documents": [
+      {
+        "path": "README.md",
+        "lines": 11,
+        "read": true
+      }
+    ]
+  },
+  "claims": [
+    {
+      "id": "docs:env_var:README.md:scraper-user-agent",
+      "type": "env_var",
+      "claim": "SCRAPER_USER_AGENT",
+      "doc": "README.md:7",
+      "status": "holds",
+      "code_shows": "read by scraper/run.py",
+      "evidence": "scraper/run.py:3",
+      "search": {
+        "pattern": "SCRAPER_USER_AGENT",
+        "scope": "scraper/",
+        "matches": [
+          "scraper/run.py:3"
+        ]
+      },
+      "severity": null,
+      "reason": null
+    },
+    {
+      "id": "docs:entry_point:README.md:scraper-run",
+      "type": "entry_point",
+      "claim": "python -m scraper.run",
+      "doc": "README.md:9",
+      "status": "holds",
+      "code_shows": "scraper/run.py exists and defines a __main__ entry point",
+      "evidence": "scraper/run.py:1",
+      "search": {
+        "pattern": "filename:scraper/run.py",
+        "scope": ".",
+        "matches": [
+          "scraper/run.py:0"
+        ]
+      },
+      "severity": null,
+      "reason": null
+    },
+    {
+      "id": "docs:dependency:README.md:httpx",
+      "type": "dependency",
+      "claim": "we depend on httpx",
+      "doc": "README.md:11",
+      "status": "holds",
+      "code_shows": "httpx is declared in the pyproject dependencies",
+      "evidence": "pyproject.toml:4",
+      "search": {
+        "pattern": "httpx",
+        "scope": "pyproject.toml",
+        "matches": [
+          "pyproject.toml:4"
+        ]
+      },
+      "severity": null,
+      "reason": null
+    }
+  ],
+  "counts": {
+    "holds": 3,
+    "drifted": 0,
+    "not_checkable": 0,
+    "by_severity": {
+      "high": 0,
+      "medium": 0,
+      "low": 0
+    },
+    "by_type": {
+      "entry_point": 1,
+      "service": 0,
+      "dependency": 1,
+      "env_var": 1,
+      "command": 0
+    }
+  },
+  "coverage": {
+    "documents_total": 1,
+    "documents_read": 1,
+    "plan_completed": true,
+    "claims_extracted": 3,
+    "unsupported_statements_skipped": 4,
+    "not_reviewed": []
+  },
+  "drift": null,
+  "verdict": "pass",
+  "checks": [
+    {
+      "name": "documents_planned_all_read",
+      "passed": true,
+      "skipped": false,
+      "details": "1 of 1 documents read"
+    },
+    {
+      "name": "every_claim_has_a_recorded_search",
+      "passed": true,
+      "skipped": false,
+      "details": "3 claims, 3 recorded searches"
+    }
+  ],
+  "assessments": [
+    {
+      "topic": "documentation currency",
+      "judgment": "Agent judgment: the drift list is the whole finding set; readability is out of scope for this lens."
+    }
+  ],
+  "artifacts": {
+    "report": "evidence/docs-currency-report.md",
+    "register": "evidence/claims-register.md",
+    "findings": "evidence/findings.json",
+    "inventory": "evidence/inventory.json",
+    "drift_report": null
+  },
+  "note": "synthetic fixture",
+  "disclaimer": "Machine-generated review evidence. Not a certification, audit opinion, or legal advice."
+}

@@ -1,0 +1,164 @@
+{
+  "schema": "preloop.review.docscurrency/v1",
+  "flow": "docs-currency-review",
+  "status": "success",
+  "run_at": "2026-09-15T09:00:00Z",
+  "git": {
+    "remote": "https://example.com/example/sample-repo.git",
+    "commit": "0000000000000000000000000000000000000000",
+    "branch": "main",
+    "dirty": false
+  },
+  "tool_versions": {
+    "git": "2.43.0"
+  },
+  "inputs_declared": {
+    "target_repo_path": "/workspace/sample-repo",
+    "project_path": "not-checkable",
+    "previous_result_path": "not delivered"
+  },
+  "runner": {
+    "kind": null,
+    "id": null
+  },
+  "project": {
+    "path": "not-checkable",
+    "documents": [
+      {
+        "path": "README.md",
+        "lines": 19,
+        "read": true
+      }
+    ]
+  },
+  "claims": [
+    {
+      "id": "docs:env_var:README.md:reporter-output-dir",
+      "type": "env_var",
+      "claim": "REPORTER_OUTPUT_DIR",
+      "doc": "README.md:7",
+      "status": "holds",
+      "code_shows": "read by reporter/main.py",
+      "evidence": "reporter/main.py:3",
+      "search": {
+        "pattern": "REPORTER_OUTPUT_DIR",
+        "scope": "reporter/",
+        "matches": [
+          "reporter/main.py:3"
+        ]
+      },
+      "severity": null,
+      "reason": null
+    },
+    {
+      "id": "docs:entry_point:README.md:reporter-main",
+      "type": "entry_point",
+      "claim": "python -m reporter.main",
+      "doc": "README.md:11",
+      "status": "holds",
+      "code_shows": "reporter/main.py exists and defines a __main__ entry point",
+      "evidence": "reporter/main.py:1",
+      "search": {
+        "pattern": "filename:reporter/main.py",
+        "scope": ".",
+        "matches": [
+          "reporter/main.py:0"
+        ]
+      },
+      "severity": null,
+      "reason": null
+    },
+    {
+      "id": "docs:command:README.md:fleetctl-release",
+      "type": "command",
+      "claim": "fleetctl release reporter --channel stable",
+      "doc": "README.md:15",
+      "status": "not_checkable",
+      "code_shows": null,
+      "evidence": null,
+      "search": {
+        "pattern": "fleetctl",
+        "scope": ".",
+        "matches": [
+          "README.md:15"
+        ]
+      },
+      "severity": null,
+      "reason": "fleetctl is installed on the deployment host and is not part of this checkout; the repository cannot show whether the command exists or what it does"
+    },
+    {
+      "id": "docs:service:README.md:shared-load-balancer",
+      "type": "service",
+      "claim": "the shared load balancer",
+      "doc": "README.md:18",
+      "status": "not_checkable",
+      "code_shows": null,
+      "evidence": null,
+      "search": {
+        "pattern": "load balancer",
+        "scope": ".",
+        "matches": [
+          "README.md:18"
+        ]
+      },
+      "severity": null,
+      "reason": "hosted infrastructure owned outside this repository; no file in the checkout can confirm or contradict it"
+    }
+  ],
+  "counts": {
+    "holds": 2,
+    "drifted": 0,
+    "not_checkable": 2,
+    "by_severity": {
+      "high": 0,
+      "medium": 0,
+      "low": 0
+    },
+    "by_type": {
+      "entry_point": 1,
+      "service": 1,
+      "dependency": 0,
+      "env_var": 1,
+      "command": 1
+    }
+  },
+  "coverage": {
+    "documents_total": 1,
+    "documents_read": 1,
+    "plan_completed": true,
+    "claims_extracted": 4,
+    "unsupported_statements_skipped": 1,
+    "not_reviewed": []
+  },
+  "drift": null,
+  "verdict": "pass_with_findings",
+  "checks": [
+    {
+      "name": "documents_planned_all_read",
+      "passed": true,
+      "skipped": false,
+      "details": "1 of 1 documents read"
+    },
+    {
+      "name": "every_claim_has_a_recorded_search",
+      "passed": true,
+      "skipped": false,
+      "details": "4 claims, 4 recorded searches"
+    }
+  ],
+  "assessments": [
+    {
+      "topic": "documentation currency",
+      "judgment": "Agent judgment: the drift list is the whole finding set; readability is out of scope for this lens."
+    }
+  ],
+  "artifacts": {
+    "report": "evidence/docs-currency-report.md",
+    "register": "evidence/claims-register.md",
+    "findings": "evidence/findings.json",
+    "inventory": "evidence/inventory.json",
+    "drift_report": null
+  },
+  "note": "synthetic fixture",
+  "disclaimer": "Machine-generated review evidence. Not a certification, audit opinion, or legal advice."
+}
