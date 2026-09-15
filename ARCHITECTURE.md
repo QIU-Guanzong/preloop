@@ -103,14 +103,6 @@ graph LR
 Execution environment profiles and hosted checkpoint recovery are documented in
 [Environments and recovery](docs/guide/flows/environments-and-recovery.md).
 
-Session search stores chunked runtime-session content in
-`session_search_document`. Keyword indexing is a separate kill switch
-from embedding. Vectors are written only when both `SESSION_EMBEDDING_ENABLED`
-and the per-account `session_embedding_setting` opt-in are on, by a bounded
-worker that records purpose-tagged `session_embedding` usage against a daily
-cap. Operator knobs and the shared-key allow-list are in
-[Session embedding](docs/operations/session-embedding.md).
-
 ### Agent launch payload (custom images and runners)
 
 Linux caps one `execve` string (a single argv element or a single
@@ -175,4 +167,5 @@ indexing is gated by `SESSION_SEARCH_INDEX_ENABLED`. Optional vectors are a
 separate per-account opt-in (`session_embedding_setting`) plus the
 deployment kill switch `SESSION_EMBEDDING_ENABLED`; a bounded worker posts
 batches to an OpenAI-compatible endpoint or a local model, caps spend, and
-records purpose-tagged usage. Operator knobs: `docs/operations/session-embedding.md`.
+records purpose-tagged usage. The shared API key is allow-listed.
+Operator knobs: [Session embedding](docs/operations/session-embedding.md).

@@ -26,9 +26,21 @@ Bearer token only when the account's `base_url` is listed in
 `SESSION_EMBEDDING_API_KEY_BASE_URLS` (comma-separated exact https URLs,
 trailing slash ignored). An empty allow-list, the shipped default, means the
 key is never sent. Store the key in the same secret handling as other
-provider credentials. `enable()` refuses a non-https URL and a private,
-loopback, or link-local IP host so the worker cannot be pointed at metadata
-or internal endpoints.
+provider credentials. `enable()` (and the worker, again at request time)
+refuses a non-https URL, a private/loopback/link-local IP literal, and a
+hostname that resolves to loopback, link-local, multicast, unspecified,
+or reserved addresses, so `169.254.169.254.nip.io` cannot reach instance
+metadata. A hostname that resolves to RFC1918 or unique-local is accepted:
+that is the self-hosted OpenAI-compatible path. DNS can still change
+between the resolve check and the HTTP connect. Restrict the embedding
+worker's egress (deny link-local and metadata ranges; allow only the
+operator endpoints you intend) rather than treating the hostname check as
+a firewall.
+
+Transcript import writes search chunks with `commit=False` and then
+calls `request_embedding` after the host transaction commits. Other
+`commit=False` writers still wait for a later committing write or a
+sweeper.
 
 ## Other knobs
 

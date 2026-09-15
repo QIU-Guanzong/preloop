@@ -83,6 +83,7 @@ def test_a_local_provider_keeps_no_base_url(db_session, test_user):
         ({"base_url": "https://169.254.169.254/latest"}, "invalid_base_url"),
         ({"base_url": "https://10.0.0.8/v1"}, "invalid_base_url"),
         ({"base_url": "https://localhost/v1"}, "invalid_base_url"),
+        ({"base_url": "https://169.254.169.254.nip.io/v1"}, "invalid_base_url"),
         ({"dimensions": 512}, "unsupported_dimensions"),
         ({"daily_cap_usd": -1.0}, "invalid_daily_cap"),
     ],
@@ -158,3 +159,16 @@ def test_a_degraded_marker_survives_until_a_run_clears_it(db_session, test_user)
     assert cleared is not None
     assert cleared.degraded_reason is None
     assert cleared.degraded_at is None
+
+
+def test_a_self_hosted_hostname_on_a_private_network_is_kept(db_session, test_user):
+    """openai_compatible is for operator endpoints named by hostname."""
+    setting = crud_session_embedding_setting.enable(
+        db_session,
+        account_id=str(test_user.account_id),
+        provider=PROVIDER_OPENAI_COMPATIBLE,
+        model_identifier="text-embedding-3-small",
+        base_url="https://embeddings.vpc.internal/v1",
+    )
+
+    assert setting.base_url == "https://embeddings.vpc.internal/v1"

@@ -41,6 +41,10 @@ from preloop.models.crud import (
     crud_session_embedding_setting,
     crud_session_search_document,
 )
+from preloop.models.crud.session_embedding_setting import (
+    SessionEmbeddingConfigError,
+    validate_openai_compatible_base_url,
+)
 from preloop.models.models.session_embedding_setting import (
     DEGRADED_DAILY_CAP,
     DEGRADED_DIMENSION_MISMATCH,
@@ -273,6 +277,10 @@ def build_provider(setting: SessionEmbeddingSetting) -> EmbeddingProvider:
             raise EmbeddingProviderError(
                 "the account setting names no base url for its provider"
             )
+        try:
+            validate_openai_compatible_base_url(setting.base_url or "")
+        except SessionEmbeddingConfigError as exc:
+            raise EmbeddingProviderError(str(exc)) from exc
         return OpenAICompatibleEmbeddingProvider(
             base_url=setting.base_url or "",
             model=model,

@@ -314,6 +314,101 @@ def test_a_commit_false_write_does_not_nudge_before_the_host_commits(
     submit.assert_not_called()
 
 
+def test_ingest_push_records_nudges_embedding_after_the_host_commits(
+    db_session, test_user
+):
+    """Imported transcripts must not wait for an unrelated later write."""
+    from decimal import Decimal
+
+    from preloop.models.crud import crud_managed_agent
+    from preloop.schemas.usage_import import (
+        UsageIngestRecord,
+        UsageIngestTranscriptMessage,
+    )
+    from preloop.services.usage_import import ingest_push_records
+
+    account_id = str(test_user.account_id)
+    agent = crud_managed_agent.upsert_from_runtime_session(
+        db_session,
+        account_id=account_id,
+        runtime_session_id=None,
+        session_source_type="desktop_agent",
+        session_source_id="cursor-embed-ingest",
+        display_name="Cursor",
+        agent_kind="cursor",
+    )
+    db_session.commit()
+    record = UsageIngestRecord(
+        external_id="turn-embed-1",
+        timestamp=OCCURRED_AT,
+        model="composer",
+        charged_cost=Decimal("0.10"),
+        input_tokens=12,
+        output_tokens=8,
+        conversation_id="conv-embed",
+        transcript=[
+            UsageIngestTranscriptMessage(
+                role="user",
+                text="a transcript chunk that should be embedded after commit",
+            )
+        ],
+    )
+
+    with patch("preloop.services.usage_import.request_embedding") as nudge:
+        ingest_push_records(
+            db_session,
+            account_id=account_id,
+            user_id=str(test_user.id),
+            agent=agent,
+            records=[record],
+            source="cursor",
+        )
+
+    nudge.assert_called_once_with(account_id)
+
+
+def test_ingest_push_records_without_a_transcript_does_not_nudge(db_session, test_user):
+    """A ledger-only import has no chunks to embed."""
+    from decimal import Decimal
+
+    from preloop.models.crud import crud_managed_agent
+    from preloop.schemas.usage_import import UsageIngestRecord
+    from preloop.services.usage_import import ingest_push_records
+
+    account_id = str(test_user.account_id)
+    agent = crud_managed_agent.upsert_from_runtime_session(
+        db_session,
+        account_id=account_id,
+        runtime_session_id=None,
+        session_source_type="desktop_agent",
+        session_source_id="cursor-embed-ledger",
+        display_name="Cursor",
+        agent_kind="cursor",
+    )
+    db_session.commit()
+    record = UsageIngestRecord(
+        external_id="turn-ledger-1",
+        timestamp=OCCURRED_AT,
+        model="composer",
+        charged_cost=Decimal("0.10"),
+        input_tokens=12,
+        output_tokens=8,
+        conversation_id="conv-ledger",
+    )
+
+    with patch("preloop.services.usage_import.request_embedding") as nudge:
+        ingest_push_records(
+            db_session,
+            account_id=account_id,
+            user_id=str(test_user.id),
+            agent=agent,
+            records=[record],
+            source="cursor",
+        )
+
+    nudge.assert_not_called()
+
+
 def test_drain_continues_an_account_that_exceeds_one_batch(
     db_session, test_user, monkeypatch
 ):

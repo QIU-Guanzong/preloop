@@ -778,3 +778,22 @@ def test_the_shared_api_key_is_omitted_unless_the_url_is_allow_listed(monkeypatc
     )
     allowed = build_provider(setting)
     assert allowed.api_key == "shared-secret"
+
+
+def test_build_provider_refuses_a_hostname_rebound_to_link_local(
+    db_session, test_user, monkeypatch
+):
+    """Request-time resolve catches a DNS rebind that enable() did not see."""
+    import ipaddress
+
+    from preloop.models.crud import session_embedding_setting as setting_mod
+
+    setting = _opt_in(db_session, str(test_user.account_id))
+    monkeypatch.setattr(
+        setting_mod,
+        "_resolved_ip_addresses",
+        lambda host: [ipaddress.ip_address("169.254.169.254")],
+    )
+
+    with pytest.raises(EmbeddingProviderError, match="loopback, link-local"):
+        build_provider(setting)
