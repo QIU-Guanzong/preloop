@@ -14,7 +14,7 @@ describe('note author markers', () => {
     expect(noteAuthorKind('AGENT')).to.equal('agent');
     expect(noteAuthorKind('jwt')).to.equal('human');
     expect(noteAuthorKind('api_key')).to.equal('human');
-    expect(noteAuthorKind(null)).to.equal('human');
+    expect(noteAuthorKind(null)).to.equal('unknown');
   });
 
   it('names the credential kind behind the author', () => {
@@ -27,11 +27,15 @@ describe('note author markers', () => {
   it('states an unrecognised credential rather than assuming a person', () => {
     expect(noteAuthorMarker('something_new')).to.equal('unknown');
     expect(noteAuthorMarker(undefined)).to.equal('unknown');
+    expect(noteAuthorKind('something_new')).to.equal('unknown');
+    expect(noteAuthorKind(undefined)).to.equal('unknown');
   });
 
-  it('gives the two kinds different icons', () => {
+  it('gives the kinds different icons', () => {
     expect(noteAuthorIcon('agent')).to.equal('robot');
-    expect(noteAuthorIcon('jwt')).to.not.equal(noteAuthorIcon('agent'));
+    expect(noteAuthorIcon('jwt')).to.equal('person');
+    expect(noteAuthorIcon(null)).to.equal('question-circle');
+    expect(noteAuthorIcon('something_new')).to.equal('question-circle');
   });
 
   it('falls back to an honest name when the row stored none', () => {

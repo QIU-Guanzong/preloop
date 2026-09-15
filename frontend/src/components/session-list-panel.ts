@@ -127,9 +127,14 @@ export class SessionListPanel extends LitElement {
       }
 
       /* An agent author is a different fact, so it is a different tint, not a
-         differently worded neutral chip. */
+         differently worded neutral chip. An unknown credential stays meta
+         (DESIGN.md: a state, not an outcome), never the person tint. */
       .note-author.agent {
         color: var(--sl-color-primary-700);
+      }
+
+      .note-author.unknown {
+        color: var(--console-meta-color, var(--sl-color-neutral-600));
       }
     `,
   ];

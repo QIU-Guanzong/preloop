@@ -305,5 +305,13 @@ describe('operator-note-composer', () => {
     )!;
     expect(author.textContent).to.contain('Unknown author');
     expect(author.textContent).to.contain('unknown');
+    expect(author.getAttribute('data-author-kind')).to.equal('unknown');
+    expect(author.querySelector('sl-icon')!.getAttribute('name')).to.equal(
+      'question-circle'
+    );
+    expect(author.querySelector('.author-mark')!.classList.contains('unknown'))
+      .to.be.true;
+    expect(author.querySelector('.author-mark')!.classList.contains('human')).to
+      .be.false;
   });
 });

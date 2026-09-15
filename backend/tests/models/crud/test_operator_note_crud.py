@@ -522,6 +522,63 @@ def test_note_summaries_ignore_commands_and_unreadable_ids(
     assert summaries[str(session.id)].note_count == 1
 
 
+def test_note_summaries_ignore_notes_that_never_steered(
+    db_session, create_account
+) -> None:
+    """A withdrawn or undelivered note does not count as steering the session."""
+    account = create_account()
+    agent = _agent(db_session, account.id)
+    only_withdrawn = _session(db_session, account.id)
+    mixed = _session(db_session, account.id)
+
+    withdrawn = _note(
+        db_session,
+        account,
+        agent,
+        runtime_session_id=only_withdrawn.id,
+        author_display="Jane Doe",
+    )
+    crud_agent_control_command.cancel_note(
+        db_session,
+        account_id=account.id,
+        note_id=withdrawn.command_id,
+        cancelled_at=datetime.now(UTC),
+    )
+
+    expired = _note(
+        db_session,
+        account,
+        agent,
+        runtime_session_id=mixed.id,
+        body="Too late.",
+        author_display="Jane Doe",
+        author_auth_method="jwt",
+    )
+    expired.status = "expired"
+    db_session.flush()
+    _note(
+        db_session,
+        account,
+        agent,
+        runtime_session_id=mixed.id,
+        body="Do this.",
+        author_display="Reviewer",
+        author_auth_method="agent",
+    )
+
+    summaries = crud_agent_control_command.note_summaries_for_sessions(
+        db_session,
+        account_id=account.id,
+        runtime_session_ids=[str(only_withdrawn.id), str(mixed.id)],
+    )
+
+    assert str(only_withdrawn.id) not in summaries
+    summary = summaries[str(mixed.id)]
+    assert summary.note_count == 1
+    assert summary.latest_author_display == "Reviewer"
+    assert summary.latest_author_auth_method == "agent"
+
+
 def test_note_summaries_with_no_sessions_reads_nothing(
     db_session, create_account
 ) -> None:

@@ -32,6 +32,13 @@ class SessionNoteSummary:
     latest_note_at: Optional[datetime]
 
 
+# Pending still will, delivered and acked already did. Cancelled, expired and
+# failed never steered, so they do not belong on the sessions-list badge.
+# ``list_notes`` still returns those rows: the composer is the history of what
+# was written, including a withdrawal.
+NOTE_STATUSES_THAT_STEER = ("pending", "delivered", "acked")
+
+
 class CRUDAgentControlCommand(CRUDBase[AgentControlCommand]):
     """CRUD operations for persisted Agent Control command envelopes.
 
@@ -414,7 +421,13 @@ class CRUDAgentControlCommand(CRUDBase[AgentControlCommand]):
         runtime_session_id: Optional[Union[uuid.UUID, str]] = None,
         limit: int = 50,
     ) -> List[AgentControlCommand]:
-        """List notes for an agent or a session, newest first."""
+        """List notes for an agent or a session, newest first.
+
+        This is the composer history, so withdrawn, expired and failed notes
+        stay in the list. The sessions-list badge uses
+        ``note_summaries_for_sessions``, which counts only notes that steered
+        or still will.
+        """
         query = db.query(AgentControlCommand).filter(
             AgentControlCommand.account_id == account_id,
             AgentControlCommand.kind == "note",
@@ -608,6 +621,11 @@ class CRUDAgentControlCommand(CRUDBase[AgentControlCommand]):
         row, so a page of fifty sessions reads the note index once instead of
         once per row. Sessions with no note are simply absent from the result,
         which is what lets a caller render nothing for them.
+
+        Only notes that steered (or still will) count: cancelled, expired and
+        failed rows never reached the agent, so a session whose only note was
+        withdrawn does not show as steered. The composer list is the other
+        surface and still includes those rows as history.
         """
         wanted: List[uuid.UUID] = []
         seen: set[uuid.UUID] = set()
@@ -647,6 +665,7 @@ class CRUDAgentControlCommand(CRUDBase[AgentControlCommand]):
             .where(
                 AgentControlCommand.account_id == account_id,
                 AgentControlCommand.kind == "note",
+                AgentControlCommand.status.in_(NOTE_STATUSES_THAT_STEER),
                 AgentControlCommand.runtime_session_id.in_(wanted),
             )
             .subquery()

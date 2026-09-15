@@ -135,6 +135,41 @@ def test_sessions_list_carries_note_count_and_newest_author(
     assert quiet_row["latest_note_at"] is None
 
 
+def test_sessions_list_omits_notes_that_never_steered(client, db_session, test_user):
+    """A cancelled note does not put a 'was steered' badge on the session."""
+    agent = crud_managed_agent.create_custom_agent(
+        db_session,
+        account_id=test_user.account_id,
+        display_name="Withdrawn Agent",
+        commit=True,
+    )
+    session = _session(db_session, test_user, source_id="workspace-withdrawn")
+    note = _note(
+        db_session,
+        test_user,
+        agent,
+        session,
+        author_display="Jane Doe",
+        author_auth_method="jwt",
+    )
+    crud_agent_control_command.cancel_note(
+        db_session,
+        account_id=test_user.account_id,
+        note_id=note.command_id,
+        cancelled_at=datetime.now(UTC),
+    )
+
+    response = client.get("/api/v1/runtime-sessions")
+
+    assert response.status_code == 200
+    items = {item["id"]: item for item in response.json()["items"]}
+    row = items[str(session.id)]
+    assert row["note_count"] == 0
+    assert row["latest_note_author_display"] is None
+    assert row["latest_note_author_auth_method"] is None
+    assert row["latest_note_at"] is None
+
+
 def test_sessions_list_reads_notes_once_for_the_whole_page(
     client, db_session, test_user, monkeypatch
 ):

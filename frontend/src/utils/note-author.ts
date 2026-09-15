@@ -14,15 +14,16 @@
 /** The credential an agent author uses, as the server stamps it. */
 export const AGENT_AUTH_METHOD = 'agent';
 
-export type NoteAuthorKind = 'agent' | 'human';
+export type NoteAuthorKind = 'agent' | 'human' | 'unknown';
 
-/** Agent or person: the distinction the marker has to carry. */
+/** Agent, person, or an unrecognised credential: icon, tint and marker agree. */
 export function noteAuthorKind(
   authMethod: string | null | undefined
 ): NoteAuthorKind {
-  return (authMethod || '').trim().toLowerCase() === AGENT_AUTH_METHOD
-    ? 'agent'
-    : 'human';
+  const marker = noteAuthorMarker(authMethod);
+  if (marker === 'agent') return 'agent';
+  if (marker === 'unknown') return 'unknown';
+  return 'human';
 }
 
 /** Short marker beside the name, naming the credential kind. */
@@ -44,9 +45,12 @@ export function noteAuthorMarker(
   }
 }
 
-/** Icon for the marker, so the two kinds differ at a glance, not only in text. */
+/** Icon for the marker, so the kinds differ at a glance, not only in text. */
 export function noteAuthorIcon(authMethod: string | null | undefined): string {
-  return noteAuthorKind(authMethod) === 'agent' ? 'robot' : 'person';
+  const kind = noteAuthorKind(authMethod);
+  if (kind === 'agent') return 'robot';
+  if (kind === 'unknown') return 'question-circle';
+  return 'person';
 }
 
 /** The author's name, falling back to something honest when none was stored. */

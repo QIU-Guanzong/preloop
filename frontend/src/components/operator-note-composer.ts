@@ -163,6 +163,12 @@ export class OperatorNoteComposer extends LitElement {
       color: var(--sl-color-primary-700);
     }
 
+    /* Unknown is a state, not an outcome (DESIGN.md Chips): meta ink, no
+       person tint and no warning amber. The question icon carries the rest. */
+    .author-mark.unknown {
+      color: var(--console-meta-color, var(--sl-color-neutral-600));
+    }
+
     .state {
       color: var(--console-meta-color, var(--sl-color-neutral-600));
       flex: none;

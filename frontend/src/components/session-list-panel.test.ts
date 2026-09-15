@@ -215,5 +215,9 @@ describe('session-list-panel note indicator', () => {
       '[data-testid="session-notes-session-anon"]'
     );
     expect(row?.textContent).to.contain('Unknown author');
+    expect(row?.getAttribute('data-note-author-kind')).to.equal('unknown');
+    expect(row?.querySelector('sl-icon')?.getAttribute('name')).to.equal(
+      'question-circle'
+    );
   });
 });
