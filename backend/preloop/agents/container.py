@@ -55,6 +55,11 @@ from preloop.utils.execve_limits import (
 )
 from preloop.utils.repo_urls import repo_url_log_location, tracker_host_kind
 from preloop.utils.secret_scrubbing import scrub_secret_lines, scrub_secrets
+from preloop.utils.workspace_baseline import (
+    BaselineDelivery,
+    baseline_env,
+    build_workspace_baseline_shell,
+)
 from preloop.utils.workspace_seed import (
     build_workspace_seed_shell,
     parse_workspace_files,
@@ -3313,6 +3318,10 @@ class ContainerAgentExecutor(AgentExecutor):
         # (128 KiB) and shared with the rendered prompt. See
         # preloop/preloop#505 and preloop.utils.workspace_seed.
         env.update(self._workspace_seed_env(execution_context))
+        # A baseline resolved from a previous execution travels the same way,
+        # split across one variable per base64 chunk because a result envelope
+        # does not fit in a single execve string.
+        env.update(self._workspace_baseline_env(execution_context))
         if self.environment_profile:
             from preloop.services.flow_environment import profile_env
 
@@ -3427,6 +3436,13 @@ class ContainerAgentExecutor(AgentExecutor):
                 + shlex.quote(template_provider)
             )
 
+        # Write the review baseline resolved from a previous execution (or
+        # its mismatch marker) before the seeds, so an explicitly seeded
+        # file at the same path is written last and wins.
+        baseline_cmd = self._prepare_workspace_baseline_commands(execution_context)
+        if baseline_cmd:
+            commands.append(baseline_cmd)
+
         # Seed /workspace files declared on the trigger payload. After git
         # clone (whose pre-clone backup would sweep earlier writes away) and
         # before custom commands (which may consume the seeded files).
@@ -3495,6 +3511,50 @@ class ContainerAgentExecutor(AgentExecutor):
             [seed.path for seed in seeds],
         )
         return build_workspace_seed_shell(seeds)
+
+    @staticmethod
+    def _workspace_baseline_delivery(
+        execution_context: Dict[str, Any],
+    ) -> Optional[BaselineDelivery]:
+        """The baseline the orchestrator resolved for this run, if any.
+
+        The orchestrator does the account-scoped read and records the
+        outcome on the context; the agent layer only transports it. A
+        context without the key (an older execution, a flow that never
+        asked for a baseline) delivers nothing.
+        """
+        declared = execution_context.get("baseline_delivery")
+        if not isinstance(declared, dict):
+            return None
+        return BaselineDelivery.model_validate(declared)
+
+    def _workspace_baseline_env(
+        self, execution_context: Dict[str, Any]
+    ) -> Dict[str, str]:
+        """Environment variables carrying the baseline's base64 chunks."""
+        return baseline_env(self._workspace_baseline_delivery(execution_context))
+
+    def _prepare_workspace_baseline_commands(
+        self, execution_context: Dict[str, Any]
+    ) -> str:
+        """Build shell commands writing the baseline or its mismatch marker."""
+        delivery = self._workspace_baseline_delivery(execution_context)
+        if delivery is None:
+            return ""
+        if delivery.delivered:
+            self.logger.info(
+                "Delivering review baseline from execution %s to /workspace/%s",
+                delivery.source_execution_id,
+                delivery.path,
+            )
+        else:
+            self.logger.info(
+                "No review baseline delivered (%s); writing mismatch marker "
+                "to /workspace/%s",
+                delivery.mismatch_reason,
+                delivery.marker_path,
+            )
+        return build_workspace_baseline_shell(delivery)
 
     def _prepare_setup_commands(self, execution_context: Dict[str, Any]) -> str:
         """Build the ``git_clone_config.setup_commands`` block, if declared."""

@@ -1833,15 +1833,27 @@ class FlowTriggerService:
             )
             return "skipped_overlap"
 
+        # A schedule may carry a static payload (schedule_config.payload) for
+        # options it has no other way to state, such as the
+        # previous_result_execution_id a review subscription diffs against.
+        # The schedule's own fields are written last: a stored config does
+        # not get to rewrite when it fired.
+        payload: Dict[str, Any] = dict(schedule_config.get("payload") or {})
+        described_schedule = {
+            key: value for key, value in schedule_config.items() if key != "payload"
+        }
+        payload.update(
+            {
+                "schedule": described_schedule,
+                "timezone": schedule_config.get("timezone", "UTC"),
+                "scheduled_at": scheduled_at,
+            }
+        )
         event_data = {
             "source": "schedule",
             "type": "schedule",
             "account_id": str(flow.account_id) if flow.account_id else None,
-            "payload": {
-                "schedule": schedule_config,
-                "timezone": schedule_config.get("timezone", "UTC"),
-                "scheduled_at": scheduled_at,
-            },
+            "payload": payload,
         }
         nats_client = await get_nats_client()
         await self._start_flow_execution(
@@ -1860,6 +1872,10 @@ class FlowTriggerService:
         retry_of_execution_id: Optional[uuid.UUID] = None,
         triggered_by: Optional[str] = None,
         source_execution_id: Optional[uuid.UUID] = None,
+        *,
+        parent_execution_id: Optional[uuid.UUID] = None,
+        root_execution_id: Optional[uuid.UUID] = None,
+        delegation_depth: int = 0,
     ) -> Dict[str, Any]:
         """
         Manually trigger a flow execution for testing purposes or as a retry.
@@ -1874,6 +1890,13 @@ class FlowTriggerService:
                 only thing that tells two of them apart in the console list.
             source_execution_id: Controller-owned continuation of a persisted
                 execution on this flow. Never read from the trigger body.
+            parent_execution_id: Execution that started this one, for a
+                delegated child (#630). Controller owned: resolved from the
+                calling execution's own identity, never from a payload.
+            root_execution_id: First execution of the delegation tree, NULL on
+                a root run. Controller owned, as above.
+            delegation_depth: Distance from the root of the tree, 0 for a run
+                nobody delegated. Controller owned, as above.
 
         Returns:
             Dict with execution_id and status
@@ -1947,6 +1970,9 @@ class FlowTriggerService:
             status="PENDING",
             trigger_event_details=trigger_details,
             retry_of_execution_id=retry_of_execution_id,
+            parent_execution_id=parent_execution_id,
+            root_execution_id=root_execution_id,
+            delegation_depth=delegation_depth,
         )
 
         execution = crud_flow_execution.create(self.db, obj_in=execution_data)
