@@ -23,12 +23,14 @@ import {
   getFlowExecutions,
   getTrackers,
   deleteFlow,
+  sendCommandToExecution,
   triggerFlowExecution,
   updateFlow,
 } from '../../api';
 import { confirmDialog, showToast } from '../../components/confirm-dialog';
 import type { ResourceAction } from '../../components/resource-actions.ts';
 import { actionsFor, intersectActions } from '../../actions';
+import { confirmStopExecution } from '../../actions/flow-execution-actions';
 import {
   FLOW_BULK_ACTION_IDS,
   type FlowActionResource,
@@ -43,7 +45,11 @@ import {
   formatRelativeTime,
   parseUTCDate,
 } from '../../utils/date';
-import { executionDurationText } from '../../utils/execution';
+import {
+  IN_FLIGHT_EXECUTION_STATUSES,
+  RUNNING_STATUSES,
+  executionDurationText,
+} from '../../utils/execution';
 // Re-exported below: the list and the flow detail page state the trigger the
 // same way, so the reading lives in one module.
 import { flowTriggerSummary } from '../../utils/flow-trigger';
@@ -676,6 +682,12 @@ export class FlowsView extends LitElement {
       .execution-item:hover {
         background: var(--console-hover-tint);
       }
+      .execution-item-actions {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        flex-shrink: 0;
+      }
       .execution-info {
         display: flex;
         align-items: center;
@@ -798,6 +810,8 @@ export class FlowsView extends LitElement {
       this.narrowViewport = narrow;
     });
     this.narrowViewport = this.narrowViewportSubscription.matches;
+    window.addEventListener('focus', this.refreshOnReturn);
+    document.addEventListener('visibilitychange', this.handleVisibilityChange);
     await this.loadData();
     this.connectWebSocket();
   }
@@ -805,9 +819,31 @@ export class FlowsView extends LitElement {
   disconnectedCallback() {
     super.disconnectedCallback();
     this.unsubscribe?.();
+    window.removeEventListener('focus', this.refreshOnReturn);
+    document.removeEventListener(
+      'visibilitychange',
+      this.handleVisibilityChange
+    );
     this.narrowViewportSubscription?.disconnect();
     this.narrowViewportSubscription = null;
   }
+
+  /**
+   * Re-read the runs in flight when this tab comes back.
+   *
+   * The list is otherwise only corrected by websocket status updates, and a
+   * run stopped while it was still queued never produces one: nothing was
+   * dispatched to publish it. Without this the page kept showing runs the
+   * database had already marked STOPPED until a reload.
+   */
+  private refreshOnReturn = (): void => {
+    if (!this.isConnected) return;
+    void this.refreshExecutions();
+  };
+
+  private handleVisibilityChange = (): void => {
+    if (document.visibilityState === 'visible') this.refreshOnReturn();
+  };
 
   /**
    * The view actually painted. On a phone a seven-column table would either
@@ -878,7 +914,7 @@ export class FlowsView extends LitElement {
         getFlowExecutions({ limit: EXECUTIONS_SAMPLE_LIMIT }).catch(() => []),
         getFlowExecutions({
           limit: 20,
-          status: ['PENDING', 'INITIALIZING', 'STARTING', 'RUNNING'],
+          status: [...IN_FLIGHT_EXECUTION_STATUSES],
         }).catch(() => []),
       ]);
       if (flows === null) {
@@ -972,11 +1008,13 @@ export class FlowsView extends LitElement {
       ),
       getFlowExecutions({
         limit: 20,
-        status: ['PENDING', 'INITIALIZING', 'STARTING', 'RUNNING'],
+        status: [...IN_FLIGHT_EXECUTION_STATUSES],
       }).catch(() => this.activeExecutions),
     ]);
     this.executions = executions;
-    this.activeExecutions = activeExecutions;
+    this.activeExecutions = (activeExecutions || []).filter(
+      (execution: FlowExecution) => RUNNING_STATUSES.has(execution.status)
+    );
   }
 
   private connectWebSocket() {
@@ -992,14 +1030,22 @@ export class FlowsView extends LitElement {
         (exec) => exec.id === message.execution_id
       );
       if (index >= 0) {
+        const status = message.payload?.status;
         const updated = [...this.activeExecutions];
-        updated[index] = {
-          ...updated[index],
-          status: message.payload.status,
-          ...(message.payload.end_time && {
-            end_time: message.payload.end_time,
-          }),
-        };
+        if (!RUNNING_STATUSES.has(status)) {
+          // A run that reached a terminal status is no longer in flight. It
+          // used to be updated in place and left in the list, so the page
+          // went on counting runs that had already stopped.
+          updated.splice(index, 1);
+        } else {
+          updated[index] = {
+            ...updated[index],
+            status,
+            ...(message.payload.end_time && {
+              end_time: message.payload.end_time,
+            }),
+          };
+        }
         this.activeExecutions = updated;
       } else {
         void this.refreshExecutions();
@@ -1437,8 +1483,11 @@ export class FlowsView extends LitElement {
       `;
     }
 
-    const running = this.activeExecutions.filter(
-      (e) => e.status === 'RUNNING' || e.status === 'STARTING'
+    // Every run in flight, queued ones included: a run waiting for a worker
+    // is the one an operator most often wants to see and stop, and it used
+    // to be fetched and then filtered out of this section.
+    const inFlight = this.activeExecutions.filter((e) =>
+      RUNNING_STATUSES.has(e.status)
     );
 
     return html`
@@ -1446,11 +1495,11 @@ export class FlowsView extends LitElement {
       <div class="column-layout extra-wide">
         <div class="main-column">
           ${
-            running.length > 0
+            inFlight.length > 0
               ? html`
                   <div class="active-executions">
                     <div class="section-header">
-                      <h2>Running now</h2>
+                      <h2>In flight</h2>
                       <sl-button
                         size="small"
                         href=${router.urlForPath('/console/flows/executions')}
@@ -1459,7 +1508,7 @@ export class FlowsView extends LitElement {
                       </sl-button>
                     </div>
                     <div class="executions-list">
-                      ${running
+                      ${inFlight
                         .slice(0, 5)
                         .map((exec) => this.renderExecutionItem(exec))}
                     </div>
@@ -2251,11 +2300,61 @@ export class FlowsView extends LitElement {
             </div>
           </div>
         </div>
-        <sl-button size="small">
-          <sl-icon name="arrow-right"></sl-icon>
-        </sl-button>
+        <div
+          class="execution-item-actions"
+          @click=${(event: Event) => event.stopPropagation()}
+        >
+          <resource-actions
+            .actions=${this.executionActions(exec)}
+          ></resource-actions>
+          <sl-button size="small">
+            <sl-icon name="arrow-right"></sl-icon>
+          </sl-button>
+        </div>
       </div>
     `;
+  }
+
+  /**
+   * What a run in flight offers here, from the one registry the executions
+   * list and the execution page read. Stop is the point: a queued run could
+   * be seen from this page but only stopped from another one.
+   */
+  private executionActions(exec: FlowExecution): ResourceAction[] {
+    return actionsFor('flow-execution', exec, {
+      onCancel: () => void this.stopExecution(exec),
+    });
+  }
+
+  /**
+   * Stop a run from the Flows page, with the confirmation the executions
+   * list asks for, and show the result at once.
+   *
+   * The row is dropped from the in-flight list as soon as the command is
+   * accepted rather than waiting for a websocket update: a run stopped
+   * before it was ever dispatched has no runtime to publish one.
+   */
+  private async stopExecution(exec: FlowExecution): Promise<void> {
+    const confirmed = await confirmStopExecution(exec);
+    if (!confirmed) return;
+
+    try {
+      await sendCommandToExecution(exec.id, 'stop');
+      this.activeExecutions = this.activeExecutions.filter(
+        (row) => row.id !== exec.id
+      );
+      this.executions = this.executions.map((row) =>
+        row.id === exec.id ? { ...row, status: 'STOPPED' } : row
+      );
+      await this.refreshExecutions();
+    } catch (error) {
+      showToast(
+        error instanceof Error && error.message
+          ? error.message
+          : 'Could not stop the run. Try again.',
+        'danger'
+      );
+    }
   }
 
   /** Title case, so "SUCCEEDED" and "Active now" read as the same object. */

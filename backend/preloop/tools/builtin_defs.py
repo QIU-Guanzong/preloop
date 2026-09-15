@@ -333,6 +333,11 @@ GET_ISSUE_TRIAGE_CONTEXT_TOOL: Dict[str, Any] = {
         "recognized complexity scheme, and limitations for safe issue triage."
     ),
     "source": "builtin",
+    # Default-off: only issue triage flows need this read, so every agent on
+    # an account with a GitHub or GitLab tracker should not pay its
+    # tools/list context tax (cf. issue #128). Flow executions opt in via
+    # their allowed_mcp_tools allow-list, which bypasses this filter.
+    "default_enabled": False,
     "requires_tracker": True,
     "required_tracker_types": ["github", "gitlab"],
     "schema": {
@@ -356,6 +361,9 @@ APPLY_ISSUE_TRIAGE_TOOL: Dict[str, Any] = {
         "when no existing scheme is present."
     ),
     "source": "builtin",
+    # Default-off for the same reason as get_issue_triage_context: the write
+    # half of the triage pair is only useful to flows that selected it.
+    "default_enabled": False,
     "requires_tracker": True,
     "required_tracker_types": ["github", "gitlab"],
     "schema": {

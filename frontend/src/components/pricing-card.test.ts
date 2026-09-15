@@ -101,6 +101,28 @@ describe('PricingCard', () => {
     expect(planId).to.equal('business');
   });
 
+  it('keeps the annual note readable on the highlighted gradient card', async () => {
+    const el = await renderCard(
+      { ...BASE, highlight: true, price_note_annual: '$100 billed annually' },
+      'year'
+    );
+    const note = el.shadowRoot?.querySelector('.price-sub');
+    expect(note, 'annual note renders').to.exist;
+    expect(note?.textContent).to.contain('$100 billed annually');
+    // Grey-on-purple was the review finding: the note now carries the class
+    // that paints it in the card's own foreground colour.
+    expect(note?.classList.contains('on-highlight')).to.equal(true);
+  });
+
+  it('leaves the note in the secondary colour on a plain card', async () => {
+    const el = await renderCard(
+      { ...BASE, id: 'team', price_note_annual: '$900 billed annually' },
+      'year'
+    );
+    const note = el.shadowRoot?.querySelector('.price-sub');
+    expect(note?.classList.contains('on-highlight')).to.equal(false);
+  });
+
   it('uses the configured CTA label when one is supplied', async () => {
     const el = await renderCard({ ...BASE, cta_text: 'Contact us' });
     expect(el.shadowRoot?.querySelector('.cta')?.textContent).to.contain(

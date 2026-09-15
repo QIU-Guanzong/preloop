@@ -25,6 +25,10 @@ import {
 } from '../utils/date';
 import { approvalRequesterName } from '../utils/approval-identity';
 import {
+  IN_FLIGHT_EXECUTION_STATUSES,
+  RUNNING_STATUSES,
+} from '../utils/execution';
+import {
   ATTENTION_SUMMARY_EVENT,
   formatAttentionSummary,
   readAttentionSummary,
@@ -121,6 +125,22 @@ export class ConsoleHeader extends LitElement {
   };
 
   /**
+   * Re-read both counts the bell carries: waiting approvals and runs in
+   * flight.
+   *
+   * The executions list used to be loaded once and then maintained from
+   * websocket status updates only. A run stopped while it was still queued is
+   * never dispatched to an orchestrator, so no status update is ever
+   * published for it, and the bell kept counting runs the database had
+   * already marked STOPPED. Focus, visibility and reconnect are the three
+   * moments where this tab has to assume it missed something.
+   */
+  private refreshLiveCounts = (): void => {
+    this.refreshPendingApprovals();
+    void this.loadRunningExecutions();
+  };
+
+  /**
    * Coalesce focus/visibility/reconnect into one follow-up fetch, and retry
    * if that fetch was requested while a load was already in flight.
    */
@@ -134,7 +154,7 @@ export class ConsoleHeader extends LitElement {
 
   private handleVisibilityChange = (): void => {
     if (document.visibilityState === 'visible') {
-      this.refreshPendingApprovals();
+      this.refreshLiveCounts();
     }
   };
 
@@ -398,7 +418,7 @@ export class ConsoleHeader extends LitElement {
       ATTENTION_SUMMARY_EVENT,
       this.handleAttentionSummary as EventListener
     );
-    window.addEventListener('focus', this.refreshPendingApprovals);
+    window.addEventListener('focus', this.refreshLiveCounts);
     document.addEventListener('visibilitychange', this.handleVisibilityChange);
     this.pruneAndScheduleApprovalExpiry();
     this.fetchUserDetails();
@@ -423,7 +443,7 @@ export class ConsoleHeader extends LitElement {
     this.unsubscribeApprovals?.();
     this.unsubscribeNotifications?.();
     this.unsubscribeConnectionState?.();
-    window.removeEventListener('focus', this.refreshPendingApprovals);
+    window.removeEventListener('focus', this.refreshLiveCounts);
     document.removeEventListener(
       'visibilitychange',
       this.handleVisibilityChange
@@ -474,11 +494,20 @@ export class ConsoleHeader extends LitElement {
   }
 
   private async loadRunningExecutions() {
+    if (!this.isConnected) return;
     try {
-      this._runningExecutions = await api.getFlowExecutions({
+      const rows = await api.getFlowExecutions({
         limit: 10,
-        status: ['PENDING', 'INITIALIZING', 'STARTING', 'RUNNING'],
+        status: [...IN_FLIGHT_EXECUTION_STATUSES],
       });
+      if (!this.isConnected) return;
+      // The list the server answers with is the truth about what is in
+      // flight, including the runs that left the set while this tab was
+      // away. Filtering again costs nothing and keeps a terminal row out of
+      // the count if a cached or widened response ever carries one.
+      this._runningExecutions = (rows || []).filter((execution) =>
+        RUNNING_STATUSES.has(execution?.status)
+      );
     } catch (error) {
       console.error('Failed to load running executions:', error);
     }
@@ -711,7 +740,9 @@ export class ConsoleHeader extends LitElement {
     this.unsubscribeConnectionState = unifiedWebSocketManager.onStateChange(
       (state) => {
         if (state === ConnectionState.CONNECTED) {
-          this.refreshPendingApprovals();
+          // A reconnect means the gap is unknown: both counts are re-read
+          // rather than waited on, since the updates missed are gone.
+          this.refreshLiveCounts();
         }
       }
     );

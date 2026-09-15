@@ -218,6 +218,15 @@ class FlowExecution(Base):
     # column.
     failure_category = Column(String(32), nullable=True, index=True)
 
+    # Why a PENDING execution has not been admitted yet, from a closed
+    # vocabulary (today: "account_concurrency_cap", see
+    # preloop.services.execution_concurrency). Set by claim_execution when it
+    # refuses admission and cleared the moment the execution is claimed, so
+    # "nothing is happening" has an answer on the row itself rather than in a
+    # worker log. A log line per refusal is not an option: the recovery loop
+    # revisits every unclaimed execution every 30 seconds.
+    queued_reason = Column(String(200), nullable=True)
+
     # Retry tracking
     retry_of_execution_id = Column(
         UUID(as_uuid=True),
@@ -225,6 +234,29 @@ class FlowExecution(Base):
         nullable=True,
         index=True,
     )  # Links to the original execution this is a retry of
+
+    # Execution lineage. Every run that was started by another run (a
+    # delegated child, a continued park, ...) points at the execution that
+    # started it, so the whole delegation tree is answerable from the table
+    # without walking logs. NULL on root runs and on every row created before
+    # the columns existed.
+    #
+    # parent_execution_id is the direct caller (indexed: the children lookup
+    # is "who did I start?"). root_execution_id is the first execution of the
+    # chain (indexed so descendants of a root can be listed together) and is
+    # also NULL on the root itself. The whole tree is the root row matched
+    # by its own id plus rows whose root_execution_id points at that root.
+    # delegation_depth is the distance from the root (0 = root, 1 = direct
+    # child), so a budget or depth cap can be enforced with a single
+    # comparison instead of a recursive query.
+    parent_execution_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("flow_execution.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    root_execution_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    delegation_depth = Column(Integer, nullable=False, default=0, server_default="0")
 
     # Delivery-level idempotency key of the webhook delivery that created this
     # execution: "delivery:<X-GitHub-Delivery / X-Gitlab-Event-UUID>", or

@@ -258,3 +258,59 @@ class TestFlowExecutionDetailResponse:
 
         # Detail response should have at least all base fields
         assert base_fields.issubset(detail_fields)
+
+
+class TestExecutionLineageFields:
+    """The delegation-tree columns are readable from the execution schemas.
+
+    A console (or an operator with curl) has to be able to tell a root run
+    from a delegated child without walking logs, so the lineage has to survive
+    serialization on the response the detail endpoint returns.
+    """
+
+    def test_legacy_response_schema_exposes_lineage_with_root_defaults(self):
+        """Detail response carries lineage and defaults an existing row to a root."""
+        fields = FlowExecutionDetailResponse.model_fields
+
+        assert "parent_execution_id" in fields
+        assert "root_execution_id" in fields
+        assert "delegation_depth" in fields
+        assert fields["parent_execution_id"].default is None
+        assert fields["root_execution_id"].default is None
+        assert fields["delegation_depth"].default == 0
+
+    def test_api_response_schema_exposes_lineage_with_root_defaults(self):
+        """The endpoint's response schema does the same, for old and new rows."""
+        from preloop.models.schemas.flow_execution import FlowExecutionResponse
+
+        fields = FlowExecutionResponse.model_fields
+        assert "parent_execution_id" in fields
+        assert "root_execution_id" in fields
+        assert "delegation_depth" in fields
+        assert fields["parent_execution_id"].default is None
+        assert fields["root_execution_id"].default is None
+        assert fields["delegation_depth"].default == 0
+
+        now = datetime.now()
+        response = FlowExecutionResponse.model_validate(
+            {
+                "id": uuid.uuid4(),
+                "flow_id": uuid.uuid4(),
+                "status": "SUCCEEDED",
+                "start_time": now,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        assert response.parent_execution_id is None
+        assert response.root_execution_id is None
+        assert response.delegation_depth == 0
+
+    def test_creation_schema_accepts_lineage(self):
+        """Creation is the only writer: the create schema must carry the fields."""
+        from preloop.models.schemas.flow_execution import FlowExecutionCreate
+
+        fields = FlowExecutionCreate.model_fields
+        assert {"parent_execution_id", "root_execution_id", "delegation_depth"} <= set(
+            fields
+        )

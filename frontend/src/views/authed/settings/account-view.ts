@@ -86,11 +86,21 @@ interface HostedModelUsageRow {
 interface BillingSummary {
   subscription: Subscription | null;
   plan: Plan | null;
+  /**
+   * What the account is entitled to right now. An ended trial leaves a stale
+   * subscription row behind, so `subscription` alone never answers "what plan
+   * am I on?". Older servers omit these fields; the view falls back to the
+   * subscription status and period end.
+   */
+  effective_plan_id?: string | null;
+  effective_plan?: { id: string; name: string } | null;
   trial: {
     is_trialing: boolean;
     days: number;
     requires_payment_method: boolean;
     hosted_model_hard_cap_usd: number | null;
+    is_expired?: boolean;
+    ended_at?: string | null;
   };
   hosted_models: {
     billing_period_start: string;
@@ -335,6 +345,15 @@ export class AccountView extends LitElement {
       day: 'numeric',
       ...(sameYear ? {} : { year: 'numeric' }),
     });
+  }
+
+  /** A confirmed date, or null when the value would print as "Unknown". */
+  private _knownDate(value: string | null | undefined) {
+    if (!value) {
+      return null;
+    }
+    const formatted = this._formatDate(value);
+    return formatted === 'Unknown' ? null : formatted;
   }
 
   private _isPast(value: string | null | undefined) {
@@ -753,9 +772,18 @@ export class AccountView extends LitElement {
     // date instead of promising a renewal that never came. A trial does not
     // renew either, so it never says "Renews on" in any direction.
     const periodEnded = this._isPast(this.subscription?.current_period_end);
+    // An ended trial is not a trial. The provider row can sit at "trialing"
+    // long after the trial stopped entitling anything, so the card reports
+    // what the account has now, not the status Stripe last wrote.
+    const trialExpired =
+      trialSummary?.is_expired === true ||
+      (trialSummary?.is_expired === undefined &&
+        this.subscription?.status === 'trialing' &&
+        periodEnded);
     const isTrialing =
-      this.subscription?.status === 'trialing' ||
-      Boolean(trialSummary?.is_trialing);
+      !trialExpired &&
+      (this.subscription?.status === 'trialing' ||
+        Boolean(trialSummary?.is_trialing));
     const periodEndLabel = periodEnded
       ? isTrialing
         ? 'Trial ended'
@@ -769,9 +797,33 @@ export class AccountView extends LitElement {
           : 'Renews on';
     const quota = this._billingSummary?.ingestion_quota ?? null;
     const seats = this._billingSummary?.seats ?? null;
-    // No subscription row means the card-free free tier, which carries a
-    // ONE-TIME hosted credit rather than a monthly allowance.
-    const onFreePlan = !this.subscription;
+    // The Free tier carries a ONE-TIME hosted credit rather than a monthly
+    // allowance. Entitlement decides that, not the presence of a row: an
+    // account whose trial ended keeps its subscription row and is on Free.
+    const effectivePlanId =
+      this._billingSummary?.effective_plan_id ??
+      (!this.subscription || trialExpired ? 'free' : this.subscription.plan_id);
+    const onFreePlan = effectivePlanId === 'free';
+    // The plan that was trialed, for the sentence that says it ended. Once
+    // the server reports the effective plan, `plan` is Free and cannot name
+    // the trialed plan, so it is only used when it names something else.
+    const summaryPlan = this._billingSummary?.plan ?? null;
+    const trialedPlanName =
+      availablePlans.find((p) => p.id === this.subscription?.plan_id)?.name ??
+      (summaryPlan && summaryPlan.id !== effectivePlanId
+        ? summaryPlan.name
+        : null);
+    const trialEndedOn = this._knownDate(
+      trialSummary?.ended_at ?? this.subscription?.current_period_end
+    );
+    // Trial figures describe a trial that is over. Without the Free fields
+    // from the server there is no verified allowance to print, and printing
+    // the expired trial's cap as an allowance is the mis-sell to avoid.
+    const staleTrialFigures =
+      trialExpired && hostedSummary?.one_time_credit_usd == null;
+    const displayPlanName = trialExpired
+      ? (this._billingSummary?.effective_plan?.name ?? 'Free')
+      : currentPlanName;
 
     return html`
       <view-header headerText="Account" width="narrow"></view-header>
@@ -977,7 +1029,7 @@ export class AccountView extends LitElement {
                   <!-- Subscription Section (Proprietary Only) -->
                   <div class="card current-plan">
                     <div class="current-row">
-                      <span class="plan-name">${currentPlanName}</span>
+                      <span class="plan-name">${displayPlanName}</span>
                       <span
                         class="status-chip ${
                           this.subscription?.status === 'pending_cancellation'
@@ -986,7 +1038,7 @@ export class AccountView extends LitElement {
                         }"
                       >
                         ${
-                          this.subscription
+                          this.subscription && !trialExpired
                             ? this.subscription.status ===
                               'pending_cancellation'
                               ? 'Pending cancellation'
@@ -996,28 +1048,35 @@ export class AccountView extends LitElement {
                       </span>
                     </div>
                     ${
-                      this.subscription
-                        ? html`
-                            <div class="date">
-                              ${periodEndLabel}
-                              ${this._formatDate(
-                                this.subscription.current_period_end
-                              )}
-                            </div>
-                          `
-                        : html`<div class="date">
-                            You are on the Free plan. It does not expire and
-                            needs no card.
+                      trialExpired
+                        ? html`<div class="date" data-testid="trial-ended">
+                            Your
+                            ${trialedPlanName ? `${trialedPlanName} ` : ''}trial
+                            ended${trialEndedOn ? ` on ${trialEndedOn}` : ''}.
+                            You are on the Free plan.
                           </div>`
+                        : this.subscription
+                          ? html`
+                              <div class="date">
+                                ${periodEndLabel}
+                                ${this._formatDate(
+                                  this.subscription.current_period_end
+                                )}
+                              </div>
+                            `
+                          : html`<div class="date">
+                              You are on the Free plan. It does not expire and
+                              needs no card.
+                            </div>`
                     }
                     ${this._renderSeats(seats)}
                     ${
-                      trialSummary?.is_trialing
+                      trialSummary?.is_trialing && !trialExpired
                         ? html`
                             <div class="date">
                               Trial cap for built-in models:
                               ${this._formatUsd(
-                                trialSummary.hosted_model_hard_cap_usd
+                                trialSummary?.hosted_model_hard_cap_usd
                               )}
                             </div>
                           `
@@ -1026,7 +1085,7 @@ export class AccountView extends LitElement {
                     <div class="actions">
                       <sl-button
                         size="medium"
-                        variant="primary"
+                        variant=${trialExpired ? 'default' : 'primary'}
                         ?disabled=${!this.subscription || !this._canManageBilling}
                         @click=${this._handleManageSubscription}
                       >
@@ -1056,31 +1115,39 @@ export class AccountView extends LitElement {
                               )}
                             </div>
                             <div class="usage-grid">
-                              <div class="usage-metric">
-                                <div class="usage-label">
-                                  ${
-                                    onFreePlan
-                                      ? 'One-time credit'
-                                      : 'Monthly allowance'
-                                  }
-                                </div>
-                                <div class="usage-value">
-                                  ${this._formatUsd(
-                                    onFreePlan
-                                      ? (hostedSummary.one_time_credit_usd ??
-                                          hostedSummary.included_limit_usd)
-                                      : hostedSummary.included_limit_usd
-                                  )}
-                                </div>
-                              </div>
-                              <div class="usage-metric">
-                                <div class="usage-label">
-                                  Current active cap
-                                </div>
-                                <div class="usage-value">
-                                  ${this._formatUsd(hostedSummary.active_limit_usd)}
-                                </div>
-                              </div>
+                              ${
+                                staleTrialFigures
+                                  ? ''
+                                  : html`
+                                      <div class="usage-metric">
+                                        <div class="usage-label">
+                                          ${
+                                            onFreePlan
+                                              ? 'One-time credit'
+                                              : 'Monthly allowance'
+                                          }
+                                        </div>
+                                        <div class="usage-value">
+                                          ${this._formatUsd(
+                                            onFreePlan
+                                              ? (hostedSummary.one_time_credit_usd ??
+                                                  hostedSummary.included_limit_usd)
+                                              : hostedSummary.included_limit_usd
+                                          )}
+                                        </div>
+                                      </div>
+                                      <div class="usage-metric">
+                                        <div class="usage-label">
+                                          Current active cap
+                                        </div>
+                                        <div class="usage-value">
+                                          ${this._formatUsd(
+                                            hostedSummary.active_limit_usd
+                                          )}
+                                        </div>
+                                      </div>
+                                    `
+                              }
                               <div class="usage-metric">
                                 <div class="usage-label">Usage so far</div>
                                 <div class="usage-value">
@@ -1089,16 +1156,22 @@ export class AccountView extends LitElement {
                                   )}
                                 </div>
                               </div>
-                              <div class="usage-metric">
-                                <div class="usage-label">
-                                  Remaining before cap
-                                </div>
-                                <div class="usage-value">
-                                  ${this._formatUsd(
-                                    hostedSummary.remaining_limit_usd
-                                  )}
-                                </div>
-                              </div>
+                              ${
+                                staleTrialFigures
+                                  ? ''
+                                  : html`
+                                      <div class="usage-metric">
+                                        <div class="usage-label">
+                                          Remaining before cap
+                                        </div>
+                                        <div class="usage-value">
+                                          ${this._formatUsd(
+                                            hostedSummary.remaining_limit_usd
+                                          )}
+                                        </div>
+                                      </div>
+                                    `
+                              }
                               <div class="usage-metric">
                                 <div class="usage-label">Extra credits</div>
                                 <div class="usage-value">
@@ -1109,6 +1182,15 @@ export class AccountView extends LitElement {
                               </div>
                             </div>
                             <div class="usage-note">
+                              ${
+                                staleTrialFigures
+                                  ? html`<div style="margin-bottom: 0.75rem;">
+                                      Allowances from the ended trial are not
+                                      shown: they no longer describe what this
+                                      account can spend.
+                                    </div>`
+                                  : ''
+                              }
                               ${
                                 onFreePlan
                                   ? html`Built-in models are Preloop-managed
