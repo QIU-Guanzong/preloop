@@ -342,6 +342,11 @@ def test_a_held_sessions_chunks_survive_the_usage_purge_as_well(
 
     assert result.derived_deleted == 0
     assert _chunk_count(db_session, session.id) == 1
+    report = corpus_retention.orphan_chunk_report(db_session)
+    assert report.clean, report.as_dict()
+    corpus_retention.assert_no_orphan_chunks(
+        db_session, context="a usage purge of a held session"
+    )
 
 
 # --- the orphan check ------------------------------------------------------

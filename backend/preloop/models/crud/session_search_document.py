@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from sqlalchemy import String, case, delete, func, select, update
 from sqlalchemy.orm import Session
 
+from ..models.runtime_session import RuntimeSession
 from ..models.session_search_document import (
     EMBEDDING_STATE_PENDING,
     REDACTION_STATE_CLEAR,
@@ -25,6 +26,21 @@ from ..models.session_search_document import (
     SessionSearchDocument,
 )
 from .base import CRUDBase
+
+
+def _held_session_exists() -> Any:
+    """True when the chunk's session is under legal hold.
+
+    Shared by the usage-purge delete and the usage-orphan count so the two
+    cannot disagree about which chunks a hold is allowed to keep after the
+    usage row they quote is gone.
+    """
+    return (
+        select(RuntimeSession.id)
+        .where(RuntimeSession.id == SessionSearchDocument.runtime_session_id)
+        .where(RuntimeSession.legal_hold.is_(True))
+        .exists()
+    )
 
 
 def content_hash_for(text: str) -> str:
@@ -112,25 +128,34 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         return int(deleted or 0)
 
     def delete_for_sources(
-        self, db: Session, *, source_kind: str, source_ids: Sequence[Any]
+        self,
+        db: Session,
+        *,
+        source_kind: str,
+        source_ids: Sequence[Any],
+        excluding_held_sessions: bool = False,
     ) -> int:
         """Delete every chunk of many sources of one kind in one statement.
 
         Used by the purge, which removes its rows in id batches and has to
         take the chunks quoting them in the same pass. An empty batch is a no
         op rather than an unbounded ``IN ()``.
+
+        ``excluding_held_sessions`` keeps chunks whose session is under legal
+        hold. The usage purge sets this so a hold outranks a cutoff on a
+        different class; the same predicate is used by
+        :meth:`count_orphans_for_sources`.
         """
         wanted = [str(value) for value in source_ids]
         if not wanted:
             return 0
-        result = db.execute(
-            delete(SessionSearchDocument)
-            .where(
-                SessionSearchDocument.source_kind == source_kind,
-                SessionSearchDocument.source_id.in_(wanted),
-            )
-            .execution_options(synchronize_session=False)
+        stmt = delete(SessionSearchDocument).where(
+            SessionSearchDocument.source_kind == source_kind,
+            SessionSearchDocument.source_id.in_(wanted),
         )
+        if excluding_held_sessions:
+            stmt = stmt.where(~_held_session_exists())
+        result = db.execute(stmt.execution_options(synchronize_session=False))
         return int(result.rowcount or 0)
 
     def delete_for_sessions(
@@ -184,8 +209,6 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
 
     def count_orphans_for_sessions(self, db: Session) -> int:
         """Chunks whose runtime session is gone. Always zero, by construction."""
-        from ..models.runtime_session import RuntimeSession
-
         return int(
             db.execute(
                 select(func.count(SessionSearchDocument.id)).where(
@@ -199,7 +222,12 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         )
 
     def count_orphans_for_sources(
-        self, db: Session, *, source_kind: str, source_model: Any
+        self,
+        db: Session,
+        *,
+        source_kind: str,
+        source_model: Any,
+        excluding_held_sessions: bool = False,
     ) -> int:
         """Chunks of one kind whose source row is gone.
 
@@ -207,18 +235,25 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         different key types, so the join casts the source id to text rather
         than the chunk's id to a uuid: a malformed id then fails to match
         instead of failing the statement.
+
+        ``excluding_held_sessions`` matches :meth:`delete_for_sources`: a
+        chunk whose session is under legal hold is not an orphan of a
+        purged usage row. The operator check after a usage pass would
+        otherwise fail on the state the hold is designed to produce.
         """
+        clauses: List[Any] = [
+            SessionSearchDocument.source_kind == source_kind,
+            ~select(source_model.id)
+            .where(
+                func.cast(source_model.id, String) == SessionSearchDocument.source_id
+            )
+            .exists(),
+        ]
+        if excluding_held_sessions:
+            clauses.append(~_held_session_exists())
         return int(
             db.execute(
-                select(func.count(SessionSearchDocument.id)).where(
-                    SessionSearchDocument.source_kind == source_kind,
-                    ~select(source_model.id)
-                    .where(
-                        func.cast(source_model.id, String)
-                        == SessionSearchDocument.source_id
-                    )
-                    .exists(),
-                )
+                select(func.count(SessionSearchDocument.id)).where(*clauses)
             ).scalar_one()
         )
 

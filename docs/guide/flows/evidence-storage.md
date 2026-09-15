@@ -303,9 +303,11 @@ somebody decides otherwise.
 
 **The invariant is checkable, not assumed.**
 `preloop.services.session_search_retention.orphan_chunk_report` counts chunks
-whose session or usage row no longer exists. The answer after any purge pass
-is zero; `assert_no_orphan_chunks` is the same check as an assertion for tests
-and for an operator running it against a real database after a pass.
+whose session or usage row no longer exists, excluding chunks a legal hold
+deliberately kept after their usage row was purged. The answer after any
+purge pass is zero except chunks preserved by a hold;
+`assert_no_orphan_chunks` is the same check as an assertion for tests and
+for an operator running it against a real database after a pass.
 
 What this does not cover: a backup restored from before a purge reintroduces
 the chunks along with the records, exactly as it reintroduces everything else,

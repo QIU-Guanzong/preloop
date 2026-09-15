@@ -28,15 +28,12 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Sequence
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from preloop.models.crud import crud_session_search_document
 from preloop.models.models.api_usage import ApiUsage
-from preloop.models.models.runtime_session import RuntimeSession
 from preloop.models.models.session_search_document import (
     SOURCE_KIND_GATEWAY_INTERACTION,
-    SessionSearchDocument,
 )
 from preloop.services.retention_policy import CLASS_RUNTIME_SESSIONS, CLASS_USAGE
 
@@ -100,34 +97,14 @@ def delete_chunks_for_usage(db: Session, *, ids: Sequence[Any]) -> int:
     quotes for as long as the hold lasts, which is the intended direction of
     the trade.
     """
-    wanted = [str(value) for value in ids]
-    if not wanted:
+    if not ids:
         return 0
-    held_sessions = (
-        select(RuntimeSession.id)
-        .where(RuntimeSession.id == SessionSearchDocument.runtime_session_id)
-        .where(RuntimeSession.legal_hold.is_(True))
-        .exists()
+    return crud_session_search_document.delete_for_sources(
+        db,
+        source_kind=SOURCE_KIND_GATEWAY_INTERACTION,
+        source_ids=list(ids),
+        excluding_held_sessions=True,
     )
-    removable = (
-        db.execute(
-            select(SessionSearchDocument.id).where(
-                SessionSearchDocument.source_kind == SOURCE_KIND_GATEWAY_INTERACTION,
-                SessionSearchDocument.source_id.in_(wanted),
-                ~held_sessions,
-            )
-        )
-        .scalars()
-        .all()
-    )
-    if not removable:
-        return 0
-    deleted = (
-        db.query(SessionSearchDocument)
-        .filter(SessionSearchDocument.id.in_(list(removable)))
-        .delete(synchronize_session=False)
-    )
-    return int(deleted or 0)
 
 
 #: Per record class, the function that removes the corpus rows derived from a
@@ -156,6 +133,11 @@ def orphan_chunk_report(db: Session) -> OrphanChunkReport:
     by one account's purge is a bug in the purge, not a property of that
     account, and scoping the check to the account under test would hide a
     cross-account mistake, which is the mistake worth catching.
+
+    Usage orphans share the hold exclusion with
+    :func:`delete_chunks_for_usage`. A held session's gateway chunk that
+    outlives the usage row it quotes is the hold working, not a purge bug,
+    so it does not count.
     """
     return OrphanChunkReport(
         orphaned_sessions=crud_session_search_document.count_orphans_for_sessions(db),
@@ -163,6 +145,7 @@ def orphan_chunk_report(db: Session) -> OrphanChunkReport:
             db,
             source_kind=SOURCE_KIND_GATEWAY_INTERACTION,
             source_model=ApiUsage,
+            excluding_held_sessions=True,
         ),
     )
 

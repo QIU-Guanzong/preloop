@@ -300,3 +300,38 @@ def test_deleting_many_sources_in_one_statement(db_session, test_user):
         )
         == 1
     )
+
+
+def test_deleting_sources_skips_chunks_of_held_sessions(db_session, test_user):
+    """The usage purge and the orphan count share this hold exclusion."""
+    held = _session(db_session, test_user.account_id, source_id="held-session")
+    unheld = _session(db_session, test_user.account_id, source_id="unheld-session")
+    _write(db_session, test_user.account_id, held, "kept", source_id="held-src")
+    _write(db_session, test_user.account_id, unheld, "gone", source_id="unheld-src")
+    held.legal_hold = True
+    db_session.flush()
+
+    deleted = crud_session_search_document.delete_for_sources(
+        db_session,
+        source_kind=SOURCE_KIND_TRANSCRIPT_MESSAGE,
+        source_ids=["held-src", "unheld-src"],
+        excluding_held_sessions=True,
+    )
+
+    assert deleted == 1
+    assert (
+        crud_session_search_document.count_for_session(
+            db_session,
+            account_id=test_user.account_id,
+            runtime_session_id=held.id,
+        )
+        == 1
+    )
+    assert (
+        crud_session_search_document.count_for_session(
+            db_session,
+            account_id=test_user.account_id,
+            runtime_session_id=unheld.id,
+        )
+        == 0
+    )
