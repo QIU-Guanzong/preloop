@@ -63,6 +63,10 @@ from preloop.services.retention_policy import (
     RECORD_CLASSES,
     resolve_retention,
 )
+from preloop.services.service_roles import (
+    background_passes_allowed,
+    current_service_role,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -615,6 +619,14 @@ class RetentionPurgeSweeper:
         """Start the purge background task."""
         if self._running:
             logger.warning("Retention purge sweeper is already running")
+            return
+        if not background_passes_allowed():
+            # See preloop.services.service_roles: a pod that relays model
+            # responses does not also sweep every account.
+            logger.info(
+                "Retention purge sweeper not started for %s role.",
+                current_service_role(),
+            )
             return
         self._running = True
         self._task = asyncio.create_task(self._sweep_loop())
