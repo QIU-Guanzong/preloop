@@ -414,13 +414,20 @@ def sync_runtime_session_for_record(
         session_source_type=source,
         session_source_id=conversation_id,
     )
-    parent_session_id = _parent_session_id_for_record(
-        db,
-        account_id=account_id,
-        agent=agent,
-        source=source,
-        record=record,
-        observed_at=observed_at,
+    # Lineage is write-once. Skip the parent get_by_source when the value
+    # cannot land on an already-parented row.
+    need_parent = session is None or session.parent_session_id is None
+    parent_session_id = (
+        _parent_session_id_for_record(
+            db,
+            account_id=account_id,
+            agent=agent,
+            source=source,
+            record=record,
+            observed_at=observed_at,
+        )
+        if need_parent
+        else None
     )
     if session is None:
         session = crud_runtime_session.upsert_by_source(

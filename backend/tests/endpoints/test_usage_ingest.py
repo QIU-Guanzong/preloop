@@ -1003,6 +1003,47 @@ class TestRuntimeSessions:
         assert parent.parent_session_id is None
         assert worker.parent_session_id == parent.id
 
+    def test_already_parented_ingest_skips_the_parent_lookup(
+        self, client, db_session, test_user, monkeypatch
+    ):
+        """A follow-up turn on a parented session does not look the parent up."""
+        from preloop.services import usage_import
+
+        _make_cursor_agent(db_session, test_user.account_id)
+        db_session.commit()
+        parent_turn = self._lifecycle("response", "conv-parent", "turn-parent", 10)
+        worker_turn = self._lifecycle(
+            "response",
+            "conv-worker",
+            "turn-worker",
+            9,
+            parent_conversation_id="conv-parent",
+        )
+        assert (
+            client.post(
+                INGEST_URL, json=_payload([parent_turn, worker_turn])
+            ).status_code
+            == 200
+        )
+
+        calls = {"n": 0}
+        original = usage_import._parent_session_id_for_record
+
+        def counting(*args, **kwargs):
+            calls["n"] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(usage_import, "_parent_session_id_for_record", counting)
+        follow_up = self._lifecycle(
+            "response",
+            "conv-worker",
+            "turn-worker-2",
+            8,
+            parent_conversation_id="conv-parent",
+        )
+        assert client.post(INGEST_URL, json=_payload([follow_up])).status_code == 200
+        assert calls["n"] == 0
+
     def test_parent_conversation_reported_before_the_parent_has_any_turn(
         self, client, db_session, test_user
     ):
