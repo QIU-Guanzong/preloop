@@ -456,3 +456,23 @@ class TestOpenHandsPromptTransport:
         assert env["PROMPT"] == prompt
         assert env["AGENT_PROMPT_FILE"] == PROMPT_FILE_PATH
         assert f"{PROMPT_ENV_PREFIX}0" in env
+
+    @pytest.mark.asyncio
+    async def test_k8s_pins_script_and_chunked_prompt_env(self):
+        """Hosted Kubernetes must hand the base the script and chunked env."""
+        agent = OpenHandsAgent({})
+        ctx = self._context('Fix the "auth" bug')
+        script = agent._build_openhands_script(ctx)
+        with patch(
+            "preloop.agents.container.ContainerAgentExecutor._start_kubernetes_pod",
+            new_callable=AsyncMock,
+            return_value="job-name",
+        ) as mock_parent:
+            await agent._start_kubernetes_pod(ctx)
+            call_ctx = mock_parent.call_args[0][0]
+            assert call_ctx["_container_command"] == ["bash"]
+            assert call_ctx["_container_args"] == ["-c", script]
+            env = call_ctx["_agent_env"]
+            assert env["AGENT_PROMPT_FILE"] == PROMPT_FILE_PATH
+            assert f"{PROMPT_ENV_PREFIX}0" in env
+            assert env["AGENT_TYPE"] == "CodeActAgent"
