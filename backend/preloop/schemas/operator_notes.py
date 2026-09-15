@@ -62,9 +62,17 @@ class OperatorNoteCreate(BaseModel):
 
 
 class OperatorNoteAuthor(BaseModel):
-    """Who sent the note, as stamped into the delivered label."""
+    """Who sent the note, as stamped into the delivered label.
+
+    Exactly one of ``user_id`` and ``agent_id`` is set: a person wrote it, or
+    a managed agent did through the ``send_note`` tool. ``auth_method`` is
+    ``agent`` in the second case and is always derived server side.
+    """
 
     user_id: Optional[UUID] = None
+    agent_id: Optional[UUID] = Field(
+        None, description="Managed agent that wrote the note, when not a person."
+    )
     display: Optional[str] = None
     auth_method: Optional[str] = None
 
