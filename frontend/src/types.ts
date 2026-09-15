@@ -1370,6 +1370,12 @@ export interface AIModelGatewayUsageSummaryResponse {
   total_requests: number;
   successful_requests: number;
   failed_requests: number;
+  /** Newest failed request in the window; a dismissal is fingerprinted with it. */
+  last_failure_at?: string | null;
+  /** Alias that failure carried, which is how the console groups failures. */
+  last_failure_alias?: string | null;
+  /** Failures newer than the requested `failed_since`, null when unasked. */
+  failed_requests_since?: number | null;
   token_usage: GatewayTokenUsage;
   estimated_cost: number;
   requests_by_day: GatewayUsageByDay[];
@@ -1391,6 +1397,12 @@ export interface AIModelOverviewItem {
   unpriced_request_count: number;
   active_session_count: number;
   last_request_at: string | null;
+  /** Newest failed request in the window; a dismissal is fingerprinted with it. */
+  last_failure_at?: string | null;
+  /** Alias that failure carried, which is how the console groups failures. */
+  last_failure_alias?: string | null;
+  /** Failures newer than this model's `failed_since` pair, null when unasked. */
+  failed_requests_since?: number | null;
   pricing_source: 'override' | 'model_config' | 'catalog' | 'none';
 }
 

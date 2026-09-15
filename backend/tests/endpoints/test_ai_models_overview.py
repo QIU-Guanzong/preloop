@@ -125,11 +125,11 @@ def _make_usage(
     return usage
 
 
-def _overview(client, models_expected: int) -> List[dict]:
+def _overview(client, models_expected: int, **params: object) -> List[dict]:
     """Call the endpoint and return its rows, newest window."""
     response = client.get(
         "/api/v1/ai-models/overview",
-        params={"start_date": WINDOW_START.isoformat()},
+        params={"start_date": WINDOW_START.isoformat(), **params},
     )
     assert response.status_code == 200, response.text
     payload = response.json()
@@ -273,3 +273,108 @@ def test_overview_excludes_other_accounts(
     rows = _overview(client, 1)
 
     assert rows[0]["model_name"] == "own-model"
+
+
+def test_overview_reports_the_newest_failure_and_its_alias(
+    client, db_session: Session, test_user: User
+) -> None:
+    """The console fingerprints a dismissal with the newest failure.
+
+    Without this the Models page cannot tell a failure an operator has
+    already acknowledged from one that arrived afterwards, so it flags both
+    for the whole window.
+    """
+    model = _make_model(db_session, test_user, "failing-model")
+    _make_usage(db_session, test_user, model=model, alias="failing-model")
+    _make_usage(
+        db_session,
+        test_user,
+        model=model,
+        alias="failing-model",
+        status_code=500,
+        minutes_ago=90,
+    )
+    newest_failure = _make_usage(
+        db_session,
+        test_user,
+        model=model,
+        alias="failing-model-renamed",
+        status_code=502,
+        minutes_ago=15,
+    )
+    db_session.commit()
+
+    row = _overview(client, 1)[0]
+
+    assert row["failed_requests"] == 2
+    assert row["last_failure_at"] is not None
+    assert row["last_failure_at"].startswith(
+        newest_failure.timestamp.replace(tzinfo=None).isoformat()[:19]
+    )
+    # The alias the failing call carried, not the alias configured today:
+    # that is how the console groups gateway failures.
+    assert row["last_failure_alias"] == "failing-model-renamed"
+    # Nothing was asked for, so nothing is counted since.
+    assert row["failed_requests_since"] is None
+
+
+def test_overview_counts_failures_after_the_moment_a_model_was_marked_fixed(
+    client, db_session: Session, test_user: User
+) -> None:
+    """``failed_since`` splits the window's failures at one moment."""
+    model = _make_model(db_session, test_user, "recovered-model")
+    quiet = _make_model(db_session, test_user, "quiet-model")
+    for minutes_ago in (240, 200):
+        _make_usage(
+            db_session,
+            test_user,
+            model=model,
+            alias="recovered-model",
+            status_code=500,
+            minutes_ago=minutes_ago,
+        )
+    for minutes_ago in (30, 10):
+        _make_usage(
+            db_session,
+            test_user,
+            model=model,
+            alias="recovered-model",
+            status_code=503,
+            minutes_ago=minutes_ago,
+        )
+    db_session.commit()
+
+    marked_fixed_at = datetime.now(UTC) - timedelta(minutes=120)
+    rows = {
+        row["ai_model_id"]: row
+        for row in _overview(
+            client,
+            2,
+            failed_since=[f"{model.id}:{marked_fixed_at.isoformat()}"],
+        )
+    }
+
+    row = rows[str(model.id)]
+    assert row["failed_requests"] == 4
+    assert row["failed_requests_since"] == 2
+    # A model nobody asked about keeps the null, not a zero that would read
+    # as "nothing has failed since".
+    assert rows[str(quiet.id)]["failed_requests_since"] is None
+
+
+def test_overview_rejects_a_malformed_failed_since_pair(
+    client, db_session: Session, test_user: User
+) -> None:
+    """A pair that is not '<model id>:<timestamp>' is a bad request."""
+    _make_model(db_session, test_user, "any-model")
+    db_session.commit()
+
+    response = client.get(
+        "/api/v1/ai-models/overview",
+        params={
+            "start_date": WINDOW_START.isoformat(),
+            "failed_since": ["not-a-pair"],
+        },
+    )
+
+    assert response.status_code == 422, response.text

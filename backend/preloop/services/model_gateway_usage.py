@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -68,6 +68,33 @@ def normalize_usage_period(
         start_date = start_date.replace(tzinfo=timezone.utc)
 
     return start_date, end_date
+
+
+def _latest_failure(
+    usage_groups: List[Dict[str, Any]],
+) -> tuple[Optional[datetime], Optional[str], int]:
+    """Reduce per-alias usage groups to one model's newest failure.
+
+    ``get_gateway_usage_by_model`` groups by (model, alias, provider), so a
+    model called under two aliases comes back as two rows.
+
+    Args:
+        usage_groups: Grouped rows for a single model.
+
+    Returns:
+        ``(last_failure_at, alias it was recorded under, failures since the
+        caller's moment summed over the aliases)``.
+    """
+    last_failure_at: Optional[datetime] = None
+    last_failure_alias: Optional[str] = None
+    failures_since = 0
+    for row in usage_groups:
+        failures_since += row.get("failed_request_count_since") or 0
+        moment = row.get("last_failure_at")
+        if moment is not None and (last_failure_at is None or moment > last_failure_at):
+            last_failure_at = moment
+            last_failure_alias = row.get("model_alias") or row.get("provider_name")
+    return last_failure_at, last_failure_alias, failures_since
 
 
 class ModelGatewayUsageService:
@@ -262,8 +289,23 @@ class ModelGatewayUsageService:
         ai_model: AIModel,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        failed_since: Optional[datetime] = None,
     ) -> AIModelGatewayUsageSummaryResponse:
-        """Return gateway usage totals for one durable AI model."""
+        """Return gateway usage totals for one durable AI model.
+
+        Args:
+            ai_model: The model to report on.
+            start_date: Inclusive lower bound, naive values read as UTC.
+            end_date: Exclusive upper bound, naive values read as UTC.
+            failed_since: When set, ``failed_requests_since`` counts the
+                failures newer than this moment. The console asks for the
+                moment an operator marked the model fixed.
+
+        Returns:
+            The model's totals for the window, plus when it last failed and
+            under which alias, which is what the console fingerprints a
+            dismissed "needs attention" item with.
+        """
         account = crud_account.get(self.db, id=ai_model.account_id)
         if account is None:
             raise ValueError("Account not found")
@@ -292,6 +334,23 @@ class ModelGatewayUsageService:
             start_date=start_date,
             end_date=end_date,
         )
+        # The same grouped aggregate the Models page runs for the whole fleet,
+        # scoped to this one model, so the detail page fingerprints failures
+        # exactly as the list does instead of inventing a second rule.
+        failure_groups = crud_api_usage.get_gateway_usage_by_model(
+            self.db,
+            account_id=str(ai_model.account_id),
+            ai_model_ids=[str(ai_model.id)],
+            start_date=start_date,
+            end_date=end_date,
+            failed_since=(
+                {str(ai_model.id): failed_since} if failed_since is not None else None
+            ),
+            limit=None,
+        )
+        last_failure_at, last_failure_alias, failures_since = _latest_failure(
+            failure_groups
+        )
         return AIModelGatewayUsageSummaryResponse(
             ai_model_id=str(ai_model.id),
             model_name=ai_model.name,
@@ -302,6 +361,11 @@ class ModelGatewayUsageService:
             total_requests=totals["request_count"],
             successful_requests=totals["success_count"],
             failed_requests=totals["error_count"],
+            last_failure_at=last_failure_at,
+            last_failure_alias=last_failure_alias,
+            failed_requests_since=(
+                failures_since if failed_since is not None else None
+            ),
             token_usage=GatewayTokenUsage.from_row(totals),
             estimated_cost=totals["estimated_cost"],
             requests_by_day=[GatewayUsageByDay(**row) for row in requests_by_day],

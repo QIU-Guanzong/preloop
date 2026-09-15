@@ -7767,6 +7767,26 @@ paths:
             format: date-time
           - type: 'null'
           title: End Date
+      - name: failed_since
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: array
+            items:
+              type: string
+          - type: 'null'
+          description: 'Repeatable ''<ai_model_id>:<ISO-8601 timestamp>'' pair. Each
+            pair asks for that model''s failed_requests_since: how many of its failures
+            in this window are newer than the timestamp. The console passes the moment
+            an operator marked the model fixed, so a row can say ''2 failed since
+            fix'' instead of repeating the whole window''s total.'
+          title: Failed Since
+        description: 'Repeatable ''<ai_model_id>:<ISO-8601 timestamp>'' pair. Each
+          pair asks for that model''s failed_requests_since: how many of its failures
+          in this window are newer than the timestamp. The console passes the moment
+          an operator marked the model fixed, so a row can say ''2 failed since fix''
+          instead of repeating the whole window''s total.'
       responses:
         '200':
           description: Successful Response
@@ -7909,6 +7929,19 @@ paths:
             format: date-time
           - type: 'null'
           title: End Date
+      - name: failed_since
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          description: Count this model's failures newer than this moment into failed_requests_since.
+            The console passes the moment the model was marked fixed.
+          title: Failed Since
+        description: Count this model's failures newer than this moment into failed_requests_since.
+          The console passes the moment the model was marked fixed.
       responses:
         '200':
           description: Successful Response
@@ -11941,6 +11974,29 @@ components:
           type: integer
           title: Failed Requests
           default: 0
+        last_failure_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Last Failure At
+          description: Timestamp of the most recent failed gateway request in the
+            window, which the console fingerprints a dismissed 'needs attention' item
+            with
+        last_failure_alias:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Failure Alias
+          description: Alias the most recent failed request carried (the provider
+            name when it carried none)
+        failed_requests_since:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Failed Requests Since
+          description: Failures newer than the failed_since query parameter. Null
+            when the caller asked for no such moment.
         token_usage:
           $ref: '#/components/schemas/GatewayTokenUsage'
         estimated_cost:
@@ -12027,6 +12083,29 @@ components:
           - type: 'null'
           title: Last Request At
           description: Timestamp of the most recent gateway request
+        last_failure_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Last Failure At
+          description: Timestamp of the most recent failed gateway request in the
+            window. The console fingerprints a dismissed 'needs attention' item with
+            it, so one more failure brings the item back.
+        last_failure_alias:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Failure Alias
+          description: Alias the most recent failed request carried (the provider
+            name when it carried none), which is how the console groups gateway failures.
+        failed_requests_since:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Failed Requests Since
+          description: Failures newer than this model's failed_since query parameter.
+            Null when the caller asked for no such moment.
         pricing_source:
           type: string
           enum:

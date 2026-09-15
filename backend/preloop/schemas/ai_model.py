@@ -453,6 +453,29 @@ class AIModelOverviewItem(BaseModel):
     last_request_at: Optional[datetime] = Field(
         None, description="Timestamp of the most recent gateway request"
     )
+    last_failure_at: Optional[datetime] = Field(
+        None,
+        description=(
+            "Timestamp of the most recent failed gateway request in the "
+            "window. The console fingerprints a dismissed 'needs attention' "
+            "item with it, so one more failure brings the item back."
+        ),
+    )
+    last_failure_alias: Optional[str] = Field(
+        None,
+        description=(
+            "Alias the most recent failed request carried (the provider name "
+            "when it carried none), which is how the console groups gateway "
+            "failures."
+        ),
+    )
+    failed_requests_since: Optional[int] = Field(
+        None,
+        description=(
+            "Failures newer than this model's failed_since query parameter. "
+            "Null when the caller asked for no such moment."
+        ),
+    )
     pricing_source: Literal["override", "model_config", "catalog", "none"] = Field(
         "none", description="Where this model's effective price comes from"
     )
@@ -483,6 +506,28 @@ class AIModelGatewayUsageSummaryResponse(BaseModel):
     total_requests: int = 0
     successful_requests: int = 0
     failed_requests: int = 0
+    last_failure_at: Optional[datetime] = Field(
+        None,
+        description=(
+            "Timestamp of the most recent failed gateway request in the "
+            "window, which the console fingerprints a dismissed 'needs "
+            "attention' item with"
+        ),
+    )
+    last_failure_alias: Optional[str] = Field(
+        None,
+        description=(
+            "Alias the most recent failed request carried (the provider name "
+            "when it carried none)"
+        ),
+    )
+    failed_requests_since: Optional[int] = Field(
+        None,
+        description=(
+            "Failures newer than the failed_since query parameter. Null when "
+            "the caller asked for no such moment."
+        ),
+    )
     token_usage: GatewayTokenUsage
     estimated_cost: float = 0.0
     requests_by_day: List[GatewayUsageByDay] = Field(default_factory=list)
