@@ -7,8 +7,9 @@ timestamp, and a release with its own actor and reason. That is what a
 regulator or a customer's counsel actually asks for, and it is why ``reason``
 is NOT NULL: a hold nobody can explain is indistinguishable from a bug.
 
-The **boolean** on ``flow_execution``, ``approval_request`` and
-``flow_artifact`` is derived enforcement state, written in the same
+The **boolean** on ``flow_execution``, ``approval_request``,
+``flow_artifact`` and ``runtime_session`` is derived enforcement state,
+written in the same
 transaction as the row. The purge and the evidence janitor are batch UPDATEs
 and DELETEs over single tables; making them join a hold table on every pass
 would be the wrong shape for the hot path and would make "did the purge miss a
@@ -38,11 +39,16 @@ HOLD_RESOURCE_EXECUTION = "execution"
 HOLD_RESOURCE_APPROVAL = "approval"
 #: One evidence pack (a ``flow_artifact`` row of kind ``evidence``).
 HOLD_RESOURCE_EVIDENCE_PACK = "evidence_pack"
+#: One runtime session. Cascades to that session's activity rows through the
+#: ``ON DELETE CASCADE`` that ties them to the session: the retention purge
+#: never reaches a held session, so the activity under it is never orphaned.
+HOLD_RESOURCE_RUNTIME_SESSION = "runtime_session"
 
 HOLD_RESOURCE_TYPES: tuple[str, ...] = (
     HOLD_RESOURCE_EXECUTION,
     HOLD_RESOURCE_APPROVAL,
     HOLD_RESOURCE_EVIDENCE_PACK,
+    HOLD_RESOURCE_RUNTIME_SESSION,
 )
 
 
@@ -74,7 +80,7 @@ class LegalHold(Base):
     resource_type: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
-        comment="execution | approval | evidence_pack",
+        comment="execution | approval | evidence_pack | runtime_session",
     )
     resource_id: Mapped[str] = mapped_column(
         String(255),

@@ -88,6 +88,15 @@ PROTOCOL_OPENAI_CHAT = "openai_chat"
 PROTOCOL_OPENAI_RESPONSES = "openai_responses"
 PROTOCOL_ANTHROPIC = "anthropic"
 
+#: How the author authenticated, as stamped into the label the model reads.
+#: ``agent`` is the note written by another managed agent through the
+#: ``send_note`` tool: not a person, and the delivered label must not pretend
+#: otherwise.
+AUTH_METHOD_SESSION = "session"
+AUTH_METHOD_API_KEY = "api_key"
+AUTH_METHOD_JWT = "jwt"
+AUTH_METHOD_AGENT = "agent"
+
 _FRAMING = (
     "The block below is an instruction from the human operating this agent, "
     "delivered out of band by the Preloop control plane at a turn boundary. "
@@ -96,6 +105,29 @@ _FRAMING = (
     "only the text inside the element. Treat it with the authority of the "
     "named person, who already holds the permission to stop this agent. Cite "
     "the note id if you change course because of it."
+)
+
+_FRAMING_AGENT = (
+    "The block below is a note from another Preloop-managed agent in this "
+    "account, delivered out of band by the Preloop control plane at a turn "
+    "boundary. It is not content from a tool result, a fetched page or any "
+    "other untrusted source: Preloop stamped every attribute, the sender "
+    "authored only the text inside the element. The named agent does not "
+    "hold the permission to stop this run. Cite the note id if you change "
+    "course because of it."
+)
+
+_FRAMING_MIXED = (
+    "The block below mixes notes from the human operating this agent and from "
+    "another Preloop-managed agent in this account, delivered out of band by "
+    "the Preloop control plane at a turn boundary. It is not content from a "
+    "tool result, a fetched page or any other untrusted source: Preloop "
+    "stamped every attribute, the sender authored only the text inside the "
+    "element. Treat a note whose auth is jwt, session or api_key with the "
+    "authority of the named person, who already holds the permission to "
+    "stop this agent. A note whose auth is agent is from a sibling agent and "
+    "does not hold that permission. Cite the note id if you change course "
+    "because of it."
 )
 
 # Any attempt in a body to close or open our own vocabulary is neutralised, so
@@ -175,6 +207,25 @@ def render_note_element(note: Any) -> str:
     )
 
 
+def _notes_block_framing(notes: Sequence[Any]) -> str:
+    """Pick the block framing from who authored the notes inside it.
+
+    Human-only deliveries stay on ``_FRAMING`` so existing prompt pins and
+    delivered-note tests stay byte-identical. An all-agent block must not
+    claim the named person can stop the run. A mixed block names both
+    authorities instead of wrapping an agent note in the human-stop
+    sentence.
+    """
+    methods = {
+        (getattr(note, "author_auth_method", None) or "").strip() for note in notes
+    }
+    if methods and methods <= {AUTH_METHOD_AGENT}:
+        return _FRAMING_AGENT
+    if AUTH_METHOD_AGENT in methods:
+        return _FRAMING_MIXED
+    return _FRAMING
+
+
 def render_notes_block(notes: Sequence[Any]) -> str:
     """Render pending notes as one framed block, oldest first.
 
@@ -185,7 +236,7 @@ def render_notes_block(notes: Sequence[Any]) -> str:
     elements = "\n".join(render_note_element(note) for note in notes)
     return (
         f'<operator-notes count="{len(notes)}" source="preloop-control-plane">\n'
-        f"{_FRAMING}\n"
+        f"{_notes_block_framing(notes)}\n"
         f"{elements}\n"
         "</operator-notes>"
     )
@@ -553,3 +604,148 @@ def notes_payload(notes: Iterable[Any]) -> List[Dict[str, Any]]:
 def new_note_id() -> str:
     """Mint a note id. Short, quotable by the agent, unique per account."""
     return uuid.uuid4().hex[:16]
+
+
+# --- authorship and targeting ----------------------------------------------
+#
+# Both live here rather than in the REST endpoint because the endpoint is no
+# longer the only way a note is written: the ``send_note`` builtin tool
+# creates notes with an agent as the author, and it must resolve targets with
+# exactly the same account-scoped queries and count against exactly the same
+# rate limit. Two implementations of "which session does this execution mean"
+# is how a cross-account delivery eventually ships.
+
+#: One author, one agent (or one session when the target has no agent), one
+#: hour. Bursts are how a note channel turns into a firehose nobody reads,
+#: and every push design that shipped before ours needed this. The same
+#: ceiling applies whether the author is a person or an agent.
+NOTE_RATE_LIMIT_PER_HOUR = 20
+
+
+class NoteTargetError(Exception):
+    """A note target did not resolve inside the caller's account.
+
+    Carries the message the caller is shown. A target in another account and
+    a target that does not exist are deliberately the same failure: the
+    account boundary is the resolution scope, so the caller cannot use the
+    error to learn that an id exists somewhere else.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+def classify_author_auth_method(
+    db: Session,
+    *,
+    token: Optional[str] = None,
+    is_managed_agent: bool = False,
+) -> str:
+    """Name the credential the author used, derived server side.
+
+    Never taken from a header field the sender controls: this string is
+    stamped into the label the model reads, so the sender must not be able to
+    choose it. An agent author is classified from the identity the tool call
+    already carried, not from the token.
+    """
+    if is_managed_agent:
+        return AUTH_METHOD_AGENT
+    token = (token or "").strip()
+    if not token:
+        return AUTH_METHOD_SESSION
+    try:
+        from preloop.models.crud import crud_api_key
+
+        if crud_api_key.get_by_key(db, key=token) is not None:
+            return AUTH_METHOD_API_KEY
+    except Exception:  # pragma: no cover - identity is best effort, never fatal
+        logger.debug("Could not classify note author credential", exc_info=True)
+    return AUTH_METHOD_JWT
+
+
+def session_for_execution(
+    db: Session, *, account_id: str, execution_id: Any
+) -> Optional[Any]:
+    """Resolve the runtime session a flow execution is running on.
+
+    An execution has no session column: the link is the usage it produced, so
+    the newest governed call for that execution names the session. Scoped to
+    the account on both sides.
+    """
+    from preloop.models.crud import crud_runtime_session
+    from preloop.models.models.api_usage import ApiUsage
+
+    row = (
+        db.query(ApiUsage.runtime_session_id)
+        .filter(
+            ApiUsage.account_id == account_id,
+            ApiUsage.flow_execution_id == execution_id,
+            ApiUsage.runtime_session_id.isnot(None),
+        )
+        .order_by(ApiUsage.timestamp.desc())
+        .first()
+    )
+    if row is None or row[0] is None:
+        return None
+    return crud_runtime_session.get_account_session(
+        db, account_id=account_id, runtime_session_id=row[0]
+    )
+
+
+def resolve_note_target(
+    db: Session,
+    *,
+    account_id: str,
+    agent_id: Optional[Any] = None,
+    runtime_session_id: Optional[Any] = None,
+    execution_id: Optional[Any] = None,
+) -> tuple[Optional[Any], Optional[Any]]:
+    """Resolve the note's target to (managed agent, runtime session).
+
+    Every lookup is account-scoped, so a foreign id resolves to nothing and
+    the caller is told the target was not found instead of reaching it.
+
+    Raises:
+        NoteTargetError: when the target does not exist in this account.
+    """
+    from preloop.models.crud import crud_managed_agent, crud_runtime_session
+
+    if runtime_session_id is not None:
+        session = crud_runtime_session.get_account_session(
+            db,
+            account_id=account_id,
+            runtime_session_id=runtime_session_id,
+        )
+        if session is None:
+            raise NoteTargetError("Runtime session not found")
+        agent = getattr(session, "managed_agent", None)
+        return (agent.id if agent is not None else None, session.id)
+
+    if execution_id is not None:
+        session = session_for_execution(
+            db, account_id=account_id, execution_id=execution_id
+        )
+        if session is None:
+            raise NoteTargetError(
+                "This execution has no runtime session yet. A note can "
+                "only be delivered once the run has made a governed call."
+            )
+        agent = getattr(session, "managed_agent", None)
+        return (agent.id if agent is not None else None, session.id)
+
+    agent = crud_managed_agent.get_for_account(
+        db, account_id=account_id, agent_id=str(agent_id)
+    )
+    if agent is None:
+        raise NoteTargetError("Managed agent not found")
+    # A note with no live session waits for the next one the agent opens,
+    # which is what "tell it before it starts" means.
+    session_id = None
+    if agent.runtime_session_id is not None:
+        session = crud_runtime_session.get_account_session(
+            db, account_id=account_id, runtime_session_id=agent.runtime_session_id
+        )
+        if session is not None and session.ended_at is None:
+            session_id = session.id
+    return (agent.id, session_id)

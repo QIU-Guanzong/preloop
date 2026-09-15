@@ -57,6 +57,22 @@ def pack(db_session, test_user):
     return execution, artifact
 
 
+@pytest.fixture
+def runtime_session(db_session, test_user):
+    """One recent runtime session, so a hold has a session to freeze."""
+    started = datetime.now(UTC) - timedelta(hours=2)
+    session = models.RuntimeSession(
+        account_id=test_user.account_id,
+        session_source_type="managed_agent",
+        session_source_id=f"agent-{uuid.uuid4().hex[:8]}",
+        started_at=started,
+        last_activity_at=started,
+    )
+    db_session.add(session)
+    db_session.commit()
+    return session
+
+
 # --- settings --------------------------------------------------------------
 
 
@@ -277,6 +293,32 @@ def test_holds_are_listed_and_released(client, pack):
     history = client.get(f"{BASE}/holds", params={"active_only": False}).json()
     assert len(history) == 1
     assert history[0]["release_reason"] == "review closed, nothing found"
+
+
+def test_a_session_hold_is_visible_on_the_session_itself(
+    client, db_session, runtime_session
+):
+    """Finding session evidence is no use if the freeze is invisible (#650)."""
+    before = client.get(f"/api/v1/runtime-sessions/{runtime_session.id}")
+    assert before.status_code == 200
+    assert before.json()["session"]["legal_hold"] is False
+
+    created = client.post(
+        f"{BASE}/holds",
+        json={
+            "resource_type": "runtime_session",
+            "resource_id": str(runtime_session.id),
+            "reason": "litigation hold, matter 2026-07",
+        },
+    )
+
+    assert created.status_code == 201
+    assert created.json()["flagged"]["runtime_session"] == 1
+    detail = client.get(f"/api/v1/runtime-sessions/{runtime_session.id}")
+    assert detail.status_code == 200
+    assert detail.json()["session"]["legal_hold"] is True
+    listed = client.get("/api/v1/runtime-sessions").json()
+    assert [item["legal_hold"] for item in listed["items"]] == [True]
 
 
 def test_releasing_an_unknown_hold_is_a_404(client):

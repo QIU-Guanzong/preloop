@@ -5000,7 +5000,7 @@ paths:
       tags:
       - Retention
       summary: Create Legal Hold
-      description: Freeze one execution, approval or evidence pack until released.
+      description: Freeze one execution, approval, evidence pack or runtime session.
       operationId: create_legal_hold_api_v1_retention_holds_post
       security:
       - bearerAuth: []
@@ -9631,6 +9631,56 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/BatchExecutionsResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/flows/executions/{execution_id}/tree:
+    get:
+      tags:
+      - Flows
+      summary: Read Execution Tree
+      description: 'List what one execution delegated, with a rollup over the subtree.
+
+
+        The whole lineage is read in one indexed query (every descendant carries
+
+        the root''s id) and the subtree under the requested execution is walked
+
+        from that in memory, so asking a child about its own children costs the
+
+        same as asking the root. A run that delegated nothing answers with an
+
+        empty list and a zeroed rollup rather than a 404: "nothing here" is the
+
+        common case and the page renders it as an empty state.
+
+
+        The rollup covers the descendants only. The requested execution''s own
+
+        cost and tokens come back on ``execution``, so the console can show "this
+
+        run cost X, what it started cost Y" without adding the two numbers.'
+      operationId: read_execution_tree_api_v1_flows_executions__execution_id__tree_get
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: execution_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Execution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionTreeResponse'
         '422':
           description: Validation Error
           content:
@@ -15929,6 +15979,50 @@ components:
           title: Notification Emails
       type: object
       title: BudgetPolicyUpdate
+    CallableFlowEntry:
+      properties:
+        flow:
+          type: string
+          maxLength: 255
+          minLength: 1
+          title: Flow
+          description: Slug or name of the flow that may be called, resolved inside
+            the calling account. A reference that names no flow in the account is
+            rejected on write.
+        max_children:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Max Children
+          description: Maximum number of children one execution of the calling flow
+            may start through this entry. Unset means no per entry count ceiling.
+        max_usd_per_child:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Max Usd Per Child
+          description: Maximum spend in USD for each child started through this entry.
+            Unset means no per child cost ceiling.
+        allow_self:
+          type: boolean
+          title: Allow Self
+          description: Explicit opt in to a self reference. A flow calling itself
+            is a recursion risk, so it has to be asked for by name.
+          default: false
+      additionalProperties: false
+      type: object
+      required:
+      - flow
+      title: CallableFlowEntry
+      description: 'One delegation allowlist entry: a flow this flow may run, with
+        ceilings.
+
+
+        ``extra=''forbid''`` is deliberate. A misspelled key in an allowlist is a
+
+        ceiling that silently does not apply, so an unknown key is rejected on
+
+        write rather than stored and ignored.'
     ChainBreakRead:
       properties:
         kind:
@@ -16689,6 +16783,15 @@ components:
           title: Timezone
           description: IANA timezone name the schedule is evaluated in
           default: UTC
+        payload:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Payload
+          description: Static trigger payload merged into every scheduled run, for
+            options a schedule has no other way to state (e.g. previous_result_execution_id).
+            Bounded and inline only.
         type:
           type: string
           const: cron
@@ -16726,6 +16829,15 @@ components:
           title: Timezone
           description: IANA timezone name the schedule is evaluated in
           default: UTC
+        payload:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Payload
+          description: Static trigger payload merged into every scheduled run, for
+            options a schedule has no other way to state (e.g. previous_result_execution_id).
+            Bounded and inline only.
         type:
           type: string
           const: daily
@@ -16999,6 +17111,249 @@ components:
       - name
       title: ExecutionRunnerSummary
       description: 'List-row runner: kind and name only.'
+    ExecutionTreeNode:
+      properties:
+        model_alias:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model Alias
+          description: Alias of the model that served most of this execution's gateway
+            requests. Null when the execution has no attributable gateway usage.
+        provider_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Provider Name
+          description: Provider behind ``model_alias``, when recorded
+        models_used:
+          items:
+            $ref: '#/components/schemas/ExecutionModelUsage'
+          type: array
+          title: Models Used
+          description: Every distinct model alias this execution used with its request
+            count, most used first.
+        token_usage:
+          anyOf:
+          - $ref: '#/components/schemas/GatewayTokenUsage'
+          - type: 'null'
+          description: Tokens this execution's gateway traffic consumed, split by
+            direction and cache participation. Null when the run has no attributable
+            gateway usage, which is not the same as zero.
+        id:
+          type: string
+          format: uuid
+          title: Id
+        flow_id:
+          type: string
+          format: uuid
+          title: Flow Id
+        status:
+          type: string
+          title: Status
+        start_time:
+          type: string
+          format: date-time
+          title: Start Time
+        end_time:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: End Time
+        error_message:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error Message
+        failure_category:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Failure Category
+          description: Coarse machine-readable failure class for terminal executions
+            (runner_conflict, model_transient, agent_error, ...). Null when the execution
+            succeeded, is still running, or predates the field.
+        queued_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Queued Reason
+          description: Why a PENDING execution has not been admitted yet (account_concurrency_cap).
+            Null for every other row.
+        retry_of_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Retry Of Execution Id
+        parent_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Parent Execution Id
+          description: Execution that directly started this run; null for a root.
+        root_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Root Execution Id
+          description: First execution of this lineage; null on the root itself.
+        delegation_depth:
+          type: integer
+          title: Delegation Depth
+          description: Distance from the lineage root; 0 for roots and existing rows.
+          default: 0
+        batch_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Batch Id
+        tool_calls_count:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Tool Calls Count
+          default: 0
+        total_tokens:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Total Tokens
+          default: 0
+        estimated_cost:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Estimated Cost
+          default: 0.0
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        updated_at:
+          type: string
+          format: date-time
+          title: Updated At
+        flow_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Flow Name
+        parked_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Parked At
+          description: When this execution was parked waiting for a human decision
+            (status WAITING_FOR_HUMAN). Null for every other row.
+        park_expires_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Park Expires At
+          description: When the pending approval window closes
+        trigger_subject:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Trigger Subject
+          description: 'Short human-readable description of what triggered this execution,
+            e.g. ''preloop/preloop #78 · Pull Request Updated · 5167595c''. Null for
+            executions created before subjects were recorded, or where no identifying
+            detail could be derived.'
+        trigger_subject_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Trigger Subject Url
+          description: Link to the resource that triggered this execution (e.g. the
+            pull request or merge request), when the trigger payload carries one.
+        runner:
+          $ref: '#/components/schemas/ExecutionRunnerSummary'
+          description: Where this execution ran. List rows carry kind and name; detail
+            adds id and pool.
+        label:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Label
+          description: Label the caller passed to run_flow for this child, e.g. 'lint
+            the diff'. Null on a run that was not delegated and on a delegation that
+            passed no label.
+      type: object
+      required:
+      - id
+      - flow_id
+      - status
+      - start_time
+      - created_at
+      - updated_at
+      title: ExecutionTreeNode
+      description: 'One execution in a delegation tree, as the console draws the row.
+
+
+        A list row plus the two things only a tree knows: who started it
+
+        (``parent_execution_id``, already on the list row) and what it was asked
+
+        to do (``label``).'
+    ExecutionTreeResponse:
+      properties:
+        execution_id:
+          type: string
+          format: uuid
+          title: Execution Id
+          description: The execution asked about
+        root_execution_id:
+          type: string
+          format: uuid
+          title: Root Execution Id
+          description: Root of the lineage this execution belongs to; the execution's
+            own id when it is the root.
+        execution:
+          $ref: '#/components/schemas/ExecutionTreeNode'
+          description: The execution asked about, with its own cost and tokens
+        executions:
+          items:
+            $ref: '#/components/schemas/ExecutionTreeNode'
+          type: array
+          title: Executions
+          description: Every descendant of this execution, parents before children.
+            Empty for the overwhelming majority of runs, which delegate nothing.
+        rollup:
+          $ref: '#/components/schemas/BatchRollup'
+          description: Status counts, tokens, tool calls and estimated cost summed
+            over the descendants, in the same shape the batch listing uses. Excludes
+            the execution itself.
+        truncated:
+          type: boolean
+          title: Truncated
+          description: True when the lineage holds more executions than one read returns,
+            so the tree and the rollup are partial.
+          default: false
+      type: object
+      required:
+      - execution_id
+      - root_execution_id
+      - execution
+      - rollup
+      title: ExecutionTreeResponse
+      description: 'One execution''s subtree plus the rollup over it.
+
+
+        ``execution`` is the run that was asked about and its rollup fields are
+
+        its own; ``rollup`` covers the descendants only. The two are deliberately
+
+        never added together: "this run cost X, the work it delegated cost Y" is
+
+        the question the tree exists to answer, and one number would hide it.'
     FlowCreate:
       properties:
         name:
@@ -17096,6 +17451,17 @@ components:
           type: array
           title: Allowed Mcp Tools
           default: []
+        callable_flows:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/CallableFlowEntry'
+            type: array
+          - type: 'null'
+          title: Callable Flows
+          description: 'Delegation allowlist: the flows an execution of this flow
+            is permitted to run, each with optional per child ceilings. Unset or an
+            empty list means no delegation, which is the default for every flow. Nothing
+            enforces the list yet.'
         git_clone_config:
           anyOf:
           - $ref: '#/components/schemas/GitCloneConfig-Input'
@@ -17877,6 +18243,17 @@ components:
             type: array
           - type: 'null'
           title: Allowed Mcp Tools
+        callable_flows:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/CallableFlowEntry'
+            type: array
+          - type: 'null'
+          title: Callable Flows
+          description: 'Delegation allowlist: the flows an execution of this flow
+            is permitted to run, each with optional per child ceilings. Unset or an
+            empty list means no delegation, which is the default for every flow. Nothing
+            enforces the list yet.'
         git_clone_config:
           anyOf:
           - $ref: '#/components/schemas/GitCloneConfig-Output'
@@ -18124,6 +18501,17 @@ components:
             type: array
           - type: 'null'
           title: Allowed Mcp Tools
+        callable_flows:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/CallableFlowEntry'
+            type: array
+          - type: 'null'
+          title: Callable Flows
+          description: 'Delegation allowlist: the flows an execution of this flow
+            is permitted to run, each with optional per child ceilings. Unset or an
+            empty list means no delegation, which is the default for every flow. Nothing
+            enforces the list yet.'
         git_clone_config:
           anyOf:
           - $ref: '#/components/schemas/GitCloneConfig-Input'
@@ -19325,6 +19713,15 @@ components:
           title: Timezone
           description: IANA timezone name the schedule is evaluated in
           default: UTC
+        payload:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Payload
+          description: Static trigger payload merged into every scheduled run, for
+            options a schedule has no other way to state (e.g. previous_result_execution_id).
+            Bounded and inline only.
         type:
           type: string
           const: interval
@@ -19907,7 +20304,7 @@ components:
         resource_type:
           type: string
           title: Resource Type
-          description: One of execution, approval, evidence_pack
+          description: One of execution, approval, evidence_pack, runtime_session
         resource_id:
           type: string
           maxLength: 255
@@ -19924,7 +20321,7 @@ components:
       - resource_id
       - reason
       title: LegalHoldCreate
-      description: Place a hold on one execution, approval or evidence pack.
+      description: Place a hold on one execution, approval, evidence pack or session.
     LegalHoldRead:
       properties:
         id:
@@ -21552,6 +21949,13 @@ components:
             format: uuid
           - type: 'null'
           title: User Id
+        agent_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Agent Id
+          description: Managed agent that wrote the note, when not a person.
         display:
           anyOf:
           - type: string
@@ -21564,7 +21968,14 @@ components:
           title: Auth Method
       type: object
       title: OperatorNoteAuthor
-      description: Who sent the note, as stamped into the delivered label.
+      description: 'Who sent the note, as stamped into the delivered label.
+
+
+        Exactly one of ``user_id`` and ``agent_id`` is set: a person wrote it, or
+
+        a managed agent did through the ``send_note`` tool. ``auth_method`` is
+
+        ``agent`` in the second case and is always derived server side.'
     OperatorNoteCreate:
       properties:
         text:
@@ -24691,6 +25102,12 @@ components:
           - type: number
           - type: 'null'
           title: Optimization Potential Savings Usd
+        legal_hold:
+          type: boolean
+          title: Legal Hold
+          description: 'True while a legal hold freezes this session: the retention
+            purge leaves it and its activity alone until the hold is released'
+          default: false
       type: object
       required:
       - id
@@ -27501,6 +27918,15 @@ components:
           title: Timezone
           description: IANA timezone name the schedule is evaluated in
           default: UTC
+        payload:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Payload
+          description: Static trigger payload merged into every scheduled run, for
+            options a schedule has no other way to state (e.g. previous_result_execution_id).
+            Bounded and inline only.
         type:
           type: string
           const: weekly

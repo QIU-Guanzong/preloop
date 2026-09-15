@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
@@ -150,6 +151,140 @@ class CustomCommands(BaseModel):
     )
 
 
+# How many flows one flow may be allowed to call. A ceiling at all is the
+# point: an allowlist is meant to be reviewable by a human operator.
+CALLABLE_FLOWS_MAX_ENTRIES = 50
+
+
+class CallableFlowEntry(BaseModel):
+    """One delegation allowlist entry: a flow this flow may run, with ceilings.
+
+    ``extra='forbid'`` is deliberate. A misspelled key in an allowlist is a
+    ceiling that silently does not apply, so an unknown key is rejected on
+    write rather than stored and ignored.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    flow: str = Field(
+        min_length=1,
+        max_length=255,
+        description=(
+            "Slug or name of the flow that may be called, resolved inside the "
+            "calling account. A reference that names no flow in the account is "
+            "rejected on write."
+        ),
+    )
+    max_children: Optional[int] = Field(
+        default=None,
+        description=(
+            "Maximum number of children one execution of the calling flow may "
+            "start through this entry. Unset means no per entry count ceiling."
+        ),
+    )
+    max_usd_per_child: Optional[float] = Field(
+        default=None,
+        description=(
+            "Maximum spend in USD for each child started through this entry. "
+            "Unset means no per child cost ceiling."
+        ),
+    )
+    allow_self: bool = Field(
+        default=False,
+        description=(
+            "Explicit opt in to a self reference. A flow calling itself is a "
+            "recursion risk, so it has to be asked for by name."
+        ),
+    )
+
+    @field_validator("flow")
+    @classmethod
+    def strip_reference(cls, value: str) -> str:
+        """Trim the reference and refuse a blank one."""
+        reference = value.strip()
+        if not reference:
+            raise ValueError("callable_flows entry needs a flow slug or name")
+        return reference
+
+    @model_validator(mode="after")
+    def validate_ceilings(self) -> "CallableFlowEntry":
+        """Ceilings must be positive: zero or negative is not a budget.
+
+        Checked here rather than with ``gt=0`` field constraints so the message
+        names the entry it came from; an allowlist is read by a human.
+        """
+        if self.max_children is not None and self.max_children <= 0:
+            raise ValueError(
+                f"callable_flows entry '{self.flow}': max_children must be a "
+                f"positive integer, got {self.max_children}"
+            )
+        if self.max_usd_per_child is not None and self.max_usd_per_child <= 0:
+            raise ValueError(
+                f"callable_flows entry '{self.flow}': max_usd_per_child must be "
+                f"a positive number of USD, got {self.max_usd_per_child}"
+            )
+        return self
+
+
+_callable_flows_adapter: TypeAdapter = TypeAdapter(List[CallableFlowEntry])
+
+
+def validate_callable_flows_shape(
+    value: Optional[List[Any]],
+) -> Optional[List[CallableFlowEntry]]:
+    """Validate an incoming ``callable_flows`` list: entries and duplicates.
+
+    Account scoped resolution of each reference is a separate, database backed
+    step (``preloop.services.flow_delegation``); this is the shape half.
+
+    Raises:
+        ValueError: If two entries name the same flow.
+    """
+    if value is None:
+        return None
+    entries = [
+        item if isinstance(item, CallableFlowEntry) else CallableFlowEntry(**item)
+        for item in value
+    ]
+    if len(entries) > CALLABLE_FLOWS_MAX_ENTRIES:
+        raise ValueError(
+            f"callable_flows supports at most {CALLABLE_FLOWS_MAX_ENTRIES} "
+            f"entries, got {len(entries)}"
+        )
+    seen: set[str] = set()
+    for entry in entries:
+        key = entry.flow.casefold()
+        if key in seen:
+            raise ValueError(
+                f"callable_flows has a duplicate entry for '{entry.flow}'; "
+                "each flow may appear once, with one set of ceilings"
+            )
+        seen.add(key)
+    return entries
+
+
+def parse_callable_flows(value: Any) -> List[CallableFlowEntry]:
+    """Read a stored ``callable_flows`` value into a list of entries.
+
+    This is the reader helper every consumer should go through, because it is
+    what makes NULL and ``[]`` the same thing: both mean "this flow may call
+    nothing at all". Enforcement is not built yet, so nothing calls this for a
+    decision; it exists so the first caller does not have to re-derive that
+    equivalence.
+
+    Raises:
+        pydantic.ValidationError: If the stored value is not a valid allowlist.
+    """
+    if value is None:
+        return []
+    return _callable_flows_adapter.validate_python(value)
+
+
+def callable_flows_for(flow: Any) -> List[CallableFlowEntry]:
+    """Read the allowlist off a flow row or response, NULL safe."""
+    return parse_callable_flows(getattr(flow, "callable_flows", None))
+
+
 # Minimum interval between two scheduled runs of the same flow.
 MIN_SCHEDULE_INTERVAL = timedelta(minutes=5)
 # Maximum interval between two scheduled runs of the same flow. Bounds
@@ -165,6 +300,13 @@ MAX_SCHEDULE_INTERVAL = timedelta(days=366)
 # first few matched days - well inside 200 ticks.
 _SCHEDULE_CHECK_MAX_TICKS = 200
 
+# Bounds on ScheduleBase.payload, the static trigger payload a schedule
+# carries. A schedule states options (which baseline to diff against, a
+# depth knob), never data: anything larger belongs to a caller who can read
+# the trigger response.
+MAX_SCHEDULE_PAYLOAD_KEYS = 20
+MAX_SCHEDULE_PAYLOAD_BYTES = 4096
+
 
 # Canonical weekday order for weekly schedules (APScheduler abbreviations),
 # re-exported from the renderer so the order and the labels come from one place.
@@ -179,6 +321,14 @@ class ScheduleBase(BaseModel):
         default="UTC",
         description="IANA timezone name the schedule is evaluated in",
     )
+    payload: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Static trigger payload merged into every scheduled run, for "
+            "options a schedule has no other way to state (e.g. "
+            "previous_result_execution_id). Bounded and inline only."
+        ),
+    )
 
     @field_validator("timezone")
     @classmethod
@@ -188,6 +338,37 @@ class ScheduleBase(BaseModel):
             ZoneInfo(v)
         except Exception:
             raise ValueError(f"Unknown IANA timezone: '{v}'")
+        return v
+
+    @field_validator("payload")
+    @classmethod
+    def validate_payload(cls, v: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Bound the static payload and keep file seeding out of it.
+
+        A schedule config is read on every tick and rendered in the console,
+        so it carries options, not data: the cap is small on purpose, and
+        ``workspace_files`` is refused because inline file seeding belongs
+        to a caller who can see the response, not to a stored config.
+        """
+        if v is None:
+            return None
+        if MAX_SCHEDULE_PAYLOAD_KEYS < len(v):
+            raise ValueError(
+                f"schedule payload declares {len(v)} keys; max is "
+                f"{MAX_SCHEDULE_PAYLOAD_KEYS}"
+            )
+        for reserved in ("workspace_files", "schedule", "scheduled_at"):
+            if reserved in v:
+                raise ValueError(f"schedule payload may not declare '{reserved}'")
+        try:
+            encoded = len(json.dumps(v, ensure_ascii=False).encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"schedule payload must be JSON: {exc}") from exc
+        if encoded > MAX_SCHEDULE_PAYLOAD_BYTES:
+            raise ValueError(
+                f"schedule payload is {encoded} bytes, which exceeds the "
+                f"{MAX_SCHEDULE_PAYLOAD_BYTES} byte cap"
+            )
         return v
 
     def build_trigger(self):
@@ -626,6 +807,15 @@ class FlowBase(BaseModel):
     agent_config: Optional[Dict[str, Any]] = None
     allowed_mcp_servers: Optional[List[str]] = None
     allowed_mcp_tools: Optional[List[Dict[str, Any]]] = None
+    callable_flows: Optional[List[CallableFlowEntry]] = Field(
+        default=None,
+        description=(
+            "Delegation allowlist: the flows an execution of this flow is "
+            "permitted to run, each with optional per child ceilings. Unset or "
+            "an empty list means no delegation, which is the default for every "
+            "flow. Nothing enforces the list yet."
+        ),
+    )
     git_clone_config: Optional[GitCloneConfig] = None
     custom_commands: Optional[CustomCommands] = None
     is_preset: Optional[bool] = False
@@ -710,6 +900,12 @@ class FlowBase(BaseModel):
     def normalize_schedule_config(cls, v):
         """Accept the legacy untyped ``{"cron": ...}`` schedule shape."""
         return _normalize_legacy_schedule_config(v)
+
+    @field_validator("callable_flows")
+    @classmethod
+    def validate_callable_flows(cls, v):
+        """Reject duplicate allowlist entries and an oversized list."""
+        return validate_callable_flows_shape(v)
 
 
 class FlowCreate(FlowBase):

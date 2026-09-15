@@ -52,7 +52,7 @@ Onboarding, the MCP firewall, human approvals, and cutting session cost. Recorde
 
 Guides: [docs.preloop.ai](https://docs.preloop.ai). Start here: [onboard local agents (60s)](https://docs.preloop.ai/quickstart-cli/).
 
-[Operator notes](docs/guide/operator-notes.md) let an identified human steer a running agent: the note is delivered at the next turn boundary through the gateway or a hook, costs nothing when there is none, and is recorded as a human decision.
+[Operator notes](docs/guide/operator-notes.md) let an identified human (or, with an opt-in tool, another agent) steer a running agent: the note is delivered at the next turn boundary through the gateway or a hook, costs nothing when there is none, and is recorded with who sent it.
 
 The [account kill switch](docs/guide/account-kill-switch.md) blocks gateway and tool traffic, freezes pending approval deadlines, and requests termination of active managed flow executions, with audited staged recovery.
 

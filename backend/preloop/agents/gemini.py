@@ -9,6 +9,11 @@ from urllib.parse import urlsplit, urlunsplit
 
 from aiodocker.exceptions import DockerError
 
+from preloop.utils.execve_limits import (
+    PROMPT_FILE_PATH,
+    build_prompt_materialization_shell,
+    prompt_transport_env,
+)
 from preloop.services.mcp_config_service import MCPConfigService
 from preloop.services.model_runtime_resolver import gateway_url_for_api
 
@@ -190,6 +195,12 @@ class GeminiAgent(ContainerAgentExecutor):
             )
             env["MCP_CONFIG_JSON"] = json.dumps(mcp_config)
 
+        # The rendered prompt travels as base64 chunks in the environment and
+        # is reassembled inside the container. It is never a single variable
+        # nor an argv element, either of which the kernel caps at
+        # MAX_ARG_STRLEN (preloop.utils.execve_limits).
+        env.update(prompt_transport_env(execution_context["prompt"]))
+
         # Build the Gemini script using shared method
         script = self._build_gemini_script(execution_context)
 
@@ -253,6 +264,10 @@ class GeminiAgent(ContainerAgentExecutor):
                 "CpuQuota": int(os.getenv("AGENT_CPU_QUOTA", "100000")),
             },
         }
+
+        self._guard_docker_launch_payload(
+            container_config, what=f"{self.agent_type} container for {execution_id}"
+        )
 
         try:
             # Pull image if not available
@@ -339,9 +354,14 @@ class GeminiAgent(ContainerAgentExecutor):
             or "gemini-3-pro-preview"
         )
 
-        # Base64-encode the prompt so it can be safely embedded in
-        # the shell script without heredoc delimiter injection risk.
-        prompt_b64 = base64.b64encode(prompt.encode()).decode()
+        # The prompt is NOT embedded in this script. It arrives as base64
+        # chunks in the environment and is reassembled into PROMPT_FILE_PATH
+        # by the block below. Embedding it base64-encoded was safe against
+        # heredoc injection but not against MAX_ARG_STRLEN: base64 is a 4/3
+        # expansion, so a 83 KiB prompt made a 133 KiB script, past the
+        # 128 KiB the kernel allows for one execve string
+        # (preloop.utils.execve_limits).
+        prompt_block = build_prompt_materialization_shell(prompt)
 
         # Prepare initialization commands (git clone, custom commands)
         init_commands = self._prepare_init_commands(execution_context)
@@ -479,10 +499,12 @@ echo "MCP Timeout: {mcp_timeout_ms}ms"
 echo "Working Directory: $(pwd)"
 echo "==========================="
 
-# Write prompt via base64 to prevent heredoc delimiter injection.
-# The prompt may originate from external events (webhooks, triggers)
-# and could contain arbitrary text including shell metacharacters.
-echo '{prompt_b64}' | base64 -d > /tmp/prompt.txt
+# Reassemble the rendered prompt from its chunked environment transport.
+# The prompt may originate from external events (webhooks, triggers) and
+# could contain arbitrary text including shell metacharacters, so it never
+# appears in this script: it travels as base64 in the environment and is
+# decoded into a file here.
+{prompt_block}
 
 # Signal to the orchestrator that the agent is about to start.
 # Sentinel detection is suppressed until this marker is seen in logs.
@@ -548,7 +570,7 @@ set +e
 : > "{AGENT_OUTPUT_LOG_PATH}"
 : > "{ATTEMPT_LOG_PATH}"
 rm -f /tmp/preloop-gemini-session-id
-gemini --output-format stream-json --yolo -m "{model}" --prompt "$(cat /tmp/prompt.txt)" 2>&1 | node /tmp/gemini-json-log-filter.js | tee -a "{AGENT_OUTPUT_LOG_PATH}" "{ATTEMPT_LOG_PATH}"
+gemini --output-format stream-json --yolo -m "{model}" --prompt "$(cat {PROMPT_FILE_PATH})" 2>&1 | node /tmp/gemini-json-log-filter.js | tee -a "{AGENT_OUTPUT_LOG_PATH}" "{ATTEMPT_LOG_PATH}"
 GEMINI_PIPE_CODES=("${{PIPESTATUS[@]}}")
 GEMINI_EXIT_CODE=${{GEMINI_PIPE_CODES[0]:-1}}
 if [ "$GEMINI_EXIT_CODE" -eq 0 ] && [ "${{GEMINI_PIPE_CODES[1]:-0}}" -ne 0 ]; then
