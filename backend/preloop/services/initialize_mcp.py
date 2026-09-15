@@ -29,6 +29,7 @@ from preloop.tools.builtin_defs import (
     REQUEST_APPROVAL_TOOL,
     RESOLVE_SBOM_UPSTREAMS_TOOL,
     RUN_FLOW_TOOL,
+    SEND_NOTE_TOOL,
     UPDATE_ISSUE_DESCRIPTION,
     UPDATE_ISSUE_SCHEMA,
 )
@@ -838,6 +839,90 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
                 "as a safety measure. Retry the tool call.",
             }
         return _dump(behavior)
+
+    # Register Tool 7c2: send_note (shared metadata:
+    # tools.builtin_defs.SEND_NOTE_TOOL). One agent leaves an operator note
+    # for another agent, a runtime session or an execution. Everything that
+    # makes a note a note (target resolution, the envelope, the rate limit,
+    # the audit row, delivery) is the existing operator-note code; the only
+    # new fact is that the author is an agent. Default-off, so a flow opts in
+    # through its tool allow-list.
+    async def send_note(
+        text: str,
+        agent_id: str | None = None,
+        runtime_session_id: str | None = None,
+        execution_id: str | None = None,
+        ctx: Optional[Context] = None,
+    ) -> str:
+        """Leave an operator note for one other agent, session or execution.
+
+        Args:
+            text: The note body, as the calling agent wrote it.
+            agent_id: Target managed agent, current or next session.
+            runtime_session_id: Target runtime session, and only that session.
+            execution_id: Target flow execution, resolved to its session.
+            ctx: MCP context (injected by FastMCP).
+
+        Returns:
+            JSON: the created note, or a structured refusal naming the
+            problem. A bad call is refused, never raised, so the model can
+            correct it on the next turn.
+        """
+        import json
+
+        from preloop.models.db.session import get_db_session
+        from preloop.services.agent_send_note import send_note_from_agent
+        from preloop.services.approval_attribution import (
+            attribution_from_user_context,
+        )
+        from preloop.services.dynamic_fastmcp_http import get_current_user_context
+
+        user_context = get_current_user_context()
+        if not user_context:
+            return "Error: No user context available"
+
+        arguments = {
+            "text": text,
+            "agent_id": agent_id,
+            "runtime_session_id": runtime_session_id,
+            "execution_id": execution_id,
+        }
+        approved, error = await require_approval(
+            tool_name=SEND_NOTE_TOOL["name"],
+            tool_source="builtin",
+            account_id=user_context.account_id,
+            arguments=arguments,
+            ctx=ctx,
+            workflow_id=_rule_workflow_id_var.get(None),
+            correlation_id=_correlation_id_var.get(None),
+            justification=_justification_var.get(None),
+        )
+        if not approved:
+            return error
+
+        # The author is the identity the call already carries, never an
+        # argument: an agent must not be able to sign a note as another one.
+        caller = attribution_from_user_context(user_context)
+        db = next(get_db_session())
+        try:
+            result = send_note_from_agent(
+                db,
+                account_id=user_context.account_id,
+                author_agent_id=caller.managed_agent_id,
+                text=text,
+                agent_id=agent_id,
+                runtime_session_id=runtime_session_id,
+                execution_id=execution_id,
+            )
+        finally:
+            db.close()
+        return json.dumps(result)
+
+    send_note_tool = FunctionTool.from_function(
+        send_note, description=SEND_NOTE_TOOL["description"]
+    )
+    send_note_tool.parameters = deepcopy(SEND_NOTE_TOOL["schema"])
+    mcp.add_tool(send_note_tool)
 
     # Register Tool 7d: resolve_sbom_upstreams (shared metadata:
     # tools.builtin_defs.RESOLVE_SBOM_UPSTREAMS_TOOL). Read-only registry

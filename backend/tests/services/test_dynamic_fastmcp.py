@@ -1959,3 +1959,137 @@ class TestHelperFunctions:
         assert result.runtime_principal_type == "flow_execution"
         assert result.runtime_principal_id == "flow-exec-1"
         assert result.runtime_principal_name == "Test Flow"
+
+
+class TestSendNoteToolExposure:
+    """send_note is default-off: opt in, or it is neither listed nor callable.
+
+    An agent that can note any sibling by default is a channel every account
+    pays for in tools/list context and nobody asked for (#628, #128).
+    """
+
+    def test_send_note_is_default_disabled_in_the_catalog(self):
+        """The metadata the list filter and the call gate both read."""
+        from preloop.api.endpoints.tools import BUILTIN_TOOLS
+
+        entry = next(t for t in BUILTIN_TOOLS if t["name"] == "send_note")
+        assert entry["default_enabled"] is False
+        assert entry["source"] == "builtin"
+        assert entry["requires_tracker"] is False
+
+    async def test_list_tools_hides_send_note_without_an_explicit_enable(
+        self, dynamic_mcp, user_context
+    ):
+        """A fresh agent is not offered a way to note its siblings."""
+        dynamic_mcp._user_context_provider = lambda: user_context
+
+        default_tools = [
+            Tool(name="send_note", description="SN", parameters={}),
+            Tool(name="get_issue", description="Get issue", parameters={}),
+        ]
+
+        with patch("preloop.services.dynamic_fastmcp.get_db") as mock_get_db:
+            mock_db = MagicMock()
+            mock_get_db.side_effect = lambda: iter([mock_db])
+
+            with (
+                patch(
+                    "preloop.services.mcp_tool_discovery._get_proxied_tools_sync",
+                    return_value=[],
+                ),
+                patch(
+                    "preloop.services.dynamic_fastmcp.crud_tool_configuration.get_multi_by_account",
+                    return_value=[],
+                ),
+                patch(
+                    "preloop.models.crud.crud_account.get",
+                    return_value=MagicMock(meta_data={}),
+                ),
+                patch.object(
+                    FastMCP, "list_tools", new=AsyncMock(return_value=default_tools)
+                ),
+            ):
+                result = await dynamic_mcp.list_tools()
+
+        names = {t.name for t in result}
+        assert "send_note" not in names
+        assert "get_issue" in names
+
+    async def test_list_tools_offers_send_note_to_a_flow_that_selected_it(
+        self, dynamic_mcp
+    ):
+        """A flow's allow-list is the opt in, and it survives the default."""
+        user_context = UserContext(
+            user_id="1",
+            account_id="1",
+            username="test",
+            has_tracker=False,
+            enabled_default_tools=[],
+            enabled_proxied_tools=[],
+            flow_execution_id="flow-exec-handoff",
+            allowed_flow_tools=["send_note"],
+        )
+        dynamic_mcp._user_context_provider = lambda: user_context
+
+        default_tools = [
+            Tool(name="send_note", description="SN", parameters={}),
+            Tool(name="get_issue", description="Get issue", parameters={}),
+        ]
+
+        with patch("preloop.services.dynamic_fastmcp.get_db") as mock_get_db:
+            mock_db = MagicMock()
+            mock_get_db.side_effect = lambda: iter([mock_db])
+
+            with (
+                patch(
+                    "preloop.services.mcp_tool_discovery._get_proxied_tools_sync",
+                    return_value=[],
+                ),
+                patch(
+                    "preloop.services.dynamic_fastmcp.crud_tool_configuration.get_multi_by_account",
+                    return_value=[],
+                ),
+                patch(
+                    "preloop.models.crud.crud_account.get",
+                    return_value=MagicMock(meta_data={}),
+                ),
+                patch.object(
+                    FastMCP, "list_tools", new=AsyncMock(return_value=default_tools)
+                ),
+            ):
+                result = await dynamic_mcp.list_tools()
+
+        names = {t.name for t in result}
+        assert names == {"send_note"}
+
+    async def test_calling_send_note_without_an_enable_is_refused(
+        self, dynamic_mcp, user_context
+    ):
+        """Hidden is not enough: calling it by name must be refused too."""
+        from fastmcp.tools.tool import ToolResult
+
+        dynamic_mcp._user_context_provider = lambda: user_context
+
+        with (
+            patch("preloop.services.dynamic_fastmcp.get_db") as mock_get_db,
+            patch(
+                "preloop.services.dynamic_fastmcp.crud_tool_configuration.get_multi_by_account",
+                return_value=[],
+            ),
+            patch.object(
+                dynamic_mcp.__class__.__bases__[0],
+                "call_tool",
+                new=AsyncMock(),
+                create=True,
+            ) as mock_super,
+        ):
+            mock_db = MagicMock()
+            mock_get_db.side_effect = lambda: iter([mock_db])
+
+            result = await dynamic_mcp.call_tool(
+                "send_note", {"text": "hi", "agent_id": str(uuid4())}
+            )
+
+        mock_super.assert_not_called()
+        assert isinstance(result, ToolResult)
+        assert "disabled" in result.content[0].text.lower()

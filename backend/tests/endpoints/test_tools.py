@@ -98,6 +98,7 @@ class TestListAllTools:
             "improve_compliance",
             "permission_prompt",
             "resolve_sbom_upstreams",
+            "send_note",
             "run_flow",
             "get_execution",
         }

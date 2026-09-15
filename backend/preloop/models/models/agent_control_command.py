@@ -91,6 +91,16 @@ class AgentControlCommand(Base):
         ForeignKey("user.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # The author when the author is not a person: a managed agent that called
+    # the ``send_note`` tool. Exactly one of this and ``created_by_user_id``
+    # is set on a note; both are NULL on a ``command`` row. Kept as its own
+    # column rather than only inside the envelope because the per author rate
+    # limit keys on it.
+    created_by_managed_agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("managed_agent.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     delivered_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -138,7 +148,10 @@ class AgentControlCommand(Base):
     )
 
     account = relationship("Account")
-    managed_agent = relationship("ManagedAgent")
+    managed_agent = relationship("ManagedAgent", foreign_keys=[managed_agent_id])
+    created_by_managed_agent = relationship(
+        "ManagedAgent", foreign_keys=[created_by_managed_agent_id]
+    )
     runtime_session = relationship("RuntimeSession")
     created_by_user = relationship("User", foreign_keys=[created_by_user_id])
     cancelled_by_user = relationship("User", foreign_keys=[cancelled_by_user_id])
@@ -166,6 +179,14 @@ class AgentControlCommand(Base):
             "ix_agent_control_note_pending_agent",
             "managed_agent_id",
             "status",
+            postgresql_where=text("kind = 'note'"),
+        ),
+        # "How many notes has this agent written in the last hour" is the rate
+        # limit for agent authors, so the author column leads.
+        Index(
+            "ix_agent_control_note_author_agent",
+            "created_by_managed_agent_id",
+            "created_at",
             postgresql_where=text("kind = 'note'"),
         ),
         CheckConstraint(
