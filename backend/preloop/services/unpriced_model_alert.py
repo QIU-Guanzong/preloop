@@ -68,7 +68,7 @@ _local_recent: dict[str, float] = {}
 def _upstream_provider(ai_model: models.AIModel, provider_name: Optional[str]) -> str:
     """Best-effort name of the upstream actually serving the model.
 
-    Different models.AIModel configs for one upstream model can carry different
+    Different AIModel configs for one upstream model can carry different
     provider names — the production Auto Router incident had it registered as
     both ``openrouter`` and ``openai-compatible`` (pointed at the OpenRouter
     endpoint). Normalising every OpenRouter-fronted config to ``openrouter``
@@ -90,7 +90,7 @@ def _dedupe_key(
 
     One gateway model is addressable under several alias spellings
     (``openrouter/auto-beta``, ``openai-compatible/openrouter/auto-beta``,
-    ``openrouter/openrouter/auto-beta``), and different models.AIModel configs for
+    ``openrouter/openrouter/auto-beta``), and different AIModel configs for
     the same upstream model may even carry different provider names. Keying
     on the raw ``(provider, alias)`` pair fired one alert per spelling. When
     the resolved model is available, the key is instead the canonical

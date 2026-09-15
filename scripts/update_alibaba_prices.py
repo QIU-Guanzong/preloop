@@ -35,7 +35,6 @@ SEED_PATH = (
     / "data"
     / "alibaba_international_prices.json"
 )
-SOURCE_URL = "https://www.alibabacloud.com/help/en/model-studio/list-models"
 
 
 def _models_from_payload(payload: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:

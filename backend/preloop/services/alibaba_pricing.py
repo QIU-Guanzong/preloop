@@ -224,6 +224,7 @@ def tariff_for(
     live = live_tariff(ai_model, observed_at=observed_at)
     if live is not None:
         return live
+    # Concurrent install_reviewed_catalogs() must not fall through to seed.
     if reviewed_before_effective(ai_model, observed_at=observed_at):
         return None
     if region == "singapore-international":
@@ -252,13 +253,6 @@ def catalog_entry(ai_model: models.AIModel) -> tuple[str, dict[str, Any]] | None
 
     prefix = f"alibaba/{tariff_source(ai_model) or region}"
     return f"{prefix}/{ai_model.model_identifier}", entry
-
-
-def _is_live(ai_model: models.AIModel, tariff: Tariff) -> bool:
-    from preloop.services.alibaba_price_catalog import live_tariff
-
-    live = live_tariff(ai_model)
-    return live is tariff
 
 
 def select_tier(tariff: Tariff, prompt_tokens: int) -> Tariff | None:
