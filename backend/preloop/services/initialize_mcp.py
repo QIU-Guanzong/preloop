@@ -21,15 +21,17 @@ from preloop.services.dynamic_fastmcp import (
     create_dynamic_mcp_server,
 )
 from preloop.tools.builtin_defs import (
-    APPLY_ISSUE_TRIAGE_TOOL,
-    GET_EXECUTION_TOOL,
-    GET_ISSUE_TRIAGE_CONTEXT_TOOL,
     ASK_USER_TOOL,
+    GET_EXECUTION_TOOL,
+    GET_ISSUE_DESCRIPTION,
+    GET_ISSUE_SCHEMA,
     PERMISSION_PROMPT_TOOL,
     REQUEST_APPROVAL_TOOL,
     RESOLVE_SBOM_UPSTREAMS_TOOL,
     RUN_FLOW_TOOL,
     SEND_NOTE_TOOL,
+    UPDATE_ISSUE_DESCRIPTION,
+    UPDATE_ISSUE_SCHEMA,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,9 +102,12 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
     from preloop.api.endpoints import mcp as mcp_router
 
     # Register Tool 1: get_issue
-    @mcp.tool()
-    async def get_issue(issue: str, ctx: Optional[Context] = None) -> str:
-        """Get detailed information about an issue by its identifier (URL, key, or ID)."""
+    async def get_issue(
+        issue: str,
+        include: list[str] | None = None,
+        ctx: Optional[Context] = None,
+    ) -> str:
+        """Apply the configured approval policy before reading an issue."""
         # Get user context for approval checking
         from preloop.services.dynamic_fastmcp_http import get_current_user_context
 
@@ -116,7 +121,7 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
             tool_name="get_issue",
             tool_source="builtin",
             account_id=user_context.account_id,
-            arguments={"issue": issue},
+            arguments={"issue": issue, "include": include},
             ctx=ctx,
             workflow_id=_rule_workflow_id_var.get(None),
             correlation_id=_correlation_id_var.get(None),
@@ -126,84 +131,14 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
         if not approved:
             return error
 
-        result = await mcp_router.get_issue(issue)
+        result = await mcp_router.get_issue(issue, include=include)
         return result.model_dump_json()
 
-    async def get_issue_triage_context(
-        issue: str, ctx: Optional[Context] = None
-    ) -> str:
-        """Apply the configured approval policy before scoped triage access."""
-        from preloop.services.dynamic_fastmcp_http import get_current_user_context
-
-        user_context = get_current_user_context()
-        if not user_context:
-            return "Error: No user context available"
-        arguments = {"issue": issue}
-        approved, error = await require_approval(
-            tool_name="get_issue_triage_context",
-            tool_source="builtin",
-            account_id=user_context.account_id,
-            arguments=arguments,
-            ctx=ctx,
-            workflow_id=_rule_workflow_id_var.get(None),
-            correlation_id=_correlation_id_var.get(None),
-            justification=_justification_var.get(None),
-        )
-        if not approved:
-            return error
-        result = await mcp_router.get_issue_triage_context(**arguments)
-        return result.model_dump_json()
-
-    get_issue_triage_context_tool = FunctionTool.from_function(
-        get_issue_triage_context,
-        description=GET_ISSUE_TRIAGE_CONTEXT_TOOL["description"],
+    get_issue_tool = FunctionTool.from_function(
+        get_issue, description=GET_ISSUE_DESCRIPTION
     )
-    get_issue_triage_context_tool.parameters = deepcopy(
-        GET_ISSUE_TRIAGE_CONTEXT_TOOL["schema"]
-    )
-    mcp.add_tool(get_issue_triage_context_tool)
-
-    async def apply_issue_triage(
-        issue: str,
-        expected_revision: str,
-        assessment: str,
-        complexity_label: str | None = None,
-        title: str | None = None,
-        ctx: Optional[Context] = None,
-    ) -> str:
-        """Apply the configured approval policy before scoped triage access."""
-        from preloop.services.dynamic_fastmcp_http import get_current_user_context
-
-        user_context = get_current_user_context()
-        if not user_context:
-            return "Error: No user context available"
-        arguments = {
-            "issue": issue,
-            "expected_revision": expected_revision,
-            "assessment": assessment,
-            "complexity_label": complexity_label,
-            "title": title,
-        }
-        approved, error = await require_approval(
-            tool_name="apply_issue_triage",
-            tool_source="builtin",
-            account_id=user_context.account_id,
-            arguments=arguments,
-            ctx=ctx,
-            workflow_id=_rule_workflow_id_var.get(None),
-            correlation_id=_correlation_id_var.get(None),
-            justification=_justification_var.get(None),
-        )
-        if not approved:
-            return error
-        result = await mcp_router.apply_issue_triage(**arguments)
-        return result.model_dump_json()
-
-    apply_issue_triage_tool = FunctionTool.from_function(
-        apply_issue_triage, description=APPLY_ISSUE_TRIAGE_TOOL["description"]
-    )
-    apply_issue_triage_tool.parameters = deepcopy(APPLY_ISSUE_TRIAGE_TOOL["schema"])
-    mcp.add_tool(apply_issue_triage_tool)
+    get_issue_tool.parameters = deepcopy(GET_ISSUE_SCHEMA)
+    mcp.add_tool(get_issue_tool)
 
     # Register Tool 2: create_issue
     @mcp.tool()
@@ -261,7 +196,6 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
         return result.model_dump_json()
 
     # Register Tool 3: update_issue
-    @mcp.tool()
     async def update_issue(
         issue: str,
         title: str | None = None,
@@ -272,9 +206,12 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
         labels: list[str] | None = None,
         add_reaction: str | None = None,
         remove_reaction: str | None = None,
+        expected_revision: str | None = None,
+        assessment: str | None = None,
+        complexity_label: str | None = None,
         ctx: Optional[Context] = None,
     ) -> str:
-        """Update an existing issue. To add a GitHub eyes reaction on pickup, pass add_reaction=\"eyes\" with no other fields."""
+        """Apply the configured approval policy before updating an issue."""
         # Get user context for approval checking
         from preloop.services.dynamic_fastmcp_http import get_current_user_context
 
@@ -283,22 +220,27 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
         if not user_context:
             return "Error: No user context available"
 
+        arguments = {
+            "issue": issue,
+            "title": title,
+            "description": description,
+            "status": status,
+            "priority": priority,
+            "assignee": assignee,
+            "labels": labels,
+            "add_reaction": add_reaction,
+            "remove_reaction": remove_reaction,
+            "expected_revision": expected_revision,
+            "assessment": assessment,
+            "complexity_label": complexity_label,
+        }
+
         # Check approval with streaming
         approved, error = await require_approval(
             tool_name="update_issue",
             tool_source="builtin",
             account_id=user_context.account_id,
-            arguments={
-                "issue": issue,
-                "title": title,
-                "description": description,
-                "status": status,
-                "priority": priority,
-                "assignee": assignee,
-                "labels": labels,
-                "add_reaction": add_reaction,
-                "remove_reaction": remove_reaction,
-            },
+            arguments=arguments,
             ctx=ctx,
             workflow_id=_rule_workflow_id_var.get(None),
             correlation_id=_correlation_id_var.get(None),
@@ -308,18 +250,14 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
         if not approved:
             return error
 
-        result = await mcp_router.update_issue(
-            issue=issue,
-            title=title,
-            description=description,
-            status=status,
-            priority=priority,
-            assignee=assignee,
-            labels=labels,
-            add_reaction=add_reaction,
-            remove_reaction=remove_reaction,
-        )
+        result = await mcp_router.update_issue(**arguments)
         return result.model_dump_json()
+
+    update_issue_tool = FunctionTool.from_function(
+        update_issue, description=UPDATE_ISSUE_DESCRIPTION
+    )
+    update_issue_tool.parameters = deepcopy(UPDATE_ISSUE_SCHEMA)
+    mcp.add_tool(update_issue_tool)
 
     # Register Tool 4: search
     @mcp.tool()

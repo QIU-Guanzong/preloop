@@ -1291,24 +1291,16 @@ class FlowTriggerService:
 
         return False
 
-    def _is_triage_self_update(self, flow: Flow, event_data: Dict[str, Any]) -> bool:
+    def _is_triage_self_update(self, event_data: Dict[str, Any]) -> bool:
         """Match a complete issue snapshot to trusted triage write receipts.
 
-        PAT-backed writes may have a human sender. Only automatic triage flows
-        are coalesced, and marker text alone never establishes a self-update.
-        Pending exact snapshots expire; a verified final snapshot may persist.
+        The decision keys on the server-written receipt, not on which tools a
+        flow selected: the receipt is the only evidence that Preloop itself
+        produced this exact issue content. PAT-backed writes may have a human
+        sender, and marker text alone never establishes a self-update. Pending
+        exact snapshots expire; a verified final snapshot may persist.
         """
         if event_data.get("type") != "issue_updated":
-            return False
-        selected_tools = flow.allowed_mcp_tools
-        if not isinstance(selected_tools, list) or not any(
-            isinstance(tool, dict)
-            and tool.get("name") == "apply_issue_triage"
-            and tool.get("source") in (None, "builtin")
-            and not tool.get("mcp_server_id")
-            and not tool.get("server_id")
-            for tool in selected_tools
-        ):
             return False
         account_id = event_data.get("account_id")
         tracker_id = event_data.get("tracker_id")
@@ -1469,6 +1461,11 @@ class FlowTriggerService:
 
             logger.info(f"Found {len(matching_flows)} potential matching flow(s)")
 
+            # The receipt describes the event, not a flow, so evaluate it once.
+            triage_self_update = self._is_triage_self_update(event_data)
+            if triage_self_update:
+                logger.info("Event matches a recorded triage write receipt")
+
             # Filter flows by trigger_config and enabled status
             flows_to_trigger = []
             for flow in matching_flows:
@@ -1483,9 +1480,9 @@ class FlowTriggerService:
                     )
                     continue
 
-                if self._is_triage_self_update(flow, event_data):
+                if triage_self_update:
                     logger.info(
-                        "Skipping triage flow %s for its recorded issue update",
+                        "Skipping flow %s for a recorded triage issue update",
                         flow.id,
                     )
                     continue

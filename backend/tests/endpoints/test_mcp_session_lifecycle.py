@@ -52,8 +52,6 @@ TOOL_NAMES = (
     "search",
     "estimate_compliance",
     "improve_compliance",
-    "get_issue_triage_context",
-    "apply_issue_triage",
     "add_comment",
     "get_pull_request",
     "update_pull_request",

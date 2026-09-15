@@ -3,23 +3,45 @@ Pydantic schemas for the MCP API endpoints.
 """
 
 from pydantic import BaseModel, field_validator
-from typing import Literal, Optional, List
+from typing import Dict, Literal, Optional, List
 from uuid import UUID
 
 from preloop.schemas.issue import IssueResponse
 from preloop.schemas.issue_compliance import IssueComplianceResultResponse
+from preloop.schemas.issue_triage import ComplexityScheme, TriageIssue
 
 
 class GetIssueRequest(BaseModel):
-    """Request body for the get_issue tool."""
+    """Request body for the get_issue tool.
+
+    Unused by the MCP tool path: FastMCP calls ``get_issue`` with
+    individual parameters, and runtime validation uses
+    ``GET_ISSUE_SCHEMA`` via ``TRIAGE_INCLUDES``. Keep ``include`` in
+    lockstep with that advertised enum; tests assert the match.
+    """
 
     issue: str
+    include: Optional[List[Literal["label_catalog", "revision"]]] = None
 
 
 class GetIssueResponse(IssueResponse):
-    """Response for the get_issue tool, including compliance data."""
+    """Response for the get_issue tool, including compliance data.
+
+    The triage blocks below stay ``None`` unless ``get_issue`` was called with
+    the matching ``include`` entry. They are read live from the tracker, not
+    from the synchronized snapshot the rest of this model carries.
+    """
 
     compliance_results: Optional[List[IssueComplianceResultResponse]] = None
+    # include="label_catalog"
+    label_catalog: Optional[List[Dict[str, str]]] = None
+    complexity_scheme: Optional[ComplexityScheme] = None
+    # include="revision"
+    expected_revision: Optional[str] = None
+    provider_issue: Optional[TriageIssue] = None
+    # Set whenever any include entry was requested.
+    triage_limitations: Optional[List[str]] = None
+    concurrency: Optional[str] = None
 
 
 class CreateIssueRequest(BaseModel):
