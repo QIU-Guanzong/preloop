@@ -32,6 +32,7 @@ from ..models import (
     RuntimeSessionOptimizationAction,
     RuntimeSessionReplayRun,
     RuntimeSessionOptimizationResult,
+    SessionEmbeddingSetting,
     SessionSearchDocument,
 )
 from .account import CRUDAccount
@@ -139,6 +140,10 @@ from .runtime_session_optimization_result import (
     CRUDRuntimeSessionOptimizationResult,
 )
 from .runtime_session_replay_run import CRUDRuntimeSessionReplayRun
+from .session_embedding_setting import (
+    CRUDSessionEmbeddingSetting,
+    SessionEmbeddingConfigError,
+)
 from .session_search_document import (
     CRUDSessionSearchDocument,
     SessionSearchChunk,
@@ -191,6 +196,7 @@ crud_provider_billing_snapshot = CRUDProviderBillingSnapshot(ProviderBillingSnap
 crud_runtime_session = CRUDRuntimeSession(RuntimeSession)
 crud_runtime_session_activity = CRUDRuntimeSessionActivity(RuntimeSessionActivity)
 crud_session_search_document = CRUDSessionSearchDocument(SessionSearchDocument)
+crud_session_embedding_setting = CRUDSessionEmbeddingSetting(SessionEmbeddingSetting)
 crud_runtime_session_optimization_action = CRUDRuntimeSessionOptimizationAction(
     RuntimeSessionOptimizationAction
 )
@@ -285,6 +291,8 @@ __all__ = [
     "crud_issue_set",
     "crud_gateway_usage_search_document",
     "crud_session_search_document",
+    "crud_session_embedding_setting",
+    "SessionEmbeddingConfigError",
     "SessionSearchChunk",
     "crud_managed_agent",
     "crud_managed_agent_ai_model_binding",

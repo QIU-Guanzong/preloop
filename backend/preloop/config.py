@@ -392,6 +392,90 @@ class Settings(BaseSettings):
             "chunked into the session search corpus as it is written"
         ),
     )
+    session_embedding_enabled: bool = Field(
+        True,
+        description=(
+            "Deployment kill switch for embedding session search chunks "
+            "(SESSION_EMBEDDING_ENABLED). Turning this off stops embedding "
+            "only; keyword indexing into the corpus keeps running. Accounts "
+            "must still opt in individually, so the shipped default embeds "
+            "nothing."
+        ),
+    )
+    session_embedding_batch_size: int = Field(
+        32,
+        ge=1,
+        le=512,
+        description=(
+            "Chunks embedded per provider call and per purpose-tagged usage "
+            "row (SESSION_EMBEDDING_BATCH_SIZE)."
+        ),
+    )
+    session_embedding_queue_max_pending: int = Field(
+        128,
+        ge=1,
+        description=(
+            "Accounts the in-process embedding queue may hold before new "
+            "submissions are dropped (SESSION_EMBEDDING_QUEUE_MAX_PENDING). "
+            "Dropping is the correct failure: the backlog is durable in the "
+            "corpus and the next write picks it up."
+        ),
+    )
+    session_embedding_queue_worker_enabled: bool = Field(
+        True,
+        description=(
+            "Whether a process may start the background embedding worker "
+            "thread (SESSION_EMBEDDING_QUEUE_WORKER_ENABLED). TESTING=true "
+            "always disables the thread even when this is true."
+        ),
+    )
+    session_embedding_daily_cap_usd: float = Field(
+        2.0,
+        ge=0.0,
+        description=(
+            "Default per-account daily ceiling on embedding spend in USD "
+            "(SESSION_EMBEDDING_DAILY_CAP_USD). An account may set a lower or "
+            "higher cap of its own. Reaching it is a degraded state, not an "
+            "error: the chunks stay pending."
+        ),
+    )
+    session_embedding_max_attempts: int = Field(
+        3,
+        ge=1,
+        description=(
+            "Provider attempts one chunk may cost before it is retired as "
+            "failed (SESSION_EMBEDDING_MAX_ATTEMPTS), so one unembeddable "
+            "chunk cannot starve the oldest-first queue behind it."
+        ),
+    )
+    session_embedding_timeout_seconds: float = Field(
+        30.0,
+        gt=0.0,
+        description=(
+            "Timeout for one embeddings call from the worker "
+            "(SESSION_EMBEDDING_TIMEOUT_SECONDS)."
+        ),
+    )
+    session_embedding_api_key: str | None = Field(
+        None,
+        description=(
+            "Credential for an OpenAI-compatible embeddings endpoint "
+            "(SESSION_EMBEDDING_API_KEY). Sent only when the account's "
+            "base_url is listed in SESSION_EMBEDDING_API_KEY_BASE_URLS. "
+            "Left unset for self-hosted endpoints that need no key. Never "
+            "attached to an account-chosen URL that the operator did not "
+            "allow-list."
+        ),
+    )
+    session_embedding_api_key_base_urls: str = Field(
+        "",
+        description=(
+            "Comma-separated https base URLs that may receive "
+            "SESSION_EMBEDDING_API_KEY (SESSION_EMBEDDING_API_KEY_BASE_URLS). "
+            "Empty (the shipped default) means the shared key is never sent. "
+            "Compare after stripping a trailing slash."
+        ),
+    )
     model_gateway_auto_index_failed_interactions: bool = Field(
         False,
         description=(
@@ -1381,6 +1465,40 @@ class Settings(BaseSettings):
         except ValueError:
             gateway_usage_index_queue_max_pending = 256
 
+        def _positive_int(name: str, fallback: int) -> int:
+            try:
+                return max(1, int(os.getenv(name, str(fallback))))
+            except ValueError:
+                return fallback
+
+        def _positive_float(name: str, fallback: float) -> float:
+            try:
+                value = float(os.getenv(name, str(fallback)))
+            except ValueError:
+                return fallback
+            return value if value > 0 else fallback
+
+        session_embedding_batch_size = min(
+            512, _positive_int("SESSION_EMBEDDING_BATCH_SIZE", 32)
+        )
+        session_embedding_queue_max_pending = _positive_int(
+            "SESSION_EMBEDDING_QUEUE_MAX_PENDING", 128
+        )
+        session_embedding_max_attempts = _positive_int(
+            "SESSION_EMBEDDING_MAX_ATTEMPTS", 3
+        )
+        session_embedding_timeout_seconds = _positive_float(
+            "SESSION_EMBEDDING_TIMEOUT_SECONDS", 30.0
+        )
+        try:
+            # A cap of exactly zero is a real choice: "priced, but spend
+            # nothing", which leaves the backlog pending and degraded.
+            session_embedding_daily_cap_usd = max(
+                0.0, float(os.getenv("SESSION_EMBEDDING_DAILY_CAP_USD", "2.0"))
+            )
+        except ValueError:
+            session_embedding_daily_cap_usd = 2.0
+
         return cls(
             app_name=os.getenv("APP_NAME", "Preloop"),
             environment=env,
@@ -1411,6 +1529,23 @@ class Settings(BaseSettings):
                 "SESSION_SEARCH_INDEX_ENABLED", "true"
             ).lower()
             in ("true", "1", "t", "yes"),
+            session_embedding_enabled=os.getenv(
+                "SESSION_EMBEDDING_ENABLED", "true"
+            ).lower()
+            in ("true", "1", "t", "yes"),
+            session_embedding_queue_worker_enabled=os.getenv(
+                "SESSION_EMBEDDING_QUEUE_WORKER_ENABLED", "true"
+            ).lower()
+            in ("true", "1", "t", "yes"),
+            session_embedding_batch_size=session_embedding_batch_size,
+            session_embedding_queue_max_pending=session_embedding_queue_max_pending,
+            session_embedding_daily_cap_usd=session_embedding_daily_cap_usd,
+            session_embedding_max_attempts=session_embedding_max_attempts,
+            session_embedding_timeout_seconds=session_embedding_timeout_seconds,
+            session_embedding_api_key=os.getenv("SESSION_EMBEDDING_API_KEY") or None,
+            session_embedding_api_key_base_urls=(
+                os.getenv("SESSION_EMBEDDING_API_KEY_BASE_URLS") or ""
+            ).strip(),
             model_gateway_auto_index_failed_interactions=os.getenv(
                 "MODEL_GATEWAY_AUTO_INDEX_FAILED_INTERACTIONS", "false"
             ).lower()

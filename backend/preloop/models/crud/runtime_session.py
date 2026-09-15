@@ -40,7 +40,16 @@ _summary_columns_cache: dict[int, bool] = {}
 # ``replay_validation`` runs additionally suppress session attribution at the
 # gateway; its presence here is defense in depth so a mis-attributed replay row
 # can never inflate the session it was validating.
-INTERNAL_USAGE_PURPOSES = ("session_optimization", "session_title", "replay_validation")
+INTERNAL_USAGE_PURPOSES = (
+    "session_optimization",
+    "session_title",
+    "replay_validation",
+    # Embedding a session's own chunks is Preloop indexing the session, not
+    # the agent doing work in it. Without this the session's reported cost
+    # would grow every time somebody searched better, which is the one thing
+    # a search feature must never do to a cost report.
+    "session_embedding",
+)
 
 # Infix marking a runtime session row minted by the gateway's inactivity closer
 # rather than by an agent-declared conversation id. A source id shaped

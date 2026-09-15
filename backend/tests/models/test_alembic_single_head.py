@@ -214,4 +214,6 @@ def test_flow_runners_revision_chains_onto_approval_rule_context() -> None:
     assert redispatch_backoff.down_revision == "20260915_child_park"
     session_search = script.get_revision("20260915_session_search")
     assert session_search.down_revision == "20260915_redispatch_backoff"
-    assert script.get_heads() == ["20260915_session_search"]
+    session_embedding = script.get_revision("20260915_session_embedding")
+    assert session_embedding.down_revision == "20260915_session_search"
+    assert script.get_heads() == ["20260915_session_embedding"]

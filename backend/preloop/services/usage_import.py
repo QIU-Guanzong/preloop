@@ -49,7 +49,10 @@ from preloop.services.model_pricing import (
     estimate_external_model_usage_cost,
     normalize_external_model_name,
 )
-from preloop.services.session_search_index import index_transcript_message
+from preloop.services.session_search_index import (
+    index_transcript_message,
+    request_embedding,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -533,6 +536,7 @@ def ingest_push_records(
         differs from the stored one (first write wins either way).
         Committed once at the end.
     """
+    indexed_transcripts = False
     fingerprints = [
         push_record_fingerprint(source=source, external_id=record.external_id)
         for record in records
@@ -633,6 +637,7 @@ def ingest_push_records(
                                 session=session,
                                 timestamp=timestamp,
                             )
+                        indexed_transcripts = True
                     except SQLAlchemyError:
                         # Activities are bookkeeping; the ledger row stands.
                         logger.warning(
@@ -665,6 +670,10 @@ def ingest_push_records(
             )
         )
     db.commit()
+    if indexed_transcripts:
+        # Chunks rode the caller's transaction (commit=False). Nudge only
+        # after they are visible to the worker's own session.
+        request_embedding(account_id)
     return results
 
 

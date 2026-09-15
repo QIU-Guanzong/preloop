@@ -179,6 +179,45 @@ def _build_chunks(
     ]
 
 
+def request_embedding(account_id: Any) -> None:
+    """Nudge the embedding worker after the host transaction has committed.
+
+    ``write_source_chunks`` calls this only on ``commit=True``. Callers that
+    write chunks inside someone else's transaction (transcript import) must
+    invoke this themselves after they commit, so imported chunks do not wait
+    for an unrelated later write. The submission is still deduplicated and
+    dropped when the queue is full; embedding runs on the worker's own
+    session.
+    """
+    try:
+        from preloop.services.session_embedding_queue import (
+            submit_account_for_embedding,
+        )
+
+        submit_account_for_embedding(account_id)
+    except Exception:  # noqa: BLE001 - indexing never fails over embedding
+        logger.warning(
+            "Session embedding hand-off failed for account %s",
+            account_id,
+            exc_info=True,
+        )
+
+
+def _request_embedding(account_id: Any, stored: List[SessionSearchDocument]) -> None:
+    """Nudge after this writer committed pending chunks.
+
+    Callers must invoke this only after the host transaction has committed.
+    A nudge while the writer's transaction is still open wakes the worker
+    on rows it cannot see, burns a submission, and leaves the chunks
+    waiting for a later write.
+    """
+    if not stored:
+        return
+    if not any(row.embedding_state == EMBEDDING_STATE_PENDING for row in stored):
+        return
+    request_embedding(account_id)
+
+
 def write_source_chunks(
     db: Session,
     *,
@@ -258,6 +297,7 @@ def write_source_chunks(
                 savepoint.commit()
         if commit:
             db.commit()
+            _request_embedding(account_id, stored)
         return stored
     except Exception:  # noqa: BLE001 - indexing never fails its caller
         logger.warning(
