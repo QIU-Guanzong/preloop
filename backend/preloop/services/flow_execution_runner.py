@@ -268,6 +268,9 @@ async def claim_and_run_execution(
             queued_reason = crud_flow_execution.get_queued_reason(
                 db, execution_id=execution_id
             )
+            # A lost-claim race also returns None. If a leftover
+            # account_concurrency_cap is still on the row, nack anyway:
+            # redelivery is safer than dropping still-PENDING work.
             if queued_reason == QUEUED_REASON_ACCOUNT_CAP:
                 logger.info(
                     "Execution %s held back by the account concurrency cap; "

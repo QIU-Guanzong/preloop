@@ -462,6 +462,7 @@ class FlowTriggerService:
             if isinstance(account_id, str)
             else account_id,
             running_statuses=list(TRACKER_OBJECT_ACTIVE_STATUSES),
+            tracker_object_key=object_key,
         )
 
         for execution in executions:

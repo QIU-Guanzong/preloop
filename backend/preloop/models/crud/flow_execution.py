@@ -101,6 +101,53 @@ async def delete_flow_execution(
     return db_flow_execution
 
 
+# Worst-case rows loaded for one-object coalescing. The JSONB match should
+# return 0 or 1; this only caps a malformed key or a filter miss.
+TRACKER_OBJECT_LOOKUP_LIMIT = 16
+
+
+def tracker_object_payload_match(object_key: str) -> Optional[ColumnElement[bool]]:
+    """SQL filter that narrows trigger payloads to one tracker object.
+
+    The Python extractor remains the source of truth. This only avoids
+    loading every active JSONB blob; an over-inclusive match is fine.
+    """
+    parts = object_key.split(":")
+    if len(parts) < 4:
+        return None
+    source = parts[0].lower()
+    ident = parts[-1]
+    kind = parts[-2]
+    repo = ":".join(parts[1:-2])
+    if not source or not kind or not ident or not repo:
+        return None
+
+    details = FlowExecution.trigger_event_details
+    payload = details["payload"]
+    source_col = details["source"].astext
+
+    if source == "github" and kind == "pr":
+        return and_(
+            source_col == "github",
+            payload["repository"]["full_name"].astext == repo,
+            payload["pull_request"]["number"].astext == ident,
+        )
+    if source == "github" and kind == "issue":
+        return and_(
+            source_col == "github",
+            payload["repository"]["full_name"].astext == repo,
+            payload["issue"]["number"].astext == ident,
+        )
+    if source == "gitlab":
+        return and_(
+            source_col == "gitlab",
+            payload["project"]["path_with_namespace"].astext == repo,
+            payload["object_kind"].astext == kind,
+            payload["object_attributes"]["iid"].astext == ident,
+        )
+    return None
+
+
 class CRUDFlowExecution(CRUDBase[FlowExecution]):
     """CRUD operations for FlowExecution model."""
 
@@ -644,11 +691,18 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         flow_id: uuid.UUID,
         account_id: Optional[uuid.UUID] = None,
         running_statuses: Optional[List[str]] = None,
+        *,
+        tracker_object_key: Optional[str] = None,
+        limit: Optional[int] = None,
     ) -> List[FlowExecution]:
         """Get running flow executions for a specific flow.
 
         Unlike get_by_flow, this specifically queries for executions in running states
         without a limit, ensuring long-running executions are not missed.
+
+        When ``tracker_object_key`` is set (one-active-run coalescing), the
+        query loads only ``id``, ``status`` and ``trigger_event_details``,
+        pushes the object-key match into JSONB, and caps the rows read.
 
         Args:
             db: Database session
@@ -656,6 +710,11 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             account_id: Optional account ID to filter by
             running_statuses: List of statuses considered "running".
                              Defaults to ["PENDING", "INITIALIZING", "STARTING", "RUNNING"]
+            tracker_object_key: Optional ``source:repo:kind:id`` key. When
+                set, only matching payloads are loaded.
+            limit: Optional row cap. Defaults to
+                ``TRACKER_OBJECT_LOOKUP_LIMIT`` when ``tracker_object_key``
+                is set, otherwise unbounded.
 
         Returns:
             List of flow executions in running states
@@ -669,6 +728,33 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         )
         if account_id:
             query = query.join(Flow).filter(Flow.account_id == account_id)
+        if tracker_object_key is not None:
+            query = query.options(
+                load_only(
+                    FlowExecution.id,
+                    FlowExecution.status,
+                    FlowExecution.trigger_event_details,
+                )
+            )
+            payload_match = tracker_object_payload_match(tracker_object_key)
+            if payload_match is not None:
+                query = query.filter(payload_match)
+            row_limit = (
+                TRACKER_OBJECT_LOOKUP_LIMIT if limit is None else max(1, int(limit))
+            )
+            rows = query.limit(row_limit + 1).all()
+            if len(rows) > row_limit:
+                logger.debug(
+                    "Tracker-object lookup for flow %s key %s exceeded "
+                    "limit %s; extra rows are ignored",
+                    flow_id,
+                    tracker_object_key,
+                    row_limit,
+                )
+                return rows[:row_limit]
+            return rows
+        if limit is not None:
+            return query.limit(max(1, int(limit))).all()
         return query.all()
 
     def get_multi(

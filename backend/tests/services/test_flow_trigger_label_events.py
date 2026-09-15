@@ -374,11 +374,11 @@ class TestOneActiveExecutionPerTrackerObject:
         await service.process_event(event)
 
         mock_start.assert_not_awaited()
+        call_kwargs = mock_crud_execution.get_running_by_flow.call_args.kwargs
+        assert "WAITING_FOR_HUMAN" in call_kwargs["running_statuses"]
         assert (
-            "WAITING_FOR_HUMAN"
-            in mock_crud_execution.get_running_by_flow.call_args.kwargs[
-                "running_statuses"
-            ]
+            call_kwargs["tracker_object_key"]
+            == "github:example-org/example-repo:issue:626"
         )
 
     @patch("preloop.services.flow_trigger_service.crud_flow_execution")
