@@ -410,6 +410,78 @@ class TestReleaseSecurityAuditPreset:
         assert data["approval_window_seconds"] > data["timeout_seconds"]
 
 
+class TestProjectScopedReleaseAudit:
+    """One project inside a repository of many is a unit of audit.
+
+    The portfolio review uses this preset as its security lens, once per
+    project. That only works if the preset can be told which project it
+    is auditing, and if a project with no SBOM says so instead of
+    borrowing a neighbour's.
+    """
+
+    @pytest.fixture()
+    def prompt(self):
+        return _load_preset(PRESET_FILES["Release Security Audit"])["prompt_template"]
+
+    def test_accepts_a_project_path_and_defaults_to_the_repository(self, prompt):
+        norm = _norm(prompt)
+        assert "payload project_path" in norm
+        assert (
+            "Absent, empty or null: the whole repository is the unit of audit "
+            "and the run behaves exactly as it did before this input existed" in norm
+        )
+
+    def test_scopes_sbom_lookup_and_file_discovery(self, prompt):
+        norm = _norm(prompt)
+        assert "PROJECT SCOPE RULE" in norm
+        assert "Look for SBOM artifacts only under <checkout>/<project_path>" in norm
+        assert "git ls-files -- <project_path>" in norm
+        assert "Every evidence pointer you record is inside the path" in norm
+
+    def test_rejects_a_path_that_escapes_the_checkout(self, prompt):
+        norm = _norm(prompt)
+        assert 'no leading "/" and no ".." segment' in norm
+        assert "NEVER silently widen the scope back to the whole repository" in norm
+
+    def test_no_sbom_for_the_project_is_not_checkable_with_a_reason(self, prompt):
+        norm = _norm(prompt)
+        assert "NO SBOM FOR THE SCOPED PROJECT" in norm
+        assert '"not_checkable"' in norm
+        assert '"no SBOM available"' in norm
+        # No fallback inventory, and never a neighbour's SBOM.
+        assert (
+            "Do NOT fall back to reading the project's manifests or lockfiles" in norm
+        )
+        assert "do NOT audit another project's SBOM" in norm
+
+    def test_the_word_is_not_checkable_and_never_skipped(self, prompt):
+        norm = _norm(prompt)
+        assert (
+            'The word for it is "not_checkable" everywhere it appears - the '
+            "result envelope, the report artifact, this documentation - and "
+            'never "skipped"' in norm.replace("—", "-")
+        )
+
+    def test_not_checkable_cannot_pass(self, prompt):
+        norm = _norm(prompt)
+        assert (
+            "A not_checkable lens can never carry a healthy or passing verdict" in norm
+        )
+
+    def test_scope_is_recorded_in_the_result(self, prompt):
+        norm = _norm(prompt)
+        assert '"scope": null | {' in norm
+        for key in ("project_path", "covers", "status", "reason", "sbom_paths"):
+            assert f'"{key}"' in norm
+        assert '"scope" records the unit of audit' in norm
+
+    def test_the_cover_says_what_the_verdict_covers(self, prompt):
+        norm = _norm(prompt)
+        assert (
+            "names the audited path and says the verdict covers that path only" in norm
+        )
+
+
 class TestReleaseAuditEvidenceStorage:
     """Multi-repo product mode: hybrid evidence storage (per-repo stubs +
     product-level compliance repo), cross-linked by commit SHA."""

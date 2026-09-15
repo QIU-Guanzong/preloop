@@ -151,7 +151,14 @@ sections may not: a document that reports findings, a gate, or a
 decision is claiming work, and claimed work is validated in full,
 waiver authenticity included.
 
-One exception, on Release Security Audit only: `drift`. Drift is
+Two exceptions, on Release Security Audit only. The first is `scope`: a
+run pointed at one project inside a repository has to say which project
+the silence is about, and a project with no SBOM of its own is exactly
+the case that stops early (see
+[Auditing one project inside a repository](#auditing-one-project-inside-a-repository)).
+It is validated in full, like the block below.
+
+The second is `drift`. Drift is
 measured before the gate and before any waiver question, so a run that
 dies waiting for a human has usually finished it. A release audit that
 wrote `evidence/drift-report.md` and left `drift` null told a human
@@ -383,6 +390,13 @@ and waiver fields on the gate.
 
 ```json
 {
+  "scope": {
+    "project_path": "projects/device-gateway",
+    "covers": "repository | project",
+    "status": "audited | not_checkable",
+    "reason": "<required when status is not_checkable>",
+    "sbom_paths": ["projects/device-gateway/sbom/image.spdx.json"]
+  },
   "sbom_audit": {
     "source": {
       "format": "spdx | cyclonedx",
@@ -591,7 +605,9 @@ and waiver fields on the gate.
 then: when a drift report exists in the evidence pack, the block must
 carry what it states (see [Incompletion envelope](#incompletion-envelope)).
 `gap_register` is `null` when no repository was attached. `evidence_storage`
-is `null` when product mode was skipped (no checkouts).
+is `null` when product mode was skipped (no checkouts). `scope` is `null`
+when the whole repository was the unit of audit (see
+[Auditing one project inside a repository](#auditing-one-project-inside-a-repository)).
 
 Overall `verdict`: `fail` if the SBOM audit failed **or** the severity
 gate failed after deterministic waiver application; `pass_with_findings`
@@ -698,6 +714,75 @@ never appear in any artifact: findings are commit SHA plus path only.
 Artifacts include `audit_report`, `findings`, `source_matrix`,
 `waivers` (or `null`), `sbom_findings`, `gap_register` (or `null`),
 `drift_report`.
+
+#### Auditing one project inside a repository
+
+A repository holding many independently built projects is not one
+product. Pass a repository-relative `project_path` in the trigger
+payload and that path becomes the unit of audit for the whole run, the
+way `target_repo_path` and `focus_paths` already scope the code health
+review:
+
+```json
+{"project_path": "projects/device-gateway"}
+```
+
+- **Default is unchanged.** No `project_path` (absent, empty or `null`)
+  means the whole repository, `scope` is `null`, and every other part of
+  the run behaves as it did before this input existed. Results written
+  before the field stay valid: `scope` is additive and nullable, and the
+  schema is still `preloop.cra.releaseaudit/v1`.
+- **The path is validated first.** It must be relative to the
+  repository root, carry no `..` segment, and exist in the checkout. A
+  bad path is a bad input: the run writes the incompletion envelope
+  naming it rather than quietly auditing the whole repository.
+- **Discovery is scoped.** SBOM lookup, the gap-register file walk,
+  gitleaks, the history pickaxe and zizmor all run inside the path. An
+  SBOM belonging to a sibling project is not this project's SBOM and is
+  never read.
+- **Every pointer is inside the path.** A repository-level file outside
+  the project (a root `SECURITY.md`, a root workflow) is not this
+  project's evidence: the item is recorded in
+  `gap_register.not_checkable` with a reason naming where the evidence
+  actually lives. The platform rejects a scoped result whose
+  `gap_register` pointers or `scope.sbom_paths` leave the path. Commit
+  SHAs and prose are not path pointers and are left alone.
+- **The verdict says what it covers.** `scope.covers` is `project`, and
+  the `audit-report.md` verdict sentence names the audited path and says
+  the verdict covers that path only.
+
+**No SBOM for the project: `not_checkable`.** This family verifies
+SBOMs and refuses to generate them, so a project with no SBOM of its own
+is an absence of evidence, not a clean bill of health. The run writes
+the [incompletion envelope](#incompletion-envelope) with `verdict:
+"error"` and a scope block that says so:
+
+```json
+{
+  "schema": "preloop.cra.releaseaudit/v1",
+  "flow": "release-security-audit",
+  "run_at": "2026-09-15T10:00:00Z",
+  "regime_profile": "cra",
+  "verdict": "error",
+  "incomplete": {"reason": "no SBOM was delivered for projects/device-gateway", "stage": "PHASE 0"},
+  "scope": {
+    "project_path": "projects/device-gateway",
+    "covers": "project",
+    "status": "not_checkable",
+    "reason": "no SBOM available"
+  },
+  "disclaimer": "Machine-generated evidence for conformity assessment support. Not a conformity assessment, certification, or legal advice."
+}
+```
+
+The word is `not_checkable`, in the result envelope, in the report and
+here, and it is never `skipped`: a skipped check reads as a choice, and
+this is a missing input. The reason is required and must be non-empty.
+There is no fallback to reading manifests or lockfiles, because a
+reconstructed inventory is not a verified SBOM. A `not_checkable` lens
+can never carry `pass` or `pass_with_findings`, and it can never carry
+an audit body either: a document reporting a gate or findings is
+claiming work, and there was none to claim.
 
 ### `preloop.cra.duediligence/v1` (Component Due Diligence)
 
@@ -1227,7 +1312,10 @@ automates a notification, never a filing.
 - These presets verify SBOMs. They never generate one. SBOM creation
   belongs to the build toolchain (Yocto / OpenEmbedded `create-spdx`,
   AOSP SBOM tooling, CycloneDX build plugins). If no SBOM was
-  delivered, the run errors rather than inventing one.
+  delivered, the run errors rather than inventing one. Scoped to one
+  project inside a repository, the same limit reads as
+  `scope.status: "not_checkable"` with its reason: no manifest
+  fallback, no neighbour's SBOM, and no passing verdict.
 
 ## Vulnerability sources (honest notes)
 
