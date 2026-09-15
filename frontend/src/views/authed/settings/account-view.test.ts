@@ -33,6 +33,9 @@ describe('AccountView', () => {
       seats?: Record<string, unknown> | null;
       hostedOverrides?: Record<string, unknown>;
       canManageBilling?: boolean;
+      effectivePlanId?: string;
+      effectivePlan?: Record<string, unknown> | null;
+      summaryPlan?: Record<string, unknown> | null;
     } = {}
   ) {
     return sinon
@@ -84,13 +87,22 @@ describe('AccountView', () => {
                     current_period_end: '2026-12-31T00:00:00Z',
                   }
                 : opts.subscription,
-            plan: opts.freeTier
-              ? { id: 'free', name: 'Free', features: { max_agents: 3 } }
-              : {
-                  id: 'plan-pro',
-                  name: 'Pro Plan',
-                  features: { max_agents: -1 },
-                },
+            plan:
+              opts.summaryPlan !== undefined
+                ? opts.summaryPlan
+                : opts.freeTier
+                  ? { id: 'free', name: 'Free', features: { max_agents: 3 } }
+                  : {
+                      id: 'plan-pro',
+                      name: 'Pro Plan',
+                      features: { max_agents: -1 },
+                    },
+            ...(opts.effectivePlanId === undefined
+              ? {}
+              : { effective_plan_id: opts.effectivePlanId }),
+            ...(opts.effectivePlan === undefined
+              ? {}
+              : { effective_plan: opts.effectivePlan }),
             ingestion_quota: opts.ingestionQuota ?? null,
             seats: opts.seats ?? null,
             trial: opts.trial ?? {
@@ -303,7 +315,52 @@ describe('AccountView', () => {
     expect(patchCall, 'expected a PATCH request').to.exist;
   });
 
-  it('says a trial ended when the period end is in the past (D13)', async () => {
+  it('reports an ended trial as Free from the effective plan fields (D13)', async () => {
+    fetchStub = createFetchStub({
+      billing: true,
+      subscription: {
+        plan_id: 'plan-pro',
+        status: 'trialing',
+        current_period_end: '2025-07-27T00:00:00Z',
+      },
+      trial: {
+        is_trialing: false,
+        is_expired: true,
+        ended_at: '2025-07-27T00:00:00Z',
+        days: 0,
+        requires_payment_method: false,
+        hosted_model_hard_cap_usd: 2,
+      },
+      effectivePlanId: 'free',
+      effectivePlan: { id: 'free', name: 'Free' },
+      summaryPlan: null,
+      hostedOverrides: {
+        included_limit_usd: null,
+        active_limit_usd: 0.5,
+        remaining_limit_usd: 0.5,
+        one_time_credit_usd: 0.5,
+      },
+    });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const text = copy(element);
+    expect(text).to.contain('trial ended on Jul 27');
+    expect(text).to.contain('You are on the Free plan');
+    // The trial cap and the monthly allowance describe a plan this account no
+    // longer has. Printing either is the mis-sell the founder rejected.
+    expect(text).to.not.contain('Trial cap');
+    expect(text).to.not.contain('Monthly allowance');
+    expect(text).to.not.contain('trialing');
+    expect(text).to.not.contain('Renews on');
+    expect(text).to.contain('One-time credit');
+  });
+
+  it('treats a past trial period end as expired without the new fields (D13)', async () => {
     fetchStub = createFetchStub({
       billing: true,
       subscription: {
@@ -315,7 +372,7 @@ describe('AccountView', () => {
         is_trialing: true,
         days: 0,
         requires_payment_method: false,
-        hosted_model_hard_cap_usd: null,
+        hosted_model_hard_cap_usd: 2,
       },
     });
     const element = (await fixture(
@@ -325,10 +382,16 @@ describe('AccountView', () => {
     await waitUntil(() => !(element as any)._loading, 'load');
     await element.updateComplete;
 
-    const text = element.shadowRoot?.textContent ?? '';
-    expect(text).to.contain('Trial ended');
-    expect(text).to.contain('Jul 27');
+    const text = copy(element);
+    expect(text).to.contain('Your Pro Plan trial ended on Jul 27');
+    expect(text).to.contain('You are on the Free plan');
+    expect(text).to.not.contain('Trial cap');
     expect(text).to.not.contain('Renews on');
+    // Nothing verified the Free credit here, so no allowance is printed at
+    // all rather than reprinting the ended trial's figures.
+    expect(text).to.not.contain('Monthly allowance');
+    expect(text).to.not.contain('Current active cap');
+    expect(text).to.contain('Allowances from the ended trial are not shown');
   });
 
   it('still says "Renews on" for a future period end', async () => {
@@ -350,7 +413,7 @@ describe('AccountView', () => {
         is_trialing: true,
         days: 14,
         requires_payment_method: false,
-        hosted_model_hard_cap_usd: null,
+        hosted_model_hard_cap_usd: 2,
       },
     });
     const element = (await fixture(
@@ -360,8 +423,9 @@ describe('AccountView', () => {
     await waitUntil(() => !(element as any)._loading, 'load');
     await element.updateComplete;
 
-    const text = element.shadowRoot?.textContent ?? '';
+    const text = copy(element);
     expect(text).to.contain('Trial ends on');
+    expect(text).to.contain('Trial cap for built-in models: $2.00');
     expect(text).to.not.contain('Renews on');
   });
 
@@ -602,6 +666,13 @@ describe('AccountView', () => {
       'billing-plan-comparison'
     ) as any;
     await waitUntil(() => !panel.loading);
+    await panel.updateComplete;
+    const collapsed = (panel.shadowRoot.textContent ?? '').replace(/\s+/g, ' ');
+    // Collapsed, the panel states the plan and offers one action.
+    expect(collapsed).to.contain('Legacy Teams');
+    expect(collapsed).to.not.contain('What changes');
+    expect(collapsed).to.not.contain('Would this plan cover your usage?');
+    panel.shadowRoot.querySelector('[data-testid="change-plan"]').click();
     await panel.updateComplete;
     const comparison = (panel.shadowRoot.textContent ?? '').replace(
       /\s+/g,
