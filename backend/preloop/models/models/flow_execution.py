@@ -251,7 +251,7 @@ class FlowExecution(Base):
     # comparison instead of a recursive query.
     parent_execution_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("flow_execution.id"),
+        ForeignKey("flow_execution.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )

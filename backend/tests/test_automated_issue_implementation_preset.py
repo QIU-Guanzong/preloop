@@ -154,6 +154,32 @@ class TestPromptContract:
         assert "do not fake it" in prompt
         assert '"skipped"' in prompt
 
+    def test_tests_are_scoped_to_the_touched_modules(self, prompt):
+        """A whole-suite run is what OOMKills this container.
+
+        The agent runs in a container with a bounded memory limit, so the
+        implementation phase asks for the tests covering the change, selected
+        per directory or per file, and says that CI owns the full suite.
+        """
+        assert "the tests for the modules you touched" in prompt
+        assert "Select tests by the directory or the file that covers your change" in (
+            prompt
+        )
+        assert "Never run a repository-wide suite" in prompt
+        assert "bounded memory limit" in prompt
+        assert "CI runs the full suite on the pull request" in prompt
+
+    def test_broad_runs_are_one_directory_at_a_time(self, prompt):
+        """When a wide run is unavoidable it is still bounded and stops early."""
+        assert "run one top-level test directory at a time with `-x` and `-q`" in prompt
+        assert "stop at the first failure" in prompt
+
+    def test_resume_repeats_only_the_affected_scope(self, prompt):
+        assert "scoped to the touched modules under the same memory limit" in prompt
+
+    def test_verification_gate_does_not_invite_a_wide_local_run(self, prompt):
+        assert "Keep those runs scoped to what you touched" in prompt
+
     def test_resume_branch_reads_pr_comments(self, prompt):
         assert "{{execution.resume_from}}" in prompt
         assert "PHASE 2R: RESUME (when Resume from is set)" in prompt

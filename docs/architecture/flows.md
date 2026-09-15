@@ -61,6 +61,22 @@ One flow definition can drive an agent-harness × model evaluation grid without 
 *   **Observation:** `GET /api/v1/flows/batches/{batch_id}/executions` lists a batch (account-scoped, sorted by matrix index) with a rollup of status counts, tokens, tool calls, and estimated cost, so an eval matrix can be observed as a unit.
 *   **Response shape:** non-matrix triggers are wire-identical to before; matrix triggers return `batch_id` plus per-cell execution references.
 
+## Execution lineage
+
+Executions expose `parent_execution_id`, `root_execution_id`, and
+`delegation_depth` in detail and lightweight list responses. Existing and root
+runs have null parent/root IDs and depth 0. Later delegation writers supply these
+values at creation; this storage contract does not start child runs.
+
+The parent is an indexed self-reference with `ON DELETE SET NULL`, so removing a
+parent preserves its children. The indexed root ID has no foreign key and remains
+a grouping label after root deletion; recorded depth is also preserved. A whole
+tree consists of the root row plus executions whose root ID points to it.
+`CRUDFlowExecution.get_children` requires an account, returns direct children
+only, and orders them by start time then execution ID. The list query loads the
+lineage fields and existing parking timestamps with the row so serializing a
+page adds no per-row reads.
+
 ## Label-based model routing
 
 A flow can optionally store ordered routing rules in `agent_config.model_routing` (no extra column). Each rule has a stable id, `labels.any` and/or `labels.all` against the issue's current labels, and an account-owned `ai_model_id` plus compatible `agent_type`. The first matching rule selects the model and harness for that execution. If none match, or the key is absent, the flow's selected model and harness are used. Examples in docs use operator-defined labels such as `documentation` or `bug`; there is no built-in taxonomy.
