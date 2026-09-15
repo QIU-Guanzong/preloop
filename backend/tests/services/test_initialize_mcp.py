@@ -102,6 +102,7 @@ EXPECTED_TOOLS = {
     "create_pull_request",
     "get_approval_status",
     "resolve_sbom_upstreams",
+    "send_note",
 }
 
 
@@ -251,6 +252,108 @@ class TestRegisteredToolBehaviour:
             result = await fn(components=[{"name": "JPEGDEC"}])
         assert result.startswith("Error:")
         assert "version" in result
+
+    async def test_send_note_no_user_context(self, mcp_server):
+        """No identity, no note: the tool cannot guess who is writing."""
+        fn = await self._fn(mcp_server, "send_note")
+        with patch(
+            "preloop.services.dynamic_fastmcp_http.get_current_user_context",
+            return_value=None,
+        ):
+            result = await fn(text="hi", agent_id=str(uuid4()))
+        assert result == "Error: No user context available"
+
+    async def test_send_note_signs_with_the_calling_identity(self, mcp_server):
+        """The author is read off the call's own context, never an argument."""
+        import json
+
+        fn = await self._fn(mcp_server, "send_note")
+        caller_agent_id = uuid4()
+        target_agent_id = uuid4()
+        user_ctx = SimpleNamespace(
+            account_id=str(uuid4()),
+            username="u",
+            managed_agent_id=str(caller_agent_id),
+            runtime_session_id=None,
+            api_key_id=None,
+            flow_execution_id=None,
+            runtime_principal_name="Reviewer",
+        )
+        service_result = {"ok": True, "note": {"note_id": "abc123"}}
+        with (
+            patch(
+                "preloop.services.dynamic_fastmcp_http.get_current_user_context",
+                return_value=user_ctx,
+            ),
+            patch(
+                "preloop.services.initialize_mcp.require_approval",
+                new=AsyncMock(return_value=(True, None)),
+            ),
+            patch(
+                "preloop.models.db.session.get_db_session",
+                return_value=iter([MagicMock()]),
+            ),
+            patch(
+                "preloop.services.agent_send_note.send_note_from_agent",
+                return_value=service_result,
+            ) as mock_send,
+        ):
+            result = await fn(text="Rebase first.", agent_id=str(target_agent_id))
+
+        assert json.loads(result) == service_result
+        kwargs = mock_send.call_args.kwargs
+        assert kwargs["account_id"] == user_ctx.account_id
+        assert kwargs["author_agent_id"] == caller_agent_id
+        assert kwargs["agent_id"] == str(target_agent_id)
+        assert kwargs["text"] == "Rebase first."
+
+    async def test_send_note_returns_a_refusal_as_json(self, mcp_server):
+        """A refusal reaches the model as data it can act on, not a stack."""
+        import json
+
+        fn = await self._fn(mcp_server, "send_note")
+        user_ctx = SimpleNamespace(
+            account_id=str(uuid4()),
+            username="u",
+            managed_agent_id=str(uuid4()),
+            runtime_session_id=None,
+            api_key_id=None,
+            flow_execution_id=None,
+            runtime_principal_name="Reviewer",
+        )
+        refusal = {
+            "ok": False,
+            "error": {"code": "invalid_target", "message": "Name exactly one target"},
+        }
+        with (
+            patch(
+                "preloop.services.dynamic_fastmcp_http.get_current_user_context",
+                return_value=user_ctx,
+            ),
+            patch(
+                "preloop.services.initialize_mcp.require_approval",
+                new=AsyncMock(return_value=(True, None)),
+            ),
+            patch(
+                "preloop.models.db.session.get_db_session",
+                return_value=iter([MagicMock()]),
+            ),
+            patch(
+                "preloop.services.agent_send_note.send_note_from_agent",
+                return_value=refusal,
+            ),
+        ):
+            result = await fn(text="hi")
+
+        assert json.loads(result) == refusal
+
+    async def test_send_note_schema_matches_the_shared_definition(self, mcp_server):
+        """One schema for the REST catalogue and the MCP registration."""
+        from preloop.tools.builtin_defs import SEND_NOTE_TOOL
+
+        tool = await mcp_server.get_tool("send_note")
+        assert tool.parameters == SEND_NOTE_TOOL["schema"]
+        assert tool.description == SEND_NOTE_TOOL["description"]
 
     async def test_removed_test_progress_tool_not_registered(self, mcp_server):
         """The old test_progress debug tool must no longer ship to users."""

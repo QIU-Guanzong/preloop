@@ -21552,6 +21552,13 @@ components:
             format: uuid
           - type: 'null'
           title: User Id
+        agent_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Agent Id
+          description: Managed agent that wrote the note, when not a person.
         display:
           anyOf:
           - type: string
@@ -21564,7 +21571,14 @@ components:
           title: Auth Method
       type: object
       title: OperatorNoteAuthor
-      description: Who sent the note, as stamped into the delivered label.
+      description: 'Who sent the note, as stamped into the delivered label.
+
+
+        Exactly one of ``user_id`` and ``agent_id`` is set: a person wrote it, or
+
+        a managed agent did through the ``send_note`` tool. ``auth_method`` is
+
+        ``agent`` in the second case and is always derived server side.'
     OperatorNoteCreate:
       properties:
         text:

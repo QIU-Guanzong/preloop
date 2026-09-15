@@ -3,7 +3,9 @@
 An operator note is a short instruction from an identified human to a running
 agent. You type it in the console or the API; the agent receives it at
 its next turn boundary; the note is recorded as a human decision, with who sent
-it, when it landed and on which turn.
+it, when it landed and on which turn. An agent can author one too, through an
+opt-in tool, and the record says so; see
+[A note from an agent](#a-note-from-an-agent).
 
 It exists because the alternative in an unattended run is to kill the agent and
 start again. A note is the cheaper correction: "the staging cluster is the one
@@ -59,6 +61,32 @@ and expiring visibly beats rotting silently.
 Mobile is out of scope for now. The iOS and Android clients already hold an
 account session, so they need no new backend: the three endpoints above are the
 whole surface.
+
+## A note from an agent
+
+An agent can leave a note for another agent through the `send_note` builtin
+tool, so a hand off between two runs stops going through a person or a file
+nobody sweeps. It is off by default and has to be enabled per agent or per
+flow, like any other builtin: an agent that was never given the tool does not
+see it in its tool list and is refused if it calls it anyway.
+
+```json
+{"text": "The migration is applied; run the backfill.", "agent_id": "0b0d..."}
+```
+
+Same one-target rule, same store, same delivery rail, same 4096 character and
+20-per-hour ceilings, and the same account boundary: the target is resolved in
+the calling agent's account, so an id from another account is simply not found.
+Naming no target or two is a structured refusal the model can correct on its
+next turn, not an exception, and no note row is written.
+
+What differs is only the author. The row records the calling managed agent
+rather than a user, the envelope carries `"authMethod": "agent"` and a display
+name suffixed `(agent)`, and the audit row for the send names the agent as the
+actor. A reader of the delivered block can therefore always tell a sibling
+agent's hand off from an instruction by the human who can stop the run, and the
+note still grants nothing: every action taken because of it goes through the
+firewall, the gateway and the approval policy as before.
 
 ## How it is delivered
 
@@ -209,7 +237,8 @@ become a delivery, and the candidate query used at delivery time is itself
 bounded by the account.
 
 Limits: 4096 characters per note, 20 notes per author per agent per hour
-(or per session, when the target has no managed agent). Note
+(or per session, when the target has no managed agent). An agent author counts
+against the same ceiling, keyed on the authoring agent. Note
 bodies are stored in the clear, exactly as approval comments are, because both
 are operator text that has to be readable in the audit trail and in the
 timeline. Do not put secrets in a note; use the credential store.
