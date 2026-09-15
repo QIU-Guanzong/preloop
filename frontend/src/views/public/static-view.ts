@@ -28,8 +28,10 @@ export class StaticView extends LitElement {
       main {
         flex: 1;
         box-sizing: border-box;
-        padding: 3.5rem 1.5rem 5rem;
-        max-width: calc(760px + 2 * 1.5rem);
+        --reading-column-width: 760px;
+        --page-gutter: 1.5rem;
+        padding: 3.5rem var(--page-gutter) 5rem;
+        max-width: calc(var(--reading-column-width) + 2 * var(--page-gutter));
         margin: 0 auto;
         width: 100%;
       }
