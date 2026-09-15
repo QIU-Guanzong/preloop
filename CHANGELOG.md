@@ -76,6 +76,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by `FLOW_DELEGATION_MAX_DEPTH` (default 2) and
   `FLOW_DELEGATION_MAX_CHILDREN` (default 25, the matrix fan out ceiling).
   Docs at `docs/guide/flows/flow-delegation.md`.
+- Execution tree on the execution page. A delegating run lists what it
+  started: one row per child with the flow, the label the caller passed, the
+  state, the duration and the cost, expandable to grandchildren and linked to
+  each child's own page. A failed child shows its failure category and a
+  refused one is visibly distinct, carrying no cost. The panel totals the
+  subtree (launched, succeeded, failed, refused, cost, tokens) and shows the
+  run's own cost beside that total rather than added to it. A run that
+  delegated nothing says so in one line. Behind it,
+  `GET /api/v1/flows/executions/{id}/tree` returns the execution, every
+  descendant of it and a rollup over them in the same shape the batch listing
+  uses; asking a child returns that child's subtree.
 - `get_execution` builtin tool: a flow execution can read the state, cost,
   tokens and result of an execution it started, or of itself. Default off,
   like `run_flow`. Scope is enforced on the server and is exactly the caller

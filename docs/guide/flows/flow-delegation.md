@@ -141,3 +141,25 @@ Every delegated child carries its parent execution, the root of its tree,
 and its depth, so a tree can be reconstructed from the execution rows alone
 without a log. A child of a child keeps the root of the whole tree, not its
 immediate parent.
+
+The execution page shows that tree. Under the summary strip, a delegating run
+lists what it started: one row per child with the flow, the label the caller
+passed, the state, when it ran and for how long, and what it cost, expandable
+to grandchildren and linked to each child's own page. A failed child shows its
+failure category; a refused one is marked as refused and carries no cost,
+because nothing ran. The header of the panel totals the subtree (launched,
+succeeded, failed, refused, cost, tokens) and keeps the run's own cost beside
+it, never added to it: "this run cost X, what it started cost Y" is the
+question the panel exists to answer. A run that started nothing says so in one
+line.
+
+The same read is available directly:
+
+```
+GET /api/v1/flows/executions/{execution_id}/tree
+```
+
+It answers with the execution itself, every descendant of it, and a rollup
+over those descendants in the same shape the batch listing uses. Asking a
+child returns that child's own subtree. A tree larger than one read comes back
+with `truncated: true`.
