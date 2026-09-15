@@ -55,6 +55,7 @@ non-triage write (replace the description, close the issue) that the old tool
 pair made impossible. Account owners who want a mechanical gate should attach an
 approval policy to `update_issue` for this flow. The preset does not pin one:
 approval gates are deployment-specific.
+
 The first provider adapters support GitHub and GitLab. Other providers report an
 unsupported operation rather than claiming an update.
 
