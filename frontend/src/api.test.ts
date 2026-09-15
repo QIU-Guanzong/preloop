@@ -8,6 +8,7 @@ import {
   getFlowExecutions,
   getFlows,
   getAllFlows,
+  uniqueFlowsById,
   FLOW_LIST_MAX_PAGES,
   createFlow,
   updateFlow,
@@ -446,13 +447,58 @@ describe('api', () => {
     });
 
     it('stops at the page cap and reports truncated', async () => {
-      fetchStub.callsFake(async () => ok([{ id: '1', name: 'A' }]));
+      let n = 0;
+      fetchStub.callsFake(async () => {
+        n += 1;
+        return ok([{ id: String(n), name: 'A' }]);
+      });
 
       const result = await getAllFlows({ pageSize: 1 });
 
       expect(result.truncated).to.be.true;
       expect(result.flows).to.have.lengthOf(FLOW_LIST_MAX_PAGES);
       expect(fetchStub.callCount).to.equal(FLOW_LIST_MAX_PAGES);
+    });
+
+    it('keeps one row when the same id appears on two pages', async () => {
+      fetchStub.onCall(0).resolves(
+        ok([
+          { id: '1', name: 'A' },
+          { id: '2', name: 'B' },
+        ])
+      );
+      fetchStub.onCall(1).resolves(
+        ok([
+          { id: '2', name: 'B-renamed' },
+          { id: '3', name: 'C' },
+        ])
+      );
+      fetchStub.onCall(2).resolves(ok([]));
+
+      const result = await getAllFlows({ pageSize: 2 });
+
+      expect(result.truncated).to.be.false;
+      expect(result.flows.map((flow: { id: string }) => flow.id)).to.deep.equal(
+        ['1', '2', '3']
+      );
+      expect(
+        result.flows.map((flow: { name: string }) => flow.name)
+      ).to.deep.equal(['A', 'B', 'C']);
+    });
+  });
+
+  describe('uniqueFlowsById', () => {
+    it('keeps the first name when the same id repeats', () => {
+      expect(
+        uniqueFlowsById([
+          { id: '1', name: 'A' },
+          { id: '1', name: 'A-renamed' },
+          { id: '2', name: 'B' },
+        ])
+      ).to.deep.equal([
+        { id: '1', name: 'A' },
+        { id: '2', name: 'B' },
+      ]);
     });
   });
 

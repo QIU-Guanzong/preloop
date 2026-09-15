@@ -9,6 +9,7 @@ import {
   getAccountOrganization,
   getRunners,
   getAllFlows,
+  uniqueFlowsById,
   listOrganizations,
   listProjects,
   getFlowPresets,
@@ -2227,14 +2228,16 @@ export class PreloopFlowForm extends LitElement {
   private renderCallableFlows() {
     const selfName = (this.flow?.name || '').trim();
     const selfKey = selfName.toLowerCase();
-    const others = this.accountFlows.filter((candidate: any) => {
-      const name =
-        typeof candidate?.name === 'string' ? candidate.name.trim() : '';
-      if (!name) return false;
-      if (candidate.is_preset === true) return false;
-      if (this.flow?.id && candidate.id === this.flow.id) return false;
-      return name.toLowerCase() !== selfKey;
-    });
+    const others = uniqueFlowsById(this.accountFlows).filter(
+      (candidate: any) => {
+        const name =
+          typeof candidate?.name === 'string' ? candidate.name.trim() : '';
+        if (!name) return false;
+        if (candidate.is_preset === true) return false;
+        if (this.flow?.id && candidate.id === this.flow.id) return false;
+        return name.toLowerCase() !== selfKey;
+      }
+    );
     const known = new Set(
       others.map((candidate: any) => candidate.name.trim().toLowerCase())
     );

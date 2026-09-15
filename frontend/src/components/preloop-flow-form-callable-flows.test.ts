@@ -292,6 +292,24 @@ describe('PreloopFlowForm callable flows picker', () => {
     expect('callable_flows' in payload).to.be.false;
   });
 
+  it('renders one picker row when paging returns the same flow twice', async () => {
+    accountFlows = [
+      ...ACCOUNT_FLOWS,
+      { id: CHILD_ID, name: 'Child flow' },
+      { id: CHILD_ID, name: 'Child flow (renamed mid-page)' },
+    ];
+    const element = await mountParent();
+
+    expect(
+      element.shadowRoot!.querySelectorAll('[data-callable-flow="Child flow"]')
+    ).to.have.lengthOf(1);
+    expect(
+      element.shadowRoot!.querySelector(
+        '[data-callable-flow="Child flow (renamed mid-page)"]'
+      )
+    ).to.not.exist;
+  });
+
   it('cannot select the same flow twice', async () => {
     const element = await mountParent();
     await toggleFlow(element, 'Child flow', true);

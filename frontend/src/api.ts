@@ -2945,6 +2945,28 @@ export const FLOW_LIST_PAGE_SIZE = 100;
 export const FLOW_LIST_MAX_PAGES = 50;
 
 /**
+ * One row per flow id. Offset paging with no ORDER BY can surface the
+ * same flow on two pages when a row is inserted or renamed between
+ * fetches; the first occurrence wins so a rename keeps a single name.
+ * Rows with no id stay in the list (they cannot be keyed).
+ */
+export function uniqueFlowsById<T extends { id?: unknown }>(flows: T[]): T[] {
+  const seen = new Set<string>();
+  const unique: T[] = [];
+  for (const flow of flows) {
+    if (flow?.id == null || flow.id === '') {
+      unique.push(flow);
+      continue;
+    }
+    const key = String(flow.id);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(flow);
+  }
+  return unique;
+}
+
+/**
  * The account's flows.
  *
  * `statsSince` asks for the run counts and the spend of one window
@@ -3002,11 +3024,11 @@ export async function getAllFlows(
     }
     flows.push(...batch);
     if (batch.length < pageSize) {
-      return { flows, truncated: false };
+      return { flows: uniqueFlowsById(flows), truncated: false };
     }
     skip += pageSize;
   }
-  return { flows, truncated: true };
+  return { flows: uniqueFlowsById(flows), truncated: true };
 }
 
 export async function getFlow(flowId: string): Promise<any> {
