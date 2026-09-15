@@ -488,3 +488,28 @@ async def test_the_sweeper_starts_when_enabled(monkeypatch):
         backfill.reset_session_search_backfill_sweeper()
 
     assert sweeper.running is False
+
+
+def test_a_locked_account_is_not_recorded_as_failed(db_session, test_user, monkeypatch):
+    """Another replica holding the walk is a skip, not a last_error stamp."""
+    monkeypatch.setattr(
+        backfill.crud_session_search_backfill_state,
+        "lock_for_account",
+        lambda db, *, account_id: None,
+    )
+
+    result = backfill.backfill_account(
+        db_session,
+        account_id=test_user.account_id,
+        row_budget=10,
+        now=NOW,
+        commit=False,
+    )
+    summary = backfill.run_session_search_backfill(
+        db_session, now=NOW, account_ids=[test_user.account_id]
+    )
+
+    assert result is None
+    assert summary.accounts_failed == 0
+    assert summary.accounts == 0
+    assert _state(db_session, test_user.account_id) is None
