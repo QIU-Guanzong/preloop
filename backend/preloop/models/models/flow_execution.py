@@ -235,6 +235,29 @@ class FlowExecution(Base):
         index=True,
     )  # Links to the original execution this is a retry of
 
+    # Execution lineage. Every run that was started by another run (a
+    # delegated child, a continued park, ...) points at the execution that
+    # started it, so the whole delegation tree is answerable from the table
+    # without walking logs. NULL on root runs and on every row created before
+    # the columns existed.
+    #
+    # parent_execution_id is the direct caller (indexed: the children lookup
+    # is "who did I start?"). root_execution_id is the first execution of the
+    # chain (indexed so descendants of a root can be listed together) and is
+    # also NULL on the root itself. The whole tree is the root row matched
+    # by its own id plus rows whose root_execution_id points at that root.
+    # delegation_depth is the distance from the root (0 = root, 1 = direct
+    # child), so a budget or depth cap can be enforced with a single
+    # comparison instead of a recursive query.
+    parent_execution_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("flow_execution.id"),
+        nullable=True,
+        index=True,
+    )
+    root_execution_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    delegation_depth = Column(Integer, nullable=False, default=0, server_default="0")
+
     # Delivery-level idempotency key of the webhook delivery that created this
     # execution: "delivery:<X-GitHub-Delivery / X-Gitlab-Event-UUID>", or
     # "content:<sha256 prefix>" for tracker sources that send no delivery id.

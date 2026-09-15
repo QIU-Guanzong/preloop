@@ -493,6 +493,98 @@ class TestListTools:
         assert "improve_compliance" not in names
         assert "get_issue" in names
 
+    async def test_list_tools_excludes_issue_triage_tools_without_config(
+        self, dynamic_mcp, user_context
+    ):
+        """Triage tools are default-disabled: a tracker alone does not
+        advertise them to a fresh agent (#660)."""
+        dynamic_mcp._user_context_provider = lambda: user_context
+        user_context.tracker_types = ["github"]
+
+        default_tools = [
+            Tool(name="get_issue_triage_context", description="GTC", parameters={}),
+            Tool(name="apply_issue_triage", description="AIT", parameters={}),
+            Tool(name="get_issue", description="Get issue", parameters={}),
+        ]
+
+        with patch("preloop.services.dynamic_fastmcp.get_db") as mock_get_db:
+            mock_db = MagicMock()
+            mock_get_db.side_effect = lambda: iter([mock_db])
+
+            with (
+                patch(
+                    "preloop.services.mcp_tool_discovery._get_proxied_tools_sync",
+                    return_value=[],
+                ),
+                patch(
+                    "preloop.services.dynamic_fastmcp.crud_tool_configuration.get_multi_by_account",
+                    return_value=[],
+                ),
+                patch(
+                    "preloop.models.crud.crud_account.get",
+                    return_value=MagicMock(meta_data={}),
+                ),
+                patch.object(
+                    FastMCP, "list_tools", new=AsyncMock(return_value=default_tools)
+                ),
+            ):
+                result = await dynamic_mcp.list_tools()
+
+        names = {t.name for t in result}
+        assert "get_issue_triage_context" not in names
+        assert "apply_issue_triage" not in names
+        assert "get_issue" in names
+
+    async def test_list_tools_flow_allow_list_exposes_issue_triage_tools(
+        self, dynamic_mcp
+    ):
+        """The triage preset selects both tools, so its execution still gets
+        them despite the default-off flag (#660)."""
+        user_context = UserContext(
+            user_id="1",
+            account_id="1",
+            username="test",
+            has_tracker=True,
+            enabled_default_tools=[],
+            enabled_proxied_tools=[],
+            tracker_types=["github"],
+            flow_execution_id="flow-exec-triage",
+            allowed_flow_tools=["get_issue_triage_context", "apply_issue_triage"],
+        )
+        dynamic_mcp._user_context_provider = lambda: user_context
+
+        default_tools = [
+            Tool(name="get_issue_triage_context", description="GTC", parameters={}),
+            Tool(name="apply_issue_triage", description="AIT", parameters={}),
+            Tool(name="create_issue", description="Create issue", parameters={}),
+        ]
+
+        with patch("preloop.services.dynamic_fastmcp.get_db") as mock_get_db:
+            mock_db = MagicMock()
+            mock_get_db.side_effect = lambda: iter([mock_db])
+
+            with (
+                patch(
+                    "preloop.services.mcp_tool_discovery._get_proxied_tools_sync",
+                    return_value=[],
+                ),
+                patch(
+                    "preloop.services.dynamic_fastmcp.crud_tool_configuration.get_multi_by_account",
+                    return_value=[],
+                ),
+                patch(
+                    "preloop.models.crud.crud_account.get",
+                    return_value=MagicMock(meta_data={}),
+                ),
+                patch.object(
+                    FastMCP, "list_tools", new=AsyncMock(return_value=default_tools)
+                ),
+            ):
+                result = await dynamic_mcp.list_tools()
+
+        names = {t.name for t in result}
+        assert names == {"get_issue_triage_context", "apply_issue_triage"}
+
     async def test_list_tools_explicit_enable_overrides_default_disabled(
         self, dynamic_mcp, user_context
     ):

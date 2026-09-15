@@ -195,4 +195,11 @@ def test_flow_runners_revision_chains_onto_approval_rule_context() -> None:
     }
     queued_reason = script.get_revision("20260915_queued_reason")
     assert queued_reason.down_revision == "20260914_pricing_merge"
-    assert script.get_heads() == ["20260915_queued_reason"]
+    lineage = script.get_revision("20260915_execution_lineage")
+    assert lineage.down_revision == "20260914_pricing_merge"
+    queued_lineage = script.get_revision("20260915_queued_lineage_merge")
+    assert set(queued_lineage.down_revision) == {
+        "20260915_queued_reason",
+        "20260915_execution_lineage",
+    }
+    assert script.get_heads() == ["20260915_queued_lineage_merge"]
