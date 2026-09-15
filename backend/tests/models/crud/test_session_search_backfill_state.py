@@ -165,3 +165,40 @@ def test_lock_for_account_returns_the_created_row(db_session, test_user):
 
     assert locked is not None
     assert locked.account_id == test_user.account_id
+
+
+def test_lock_for_account_commits_a_new_row_before_locking(
+    db_session, test_user, monkeypatch
+):
+    """A concurrent replica can see the empty row and skip immediately."""
+    commits = {"n": 0}
+    original = db_session.commit
+
+    def counting_commit() -> None:
+        commits["n"] += 1
+        original()
+
+    monkeypatch.setattr(db_session, "commit", counting_commit)
+    locked = crud_state.lock_for_account(db_session, account_id=test_user.account_id)
+
+    assert locked is not None
+    assert locked.account_id == test_user.account_id
+    assert commits["n"] == 1
+
+
+def test_lock_for_account_does_not_commit_an_existing_row(
+    db_session, test_user, monkeypatch
+):
+    """An already created row is skip-locked without a first-touch commit."""
+    crud_state.get_or_create(db_session, account_id=test_user.account_id)
+    db_session.flush()
+    commits = {"n": 0}
+
+    def counting_commit() -> None:
+        commits["n"] += 1
+
+    monkeypatch.setattr(db_session, "commit", counting_commit)
+    locked = crud_state.lock_for_account(db_session, account_id=test_user.account_id)
+
+    assert locked is not None
+    assert commits["n"] == 0
