@@ -77,7 +77,9 @@ All three presets follow the same guarantees:
   plus a per-finding verification budget (at most 2 greps and 2 file
   reads) inherited from the Pull Request Reviewer.
 - **Freeze-floor drift.** Deliver a previous run's `result.json`
-  (`previous_result_path` in the seed, or a hygiene-checked URL) and the
+  (`previous_result_path` in the seed, a hygiene-checked URL, or
+  `previous_result_execution_id` naming a previous execution — see
+  [Baseline from a previous run](#baseline-from-a-previous-run)) and the
   run classifies everything as new / persisting / resolved. Previous open
   items are a floor: each must reappear re-verified against the current
   checkout or be resolved with a reason and evidence; silently dropping
@@ -168,6 +170,84 @@ search pattern, and requirements a repository cannot evidence
 (organizational process, runtime behavior, personnel, hosted
 infrastructure) land in `not_checkable`, never faked. Any `mandatory`
 gap fails the run.
+
+## Baseline from a previous run
+
+Drift needs a baseline, and until now the only way to deliver one was to
+attach the previous `result.json` as a file: `previous_result_path`
+pointing at a [`workspace_files` seed](../../webhook-triggers.md), or a
+hygiene-checked URL. Both need a human holding the previous result, and
+the seed transport is capped at 96 KiB base64 per file, below a full
+review envelope.
+
+`previous_result_execution_id` removes the file from the loop. The
+payload names a previous **execution**; the runner reads that execution's
+stored result and writes it into the workspace at `previous/result.json`
+before the agent starts, which is exactly where a seeded baseline would
+have landed:
+
+```json
+{
+  "previous_result_execution_id": "0f1d4c0e-7a1c-4a9a-9a8f-2f0b1d4c0e7a"
+}
+```
+
+`"last"` means this flow's own most recent execution that reported a
+result, which is what a subscription wants: a schedule cannot know an
+execution id in advance, and a pinned id would freeze every future run
+against one baseline.
+
+```json
+{
+  "previous_result_execution_id": "last"
+}
+```
+
+Rules, in the order they bite:
+
+- **Explicit file wins.** If the payload also names
+  `previous_result_path` or `previous_result_url`, or seeds a file at
+  `previous/result.json`, the execution id is ignored and nothing is
+  fetched. The caller who attached a file said what they wanted.
+- **Account scoped.** The lookup is scoped to the account that owns the
+  flow, so an execution in another account behaves exactly like one that
+  never existed — same outcome, same reason string, nothing to probe
+  with.
+- **Degrades, never fails.** An id that does not resolve, an execution
+  that stored no result, or a result over the cap does not fail the run.
+  The runner writes `previous/baseline-mismatch.json` instead
+  (`{"baseline_mismatch": true, "reason": "..."}`), the preset sets
+  `baseline_mismatch` in `result.json`, `drift` stays `null`, and the run
+  continues. Reasons are `previous_result_unavailable` (unknown, foreign
+  or malformed id), `previous_result_missing` (no stored result), and
+  `previous_result_too_large`.
+- **Size cap.** A stored result above **256 KiB** of serialized JSON is
+  refused with the `previous_result_too_large` marker rather than
+  truncated: truncated JSON is not a baseline, it is a parse error. The
+  presets keep `result.json` under 200 KB, so the cap sits above the
+  contract it serves.
+
+### Scheduled review subscription
+
+A schedule carries a static `payload` alongside its timing, which is how
+a scheduled run states the key (a schedule has no request body):
+
+```json
+{
+  "type": "weekly",
+  "days": ["mon"],
+  "at": "07:00",
+  "timezone": "Europe/Athens",
+  "payload": {"previous_result_execution_id": "last", "depth": "standard"}
+}
+```
+
+Every Monday run then diffs against the previous Monday's result with
+nobody in the loop: `drift` names new, resolved and persisting items, and
+the freeze floor is enforced against the baseline the runner delivered.
+The schedule payload is bounded (20 keys, 4 KB) and may not declare
+`workspace_files`: inline file seeding belongs to a caller who can read
+the response, not to a stored config.
 
 ## Evidence pack layout
 

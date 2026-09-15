@@ -13,6 +13,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from urllib.parse import urlparse
 
 from sqlalchemy.orm import Session
 
@@ -82,7 +83,9 @@ def _alibaba_refresh_error(status: object) -> str:
         return "Alibaba Cloud Model Studio credentials are not configured"
     if status is CatalogRefreshStatus.host_mismatch:
         return (
-            "This model's credentials are not sent to a different Alibaba catalog host"
+            "This workspace has no supported native pricing fetch. Its credentials "
+            "are not sent to a different Alibaba catalog host. Use the reviewed "
+            "regional catalog or an override verified against the Model Studio console."
         )
     if status is CatalogRefreshStatus.empty:
         return "Alibaba Cloud Model Studio's price catalog listed no token tariffs"
@@ -107,7 +110,11 @@ def provider_supports_price_fetch(ai_model: AIModel) -> bool:
     from preloop.services.alibaba_price_catalog import native_catalog_target
 
     if alibaba_pricing.is_alibaba(ai_model):
-        return native_catalog_target(ai_model) is not None
+        target = native_catalog_target(ai_model)
+        return bool(
+            target is not None
+            and urlparse(target[0]).hostname == alibaba_pricing._host(ai_model)
+        )
     provider = (ai_model.provider_name or "").strip().lower()
     if provider in PRICE_FETCH_PROVIDERS:
         return True
@@ -381,6 +388,7 @@ def fetch_provider_pricing(ai_model: AIModel) -> AIModelPriceQuote:
     from preloop.services.alibaba_price_catalog import (
         CatalogRefreshStatus,
         native_catalog_target,
+        native_tariff,
         refresh_from_model,
     )
 
@@ -388,24 +396,40 @@ def fetch_provider_pricing(ai_model: AIModel) -> AIModelPriceQuote:
         target = native_catalog_target(ai_model)
         if target is None:
             raise PriceFetchUnsupportedError(
-                f"{provider_label(ai_model.provider_name)} does not publish prices"
+                "Native USD pricing fetch is not supported for this Alibaba region. "
+                "Use a verified regional price override."
+            )
+        if not provider_supports_price_fetch(ai_model):
+            raise PriceFetchUnsupportedError(
+                _alibaba_refresh_error(CatalogRefreshStatus.host_mismatch)
             )
         status = refresh_from_model(ai_model)
         if status is not CatalogRefreshStatus.ingested:
             raise PriceFetchUnavailableError(_alibaba_refresh_error(status))
-        catalog = _catalog_entry(ai_model)
-        if catalog is None:
+        tariff = native_tariff(ai_model)
+        if tariff is None:
             raise PriceFetchUnavailableError(
                 "Alibaba Cloud Model Studio does not list a price "
                 "for this model identifier"
             )
-        model_key, entry = catalog
+        # A reviewed tariff can remain authoritative for accounting. Quote
+        # the actual native response here, without attributing reviewed or
+        # seeded prices to a provider download that did not return them.
+        cached_input = (
+            tariff.implicit_read
+            if tariff.explicit_read in (None, tariff.implicit_read)
+            else None
+        )
         return AIModelPriceQuote(
             ai_model_id=str(ai_model.id),
             provider_name=ai_model.provider_name,
             source_url=target[0],
-            model_key=model_key.split("/", 1)[-1],
-            price=_price_from_catalog_entry(entry),
+            model_key=ai_model.model_identifier,
+            price=AIModelPrice(
+                input_per_1m=tariff.input,
+                output_per_1m=tariff.output,
+                cached_input_per_1m=cached_input,
+            ),
             fetched_at=datetime.now(timezone.utc),
         )
 

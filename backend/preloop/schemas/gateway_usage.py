@@ -366,6 +366,13 @@ class RuntimeSessionSummary(BaseModel):
     optimization_waste_score: Optional[int] = None
     optimization_potential_savings_tokens: Optional[int] = None
     optimization_potential_savings_usd: Optional[float] = None
+    legal_hold: bool = Field(
+        False,
+        description=(
+            "True while a legal hold freezes this session: the retention "
+            "purge leaves it and its activity alone until the hold is released"
+        ),
+    )
 
 
 class AccountRuntimeSessionListResponse(BaseModel):

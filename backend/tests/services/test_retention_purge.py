@@ -1,5 +1,6 @@
 """The purge: bounds, holds, audit rows and the off-peak window."""
 
+import inspect
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -12,7 +13,11 @@ from preloop.models.models.audit_log import AuditLog
 from preloop.services import audit_chain
 from preloop.services import retention_purge as purge
 from preloop.services.legal_hold import place_hold
-from preloop.services.retention_policy import CLASS_AUDIT
+from preloop.services.retention_policy import (
+    CLASS_AUDIT,
+    CLASS_RUNTIME_SESSIONS,
+    RECORD_CLASSES,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -126,6 +131,58 @@ def _evidence(db_session, test_user, *, age_days: int):
     return execution, artifact
 
 
+def _runtime_session(db_session, test_user, *, age_days: int, activities: int = 2):
+    """One ended session with activity rows, all dated ``age_days`` ago."""
+    stamp = datetime.now(UTC) - timedelta(days=age_days)
+    session = models.RuntimeSession(
+        account_id=test_user.account_id,
+        session_source_type="managed_agent",
+        session_source_id=f"agent-{uuid.uuid4().hex[:8]}",
+        started_at=stamp,
+        last_activity_at=stamp,
+        ended_at=stamp,
+    )
+    db_session.add(session)
+    db_session.flush()
+    for index in range(activities):
+        db_session.add(
+            models.RuntimeSessionActivity(
+                account_id=test_user.account_id,
+                runtime_session_id=session.id,
+                activity_type="tool_call",
+                tool_name=f"tool-{index}",
+                status="success",
+                timestamp=stamp,
+            )
+        )
+    db_session.flush()
+    return session
+
+
+def _session_count(db_session, account_id) -> int:
+    return len(
+        db_session.execute(
+            select(models.RuntimeSession.id).where(
+                models.RuntimeSession.account_id == account_id
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+def _activity_count(db_session, session_id) -> int:
+    return len(
+        db_session.execute(
+            select(models.RuntimeSessionActivity.id).where(
+                models.RuntimeSessionActivity.runtime_session_id == session_id
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
 # --- what gets removed -----------------------------------------------------
 
 
@@ -222,6 +279,190 @@ def test_an_execution_hold_covers_that_executions_packs(db_session, test_user, a
     purge.run_retention_purge(db_session, account_ids=[account.id], ignore_window=True)
 
     assert _exists(db_session, models.FlowArtifact, artifact.id) is True
+
+
+def test_a_held_execution_keeps_its_legacy_evidence_archive(
+    db_session, test_user, account
+):
+    """The legacy-column drop is not a RECORD_CLASS, but a hold still stops it."""
+    held, _held_pack = _evidence(db_session, test_user, age_days=500)
+    unheld, _unheld_pack = _evidence(db_session, test_user, age_days=500)
+    aged = datetime.now(UTC) - timedelta(days=500)
+    held.created_at = aged
+    unheld.created_at = aged
+    held.evidence_archive = b"held-archive"
+    unheld.evidence_archive = b"unheld-archive"
+    db_session.add_all([held, unheld])
+    db_session.commit()
+    place_hold(
+        db_session,
+        account_id=account.id,
+        resource_type="execution",
+        resource_id=str(held.id),
+        reason="incident review INC-114",
+        user_id=test_user.id,
+    )
+
+    purge.run_retention_purge(db_session, account_ids=[account.id], ignore_window=True)
+    db_session.expire_all()
+
+    held_archive = db_session.get(models.FlowExecution, held.id).evidence_archive
+    unheld_archive = db_session.get(models.FlowExecution, unheld.id).evidence_archive
+    assert bytes(held_archive or b"") == b"held-archive"
+    assert unheld_archive is None
+
+
+def test_a_held_runtime_session_and_its_activity_survive_the_purge(
+    db_session, test_user, account
+):
+    """A session told to be preserved keeps its activity rows too (#650)."""
+    held = _runtime_session(db_session, test_user, age_days=500, activities=3).id
+    unheld = _runtime_session(db_session, test_user, age_days=500, activities=2).id
+    db_session.commit()
+    place_hold(
+        db_session,
+        account_id=account.id,
+        resource_type="runtime_session",
+        resource_id=str(held),
+        reason="litigation hold, matter 2026-07",
+        user_id=test_user.id,
+    )
+    before_sessions = _session_count(db_session, account.id)
+    before_activity = _activity_count(db_session, held)
+    assert (before_sessions, before_activity) == (2, 3)
+
+    purge.run_retention_purge(db_session, account_ids=[account.id], ignore_window=True)
+
+    assert _session_count(db_session, account.id) == 1
+    assert _exists(db_session, models.RuntimeSession, held) is True
+    assert _exists(db_session, models.RuntimeSession, unheld) is False
+    assert _activity_count(db_session, held) == before_activity
+    assert _activity_count(db_session, unheld) == 0
+
+
+def test_releasing_a_session_hold_makes_it_purgeable_again(
+    db_session, test_user, account
+):
+    session = _runtime_session(db_session, test_user, age_days=500, activities=2).id
+    db_session.commit()
+    outcome = place_hold(
+        db_session,
+        account_id=account.id,
+        resource_type="runtime_session",
+        resource_id=str(session),
+        reason="litigation hold, matter 2026-07",
+        user_id=test_user.id,
+    )
+    purge.run_retention_purge(db_session, account_ids=[account.id], ignore_window=True)
+    assert _exists(db_session, models.RuntimeSession, session) is True
+
+    from preloop.services.legal_hold import release_hold
+
+    release_hold(
+        db_session,
+        account_id=account.id,
+        hold_id=outcome.hold.id,
+        reason="matter closed 2026-08",
+        user_id=test_user.id,
+    )
+    purge.run_retention_purge(db_session, account_ids=[account.id], ignore_window=True)
+
+    assert _exists(db_session, models.RuntimeSession, session) is False
+    assert _activity_count(db_session, session) == 0
+
+
+def test_a_held_session_is_not_counted_as_purgeable(db_session, test_user, account):
+    """The dry-run preview must not promise to delete a frozen session."""
+    session = _runtime_session(db_session, test_user, age_days=500, activities=1).id
+    db_session.commit()
+    cutoff = datetime.now(UTC) - timedelta(days=365)
+    assert (
+        purge.count_purgeable(
+            db_session,
+            account_id=account.id,
+            record_class=CLASS_RUNTIME_SESSIONS,
+            cutoff=cutoff,
+        )
+        == 1
+    )
+
+    place_hold(
+        db_session,
+        account_id=account.id,
+        resource_type="runtime_session",
+        resource_id=str(session),
+        reason="regulator request 2026-08",
+        user_id=test_user.id,
+    )
+
+    assert (
+        purge.count_purgeable(
+            db_session,
+            account_id=account.id,
+            record_class=CLASS_RUNTIME_SESSIONS,
+            cutoff=cutoff,
+        )
+        == 0
+    )
+
+
+# --- the invariant ---------------------------------------------------------
+
+
+def test_every_purgeable_class_carries_a_hold_predicate():
+    """No class may delete by cutoff alone while its model can be held.
+
+    This is the test that would have caught #650: runtime sessions were
+    purgeable with no hold check because nothing compared the classes.
+    """
+    cutoff = datetime.now(UTC)
+    for record_class in RECORD_CLASSES:
+        model = purge._CLASS_MODELS[record_class]
+        rendered = [
+            str(item).lower()
+            for item in purge.class_filters(cutoff=cutoff, record_class=record_class)
+        ]
+        if record_class in purge.HOLD_EXEMPT_CLASSES:
+            assert not hasattr(model, "legal_hold")
+            continue
+        assert any(
+            f"{model.__tablename__}.legal_hold is false" in text for text in rendered
+        ), f"{record_class} is purged without a legal hold predicate"
+    for model in purge.HOLD_SIDE_MODELS:
+        rendered = [str(item).lower() for item in purge._hold_filters_for_model(model)]
+        assert any(
+            f"{model.__tablename__}.legal_hold is false" in text for text in rendered
+        ), f"{model.__name__} is written by the purge without a legal hold predicate"
+
+
+def test_legacy_evidence_drop_routes_through_the_hold_helper():
+    """The FlowExecution UPDATE must unpack the helper, not repeat the flag."""
+    source = inspect.getsource(purge._drop_legacy_evidence_columns)
+    assert "_hold_filters_for_model(FlowExecution)" in source
+    assert "legal_hold.is_(False)" not in source
+
+
+def test_hold_filters_always_returns_a_list_of_clauses():
+    """Exempt and held classes both yield a sequence, never mixed tuple lengths."""
+    for record_class in RECORD_CLASSES:
+        clauses = purge._hold_filters(record_class)
+        assert isinstance(clauses, list)
+        if record_class in purge.HOLD_EXEMPT_CLASSES:
+            assert clauses == []
+        else:
+            assert len(clauses) == 1
+    for model in purge.HOLD_SIDE_MODELS:
+        clauses = purge._hold_filters_for_model(model)
+        assert isinstance(clauses, list)
+        assert len(clauses) == 1
+
+
+def test_a_class_purged_without_a_hold_check_has_to_say_why():
+    """An exemption is a written decision, not a forgotten predicate."""
+    assert set(purge.HOLD_EXEMPT_CLASSES) <= set(RECORD_CLASSES)
+    for record_class, reason in purge.HOLD_EXEMPT_CLASSES.items():
+        assert len(reason.strip()) >= 20
+        assert not hasattr(purge._CLASS_MODELS[record_class], "legal_hold")
 
 
 def test_a_released_hold_stops_protecting_the_row(db_session, test_user, account):

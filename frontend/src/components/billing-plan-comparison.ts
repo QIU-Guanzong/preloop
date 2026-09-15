@@ -95,13 +95,21 @@ export class BillingPlanComparison extends LitElement {
   }
 
   /**
-   * Reload the options.
+   * "Refresh subscription status" must actually re-read the provider.
    *
-   * `reconcile` asks the server for a bounded re-read of the payment provider.
-   * Only the explicit refresh control passes it: loading the page must stay a
-   * cheap read.
+   * Plain reloads of this component only re-fetched our own database row, so
+   * a subscription whose state changed at Stripe without a delivered webhook
+   * (a finished trial, most visibly) looked identical after every click. The
+   * explicit button now asks the server to reconcile with the provider first;
+   * that request is permission-checked and rate limited server side, so a
+   * user holding the button down cannot turn it into a provider hammer.
+   * Automatic loads stay read-only.
    */
-  async refresh(reconcile = false): Promise<void> {
+  private refreshFromProvider(): void {
+    void this.refresh({ reconcile: true });
+  }
+
+  async refresh(intent?: { reconcile?: boolean }): Promise<void> {
     if (this.busy === 'confirm' || this.busy === 'checkout') return;
     const revision = ++this.revision;
     this.loading = true;
@@ -112,7 +120,9 @@ export class BillingPlanComparison extends LitElement {
     this.permissionChanged(false);
     try {
       const response = await fetchWithAuth(
-        `/api/v1/billing/plan-change-options${reconcile === true ? '?reconcile=true' : ''}`,
+        intent?.reconcile
+          ? '/api/v1/billing/plan-change-options?reconcile=true'
+          : '/api/v1/billing/plan-change-options',
         { cache: 'no-store' }
       );
       if (!response.ok) throw new Error(await this.responseError(response));
@@ -1154,7 +1164,7 @@ export class BillingPlanComparison extends LitElement {
         <button
           class="secondary"
           data-testid="refresh"
-          @click=${() => this.refresh(true)}
+          @click=${this.refreshFromProvider}
           ?disabled=${this.loading || this.busy === 'confirm' || this.busy === 'checkout'}
         >
           Refresh subscription status

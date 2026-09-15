@@ -307,7 +307,7 @@ def create_legal_hold(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db_session),
 ):
-    """Freeze one execution, approval or evidence pack until released."""
+    """Freeze one execution, approval, evidence pack or runtime session."""
     try:
         outcome = place_hold(
             db,

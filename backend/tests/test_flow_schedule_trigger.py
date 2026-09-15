@@ -12,6 +12,7 @@ from preloop.models.crud import crud_account, crud_flow, crud_flow_execution
 from preloop.models.models import Account, Flow
 from preloop.models.models.event import Event
 from preloop.models.schemas.flow import (
+    MAX_SCHEDULE_PAYLOAD_BYTES,
     CronSchedule,
     DailySchedule,
     FlowCreate,
@@ -118,6 +119,67 @@ class TestCronScheduleValidation:
 
     def test_yearly_cron_allowed(self):
         assert CronSchedule(expr="0 0 1 1 *").expr == "0 0 1 1 *"
+
+
+class TestSchedulePayloadValidation:
+    """A schedule may carry a small static payload for its runs."""
+
+    def test_absent_by_default(self):
+        assert CronSchedule(expr="0 6 * * *").payload is None
+
+    def test_carries_options(self):
+        config = CronSchedule(
+            expr="0 6 * * *",
+            payload={"previous_result_execution_id": "last", "depth": "standard"},
+        )
+        assert config.payload["previous_result_execution_id"] == "last"
+
+    def test_survives_the_stored_round_trip(self):
+        stored = CronSchedule(
+            expr="0 6 * * *", payload={"previous_result_execution_id": "last"}
+        ).model_dump()
+        assert parse_schedule_config(stored).payload == {
+            "previous_result_execution_id": "last"
+        }
+
+    def test_file_seeding_is_refused(self):
+        """Inline seeds belong to a caller who can read the response."""
+        with pytest.raises(ValidationError, match="workspace_files"):
+            CronSchedule(
+                expr="0 6 * * *",
+                payload={"workspace_files": [{"path": "a", "content_base64": "eA=="}]},
+            )
+
+    def test_schedule_fields_are_not_overridable(self):
+        with pytest.raises(ValidationError, match="scheduled_at"):
+            CronSchedule(expr="0 6 * * *", payload={"scheduled_at": "whenever"})
+
+    def test_oversized_payload_rejected(self):
+        with pytest.raises(ValidationError, match="byte cap"):
+            CronSchedule(expr="0 6 * * *", payload={"note": "x" * 5000})
+
+    def test_payload_cap_counts_utf8_bytes_not_characters(self):
+        """CJK that fits as characters can still exceed the documented byte cap."""
+        payload = {"note": "你" * 1400}
+        encoded = json.dumps(payload, ensure_ascii=False)
+        assert len(encoded) <= MAX_SCHEDULE_PAYLOAD_BYTES
+        assert len(encoded.encode("utf-8")) > MAX_SCHEDULE_PAYLOAD_BYTES
+        with pytest.raises(ValidationError, match="byte cap"):
+            CronSchedule(expr="0 6 * * *", payload=payload)
+
+    def test_utf8_payload_under_the_byte_cap_is_accepted(self):
+        payload = {"note": "你" * 1000}
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        assert len(encoded) <= MAX_SCHEDULE_PAYLOAD_BYTES
+        config = CronSchedule(expr="0 6 * * *", payload=payload)
+        assert config.payload["note"] == "你" * 1000
+
+    def test_too_many_keys_rejected(self):
+        with pytest.raises(ValidationError, match="max is"):
+            CronSchedule(
+                expr="0 6 * * *",
+                payload={f"key{index}": index for index in range(21)},
+            )
 
 
 class TestIntervalScheduleValidation:
@@ -317,6 +379,32 @@ class TestScheduledTick:
         }
         assert event_data["payload"]["timezone"] == "UTC"
         assert event_data["payload"]["scheduled_at"]
+
+    @pytest.mark.asyncio
+    @patch("preloop.services.flow_trigger_service.get_nats_client")
+    async def test_tick_carries_the_static_schedule_payload(
+        self, mock_nats, db_session: Session, scheduled_flow: Flow
+    ):
+        """A review subscription states its baseline once, on the schedule."""
+        scheduled_flow.schedule_config = CronSchedule(
+            expr="*/10 * * * *",
+            timezone="UTC",
+            payload={"previous_result_execution_id": "last"},
+        ).model_dump()
+        db_session.flush()
+        mock_nats.return_value = AsyncMock()
+        service = FlowTriggerService(db_session)
+
+        with patch.object(
+            service, "_start_flow_execution", new_callable=AsyncMock
+        ) as mock_run:
+            outcome = await service.run_scheduled_tick(scheduled_flow.id)
+
+        assert outcome == "triggered"
+        payload = mock_run.call_args[1]["event_data"]["payload"]
+        assert payload["previous_result_execution_id"] == "last"
+        assert payload["schedule"]["expr"] == "*/10 * * * *"
+        assert "payload" not in payload["schedule"]
 
     @pytest.mark.asyncio
     @patch("preloop.services.flow_trigger_service.get_nats_client")

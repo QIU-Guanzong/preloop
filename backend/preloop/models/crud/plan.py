@@ -3,11 +3,11 @@
 from datetime import date
 from typing import List, Optional
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..models.plan import Plan, Subscription, MonthlyUsage
 from .base import CRUDBase
+from .entitlement import ACTIVE_STATUSES, entitlement_clause
 
 
 class CRUDPlan(CRUDBase[Plan]):
@@ -54,15 +54,21 @@ class CRUDSubscription(CRUDBase[Subscription]):
     def get_active_for_account(
         self, db: Session, *, account_id: str
     ) -> Optional[Subscription]:
-        """Get the active subscription for an account."""
+        """Get the live subscription for an account, if it still is one.
+
+        ``active`` or ``trialing`` only (never ``past_due``): callers are
+        checkout de-duplication, the trial hosted-model cap and the ingestion
+        quota, none of which should treat a dunning subscription as a live
+        trial. A trial whose ``current_period_end`` has passed is not live and
+        returns None, so those callers fall back to Free. The expiry rule is
+        shared with every other entitlement lookup; see
+        :mod:`preloop.models.crud.entitlement`.
+        """
         return (
             db.query(Subscription)
             .filter(
                 Subscription.account_id == account_id,
-                or_(
-                    Subscription.status == "active",
-                    Subscription.status == "trialing",
-                ),
+                entitlement_clause(Subscription, statuses=ACTIVE_STATUSES),
             )
             .order_by(Subscription.created_at.desc())
             .first()

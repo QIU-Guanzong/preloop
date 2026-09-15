@@ -22,12 +22,14 @@ from preloop.services.dynamic_fastmcp import (
 )
 from preloop.tools.builtin_defs import (
     APPLY_ISSUE_TRIAGE_TOOL,
+    GET_EXECUTION_TOOL,
     GET_ISSUE_TRIAGE_CONTEXT_TOOL,
     ASK_USER_TOOL,
     PERMISSION_PROMPT_TOOL,
     REQUEST_APPROVAL_TOOL,
     RESOLVE_SBOM_UPSTREAMS_TOOL,
     RUN_FLOW_TOOL,
+    SEND_NOTE_TOOL,
 )
 
 logger = logging.getLogger(__name__)
@@ -900,6 +902,90 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
             }
         return _dump(behavior)
 
+    # Register Tool 7c2: send_note (shared metadata:
+    # tools.builtin_defs.SEND_NOTE_TOOL). One agent leaves an operator note
+    # for another agent, a runtime session or an execution. Everything that
+    # makes a note a note (target resolution, the envelope, the rate limit,
+    # the audit row, delivery) is the existing operator-note code; the only
+    # new fact is that the author is an agent. Default-off, so a flow opts in
+    # through its tool allow-list.
+    async def send_note(
+        text: str,
+        agent_id: str | None = None,
+        runtime_session_id: str | None = None,
+        execution_id: str | None = None,
+        ctx: Optional[Context] = None,
+    ) -> str:
+        """Leave an operator note for one other agent, session or execution.
+
+        Args:
+            text: The note body, as the calling agent wrote it.
+            agent_id: Target managed agent, current or next session.
+            runtime_session_id: Target runtime session, and only that session.
+            execution_id: Target flow execution, resolved to its session.
+            ctx: MCP context (injected by FastMCP).
+
+        Returns:
+            JSON: the created note, or a structured refusal naming the
+            problem. A bad call is refused, never raised, so the model can
+            correct it on the next turn.
+        """
+        import json
+
+        from preloop.models.db.session import get_db_session
+        from preloop.services.agent_send_note import send_note_from_agent
+        from preloop.services.approval_attribution import (
+            attribution_from_user_context,
+        )
+        from preloop.services.dynamic_fastmcp_http import get_current_user_context
+
+        user_context = get_current_user_context()
+        if not user_context:
+            return "Error: No user context available"
+
+        arguments = {
+            "text": text,
+            "agent_id": agent_id,
+            "runtime_session_id": runtime_session_id,
+            "execution_id": execution_id,
+        }
+        approved, error = await require_approval(
+            tool_name=SEND_NOTE_TOOL["name"],
+            tool_source="builtin",
+            account_id=user_context.account_id,
+            arguments=arguments,
+            ctx=ctx,
+            workflow_id=_rule_workflow_id_var.get(None),
+            correlation_id=_correlation_id_var.get(None),
+            justification=_justification_var.get(None),
+        )
+        if not approved:
+            return error
+
+        # The author is the identity the call already carries, never an
+        # argument: an agent must not be able to sign a note as another one.
+        caller = attribution_from_user_context(user_context)
+        db = next(get_db_session())
+        try:
+            result = send_note_from_agent(
+                db,
+                account_id=user_context.account_id,
+                author_agent_id=caller.managed_agent_id,
+                text=text,
+                agent_id=agent_id,
+                runtime_session_id=runtime_session_id,
+                execution_id=execution_id,
+            )
+        finally:
+            db.close()
+        return json.dumps(result)
+
+    send_note_tool = FunctionTool.from_function(
+        send_note, description=SEND_NOTE_TOOL["description"]
+    )
+    send_note_tool.parameters = deepcopy(SEND_NOTE_TOOL["schema"])
+    mcp.add_tool(send_note_tool)
+
     # Register Tool 7d: resolve_sbom_upstreams (shared metadata:
     # tools.builtin_defs.RESOLVE_SBOM_UPSTREAMS_TOOL). Read-only registry
     # lookup used by the SBOM security presets (005/006) to enrich vendored
@@ -1060,6 +1146,92 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
     # REST catalog and the callable cannot drift.
     run_flow_tool.parameters = deepcopy(RUN_FLOW_TOOL["schema"])
     mcp.add_tool(run_flow_tool)
+
+    # Register Tool 7f: get_execution (shared metadata:
+    # tools.builtin_defs.GET_EXECUTION_TOOL). The read half of delegation
+    # (#632): the caller polls an execution it started and gets back the same
+    # A2A shaped record run_flow handed it. Scope (this execution and its
+    # descendants, nothing else), the result size cap and the audit row all
+    # live in preloop.services.flow_execution_read, server side.
+    async def get_execution(
+        execution_id: str,
+        include_result: bool = False,
+        ctx: Optional[Context] = None,
+    ) -> str:
+        """Read one execution this execution started, or itself.
+
+        Args:
+            execution_id: The execution to read, as returned by run_flow.
+            include_result: Whether to include the result payload, which is
+                only present once the execution has finished.
+            ctx: MCP context (injected by FastMCP).
+
+        Returns:
+            One A2A task record as JSON: the execution, or a rejected record
+            carrying execution_not_found when the caller may not read it.
+        """
+        import json
+
+        from preloop.models.db.session import get_db_session
+        from preloop.services.dynamic_fastmcp_http import get_current_user_context
+        from preloop.services.flow_delegation_call import DelegationUnavailableError
+        from preloop.services.flow_execution_read import (
+            GET_EXECUTION_TOOL_NAME,
+            read_execution,
+        )
+
+        user_context = get_current_user_context()
+        if not user_context:
+            return "Error: No user context available"
+        if not user_context.flow_execution_id:
+            return (
+                "Error: get_execution is only available inside a flow "
+                "execution; there is no execution to read from."
+            )
+
+        correlation_id = _correlation_id_var.get(None)
+        approved, error = await require_approval(
+            tool_name=GET_EXECUTION_TOOL_NAME,
+            tool_source="builtin",
+            account_id=user_context.account_id,
+            arguments={
+                "execution_id": execution_id,
+                "include_result": bool(include_result),
+            },
+            ctx=ctx,
+            workflow_id=_rule_workflow_id_var.get(None),
+            correlation_id=correlation_id,
+            justification=_justification_var.get(None),
+        )
+        if not approved:
+            return error
+
+        db = next(get_db_session())
+        try:
+            record = read_execution(
+                db,
+                account_id=user_context.account_id,
+                caller_execution_id=user_context.flow_execution_id,
+                reference=execution_id,
+                include_result=bool(include_result),
+                correlation_id=correlation_id,
+                user_id=user_context.user_id,
+                runtime_session_id=user_context.runtime_session_id,
+                api_key_id=user_context.api_key_id,
+                api_key_name=user_context.api_key_name,
+            )
+        except DelegationUnavailableError as exc:
+            return f"Error: {exc}"
+        finally:
+            db.close()
+        return json.dumps(record)
+
+    get_execution_tool = FunctionTool.from_function(
+        get_execution, description=GET_EXECUTION_TOOL["description"]
+    )
+    # Same rule as run_flow: the catalog schema is the authority.
+    get_execution_tool.parameters = deepcopy(GET_EXECUTION_TOOL["schema"])
+    mcp.add_tool(get_execution_tool)
 
     # Register Tool 8: add_comment
     @mcp.tool()

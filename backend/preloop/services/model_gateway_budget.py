@@ -17,6 +17,7 @@ from preloop.models.crud import (
     crud_api_usage,
     crud_flow,
 )
+from preloop.models.crud.entitlement import is_live_trial
 from preloop.models.crud.plan import subscription as crud_subscription
 from preloop.models.models.ai_model import AIModel
 from preloop.models.models.flow import Flow
@@ -176,7 +177,7 @@ class ModelGatewayBudgetService:
         )
         if (
             subscription
-            and subscription.status == "trialing"
+            and is_live_trial(subscription)
             and self._is_built_in_hosted_model(ai_model)
         ):
             trial_hosted_model_limit_usd = max(
@@ -503,6 +504,7 @@ class ModelGatewayBudgetService:
     @staticmethod
     def _estimate_input_tokens(payload: Dict[str, Any]) -> int:
         text_parts = []
+        extra_tokens = 0
         if isinstance(payload.get("messages"), list):
             for message in payload["messages"]:
                 if isinstance(message, dict):
@@ -524,9 +526,21 @@ class ModelGatewayBudgetService:
                             item.get("content", "")
                         )
                     )
+                elif isinstance(item, str):
+                    # OpenAI embeddings batches are a list of strings. Without
+                    # this branch those calls preflight at 0 input tokens.
+                    text_parts.append(item)
+                elif isinstance(item, int):
+                    # OpenAI embeddings also accept a token array
+                    # (input: [101, 102, ...]). Each id is one token, and
+                    # litellm already forwards that shape verbatim.
+                    extra_tokens += 1
         total_chars = sum(len(part) for part in text_parts if part)
         chars_per_token = _chars_per_token()
-        return max(1, math.ceil(total_chars / chars_per_token)) if total_chars else 0
+        char_tokens = (
+            max(1, math.ceil(total_chars / chars_per_token)) if total_chars else 0
+        )
+        return char_tokens + extra_tokens
 
     @staticmethod
     def _content_to_text(content: Any) -> str:

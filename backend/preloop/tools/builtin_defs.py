@@ -254,6 +254,65 @@ PERMISSION_PROMPT_TOOL: Dict[str, Any] = {
 }
 
 
+SEND_NOTE_TOOL: Dict[str, Any] = {
+    "name": "send_note",
+    "description": (
+        "Leave an operator note for exactly one other target: another managed "
+        "agent, a runtime session, or a flow execution. The note is delivered "
+        "into the target's next turn by the same rail that carries a human's "
+        "note, and is recorded with you as the author, so a hand off between "
+        "agents leaves a record instead of a file nobody sweeps. Name exactly "
+        "one of agent_id, runtime_session_id or execution_id; naming none or "
+        "two is refused and writes nothing. Targets outside your account do "
+        "not exist. Rate limited per author, per target, per hour."
+    ),
+    "source": "builtin",
+    # Default-off: most agents never need to talk to a sibling, and every
+    # agent would otherwise pay this schema's tools/list context tax
+    # (cf. issue #128). A flow opts in through its tool allow-list, and an
+    # account through the Tools page.
+    "default_enabled": False,
+    "requires_tracker": False,
+    "required_tracker_types": [],
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "text": {
+                "type": "string",
+                "description": (
+                    "What the target should be told, in your own words. Say "
+                    "what changed and what you want done about it; the "
+                    "reader has none of your context."
+                ),
+                "minLength": 1,
+                "maxLength": 4096,
+            },
+            "agent_id": {
+                "type": "string",
+                "description": (
+                    "Target managed agent. Delivered at its current session's "
+                    "next turn, or at the start of the next session it opens."
+                ),
+            },
+            "runtime_session_id": {
+                "type": "string",
+                "description": "Target runtime session, and only that session.",
+            },
+            "execution_id": {
+                "type": "string",
+                "description": (
+                    "Target flow execution, resolved to the runtime session "
+                    "it is running on. Deliverable once the run has made a "
+                    "governed call."
+                ),
+            },
+        },
+        "required": ["text"],
+    },
+}
+
+
 RESOLVE_SBOM_UPSTREAMS_TOOL: Dict[str, Any] = {
     "name": "resolve_sbom_upstreams",
     "description": (
@@ -389,6 +448,60 @@ RUN_FLOW_TOOL: Dict[str, Any] = {
             },
         },
         "required": ["flow"],
+    },
+}
+
+
+GET_EXECUTION_TOOL: Dict[str, Any] = {
+    "name": "get_execution",
+    "description": (
+        "Read the state, cost and result of an execution this execution "
+        "started, or of this execution itself. Use it to poll a child "
+        "created with run_flow: the id to pass is the one that call "
+        "returned. Scope is enforced on the server and is exactly this "
+        "execution and its descendants; anything else, including an "
+        "execution that does not exist, comes back as a record with state "
+        "TASK_STATE_REJECTED and 'preloop.ai/refusalReason' set to "
+        "execution_not_found. Returns one A2A shaped task record as JSON: "
+        "the state, the Preloop status it was mapped from, the depth, the "
+        "cost and tokens spent so far, and, when the execution has finished "
+        "and include_result is true, its result as an artifact. A failed "
+        "execution carries its failure category on the status message. A "
+        "result larger than the size cap comes back truncated, flagged with "
+        "'preloop.ai/truncated', and with the path that serves the whole "
+        "document."
+    ),
+    "source": "builtin",
+    # Default-off, like run_flow: a tool that reads execution rows is only
+    # useful to a flow that delegates, and every unused tool in a prompt is
+    # a context tax on every other flow (cf. issue #128).
+    "default_enabled": False,
+    "requires_tracker": False,
+    "required_tracker_types": [],
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "execution_id": {
+                "type": "string",
+                "description": (
+                    "Execution to read, as returned by run_flow. Must be "
+                    "this execution or one it started, directly or through "
+                    "another child."
+                ),
+            },
+            "include_result": {
+                "type": "boolean",
+                "description": (
+                    "Whether to return the execution's result payload. "
+                    "Defaults to false, because a result is only there once "
+                    "the execution has finished and it is the expensive part "
+                    "of the answer. A result is never returned for an "
+                    "execution that is still running."
+                ),
+            },
+        },
+        "required": ["execution_id"],
     },
 }
 

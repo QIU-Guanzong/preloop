@@ -135,6 +135,14 @@ runs a static Docker bootstrap that launches this script. Repository clone,
 setup commands, prompt, model routing, MCP configuration and the existing
 post-execution git wrapper therefore run inside the container.
 
+The prompt and (on Kubernetes) the inner agent script are **not** one
+environment variable. They arrive as base64 chunks (`PRELOOP_AGENT_PROMPT_*`,
+`PRELOOP_INNER_SCRIPT_*`), reassembled to `AGENT_PROMPT_FILE`
+(`/tmp/preloop/prompt.txt`) and `/tmp/preloop/agent-script.sh`. `AGENT_PROMPT`
+is set only when the prompt is 64 KiB or less. Custom images must not treat
+a missing `AGENT_PROMPT` as an empty task. See
+[Agent launch payload](../../architecture/flows.md#agent-launch-payload-container-environment).
+
 Scripts and credentials are transient. Persisted leases contain configuration
 and execution references; delivery after a queue wait or reconnect regenerates
 the model, git and MCP credentials from the execution's stored trigger and

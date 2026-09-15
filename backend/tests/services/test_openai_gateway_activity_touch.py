@@ -218,6 +218,9 @@ def test_gateway_request_recording_survives_activity_touch_timeout():
         patch("preloop.services.openai_gateway.ModelGatewayEventEmitter") as emitter,
         patch("preloop.services.openai_gateway.GatewayUsageSearchService") as search,
         patch(
+            "preloop.services.openai_gateway.get_gateway_usage_index_queue"
+        ) as index_queue,
+        patch(
             "preloop.services.openai_gateway.crud_runtime_session.touch_activity",
             side_effect=OperationalError(
                 "UPDATE runtime_session",
@@ -254,7 +257,8 @@ def test_gateway_request_recording_survives_activity_touch_timeout():
 
     log_audit.assert_called_once()
     emitter.return_value.emit_for_usage.assert_called_once()
-    search.return_value.auto_index_interaction.assert_called_once()
+    search.return_value.build_index_document.assert_called_once()
+    index_queue.return_value.submit.assert_called_once()
     service.db.rollback.assert_called_once()
 
 

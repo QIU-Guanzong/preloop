@@ -52,7 +52,7 @@ Onboarding, the MCP firewall, human approvals, and cutting session cost. Recorde
 
 Guides: [docs.preloop.ai](https://docs.preloop.ai). Start here: [onboard local agents (60s)](https://docs.preloop.ai/quickstart-cli/).
 
-[Operator notes](docs/guide/operator-notes.md) let an identified human steer a running agent: the note is delivered at the next turn boundary through the gateway or a hook, costs nothing when there is none, and is recorded as a human decision.
+[Operator notes](docs/guide/operator-notes.md) let an identified human (or, with an opt-in tool, another agent) steer a running agent: the note is delivered at the next turn boundary through the gateway or a hook, costs nothing when there is none, and is recorded with who sent it.
 
 The [account kill switch](docs/guide/account-kill-switch.md) blocks gateway and tool traffic, freezes pending approval deadlines, and requests termination of active managed flow executions, with audited staged recovery.
 
@@ -71,6 +71,12 @@ Jobs teams otherwise buy from several vendors, in one Apache 2.0 stack:
 | **Human Approvals** | Mobile, watch, Slack, Mattermost, email, webhook, or `preloop approvals`. Native `Bash`/`Edit`. Agents can `ask_user`. | Custom Slack bots, Peta Desk |
 | **Runtime Observability** | One session timeline: tool calls, model calls, policy, approvals, spend, outcomes. | AgentOps, Langfuse, LangSmith |
 | **Evidence packs** | Apache flow presets write `result.json` plus an evidence directory for CRA / AI Act-style work. Not a certification. | Custom GRC folders |
+
+[Reviewed model pricing](docs/guide/model-price-refresh.md) distributes verified
+tariffs to gateway, API, and worker processes. Alibaba tariffs preserve regional
+and cache-policy differences. The weekly review preset prepares tested pricing
+PRs after you bind its repository and model; historical repricing is a separate
+operation. Models or billing modes without verified rates remain visibly unpriced.
 
 ```text
 AI Agent → Preloop → [Policy]  → Allow / Deny / Require Approval → Execute
