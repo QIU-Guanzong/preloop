@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // noteStub is a server standing in for POST /api/v1/operator-notes. It records
@@ -78,6 +79,11 @@ func runNotesSendCmdOn(t *testing.T, terminal bool, stdin string, args ...string
 		stdinIsTerminal = previousTerminal
 		noteAgentID, noteSessionID, noteExecutionID = "", "", ""
 		noteExpiresIn, noteJSON = 0, false
+		for _, name := range []string{"agent", "session", "execution", "expires-in", "json"} {
+			if flag := notesSendCmd.Flags().Lookup(name); flag != nil {
+				flag.Changed = false
+			}
+		}
 		notesSendCmd.SetIn(nil)
 	})
 
@@ -327,6 +333,102 @@ func TestNotesSendSendsTheExpiryWhenAsked(t *testing.T) {
 	}
 	if len(stub.requests) != 1 || stub.requests[0].ExpiresInSeconds != 7200 {
 		t.Fatalf("expires_in_seconds was not sent: %+v", stub.requests)
+	}
+}
+
+func TestNoteExpiresInSeconds(t *testing.T) {
+	cases := []struct {
+		name    string
+		d       time.Duration
+		want    int
+		wantErr string
+	}{
+		{name: "zero", d: 0, wantErr: "60s and 7d"},
+		{name: "sub-second", d: 500 * time.Millisecond, wantErr: "60s and 7d"},
+		{name: "negative", d: -time.Hour, wantErr: "60s and 7d"},
+		{name: "below floor", d: 59 * time.Second, wantErr: "60s and 7d"},
+		{name: "floor", d: 60 * time.Second, want: 60},
+		{name: "two hours", d: 2 * time.Hour, want: 7200},
+		{name: "ceiling", d: 7 * 24 * time.Hour, want: noteExpiresInMaxSeconds},
+		{name: "above ceiling", d: 7*24*time.Hour + time.Second, wantErr: "60s and 7d"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := noteExpiresInSeconds(tc.d)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("accepted %s", tc.d)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("rejected %s: %v", tc.d, err)
+			}
+			if got != tc.want {
+				t.Errorf("got %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNotesSendRejectsOutOfRangeExpiryBeforeSending(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{name: "sub-second", value: "500ms"},
+		{name: "zero", value: "0"},
+		{name: "negative", value: "-1h"},
+		{name: "below floor", value: "30s"},
+		{name: "above ceiling", value: "169h"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newNoteStub(t, operatorNoteResponse{NoteID: "never"})
+
+			out, err := runNotesSendCmd(t, "",
+				"--agent", testNoteAgentID, "--expires-in", tc.value, "Steer the run.")
+
+			if err == nil {
+				t.Fatalf("out of range --expires-in %s was accepted:\n%s", tc.value, out)
+			}
+			if !strings.Contains(err.Error(), "60s and 7d") {
+				t.Errorf("the message did not name the bounds: %v", err)
+			}
+			if len(stub.requests) != 0 {
+				t.Errorf("the CLI called the server anyway: %+v", stub.requests)
+			}
+		})
+	}
+}
+
+func TestNotesSendAcceptsFloorAndCeilingExpiry(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  int
+	}{
+		{name: "floor", value: "60s", want: 60},
+		{name: "ceiling", value: "168h", want: noteExpiresInMaxSeconds},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newNoteStub(t, operatorNoteResponse{
+				NoteID:         "note-bound",
+				ManagedAgentID: testNoteAgentID,
+			})
+
+			if _, err := runNotesSendCmd(t, "",
+				"--agent", testNoteAgentID, "--expires-in", tc.value, "In range."); err != nil {
+				t.Fatalf("sending with --expires-in %s failed: %v", tc.value, err)
+			}
+			if len(stub.requests) != 1 || stub.requests[0].ExpiresInSeconds != tc.want {
+				t.Fatalf("expires_in_seconds for %s: %+v", tc.value, stub.requests)
+			}
+		})
 	}
 }
 

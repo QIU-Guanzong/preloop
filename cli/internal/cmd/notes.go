@@ -26,7 +26,12 @@ import (
 	"github.com/preloop/preloop/cli/internal/api"
 )
 
-const operatorNotesPath = "/api/v1/operator-notes"
+const (
+	operatorNotesPath = "/api/v1/operator-notes"
+	// Same bounds as OperatorNoteCreate.expires_in_seconds (ge=60, le=7d).
+	noteExpiresInMinSeconds = 60
+	noteExpiresInMaxSeconds = 7 * 24 * 60 * 60
+)
 
 // operatorNoteCreate is the request body. The target fields are omitted when
 // empty because the server accepts exactly one of them and counts nulls.
@@ -122,21 +127,25 @@ func init() {
 	notesSendCmd.Flags().StringVar(&noteAgentID, "agent", "", "managed agent id to steer, current or next session")
 	notesSendCmd.Flags().StringVar(&noteSessionID, "session", "", "runtime session id, and only that session")
 	notesSendCmd.Flags().StringVar(&noteExecutionID, "execution", "", "flow execution id, resolved to its runtime session")
-	notesSendCmd.Flags().DurationVar(&noteExpiresIn, "expires-in", 0, "how long the note stays deliverable (default: the server's 24h)")
+	notesSendCmd.Flags().DurationVar(&noteExpiresIn, "expires-in", 0, "how long the note stays deliverable, 60s to 7d (default: the server's 24h)")
 	notesSendCmd.Flags().BoolVar(&noteJSON, "json", false, "emit the note id and target as JSON")
 
 	notesCmd.AddCommand(notesSendCmd)
 }
 
 func runNotesSend(cmd *cobra.Command, args []string) error {
-	// Both of these run before any client exists: a note with no target, or
-	// with two, is a mistake the operator can fix in the shell, and sending
-	// it to the server to be told so costs a round trip and an audit row.
+	// Target, body, and --expires-in all run before any client exists: a
+	// note with no target, or with two, or with an expiry the server would
+	// 422, is a mistake the operator can fix in the shell.
 	target, err := resolveNoteTarget(noteAgentID, noteSessionID, noteExecutionID)
 	if err != nil {
 		return err
 	}
 	body, err := readNoteBody(args, cmd.InOrStdin())
+	if err != nil {
+		return err
+	}
+	expiresInSeconds, err := optionalNoteExpiresInSeconds(cmd)
 	if err != nil {
 		return err
 	}
@@ -158,8 +167,8 @@ func runNotesSend(cmd *cobra.Command, args []string) error {
 	case "execution":
 		payload.ExecutionID = target.ID
 	}
-	if noteExpiresIn > 0 {
-		payload.ExpiresInSeconds = int(noteExpiresIn.Seconds())
+	if expiresInSeconds != 0 {
+		payload.ExpiresInSeconds = expiresInSeconds
 	}
 
 	var note operatorNoteResponse
@@ -168,6 +177,26 @@ func runNotesSend(cmd *cobra.Command, args []string) error {
 	}
 
 	return printSentNote(cmd.OutOrStdout(), note, target, noteJSON)
+}
+
+// optionalNoteExpiresInSeconds mirrors the server's 60s floor and 7d ceiling
+// locally. Sub-second values truncate to 0 under int(Seconds()) and would be
+// dropped by omitempty; negatives fail the old >0 guard and were ignored.
+// An explicit --expires-in of 0s is also refused, so it is not confused with
+// the default of leaving the field unset.
+func optionalNoteExpiresInSeconds(cmd *cobra.Command) (int, error) {
+	if !cmd.Flags().Changed("expires-in") {
+		return 0, nil
+	}
+	return noteExpiresInSeconds(noteExpiresIn)
+}
+
+func noteExpiresInSeconds(d time.Duration) (int, error) {
+	secs := int(d.Seconds())
+	if secs < noteExpiresInMinSeconds || secs > noteExpiresInMaxSeconds {
+		return 0, fmt.Errorf("--expires-in must be between 60s and 7d, got %s", d)
+	}
+	return secs, nil
 }
 
 // resolveNoteTarget enforces the server's "exactly one target" rule locally,

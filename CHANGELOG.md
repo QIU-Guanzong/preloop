@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `preloop notes send` posts one operator note from the terminal to
+  `POST /api/v1/operator-notes`. Name exactly one of `--agent`,
+  `--session`, or `--execution`. The body is the argument, or stdin when
+  piped. `--expires-in` is a Go duration between 60s and 7d; omitted, the
+  server keeps the note deliverable for 24 hours. `--json` emits the note
+  id and target only.
+
 - Flow-execution workers run up to `FLOW_EXECUTION_MAX_INFLIGHT` hosted
   monitors per process (default 10). The monitor loop is wait-bound; other
   worker pools stay serial. Helm sets `flowExecution.maxInflight` and a
