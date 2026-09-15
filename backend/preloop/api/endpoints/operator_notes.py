@@ -30,13 +30,9 @@ from preloop.api.loop_safety import run_db_off_loop
 from preloop.models import models
 from preloop.models.crud import (
     crud_agent_control_command,
-    crud_api_key,
     crud_audit_log,
-    crud_managed_agent,
-    crud_runtime_session,
 )
 from preloop.models.db.session import get_db_session, get_session_factory
-from preloop.models.models.api_usage import ApiUsage
 from preloop.schemas.operator_notes import (
     OperatorNoteAuthor,
     OperatorNoteCreate,
@@ -59,10 +55,9 @@ router = APIRouter()
 #: someone else's run.
 CONTROL_PERMISSION = "control_managed_agent"
 
-#: One author, one agent (or one session when the target has no agent), one
-#: hour. Bursts are how a note channel turns into a firehose nobody reads,
-#: and every push design that shipped before ours needed this.
-NOTE_RATE_LIMIT_PER_HOUR = 20
+#: Re-exported from the service, which owns it now that the ``send_note``
+#: builtin tool counts against the same ceiling with an agent as the author.
+NOTE_RATE_LIMIT_PER_HOUR = operator_notes.NOTE_RATE_LIMIT_PER_HOUR
 
 
 def _to_response(note: Any) -> OperatorNoteResponse:
@@ -75,6 +70,7 @@ def _to_response(note: Any) -> OperatorNoteResponse:
         runtime_session_id=note.runtime_session_id,
         author=OperatorNoteAuthor(
             user_id=note.created_by_user_id,
+            agent_id=getattr(note, "created_by_managed_agent_id", None),
             display=note.author_display,
             auth_method=note.author_auth_method,
         ),
@@ -88,104 +84,38 @@ def _to_response(note: Any) -> OperatorNoteResponse:
     )
 
 
-def _session_for_execution(
-    db: Session, *, account_id: str, execution_id: UUID
-) -> Optional[Any]:
-    """Resolve the runtime session a flow execution is running on.
-
-    An execution has no session column: the link is the usage it produced, so
-    the newest governed call for that execution names the session. Scoped to
-    the account on both sides.
-    """
-    row = (
-        db.query(ApiUsage.runtime_session_id)
-        .filter(
-            ApiUsage.account_id == account_id,
-            ApiUsage.flow_execution_id == execution_id,
-            ApiUsage.runtime_session_id.isnot(None),
-        )
-        .order_by(ApiUsage.timestamp.desc())
-        .first()
-    )
-    if row is None or row[0] is None:
-        return None
-    return crud_runtime_session.get_account_session(
-        db, account_id=account_id, runtime_session_id=row[0]
-    )
-
-
 def _resolve_target(
     db: Session, *, account_id: str, payload: OperatorNoteCreate
 ) -> Tuple[Optional[UUID], Optional[UUID]]:
     """Resolve the note's target to (managed agent, runtime session).
 
-    Every lookup is account-scoped, so a foreign id resolves to nothing and
-    the caller gets a 404 instead of a cross-account delivery.
+    Delegates to the shared resolver so this route and the ``send_note``
+    builtin tool reach exactly the same set of targets, and translates its
+    "not in this account" into the 404 the API has always returned.
     """
-    if payload.runtime_session_id is not None:
-        session = crud_runtime_session.get_account_session(
+    try:
+        return operator_notes.resolve_note_target(
             db,
             account_id=account_id,
+            agent_id=payload.agent_id,
             runtime_session_id=payload.runtime_session_id,
+            execution_id=payload.execution_id,
         )
-        if session is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Runtime session not found",
-            )
-        agent = getattr(session, "managed_agent", None)
-        return (agent.id if agent is not None else None, session.id)
-
-    if payload.execution_id is not None:
-        session = _session_for_execution(
-            db, account_id=account_id, execution_id=payload.execution_id
-        )
-        if session is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=(
-                    "This execution has no runtime session yet. A note can "
-                    "only be delivered once the run has made a governed call."
-                ),
-            )
-        agent = getattr(session, "managed_agent", None)
-        return (agent.id if agent is not None else None, session.id)
-
-    agent = crud_managed_agent.get_for_account(
-        db, account_id=account_id, agent_id=str(payload.agent_id)
-    )
-    if agent is None:
+    except operator_notes.NoteTargetError as exc:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Managed agent not found"
-        )
-    # A note with no live session waits for the next one the agent opens,
-    # which is what "tell it before it starts" means.
-    session_id = None
-    if agent.runtime_session_id is not None:
-        session = crud_runtime_session.get_account_session(
-            db, account_id=account_id, runtime_session_id=agent.runtime_session_id
-        )
-        if session is not None and session.ended_at is None:
-            session_id = session.id
-    return (agent.id, session_id)
+            status_code=status.HTTP_404_NOT_FOUND, detail=exc.detail
+        ) from exc
 
 
 def _author_auth_method(db: Session, request: Request) -> str:
-    """Name the credential the author used, derived server side.
+    """Name the credential this request's author used, derived server side.
 
-    Never taken from a header: this string is stamped into the label the model
-    reads, so the sender must not be able to choose it.
+    Never taken from a header the sender controls: the classification itself
+    lives in the service, which also knows the agent case.
     """
     header = request.headers.get("authorization") or ""
     token = header.split(" ", 1)[1].strip() if " " in header else ""
-    if not token:
-        return "session"
-    try:
-        if crud_api_key.get_by_key(db, key=token) is not None:
-            return "api_key"
-    except Exception:  # pragma: no cover - identity is best effort, never fatal
-        logger.debug("Could not classify note author credential", exc_info=True)
-    return "jwt"
+    return operator_notes.classify_author_auth_method(db, token=token)
 
 
 def _create_note(
@@ -330,7 +260,7 @@ def list_operator_notes(
     def _load() -> list[Any]:
         session_id = runtime_session_id
         if execution_id is not None:
-            session = _session_for_execution(
+            session = operator_notes.session_for_execution(
                 db, account_id=account_id, execution_id=execution_id
             )
             if session is None:

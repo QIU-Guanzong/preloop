@@ -106,18 +106,20 @@ def subscription_history_retention(db: Session, *, account_id: Any) -> int:
 
 
 def lock_account_for_retention(
-    db: Session, *, account_id: Any
+    db: Session, *, account_id: Any, skip_locked: bool = True
 ) -> models.Account | None:
     """Read fresh account policy under a bounded lock for one purge transaction.
 
     The purge owns its session and enters with no pending writes. Skip accounts
     being changed rather than waiting on a billing/configuration transaction.
-    Account-first ordering matches billing reconciliation and promise updates.
+    Hold writes pass ``skip_locked=False`` so they wait; the purge then skips
+    that account for the current batch. Account-first ordering matches billing
+    reconciliation and promise updates.
     """
     with db.no_autoflush:
         return db.execute(
             select(models.Account)
             .where(models.Account.id == account_id)
-            .with_for_update(skip_locked=True)
+            .with_for_update(skip_locked=skip_locked)
             .execution_options(populate_existing=True)
         ).scalar_one_or_none()

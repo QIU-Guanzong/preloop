@@ -3,7 +3,10 @@ import sinon from 'sinon';
 
 import './flow-execution-view';
 import type { FlowExecutionView } from './flow-execution-view';
-import { liftLogfmtErrorField } from './flow-execution-view';
+import {
+  containerTerminationNotice,
+  liftLogfmtErrorField,
+} from './flow-execution-view';
 import { unifiedWebSocketManager } from '../../services/unified-websocket-manager';
 import {
   FINISHED_EXECUTION,
@@ -142,6 +145,36 @@ describe('FlowExecutionView', () => {
               status: 200,
               headers: { 'Content-Type': 'application/json' },
             }
+          );
+        }
+
+        // Every execution page asks what the run delegated (#634). Nothing
+        // in this file delegates, so the answer is an empty tree.
+        if (url.endsWith('/tree') && method === 'GET') {
+          const id = url.split('/').slice(-2)[0];
+          return new Response(
+            JSON.stringify({
+              execution_id: id,
+              root_execution_id: id,
+              execution: {
+                id,
+                flow_id: 'flow-1',
+                status: 'SUCCEEDED',
+                start_time: '2026-03-09T10:00:00Z',
+                estimated_cost: 0,
+              },
+              executions: [],
+              rollup: {
+                total: 0,
+                by_status: {},
+                completed: 0,
+                total_tokens: 0,
+                total_estimated_cost: 0,
+                total_tool_calls: 0,
+              },
+              truncated: false,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
           );
         }
 
@@ -1278,6 +1311,127 @@ describe('FlowExecutionView', () => {
       );
     });
 
+    it('explains an OOMKilled container in the failure summary', async () => {
+      const element = await load('exec-1');
+      (element as any).execution = {
+        ...(element as any).execution,
+        status: 'FAILED',
+        result: {
+          container_termination: {
+            runtime: 'kubernetes',
+            reason: 'OOMKilled',
+            exit_code: 137,
+            oom_killed: true,
+          },
+        },
+      };
+      await element.updateComplete;
+
+      const reason = element.shadowRoot!.querySelector(
+        '[data-testid="termination-reason"]'
+      )!;
+      expect(reason.textContent!.replace(/\s+/g, ' ').trim()).to.equal(
+        'OOMKilled (exit code 137)'
+      );
+
+      const hint = element.shadowRoot!.querySelector(
+        '[data-testid="termination-hint"]'
+      )!;
+      expect(hint.textContent!.replace(/\s+/g, ' ').trim()).to.equal(
+        'The agent exceeded the container memory limit; running fewer tests ' +
+          'at once usually fixes it.'
+      );
+    });
+
+    it('states another termination reason without the memory hint', async () => {
+      const element = await load('exec-1');
+      (element as any).execution = {
+        ...(element as any).execution,
+        status: 'FAILED',
+        result: {
+          container_termination: {
+            runtime: 'docker',
+            reason: 'Error',
+            exit_code: 1,
+            oom_killed: false,
+          },
+        },
+      };
+      await element.updateComplete;
+
+      expect(
+        element
+          .shadowRoot!.querySelector('[data-testid="termination-reason"]')!
+          .textContent!.replace(/\s+/g, ' ')
+          .trim()
+      ).to.equal('Error (exit code 1)');
+      expect(
+        element.shadowRoot!.querySelector('[data-testid="termination-hint"]')
+      ).to.not.exist;
+    });
+
+    it('says nothing about the container when the runtime reported no exit', async () => {
+      const element = await load('exec-1');
+      (element as any).execution = {
+        ...(element as any).execution,
+        result: { status: 'success' },
+      };
+      await element.updateComplete;
+
+      expect(
+        element.shadowRoot!.querySelector(
+          '[data-testid="container-termination"]'
+        )
+      ).to.not.exist;
+    });
+
+    it('says nothing about the container after a successful Kubernetes exit', async () => {
+      const element = await load('exec-1');
+      (element as any).execution = {
+        ...(element as any).execution,
+        result: {
+          container_termination: {
+            runtime: 'kubernetes',
+            reason: 'Completed',
+            exit_code: 0,
+            oom_killed: false,
+          },
+        },
+      };
+      await element.updateComplete;
+
+      expect(
+        element.shadowRoot!.querySelector(
+          '[data-testid="container-termination"]'
+        )
+      ).to.not.exist;
+    });
+
+    it('reads a memory kill reported only as a flag', () => {
+      const notice = containerTerminationNotice({
+        container_termination: { runtime: 'docker', oom_killed: true },
+      });
+      expect(notice?.reason).to.equal('OOMKilled');
+      expect(notice?.exitCode).to.equal(null);
+      expect(notice?.hint).to.contain('fewer tests');
+      // Nothing to say without a termination record.
+      expect(containerTerminationNotice({ status: 'success' })).to.equal(null);
+      expect(containerTerminationNotice(null)).to.equal(null);
+    });
+
+    it('returns null for a successful Kubernetes Completed exit', () => {
+      expect(
+        containerTerminationNotice({
+          container_termination: {
+            runtime: 'kubernetes',
+            reason: 'Completed',
+            exit_code: 0,
+            oom_killed: false,
+          },
+        })
+      ).to.equal(null);
+    });
+
     it('searches the raw log lines in place', async () => {
       const element = await load('exec-running');
       (element as any).logs = [
@@ -1705,6 +1859,106 @@ describe('FlowExecutionView', () => {
       } finally {
         log.restore();
       }
+    });
+  });
+  /**
+   * Stopping a run that never started.
+   *
+   * The command endpoint writes STOPPED itself, and a queued run has no
+   * runtime to publish a status update, so the page has to show the result of
+   * the operator's own click without waiting for the follow-up fetch.
+   */
+  it('reads STOPPED as soon as a queued run is stopped', async () => {
+    const element = (await fixture(
+      html`<flow-execution-view></flow-execution-view>`
+    )) as FlowExecutionView;
+    (element as any).executionId = 'exec-pending';
+    (element as any).execution = {
+      id: 'exec-pending',
+      flow_id: 'flow-1',
+      status: 'PENDING',
+      start_time: '2026-09-15T15:25:00Z',
+      end_time: null,
+    };
+    await element.updateComplete;
+
+    let release: () => void = () => {};
+    const refetch = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let commands = 0;
+    fetchStub.callsFake(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = (init?.method || 'GET').toUpperCase();
+        if (url.includes('/command') && method === 'POST') {
+          commands += 1;
+          return new Response(JSON.stringify({ status: 'stopped' }), {
+            status: 200,
+          });
+        }
+        if (url.endsWith('/flows/executions/exec-pending')) {
+          await refetch;
+          return new Response(
+            JSON.stringify({
+              id: 'exec-pending',
+              flow_id: 'flow-1',
+              status: 'STOPPED',
+              start_time: '2026-09-15T15:25:00Z',
+              end_time: '2026-09-15T15:30:00Z',
+            }),
+            { status: 200 }
+          );
+        }
+        return new Response(JSON.stringify({ logs: [] }), { status: 200 });
+      }
+    );
+
+    const stopping = (element as any).stopExecution() as Promise<void>;
+    await waitUntil(
+      () => (element as any).execution?.status === 'STOPPED',
+      'the page waited for a reload to admit the run had stopped'
+    );
+    expect(commands).to.equal(1);
+
+    release();
+    await stopping;
+    expect((element as any).execution.status).to.equal('STOPPED');
+  });
+  describe('delegation tree', () => {
+    const treePanel = (element: FlowExecutionView) =>
+      element.shadowRoot!.querySelector('preloop-execution-tree') as any;
+
+    it('hands the tree panel the execution on the page', async () => {
+      const element = await load('exec-1');
+
+      const panel = treePanel(element);
+      expect(panel).to.exist;
+      expect(panel.getAttribute('execution-id')).to.equal('exec-1');
+      expect(panel.executionId).to.equal('exec-1');
+    });
+
+    it('leaves the page as it was for a run that delegated nothing', async () => {
+      const element = await load('exec-1');
+      const panel = treePanel(element);
+      await waitUntil(() => !panel.loading);
+      await panel.updateComplete;
+
+      // The empty state, and no tree section.
+      expect(
+        panel.shadowRoot.querySelector('[data-testid="execution-tree-empty"]')
+      ).to.exist;
+      expect(panel.shadowRoot.querySelector('[data-testid="execution-tree"]'))
+        .to.not.exist;
+
+      // Everything the page already did, unchanged.
+      expect(element.shadowRoot!.querySelector('[data-testid="summary-strip"]'))
+        .to.exist;
+      expect(stripValue(element, 'strip-duration')).to.equal('2m 0s');
+      expect(stripValue(element, 'strip-cost')).to.equal('$0.10');
+      expect(
+        element.shadowRoot!.querySelectorAll('sl-tab-group sl-tab').length
+      ).to.equal(5);
     });
   });
 });

@@ -59,6 +59,7 @@ import {
 } from '../../components/token-figures';
 import '../../components/preloop-gateway-event.ts';
 import '../../components/preloop-execution-continuation';
+import '../../components/preloop-execution-tree';
 import '../../components/view-header.ts';
 import '../../components/json-tree.ts';
 import '../../components/session-chat-view';
@@ -177,6 +178,52 @@ function firstErrorLine(message?: string | null): string {
   if (!message) return '';
   const line = message.split('\n').find((part) => part.trim().length > 0);
   return (line || '').trim();
+}
+
+/**
+ * What the runtime said about the container exit, in one readable line.
+ *
+ * The runner writes `container_termination` onto the stored result: it is the
+ * only account of a run the agent never got to summarize, because a container
+ * killed for memory leaves nothing but heartbeats behind. Buried in the result
+ * tree that reads as noise, so the failure summary states the reason, and for
+ * a memory kill it also says what to do about it.
+ */
+export interface ContainerTerminationNotice {
+  reason: string;
+  exitCode: number | null;
+  hint: string;
+}
+
+/** The one action that fixes a memory kill, in the words of the incident. */
+const OOM_KILLED_HINT =
+  'The agent exceeded the container memory limit; running fewer tests at ' +
+  'once usually fixes it.';
+
+export function containerTerminationNotice(
+  result: unknown
+): ContainerTerminationNotice | null {
+  if (!result || typeof result !== 'object') return null;
+  const termination = (result as Record<string, unknown>).container_termination;
+  if (!termination || typeof termination !== 'object') return null;
+
+  const record = termination as Record<string, unknown>;
+  const rawReason =
+    typeof record.reason === 'string' ? record.reason.trim() : '';
+  const oomKilled =
+    record.oom_killed === true || rawReason.toLowerCase() === 'oomkilled';
+  // A clean Kubernetes exit also carries a reason ("Completed"); that is
+  // not a failure and must not render as one.
+  if (!oomKilled && rawReason.toLowerCase() === 'completed') return null;
+  // A runtime that reports the kill only as a flag still has a reason to show.
+  const reason = rawReason || (oomKilled ? 'OOMKilled' : '');
+  if (!reason) return null;
+
+  return {
+    reason,
+    exitCode: typeof record.exit_code === 'number' ? record.exit_code : null,
+    hint: oomKilled ? OOM_KILLED_HINT : '',
+  };
 }
 
 /**
@@ -583,6 +630,17 @@ export class FlowExecutionView extends LitElement {
       }
       .error-block {
         color: var(--sl-color-danger-700);
+      }
+      .termination-reason {
+        margin: 0;
+        font-family: var(--sl-font-mono);
+        font-size: 12px;
+        color: var(--sl-color-danger-700);
+      }
+      .termination-hint {
+        margin: 6px 0 0;
+        font-size: var(--console-text-body);
+        color: var(--sl-color-neutral-600);
       }
       .logs-panel {
         display: flex;
@@ -2555,8 +2613,44 @@ export class FlowExecutionView extends LitElement {
       </div>`;
     }
 
+    const termination = containerTerminationNotice(execution.result);
+
     return html`
       <div class="output-panel">
+        ${
+          /* Above the error text: when the runtime killed the container,
+             that is the failure, and the agent's own last words are not. */
+          termination
+            ? html`
+                <section
+                  class="output-section"
+                  data-testid="container-termination"
+                >
+                  <h2 class="section-title">Container exit</h2>
+                  <p
+                    class="termination-reason"
+                    data-testid="termination-reason"
+                  >
+                    ${termination.reason}${
+                      termination.exitCode !== null
+                        ? ` (exit code ${termination.exitCode})`
+                        : ''
+                    }
+                  </p>
+                  ${
+                    termination.hint
+                      ? html`<p
+                          class="termination-hint"
+                          data-testid="termination-hint"
+                        >
+                          ${termination.hint}
+                        </p>`
+                      : ''
+                  }
+                </section>
+              `
+            : ''
+        }
         ${
           execution.error_message
             ? html`
@@ -3100,6 +3194,12 @@ ${execution.resolved_input_prompt}</pre>
       <div class="column-layout wide">
         <div class="main-column">
           ${this.renderSummaryStrip(execution)}
+          <!-- What this run delegated, and what that cost. Renders one quiet
+               line for the overwhelming majority of runs, which delegate
+               nothing. -->
+          <preloop-execution-tree
+            execution-id=${execution.id}
+          ></preloop-execution-tree>
           <preloop-execution-continuation
             .execution=${execution}
           ></preloop-execution-continuation>
@@ -3322,6 +3422,13 @@ ${log.payload.content}</pre>
     try {
       // Send stop command to backend (which stops the container directly)
       await sendCommandToExecution(this.executionId, 'stop');
+
+      // Say so at once. The command has already written STOPPED, and a run
+      // stopped while it was still queued has no runtime to publish a status
+      // update, so the page would otherwise read PENDING until a reload.
+      if (this.execution) {
+        this.execution = { ...this.execution, status: 'STOPPED' };
+      }
 
       // Wait a moment for the container to stop
       await new Promise((resolve) => setTimeout(resolve, 500));

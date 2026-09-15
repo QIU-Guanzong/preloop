@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://preloop.ai/schemas/a2a/delegation-task/v1",
+  "title": "Flow delegation task record",
+  "description": "One child execution as the parent sees it. An A2A v1.0 Task, ProtoJSON serialised, carrying the child result as an artifact. Internal delegation in A2A shapes, not A2A support.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "status", "metadata"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The child execution id, or, for a refused call, the id of the attempt."
+    },
+    "contextId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The delegation tree: the root execution id."
+    },
+    "status": { "$ref": "#/$defs/status" },
+    "artifacts": {
+      "type": "array",
+      "description": "Outputs of the child. Empty until it finishes.",
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "metadata": { "$ref": "#/$defs/taskMetadata" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["status"],
+        "properties": {
+          "status": {
+            "required": ["state"],
+            "properties": { "state": { "const": "TASK_STATE_REJECTED" } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "metadata": { "required": ["preloop.ai/refusalReason"] },
+          "artifacts": { "maxItems": 0 }
+        }
+      },
+      "else": {
+        "properties": {
+          "metadata": {
+            "required": ["preloop.ai/executionId"],
+            "not": { "required": ["preloop.ai/refusalReason"] }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "description": "A2A task state. Only the states the mapping table produces are allowed.",
+          "enum": [
+            "TASK_STATE_SUBMITTED",
+            "TASK_STATE_WORKING",
+            "TASK_STATE_INPUT_REQUIRED",
+            "TASK_STATE_COMPLETED",
+            "TASK_STATE_FAILED",
+            "TASK_STATE_CANCELED",
+            "TASK_STATE_REJECTED"
+          ]
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "When the state was recorded, ISO 8601 in UTC."
+        },
+        "message": {
+          "type": "object",
+          "description": "Optional human readable note on the state, as an A2A message.",
+          "additionalProperties": false,
+          "required": ["messageId", "role", "parts"],
+          "properties": {
+            "messageId": { "type": "string", "minLength": 1 },
+            "contextId": { "type": "string", "minLength": 1 },
+            "taskId": { "type": "string", "minLength": 1 },
+            "role": { "const": "ROLE_AGENT" },
+            "parts": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/part" }
+            },
+            "metadata": { "type": "object" }
+          }
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "parts"],
+      "description": "The child's structured result, taken from FlowExecution.result.",
+      "properties": {
+        "artifactId": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "parts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/part" }
+        },
+        "metadata": { "type": "object" }
+      }
+    },
+    "part": {
+      "type": "object",
+      "description": "A2A v1.0 part. The member name is the discriminator; there is no kind field.",
+      "oneOf": [{ "$ref": "#/$defs/textPart" }, { "$ref": "#/$defs/dataPart" }]
+    },
+    "textPart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string" },
+        "mediaType": { "type": "string" },
+        "metadata": { "type": "object" }
+      }
+    },
+    "dataPart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data"],
+      "properties": {
+        "data": {
+          "type": "object",
+          "description": "The child's result document, as stored."
+        },
+        "mediaType": { "type": "string", "const": "application/json" },
+        "metadata": { "type": "object" }
+      }
+    },
+    "taskMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Preloop specifics, namespaced. Closed on purpose: adding a key is an edit to this schema and to docs/guide/flow-delegation-shapes.md in the same change.",
+      "required": [
+        "preloop.ai/kind",
+        "preloop.ai/flowId",
+        "preloop.ai/depth",
+        "preloop.ai/status"
+      ],
+      "properties": {
+        "preloop.ai/kind": { "const": "delegation_task" },
+        "preloop.ai/executionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The child execution row. Absent only on a refusal, where no row exists."
+        },
+        "preloop.ai/parentExecutionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The execution that made the call."
+        },
+        "preloop.ai/rootExecutionId": {
+          "type": ["string", "null"],
+          "description": "First execution of the tree. Null when the parent is the root."
+        },
+        "preloop.ai/flowId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The flow that ran, or that was asked to."
+        },
+        "preloop.ai/flowName": {
+          "type": "string",
+          "description": "That flow's name, for reading."
+        },
+        "preloop.ai/depth": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Distance from the root: 0 is the root, 1 a direct child."
+        },
+        "preloop.ai/status": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The Preloop execution status this state was mapped from, so the mapping stays inspectable."
+        },
+        "preloop.ai/cost": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Estimated cost of the child so far, in USD."
+        },
+        "preloop.ai/tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total tokens the child has spent so far."
+        },
+        "preloop.ai/consoleUrl": {
+          "type": "string",
+          "description": "Console link to the child execution."
+        },
+        "preloop.ai/refusalReason": {
+          "type": "string",
+          "description": "Which rule declined the call. Present only on a refusal.",
+          "enum": [
+            "flow_not_found",
+            "flow_not_callable",
+            "tool_not_allowed",
+            "firewall_denied",
+            "depth_exceeded",
+            "cycle_detected",
+            "fanout_exceeded",
+            "budget_exceeded",
+            "execution_not_found"
+          ]
+        }
+      }
+    }
+  }
+}

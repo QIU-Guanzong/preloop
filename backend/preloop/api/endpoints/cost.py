@@ -226,9 +226,13 @@ def reprice_account_gateway_usage(
                 "backfill into smaller ranges"
             ),
         )
+    # Authorization reads are complete. Release their transaction before the
+    # catalog preflight performs provider I/O on detached credentials.
+    repricing_account_id = current_user.account_id
+    db.rollback()
     result = reprice_gateway_usage(
         db,
-        account_id=current_user.account_id,
+        account_id=repricing_account_id,
         start=reprice_in.start_date,
         end=reprice_in.end_date,
         only_unpriced=reprice_in.only_unpriced,

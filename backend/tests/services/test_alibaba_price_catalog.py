@@ -1,6 +1,7 @@
 """Native Model Studio catalog parsing is token-only and skips time bands."""
 
 from typing import Any, Callable
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import httpx
@@ -23,6 +24,91 @@ from preloop.services.alibaba_pricing import Tariff
 
 def setup_function() -> None:
     reset_live_state_for_tests()
+
+
+def test_reviewed_workspace_tariff_wins_until_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(catalog_mod, "_utcnow", lambda: now)
+    reviewed = Tariff(input=1, output=2, implicit_read=0.05)
+    catalog_mod.install_reviewed_catalogs(
+        {"singapore-international": {"qwen3.8-flash": reviewed}},
+        verified_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(days=1),
+        revision="review-1",
+    )
+    assert live_tariff(_sg_workspace()) == reviewed
+    ingest_native_models([_token_model("qwen3.8-flash", "3", "4")])
+    assert live_tariff(_sg_workspace()) == reviewed
+    assert catalog_mod.native_tariff(_sg_workspace()).input == 3
+    monkeypatch.setattr(catalog_mod, "_utcnow", lambda: now + timedelta(days=2))
+    assert live_tariff(_sg_workspace()) == reviewed
+    assert catalog_mod.pricing_snapshot(_sg_workspace())["stale"] is True
+
+
+def test_reviewed_catalog_validation_is_atomic() -> None:
+    now = datetime.now(timezone.utc)
+    with pytest.raises(ValueError):
+        catalog_mod.install_reviewed_catalogs(
+            {
+                "singapore-international": {"x": Tariff(input=1, output=2)},
+                "beijing": {"y": Tariff(input=1, output=2)},
+            },
+            verified_at=now,
+            expires_at=now + timedelta(days=1),
+            revision="bad",
+        )
+    assert live_tariff(_sg_classic("x")) is None
+
+
+def test_newer_reviewed_tariff_wins_then_falls_back_to_native(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(catalog_mod, "_utcnow", lambda: now - timedelta(hours=1))
+    ingest_native_models([_token_model("qwen3.8-flash", "3", "4")])
+    monkeypatch.setattr(catalog_mod, "_utcnow", lambda: now)
+    catalog_mod.install_reviewed_catalogs(
+        {"singapore-international": {"qwen3.8-flash": Tariff(input=5, output=6)}},
+        verified_at=now,
+        expires_at=now + timedelta(minutes=30),
+        revision="newer",
+    )
+    assert live_tariff(_sg_workspace()).input == 5
+    assert catalog_mod.tariff_source(_sg_workspace()) == "reviewed-catalog"
+    monkeypatch.setattr(catalog_mod, "_utcnow", lambda: now + timedelta(hours=1))
+    assert live_tariff(_sg_workspace()).input == 3
+    assert catalog_mod.tariff_source(_sg_workspace()) == "native-catalog"
+
+
+@pytest.mark.parametrize("rate", [float("nan"), float("inf"), -1])
+def test_reviewed_rejects_nonfinite_and_negative_rates(rate: float) -> None:
+    now = datetime.now(timezone.utc)
+    with pytest.raises(ValueError):
+        catalog_mod.validate_reviewed_catalogs(
+            {
+                "singapore-international": {
+                    "x": Tariff(input=1, output=2, creation=rate)
+                }
+            },
+            verified_at=now,
+            expires_at=now + timedelta(days=1),
+            revision="bad",
+        )
+
+
+def test_native_refresh_preparation_does_not_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(catalog_mod, "_api_key", lambda model: "private-key")
+    download = MagicMock(return_value=([_token_model("qwen3.8-flash")], True))
+    monkeypatch.setattr(catalog_mod, "_download_catalog", download)
+    prepared = catalog_mod.prepare_refresh(_sg_classic())
+    download.assert_not_called()
+    assert "private-key" not in repr(prepared)
+    assert catalog_mod.refresh_prepared(prepared) is CatalogRefreshStatus.ingested
+    download.assert_called_once()
 
 
 def _sg_classic(model_id: str = "qwen3.8-flash") -> models.AIModel:
@@ -371,4 +457,32 @@ def test_download_catalog_success_false_yields_no_entries(
         "international",
     )
     assert entries == []
+    assert complete is False
+
+
+def test_native_pagination_has_overall_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [0.0]
+    monkeypatch.setattr(catalog_mod.time, "monotonic", lambda: now[0])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.extensions["timeout"]["read"] == 5.0
+        now[0] = 6.0
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "output": {"models": [_token_model("example")], "total": 200},
+            },
+        )
+
+    _patch_client(monkeypatch, handler)
+    entries, complete = _download_catalog(
+        "https://dashscope-intl.aliyuncs.com/api/v1/models",
+        "test-key",
+        "international",
+        max_duration_seconds=5,
+    )
+    assert len(entries) == 1
     assert complete is False

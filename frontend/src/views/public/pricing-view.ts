@@ -5,6 +5,7 @@ import { customElement, state } from 'lit/decorators.js';
 import landingStyles from '../../styles/landing.css?inline';
 import pricingStyles from '../../styles/pricing-styles.css?inline';
 import '../../components/billing-toggle';
+import '../../components/deployment-toggle';
 import '../../components/pricing-card';
 
 interface Plan {
@@ -22,6 +23,8 @@ interface Plan {
   price_note?: string;
   price_note_annual?: string;
   tagline?: string;
+  /** Which tab the plan belongs to; anything untagged is a cloud plan. */
+  deployment?: 'cloud' | 'dedicated';
 }
 
 interface PricingFaq {
@@ -48,6 +51,11 @@ interface Comparison {
 @customElement('public-pricing-view')
 export class PublicPricingView extends LitElement {
   @state() private _interval: 'month' | 'year' = 'year';
+  /**
+   * Cloud is the default tab: it is what most visitors are buying, and it is
+   * the only tab with a price a visitor can act on without talking to us.
+   */
+  @state() private _deployment: 'cloud' | 'dedicated' = 'cloud';
 
   @state() private _plans: Plan[] = [];
   @state() private _comparison: Comparison | null = null;
@@ -135,6 +143,10 @@ export class PublicPricingView extends LitElement {
         highlight: el.getAttribute('data-highlight') === 'true',
         cta_text: el.getAttribute('data-cta-text') || undefined,
         cta_url: el.getAttribute('data-cta-url') || undefined,
+        deployment:
+          el.getAttribute('data-deployment') === 'dedicated'
+            ? 'dedicated'
+            : 'cloud',
         description: el.getAttribute('data-description') || undefined,
         features: featuresAttr ? featuresAttr.split('|').filter(Boolean) : [],
       });
@@ -208,6 +220,7 @@ export class PublicPricingView extends LitElement {
         highlight: p.highlight,
         cta_text: p.cta_text,
         cta_url: p.cta_url,
+        deployment: p.deployment === 'dedicated' ? 'dedicated' : 'cloud',
         description: p.description,
         features: p.features || [],
       }));
@@ -269,22 +282,42 @@ export class PublicPricingView extends LitElement {
     unsafeCSS(pricingStyles),
     unsafeCSS(landingStyles),
     css`
+      /* Two segmented controls side by side on a laptop, stacked on a phone.
+         Wrapping is what keeps a narrow screen from squashing either one. */
+      .pricing-toggles {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: center;
+        column-gap: 1.5rem;
+      }
+
       .deployment-options {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
         gap: 1.5rem;
       }
       .deployment-options article {
-        padding: 1.25rem;
-        border: 1px solid var(--sl-color-neutral-300);
-        border-radius: 0.75rem;
+        display: flex;
+        flex-direction: column;
+        padding: 1.5rem;
+        border: 1px solid rgba(230, 237, 243, 0.12);
+        border-radius: 20px;
+        background-color: #21262f;
+      }
+      .deployment-options h3 {
+        margin-top: 0;
       }
       .deployment-options p {
         line-height: 1.6;
+        flex: 1 1 auto;
       }
       .deployment-options a {
         display: inline-block;
+        margin-top: auto;
         padding: 0.75rem 0;
+        font-weight: 600;
+        color: #58a6ff;
       }
       .loading,
       .error {
@@ -295,7 +328,7 @@ export class PublicPricingView extends LitElement {
         color: var(--sl-color-danger-600);
       }
 
-      /* Five cards need a tighter minimum than the shared 260px grid or the
+      /* Four cards need a tighter minimum than the shared 260px grid or the
          ladder wraps to two rows on ordinary laptop widths. */
       .plans-grid {
         grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
@@ -305,7 +338,7 @@ export class PublicPricingView extends LitElement {
         margin-top: 3.5rem;
       }
 
-      /* Narrow screens scroll the table sideways instead of squashing five
+      /* Narrow screens scroll the table sideways instead of squashing four
          columns into unreadable slivers. */
       .comparison-scroll {
         overflow-x: auto;
@@ -384,10 +417,52 @@ export class PublicPricingView extends LitElement {
     `,
   ];
 
+  /**
+   * A brand with no dedicated plan and no deployment options gets no tab
+   * selector at all, so a cloud-only page still renders exactly as before.
+   */
+  private _hasDedicated(): boolean {
+    return this._dedicatedOptions().length > 0;
+  }
+
+  /**
+   * Resolve the visible pane in one place. Cloud is the default when it has
+   * cards; if every configured plan is dedicated (or the brand only ships
+   * deployment options) fall back so the page is not an empty container.
+   */
+  private _activeDeployment(): 'cloud' | 'dedicated' {
+    return this._cloudPlans().length ? this._deployment : 'dedicated';
+  }
+
+  /** Hosted subscriptions: the cards and the comparison table. */
+  private _cloudPlans(): Plan[] {
+    return this._plans.filter((p) => p.deployment !== 'dedicated');
+  }
+
+  /**
+   * The Dedicated tab: the configured deployment options, then any plan the
+   * catalog marked as dedicated (Enterprise). Both are quoted rather than
+   * bought, so they render as the same card shape and link straight to the
+   * contact or source route instead of carrying a price toggle.
+   */
+  private _dedicatedOptions(): PricingDeploymentOption[] {
+    const quotedPlans = this._plans
+      .filter((p) => p.deployment === 'dedicated')
+      .map((plan) => ({
+        title: plan.price_label
+          ? `${plan.name}: ${plan.price_label}`
+          : plan.name,
+        description: plan.tagline || plan.description || '',
+        cta_text: plan.cta_text || 'Contact us',
+        cta_url: plan.cta_url || '/request-demo',
+      }));
+    return [...this._deployments, ...quotedPlans];
+  }
+
   private _renderCards() {
     return html`
       <div class="plans-grid" @signup-requested=${this._handleSignUpRequest}>
-        ${this._plans.map(
+        ${this._cloudPlans().map(
           (plan) => html`
             <pricing-card
               .plan=${plan}
@@ -422,9 +497,10 @@ export class PublicPricingView extends LitElement {
    * split live here, keeping every card to one number plus one line.
    */
   private _renderComparison() {
-    if (!this._comparison?.groups?.length || !this._plans.length) return '';
+    const plans = this._cloudPlans();
+    if (!this._comparison?.groups?.length || !plans.length) return '';
 
-    const planIds = this._plans.map((p) => p.id);
+    const planIds = plans.map((p) => p.id);
     const colCount = planIds.length + 1;
 
     return html`
@@ -438,7 +514,7 @@ export class PublicPricingView extends LitElement {
               <thead>
                 <tr>
                   <th scope="col" class="row-label"></th>
-                  ${this._plans.map(
+                  ${plans.map(
                     (plan) => html`<th scope="col">${plan.name}</th>`
                   )}
                 </tr>
@@ -513,20 +589,32 @@ export class PublicPricingView extends LitElement {
     }
   }
 
-  private _renderDeployments() {
-    if (!this._deployments.length) return '';
-    return html`<section class="main-section" aria-label="Self-hosted options">
+  private _renderDedicated() {
+    const options = this._dedicatedOptions();
+    if (!options.length) return '';
+    // Landmark + visible heading match the SSR crawler block
+    // (`Dedicated and self-hosted options`) so hydration does not drop the
+    // heading, and aria-labelledby is valid on <section>.
+    return html`<section
+      class="main-section"
+      aria-labelledby="dedicated-heading"
+    >
       <div class="section-container">
-        <h2>Self-hosted options</h2>
+        <h2 id="dedicated-heading">Dedicated and self-hosted options</h2>
         <div class="deployment-options">
-          ${this._deployments.map(
-            (option) =>
-              html`<article>
-                <h3>${option.title}</h3>
-                <p>${option.description}</p>
-                <a href=${option.cta_url}>${option.cta_text}</a>
-              </article>`
-          )}
+          ${options.map((option) => {
+            const external = /^https?:\/\//.test(option.cta_url);
+            return html`<article>
+              <h3>${option.title}</h3>
+              <p>${option.description}</p>
+              <a
+                href=${option.cta_url}
+                target=${external ? '_blank' : '_self'}
+                rel=${external ? 'noopener noreferrer' : ''}
+                >${option.cta_text}</a
+              >
+            </article>`;
+          })}
         </div>
       </div>
     </section>`;
@@ -559,6 +647,7 @@ export class PublicPricingView extends LitElement {
   }
 
   render() {
+    const deployment = this._activeDeployment();
     return html`
       <app-header></app-header>
       <main>
@@ -573,20 +662,39 @@ export class PublicPricingView extends LitElement {
           </div>
 
           <div class="section-container">
-            ${
-              this._billingToggle
-                ? html`<billing-toggle
-                    .dark=${true}
-                    .interval=${this._interval}
-                    @interval-change=${(e: CustomEvent) =>
-                      (this._interval = e.detail.value)}
-                  ></billing-toggle>`
-                : ''
-            }
-            ${this._plans.length ? this._renderCards() : ''}
+            <div class="pricing-toggles">
+              ${
+                // The tab choice governs everything below it, so it leads.
+                // Keeping it leftmost also means the row does not reflow when
+                // the period toggle disappears on the Dedicated tab.
+                this._hasDedicated()
+                  ? html`<deployment-toggle
+                      .dark=${true}
+                      .deployment=${deployment}
+                      @deployment-change=${(e: CustomEvent) =>
+                        (this._deployment = e.detail.value)}
+                    ></deployment-toggle>`
+                  : ''
+              }
+              ${
+                // The billing period only exists for hosted subscriptions:
+                // nothing on the Dedicated tab is priced per month, so the
+                // toggle is removed there rather than left inert.
+                this._billingToggle && deployment === 'cloud'
+                  ? html`<billing-toggle
+                      .dark=${true}
+                      .interval=${this._interval}
+                      @interval-change=${(e: CustomEvent) =>
+                        (this._interval = e.detail.value)}
+                    ></billing-toggle>`
+                  : ''
+              }
+            </div>
+            ${deployment === 'cloud' ? this._renderCards() : ''}
           </div>
         </section>
-        ${this._renderComparison()} ${this._renderDeployments()}
+        ${deployment === 'dedicated' ? this._renderDedicated() : ''}
+        ${deployment === 'cloud' ? this._renderComparison() : ''}
         ${this._renderFaqs()}
       </main>
       <app-footer></app-footer>

@@ -98,6 +98,11 @@ class TestListAllTools:
             "improve_compliance",
             "permission_prompt",
             "resolve_sbom_upstreams",
+            "get_issue_triage_context",
+            "apply_issue_triage",
+            "send_note",
+            "run_flow",
+            "get_execution",
         }
         for tool in result:
             expected = tool["name"] not in default_disabled

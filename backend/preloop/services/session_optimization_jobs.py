@@ -53,6 +53,10 @@ from preloop.schemas.gateway_usage import (
     RuntimeSessionOptimizationRequest,
     RuntimeSessionOptimizationResponse,
 )
+from preloop.services.service_roles import (
+    background_passes_allowed,
+    current_service_role,
+)
 from preloop.services.session_optimization import SessionOptimizationService
 
 logger = logging.getLogger(__name__)
@@ -414,6 +418,14 @@ class OptimizationJobSweeper:
         """Start the sweep background task."""
         if self._running:
             logger.warning("Optimization job sweeper is already running")
+            return
+        if not background_passes_allowed():
+            # See preloop.services.service_roles: background passes stay out
+            # of a process that relays model gateway traffic.
+            logger.info(
+                "Optimization job sweeper not started for %s role.",
+                current_service_role(),
+            )
             return
         self._running = True
         self._task = asyncio.create_task(self._sweep_loop())

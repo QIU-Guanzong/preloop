@@ -18,10 +18,11 @@ GITHUB_GITLAB_ONLY = {
     "get_pull_request",
     "update_pull_request",
     "create_pull_request",
-    "get_issue_triage_context",
-    "apply_issue_triage",
 }
 COMPLIANCE_DEFAULT_DISABLED = {"estimate_compliance", "improve_compliance"}
+# github/gitlab-gated but default-disabled (#660): only flows that select
+# them explicitly receive them, so a tracker never unlocks them.
+TRIAGE_DEFAULT_DISABLED = {"get_issue_triage_context", "apply_issue_triage"}
 
 
 def test_first_jira_unlocks_any_tracker_default_enabled_only():
@@ -32,6 +33,7 @@ def test_first_jira_unlocks_any_tracker_default_enabled_only():
     )
     assert set(unlocked) == ANY_TRACKER_DEFAULT_ENABLED
     assert COMPLIANCE_DEFAULT_DISABLED.isdisjoint(unlocked)
+    assert TRIAGE_DEFAULT_DISABLED.isdisjoint(unlocked)
     assert GITHUB_GITLAB_ONLY.isdisjoint(unlocked)
 
 
@@ -43,6 +45,7 @@ def test_first_github_unlocks_any_plus_github_gitlab_tools():
     )
     assert set(unlocked) == ANY_TRACKER_DEFAULT_ENABLED | GITHUB_GITLAB_ONLY
     assert COMPLIANCE_DEFAULT_DISABLED.isdisjoint(unlocked)
+    assert TRIAGE_DEFAULT_DISABLED.isdisjoint(unlocked)
 
 
 def test_second_tracker_same_capability_returns_empty():
@@ -63,6 +66,24 @@ def test_github_after_jira_unlocks_only_github_gitlab_set():
     assert set(unlocked) == GITHUB_GITLAB_ONLY
 
 
+def test_github_does_not_unlock_default_disabled_triage_tools():
+    """Triage builtins are github/gitlab-gated but default-off (#660)."""
+    unlocked = unlocked_tool_names_after_tracker(
+        had_tracker=False,
+        types_before=[],
+        types_after=["github"],
+    )
+    assert TRIAGE_DEFAULT_DISABLED.isdisjoint(unlocked)
+
+    with_explicit_enable = unlocked_tool_names_after_tracker(
+        had_tracker=False,
+        types_before=[],
+        types_after=["github"],
+        enabled_by_name={name: True for name in TRIAGE_DEFAULT_DISABLED},
+    )
+    assert TRIAGE_DEFAULT_DISABLED.issubset(with_explicit_enable)
+
+
 def test_explicit_disabled_config_excludes_tool():
     unlocked = unlocked_tool_names_after_tracker(
         had_tracker=False,
@@ -80,6 +101,7 @@ def test_supported_names_respect_default_enabled_false():
         tracker_types=["github"],
     )
     assert COMPLIANCE_DEFAULT_DISABLED.isdisjoint(names)
+    assert TRIAGE_DEFAULT_DISABLED.isdisjoint(names)
     assert ANY_TRACKER_DEFAULT_ENABLED.issubset(names)
 
 

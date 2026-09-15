@@ -216,6 +216,24 @@ class TestRepoReviewPresetInvariants:
         assert '"resolved"' in prompt or "resolved" in prompt
         assert "not reproducible at <SHA>" in norm
 
+    def test_previous_result_execution_id_input(self, preset):
+        """The payload key the runner resolves into previous/result.json,
+        with the precedence and the mismatch marker stated in the prompt."""
+        _, data = preset
+        norm = _norm(data["prompt_template"])
+        assert "previous_result_execution_id" in norm
+        assert '"last"' in norm
+        assert "previous/result.json" in norm
+        assert "previous/baseline-mismatch.json" in norm
+        # Degrades: marker present means no baseline, drift stays null.
+        assert "set baseline_mismatch true" in norm
+        assert "keep drift null" in norm
+        # Documented precedence: an explicitly delivered file wins.
+        assert (
+            "previous_result_path (or previous_result_url) wins when both "
+            "are given" in norm
+        )
+
     def test_register_cannot_upgrade_verdict(self, preset):
         """Verdict honesty: met/declared/resolved rows and positive prose
         never raise a verdict; declared is not a pass."""

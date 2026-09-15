@@ -31,6 +31,11 @@ scheme exists. If complexity cannot be estimated, the issue can still receive it
 assessment with the missing information, but the run reports the absent tag as
 incomplete. It never invents an estimate to fill a field.
 
+Both tools are off by default. They are advertised only to a flow whose
+`allowed_mcp_tools` selects them, such as this preset, or to an account or agent
+that enables them explicitly on the Tools page. Connecting a GitHub or GitLab
+tracker alone does not add them to every agent's tool list.
+
 The write tool requires the existing `edit_issues` permission and follows normal
 MCP availability and approval policies. Project and tracker identity come from
 account-scoped stored records. The preset does not use broad issue mutation tools,

@@ -28,6 +28,56 @@ Flow `prompt_template` strings are resolved before the agent starts. Besides `{{
 *   `{{execution.resume_from}}` — prior execution id when this run was started from a human comment on a PR this flow opened. Empty otherwise.
 *   `{{execution.ci_failure}}` — when this run was started because GitHub CI failed on a PR this flow opened: provider, job name, and check URL. Empty otherwise.
 
+Any placeholder may take a `|truncate(N)` filter, for example
+`{{trigger_event.payload.object_attributes.description|truncate(16384)}}`.
+`N` is a byte cap (not a character count) so it matches the launch-payload
+and tokenizer costs that actually grow. The cut is on a UTF-8 boundary.
+`{{name|truncate}}` without `N` uses 16 KiB. When the resolved value is
+longer, the injected text is the prefix plus:
+
+```
+[truncated by Preloop: showing the first N bytes of TOTAL; fetch the full text
+with the tool that owns this object, for example get_pull_request]
+```
+
+Unbounded webhook fields are capped because they dominate context window,
+reviewer attention, and the kernel `execve` string limit (one argv element or
+one `NAME=value` entry cannot exceed 128 KiB). Templates without the filter
+are unchanged. Operator-facing grammar also lives in
+[Webhook Triggers](../webhook-triggers.md#prompt-placeholders).
+
+## Agent launch payload (container environment)
+
+Custom agent images and private runners must not assume the rendered prompt
+arrives as one environment variable. Linux caps a single `execve` string
+(one argv element or one `NAME=value` entry) at `MAX_ARG_STRLEN` (131072
+bytes). The control plane delivers large text as base64 chunks and
+reassembles files inside the container:
+
+| Variable | Meaning |
+| --- | --- |
+| `PRELOOP_AGENT_PROMPT_0..N` | Base64 chunks of the rendered prompt (96 KiB each). |
+| `PRELOOP_AGENT_PROMPT_CHUNKS` | Chunk count (`0` when the prompt is empty). |
+| `PRELOOP_AGENT_PROMPT_BYTES` | Decoded byte length, used to abort a truncated reassembly. |
+| `AGENT_PROMPT_FILE` | Path the chunks materialize at (`/tmp/preloop/prompt.txt`). |
+| `AGENT_PROMPT` | Whole prompt, **only when it is <= 64 KiB**. Absent above that. |
+| `PRELOOP_INNER_SCRIPT_0..N` | Base64 chunks of the Kubernetes inner agent script. |
+| `PRELOOP_INNER_SCRIPT_CHUNKS` / `PRELOOP_INNER_SCRIPT_BYTES` | Count and decoded size for that script. |
+| `PRELOOP_INNER_SCRIPT` | Legacy whole-script value. Still honoured by the artifact wrapper so an old control plane can drive a new image. |
+
+A new control plane can drive an old image: small prompts still set
+`AGENT_PROMPT`, and the wrapper still accepts a whole `PRELOOP_INNER_SCRIPT`.
+An old control plane can drive a new image the same way. Custom images that
+read the prompt themselves should prefer `AGENT_PROMPT_FILE` after the
+launch script's materialization block, or reassemble `PRELOOP_AGENT_PROMPT_*`
+the same way (`base64 -d`, then `wc -c` against `_BYTES`). Do not require
+`AGENT_PROMPT` for prompts above 64 KiB.
+
+OpenHands (the default `agent_type`) uses this prompt transport on Docker
+and Kubernetes. Gemini and OpenCode still expand the materialized file into
+an inner CLI argv (`--prompt "$(cat ...)"` / `-- "$(cat ...)"`); that inner
+`execve` residual is tracked as issue #692 and is not part of this contract.
+
 ## Model stream recovery
 
 Hosted Docker/Kubernetes agent scripts and supported private Docker launches keep provider retries separate from session recovery. Codex uses four request retries and five stream retries (explicit for the gateway provider, matching its native defaults); OpenCode 1.18.29 already retries a model request up to five times; Gemini enables transport retries with four total chat-model attempts. After a transient CLI failure, the container can resume the captured parent conversation twice, with two- and four-second backoffs and a 600-second timeout per resume (forced termination after another five seconds). The execution's overall timeout still applies. These retry layers can multiply upstream attempts; they are bounded and do not guarantee recovery from a sustained outage.
@@ -61,6 +111,22 @@ One flow definition can drive an agent-harness × model evaluation grid without 
 *   **Observation:** `GET /api/v1/flows/batches/{batch_id}/executions` lists a batch (account-scoped, sorted by matrix index) with a rollup of status counts, tokens, tool calls, and estimated cost, so an eval matrix can be observed as a unit.
 *   **Response shape:** non-matrix triggers are wire-identical to before; matrix triggers return `batch_id` plus per-cell execution references.
 
+## Execution lineage
+
+Executions expose `parent_execution_id`, `root_execution_id`, and
+`delegation_depth` in detail and lightweight list responses. Existing and root
+runs have null parent/root IDs and depth 0. Later delegation writers supply these
+values at creation; this storage contract does not start child runs.
+
+The parent is an indexed self-reference with `ON DELETE SET NULL`, so removing a
+parent preserves its children. The indexed root ID has no foreign key and remains
+a grouping label after root deletion; recorded depth is also preserved. A whole
+tree consists of the root row plus executions whose root ID points to it.
+`CRUDFlowExecution.get_children` requires an account, returns direct children
+only, and orders them by start time then execution ID. The list query loads the
+lineage fields and existing parking timestamps with the row so serializing a
+page adds no per-row reads.
+
 ## Label-based model routing
 
 A flow can optionally store ordered routing rules in `agent_config.model_routing` (no extra column). Each rule has a stable id, `labels.any` and/or `labels.all` against the issue's current labels, and an account-owned `ai_model_id` plus compatible `agent_type`. The first matching rule selects the model and harness for that execution. If none match, or the key is absent, the flow's selected model and harness are used. Examples in docs use operator-defined labels such as `documentation` or `bug`; there is no built-in taxonomy.
@@ -78,6 +144,8 @@ The controller writes the chosen rule or default onto the execution under reserv
 **Per-flow timeout budget.** `flow.timeout_seconds` (nullable, 60..86400, on the create/update API and settable from a preset YAML) is the wall-clock budget for one execution of that flow; NULL keeps the deployment default `FLOW_EXECUTION_MAX_WAIT_SECONDS` (3600, `flowExecution.maxWaitSeconds`). The orchestrator resolves and clamps it once per run, records it on the `agent_monitoring_started` milestone (`timeout_seconds`, `timeout_source`), enforces it in the monitor loop, and on expiry writes `agent_execution_timeout` and a message that names the budget that ran out ("this flow's timeout budget" vs "the default timeout budget"), still classified `timeout`. This is what separates "genuinely long" from "stuck": with one global ceiling, all 7 staging timeouts sat on exactly 3600 seconds and said nothing about which was which. A PR review that should finish in minutes (`002-pull-request-reviewer.yaml`, 1800) and a release audit that legitimately runs for hours (`006-release-security-audit.yaml`, 7200) now carry their own budgets.
 
 **Hosted-monitor concurrency.** Each flow-execution worker process may babysit `FLOW_EXECUTION_MAX_INFLIGHT` hosted monitors at once (default 10, `flowExecution.maxInflight`). The cap is a process-wide semaphore shared by `execute_flow` and `resume_flow_execution`. Other worker pools stay serial: they were not sized for fan-out. Helm injects a dedicated `flowExecution.databasePool` (size 10 / overflow 4) on the flow-execution pool so those short-lived sessions are not squeezed through the generic worker 2+4 pool.
+
+**Per-account admission cap.** Admission is also bounded per account, so one account cannot fill every worker. `FLOW_EXECUTION_MAX_RUNNING_PER_ACCOUNT` (default 3, Helm `flowExecution.maxRunningPerAccount`) is enforced inside `claim_execution`. An account may override it through `account.meta_data["flow_execution_max_running_per_account"]`. A refused execution stays `PENDING` with `queued_reason=account_concurrency_cap` and its message is nacked for later redelivery. Independently, a flow gets at most one active execution per tracker object (issue, pull request, or merge request): a later matching trigger is recorded as skipped rather than queued. Comment and CI deliveries are exempt so they can still feed a live run. A `labels` condition on a labeled/unlabeled delivery tests the label the event carries, not the issue's full label list.
 
 **Terminal notifications (`flow.notifications`).** A flow can opt into posting a tracker comment when an execution ends, instead of asking the agent to ping the triggering issue from the prompt. `on_success.comment_on_trigger_issue` posts a short "PR opened: \<url\>" comment when the run recorded a `pr_url`. The orchestrator posts it from the terminal path (including resume), and a notification failure never rewrites the execution status. The console offers the option only where it can apply: the flow opens the pull request itself (`git_clone_config.create_pull_request`) and the trigger is about an issue (a tracker trigger with an `issue_*` or `comment_*` event).
 

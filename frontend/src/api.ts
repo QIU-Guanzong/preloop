@@ -511,9 +511,10 @@ export async function startCheckout(
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
       const detail = body.detail;
-      const message = ['legacy_plan_unavailable', 'catalog_not_ready'].includes(
-        detail?.code
-      )
+      // catalog_not_synced carries its own message ("not available for
+      // purchase yet"): the offer has not changed, the deployment is
+      // incomplete, so refreshing the comparison would not help.
+      const message = ['legacy_plan_unavailable'].includes(detail?.code)
         ? 'This offer has changed. Refresh the plan comparison before choosing a plan.'
         : typeof detail?.message === 'string'
           ? detail.message
@@ -3214,6 +3215,62 @@ export async function getFlowExecutions(options?: {
 }): Promise<any[]> {
   const page = await getFlowExecutionsPage(options);
   return page.rows;
+}
+
+/** One run in a delegation tree, as the server lists it (#634). */
+export interface ExecutionTreeNode {
+  id: string;
+  flow_id: string;
+  flow_name?: string | null;
+  /** What the caller asked this child to do, when it passed a label. */
+  label?: string | null;
+  status: string;
+  start_time: string;
+  end_time?: string | null;
+  failure_category?: string | null;
+  /** Which row this one hangs under; null only on a lineage root. */
+  parent_execution_id?: string | null;
+  delegation_depth?: number;
+  estimated_cost?: number | null;
+  total_tokens?: number | null;
+  tool_calls_count?: number | null;
+}
+
+/** Status counts and totals over a set of runs, shared with batch listings. */
+export interface ExecutionRollup {
+  total: number;
+  by_status: Record<string, number>;
+  completed: number;
+  total_tokens: number;
+  total_estimated_cost: number;
+  total_tool_calls: number;
+}
+
+/**
+ * What one run delegated, plus the rollup over it.
+ *
+ * `execution` carries the run's own cost and `rollup` covers its descendants
+ * only: the two numbers answer different questions and are never summed.
+ */
+export interface ExecutionTree {
+  execution_id: string;
+  root_execution_id: string;
+  execution: ExecutionTreeNode;
+  executions: ExecutionTreeNode[];
+  rollup: ExecutionRollup;
+  truncated?: boolean;
+}
+
+export async function getExecutionTree(
+  executionId: string
+): Promise<ExecutionTree> {
+  const response = await fetchWithAuth(
+    `/api/v1/flows/executions/${executionId}/tree`
+  );
+  if (!response.ok) {
+    throw new Error('Failed to fetch the execution tree');
+  }
+  return response.json();
 }
 
 export async function getFlowExecution(executionId: string): Promise<any> {

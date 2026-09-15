@@ -196,6 +196,37 @@ async def run_scheduler_async(
         getattr(settings, "workspace_snapshot_ttl_hours", 24),
     )
 
+    # Periodic Stripe subscription reconciliation. A missed or rejected
+    # webhook used to leave a subscription stale until an operator reconciled
+    # it by hand; this pass repairs it within one interval. The worker-side
+    # task no-ops unless the Enterprise billing plugin is present and a Stripe
+    # key is configured, and it only ever reads from Stripe. The first run is
+    # scheduled shortly after sync-role startup so a restart also repairs
+    # whatever drifted while the process was down.
+    subscription_reconcile_hours = max(
+        1, int(getattr(settings, "billing_subscription_reconcile_hours", 6) or 6)
+    )
+
+    async def _publish_subscription_reconcile() -> None:
+        try:
+            await event_bus_service.publish_task("reconcile_stripe_subscriptions")
+        except Exception:
+            logger.exception("Failed to publish subscription reconciliation task")
+
+    scheduler.add_job(
+        _publish_subscription_reconcile,
+        trigger=IntervalTrigger(hours=subscription_reconcile_hours),
+        id="subscription_reconcile_job",
+        name="Reconcile Stripe Subscriptions",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        next_run_time=datetime.now(pytz.utc) + timedelta(minutes=3),
+    )
+    logger.info(
+        "Scheduled subscription reconciliation every %d hour(s).",
+        subscription_reconcile_hours,
+    )
+
     # Weekly cost optimization & savings digest. The worker-side task no-ops
     # unless the Enterprise billing plugin is present.
     if getattr(settings, "cost_digest_enabled", True):

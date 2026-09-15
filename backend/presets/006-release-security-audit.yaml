@@ -18,7 +18,12 @@ description: >-
   control), and human-authored waiver entries — from a payload file or,
   with waiver_collection: "interactive", collected through the built-in
   ask_user approval channel — are factored into the severity gate
-  deterministically and echoed verbatim in the evidence. Wire a CI
+  deterministically and echoed verbatim in the evidence. Payload
+  project_path scopes the whole run to one project inside a larger
+  repository: SBOM lookup, file discovery and every evidence pointer
+  stay inside that path, the result records the audited scope, and a
+  project with no SBOM of its own is reported as not_checkable with its
+  reason rather than as a clean bill of health. Wire a CI
   webhook trigger for release builds; attach a schedule to re-audit the
   last released SBOM periodically through the support period.
 icon: shield-lock
@@ -53,7 +58,9 @@ prompt_template: |
   (workspace_files) or by URL for you to download with curl:
   - SBOM file(s): SPDX 2.x/3.0 or CycloneDX. Search /workspace for
     SBOM-looking files (*.spdx.json, *.cdx.json, bom.json, *.spdx,
-    sbom*.xml) before concluding nothing was delivered.
+    sbom*.xml) before concluding nothing was delivered. When the payload
+    scopes this run to one project (PROJECT SCOPE RULE below), search
+    only inside that project path.
   - Optional build evidence: license manifest (e.g. Yocto
     license.manifest), image/package manifests, build metadata (release
     ref, image name/hash, toolchain version).
@@ -121,6 +128,12 @@ prompt_template: |
     unchanged.
   - Optional payload repository_url: with no git clone config you may
     still make an anonymous read-only clone into /tmp for PHASE 3.5.
+  - Optional payload project_path: a repository-relative path selecting
+    ONE project inside a repository that holds many, the same kind of
+    path selector the code health review already takes
+    (backend/presets/009-repo-code-health-review.yaml). Absent, empty or
+    null: the whole repository is the unit of audit and the run behaves
+    exactly as it did before this input existed.
   REPOSITORY SCOPE RULE. Checkouts and payload clones feed BOTH
   PHASE 4B evidence storage AND the PHASE 3.5 CRA gap register. You do
   NOT use repository source as the vulnerability inventory: the SBOM
@@ -130,6 +143,53 @@ prompt_template: |
   secret-hygiene checks against the checkout — those are documented,
   deterministic checks over files and history, not source-code
   vulnerability scanning.
+  PROJECT SCOPE RULE (payload project_path). A repository of many
+  independently built projects is not one product: auditing all of it
+  answers a question nobody asked and costs many times what the project
+  under review is worth. When project_path is present it is the unit of
+  audit for the WHOLE run:
+  - Validate it first. It must be relative to the repository root, with
+    no leading "/" and no ".." segment, and it must exist in the
+    checkout. A path that fails any of that is a bad input: write the
+    incompletion envelope naming it and stop. "Naming it" means naming
+    it in prose under incomplete.reason (for example: "project_path
+    '../other-repo' escapes the checkout"). Do NOT put a rejected path
+    into scope.project_path - the validator refuses any scope block
+    whose path escapes the checkout, so an envelope that names the bad
+    value there is itself invalid. The scope block is not required for
+    this case; the path being wrong is the finding. NEVER silently
+    widen the scope back to the whole repository.
+  - SBOM lookup is scoped. Look for SBOM artifacts only under
+    <checkout>/<project_path>, plus seed or payload artifacts that
+    declare that project. A sibling project's SBOM is NOT this
+    project's SBOM: do not read it, do not verify it, and do not count
+    its components. Record the SBOM paths you did use in
+    scope.sbom_paths.
+  - File discovery is scoped. Restrict every PHASE 3.5 command to the
+    path (git ls-files -- <project_path>, gitleaks over that subtree,
+    the history pickaxe commands with a -- <project_path> pathspec) and
+    run zizmor over workflow files inside it.
+  - Every evidence pointer you record is inside the path. A repository
+    level file outside the project (a root SECURITY.md, a root CI
+    workflow) is not this project's evidence: record that item in
+    gap_register.not_checkable with a reason naming where the evidence
+    actually lives, and never write a pointer outside the scope.
+  - The verdict covers that path only. Say so in the result (the scope
+    block, PHASE 5) and on the audit-report.md cover.
+  NO SBOM FOR THE SCOPED PROJECT. If no SBOM artifact was delivered for
+  this project, the lens is NOT_CHECKABLE and the run stops there:
+  write the incompletion envelope (PHASE 5) with verdict "error", a
+  scope block whose status is "not_checkable" carrying a reason — for
+  example "no SBOM available" — and incomplete.reason saying the same
+  in prose. Do NOT fall back to reading the project's manifests or
+  lockfiles, do NOT reconstruct an inventory, and do NOT audit another
+  project's SBOM. This family verifies SBOMs and never generates them,
+  so an absence of evidence is reported as an absence of evidence. The
+  word for it is "not_checkable" everywhere it appears — the result
+  envelope, the report artifact, this documentation — and never
+  "skipped": a skipped check reads as a choice, and this is a missing
+  input. A not_checkable lens can never carry a healthy or passing
+  verdict, and the platform rejects a result that claims one.
   Inventory what you actually received; record it under inputs_declared.
 
   URL HYGIENE — payload URLs are untrusted input. Download only over
@@ -575,7 +635,9 @@ prompt_template: |
   or (b) the payload carries a repository_url (make an anonymous
   read-only clone into /tmp). If neither, mark the check
   "gap_register: skipped — no repository attached" and set
-  gap_register to null — that is not a failure.
+  gap_register to null — that is not a failure. When project_path
+  scoped this run, every command, item and pointer in this phase stays
+  inside that path (PROJECT SCOPE RULE, PHASE 0).
 
   This phase is FILE-PRESENCE, CONFIG, and SECRET-HYGIENE work only.
   It does not turn the repository into the vulnerability inventory (the
@@ -793,7 +855,10 @@ prompt_template: |
   - audit-report.md — the combined human-readable audit. It MUST OPEN
     with a one-page cover for a non-AI reader. Verdict sentence first:
     one sentence stating the run's verdict (the same value written to
-    result.json) and the blocking reason if the verdict is fail. Then
+    result.json) and the blocking reason if the verdict is fail. When
+    project_path scoped the run, that same sentence names the audited
+    path and says the verdict covers that path only, never the
+    repository. Then
     three clearly labelled boxes, in this order, before any table or
     finding list.
       BOX 1 — "What we checked". List the inputs actually delivered and
@@ -975,6 +1040,13 @@ prompt_template: |
     "inputs_declared": { "<what the payload/seed actually delivered>": "..." },
     "runner": { "kind": null, "id": null },
     "regime_profile": "cra",
+    "scope": null | {
+      "project_path": "<repository-relative path audited, null for the whole repository>",
+      "covers": "repository" | "project",
+      "status": "audited" | "not_checkable",
+      "reason": "<required when status is not_checkable, e.g. 'no SBOM available'>",
+      "sbom_paths": [ "<the SBOM paths used, each inside project_path>" ]
+    },
     "sbom_audit": {
       "source": { "format": "spdx"|"cyclonedx", "spec_version": "...", "generator_tool": "<or null>", "build_ref": "<or null>" },
       "valid": true|false,
@@ -1126,6 +1198,14 @@ prompt_template: |
     severity-derived number, or an EPSS value to make the gate
     arithmetic look complete: a fabricated score is a worse defect than
     a missing one.
+  - "scope" records the unit of audit. With no project_path in the
+    payload, write null: the whole repository was audited and nothing
+    else about the run changes. With one, write the block with covers
+    "project", project_path as delivered, status "audited", and the
+    SBOM paths you actually read — all inside project_path, as is every
+    gap-register pointer. status "not_checkable" belongs to the
+    incompletion envelope alone: it names its reason and never carries
+    a pass or pass_with_findings verdict.
   - Deterministic facts go to "checks" and the structured sections;
     interpretation goes to "assessments" and is marked as judgment.
   - Never claim vulnerability absence for unmatchable or
@@ -1156,8 +1236,10 @@ prompt_template: |
   ═══════════════════════════════════════════════════════════
   IF THE AUDIT CANNOT FINISH
   ═══════════════════════════════════════════════════════════
-  This applies to the case that actually happens: an interactive waiver
-  question that no human answers before the execution limit. Do NOT
+  This applies to the cases that actually happen: an interactive
+  waiver question that no human answers before the execution limit, a
+  scoped project with no SBOM of its own, and a payload project_path
+  that fails validation (PROJECT SCOPE RULE). Do NOT
   write a bare {"status": "failure", "reason": "..."} object: it carries
   no schema, so the platform cannot tell it from a broken run and your
   explanation is discarded. Do NOT invent an audit body you never
@@ -1178,7 +1260,15 @@ prompt_template: |
   }
 
   You MAY add git, tool_versions, inputs_declared, runner, checks,
-  assessments and artifacts when you have them. You MAY also add
+  assessments and artifacts when you have them. You MUST add "scope"
+  when project_path scoped the run AND the path itself was valid: a
+  reader of this envelope has to be told which project the silence is
+  about, and a project with no SBOM is exactly the not_checkable case
+  ({"project_path": "<path>", "covers": "project",
+    "status": "not_checkable", "reason": "no SBOM available"}). Do NOT
+  add "scope" when the path itself was the bad input (PROJECT SCOPE
+  RULE): name the rejected value in incomplete.reason only.
+  You MAY also add
   "drift" when PHASE 3 actually ran and evidence/drift-report.md
   exists, with artifacts.drift_report naming it: drift finishes before
   the gate, and a measured comparison that only exists in prose is a

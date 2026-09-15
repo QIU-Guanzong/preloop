@@ -52,11 +52,14 @@ from preloop.utils.permissions import require_permission
 
 from preloop.tools.builtin_defs import (
     APPLY_ISSUE_TRIAGE_TOOL,
+    GET_EXECUTION_TOOL,
     GET_ISSUE_TRIAGE_CONTEXT_TOOL,
     ASK_USER_TOOL,
     PERMISSION_PROMPT_TOOL,
     REQUEST_APPROVAL_TOOL,
     RESOLVE_SBOM_UPSTREAMS_TOOL,
+    RUN_FLOW_TOOL,
+    SEND_NOTE_TOOL,
 )
 from preloop.tools.native_defs import NATIVE_TOOL_NAMES, NATIVE_TOOLS
 
@@ -72,6 +75,9 @@ BUILTIN_TOOLS = [
     ASK_USER_TOOL,
     PERMISSION_PROMPT_TOOL,
     RESOLVE_SBOM_UPSTREAMS_TOOL,
+    SEND_NOTE_TOOL,
+    RUN_FLOW_TOOL,
+    GET_EXECUTION_TOOL,
     {
         "name": "get_issue",
         "description": "Get detailed information about an issue by its identifier (URL, key, or ID)",

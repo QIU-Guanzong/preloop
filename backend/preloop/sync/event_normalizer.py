@@ -21,6 +21,33 @@ EVENT_TYPE_ALIASES: Dict[str, Tuple[str, ...]] = {
 }
 
 
+# Normalized event types whose payload is about ONE label, not about the
+# label set of the object. GitHub sends a separate ``issues.labeled``
+# delivery per label (six labels applied at creation is six webhooks), and
+# GitLab folds a label edit into an ``Issue Hook`` update that
+# ``normalize_event_type`` maps onto the same two names. A ``labels``
+# trigger condition on these must be read as "this event carried label X",
+# not as "the issue currently has label X"; otherwise every later label on
+# an already-qualifying object matches again.
+#
+# GitHub's ``pull_request.labeled`` has no normalized name of its own today
+# (it stays ``pull_request_opened``), so callers also check the raw
+# ``action``. The two forward-looking names below cost nothing and stop the
+# same defect from reappearing when those actions are normalized.
+LABEL_CHANGE_EVENT_TYPES: frozenset = frozenset(
+    {
+        "issue_labeled",
+        "issue_unlabeled",
+        "pull_request_labeled",
+        "pull_request_unlabeled",
+    }
+)
+
+# Raw provider actions that carry exactly one label, whatever the normalized
+# event type ends up being.
+LABEL_CHANGE_ACTIONS: frozenset = frozenset({"labeled", "unlabeled"})
+
+
 def matching_event_types(event_type: str) -> Tuple[str, ...]:
     """Return the canonical event type plus legacy aliases that should match.
 

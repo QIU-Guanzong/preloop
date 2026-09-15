@@ -80,7 +80,6 @@ describe('Public pricing from billing catalog', () => {
       free: '6 months (183 days)',
       pro: '1 year',
       team: '2 years',
-      enterprise: 'Custom',
     });
     expect(result.comparison!.note)
       .to.include('183 days')
@@ -96,6 +95,80 @@ describe('Public pricing from billing catalog', () => {
       rows.find((r) => r.label === 'Role-based access control')!.values.pro
     ).to.equal(false);
   });
+  it('compares cloud plans only and tags which tab each plan belongs to', () => {
+    const result = applyPricingCatalog(config, catalog());
+    expect(result.plans.map((p) => [p.id, p.deployment])).to.deep.equal([
+      ['free', 'cloud'],
+      ['pro', 'cloud'],
+      ['team', 'cloud'],
+      ['enterprise', 'dedicated'],
+    ]);
+    // Enterprise is quoted, so it has no column to fill: every row is keyed by
+    // the cloud plan ids alone.
+    for (const group of result.comparison!.groups) {
+      for (const row of group.rows) {
+        expect(Object.keys(row.values), row.label).to.deep.equal([
+          'free',
+          'pro',
+          'team',
+        ]);
+      }
+    }
+  });
+
+  it('honours an explicit brand deployment so EE can route a plan', () => {
+    const branded: PricingConfig = {
+      ...config,
+      plans: config.plans.map((p) =>
+        p.id === 'team' ? { ...p, deployment: 'dedicated' as const } : p
+      ),
+    };
+    const result = applyPricingCatalog(branded, catalog());
+    expect(result.plans.map((p) => [p.id, p.deployment])).to.deep.equal([
+      ['free', 'cloud'],
+      ['pro', 'cloud'],
+      ['team', 'dedicated'],
+      ['enterprise', 'dedicated'],
+    ]);
+    for (const group of result.comparison!.groups) {
+      for (const row of group.rows) {
+        expect(Object.keys(row.values), row.label).to.deep.equal([
+          'free',
+          'pro',
+        ]);
+      }
+    }
+  });
+
+  it('tags a non-enterprise unpurchasable plan as dedicated via isQuoted', () => {
+    const source = catalog();
+    const team = source.plans.find((p) => p.id === 'team')!;
+    team.purchasable = false;
+    const result = applyPricingCatalog(config, source);
+    expect(result.plans.find((p) => p.id === 'team')!.deployment).to.equal(
+      'dedicated'
+    );
+    expect(result.plans.find((p) => p.id === 'team')!.cta_text).to.equal(
+      'Contact us'
+    );
+    const row = result.comparison!.groups[0].rows[0];
+    expect(Object.keys(row.values)).to.deep.equal(['free', 'pro']);
+  });
+
+  it('drops the deployment group that only restated the tab name', () => {
+    const result = applyPricingCatalog(config, catalog());
+    const titles = result.comparison!.groups.map((g) => g.title);
+    expect(titles).to.deep.equal([
+      'Plan limits',
+      'Governance in every cloud plan',
+      'Additional capabilities',
+    ]);
+    const labels = result.comparison!.groups.flatMap((g) =>
+      g.rows.map((r) => r.label)
+    );
+    expect(labels).to.not.include('Deployment and support scope');
+  });
+
   it('never converts the free lifetime credit to a recurring allowance', () => {
     const result = applyPricingCatalog(config, catalog());
     const row = result.comparison!.groups[0].rows.find(
