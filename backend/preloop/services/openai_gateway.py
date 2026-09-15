@@ -9253,8 +9253,15 @@ class OpenAIGatewayService:
                 usage_row.id,
             )
         # Session search corpus. Separate from the gateway document above: it
-        # is chunked, session scoped and has its own kill switch. The writer
-        # swallows its own failures, so there is nothing to catch here.
+        # is chunked, session scoped and has its own kill switch. The write is
+        # inline on this request's session (commit=True) on purpose: the
+        # chunks share a transaction boundary with the usage row that was
+        # just recorded, and a queue worker would need a second session plus
+        # a copy of the already-derived text. That is the opposite of the
+        # gateway document path (#670/#686), which builds here and writes on
+        # a worker so indexing costs the request nothing but a submit. The
+        # writer swallows its own failures, so there is nothing to catch
+        # here.
         index_gateway_interaction(
             self.db,
             usage=usage_row,

@@ -446,19 +446,24 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
     ) -> List[SessionSearchDocument]:
         """Store the chunks of one source, skipping an unchanged rewrite.
 
-        The stored chunks are compared with the offered ones by content hash
-        and position. An identical set is left alone (no delete, no insert,
-        no changed row count); anything else replaces the source's chunks
-        wholesale, which is what keeps a shrinking source from leaving
-        orphans behind.
+        The stored chunks are compared with the offered ones by content hash,
+        position, ``occurred_at``, ``role`` and ``status``. An identical set
+        is left alone (no delete, no insert, no changed row count). A
+        metadata-only change (same text, new timestamp or status) still
+        replaces the rows so filter columns and the session-timeline index
+        stay current. Anything else replaces the source's chunks wholesale,
+        which is what keeps a shrinking source from leaving orphans behind.
         """
         existing = self.list_for_source(
             db, source_kind=source_kind, source_id=str(source_id)
         )
         new_hashes = [content_hash_for(chunk.content) for chunk in chunks]
-        if [row.content_hash for row in existing] == new_hashes and len(
-            existing
-        ) == len(chunks):
+        if [row.content_hash for row in existing] == new_hashes and all(
+            row.occurred_at == occurred_at
+            and row.role == chunk.role
+            and row.status == chunk.status
+            for row, chunk in zip(existing, chunks, strict=False)
+        ):
             return existing
 
         if existing:
@@ -494,8 +499,6 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         db.flush()
         if commit:
             db.commit()
-            for db_obj in stored:
-                db.refresh(db_obj)
         return stored
 
     @staticmethod
