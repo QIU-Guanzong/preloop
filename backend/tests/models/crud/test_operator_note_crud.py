@@ -46,6 +46,9 @@ def _note(
     body="Stop and open a PR.",
     expires_at=None,
     created_by_user_id=None,
+    created_by_managed_agent_id=None,
+    author_display="Ada Lovelace",
+    author_auth_method="jwt",
 ):
     note_id = uuid4().hex[:16]
     return crud_agent_control_command.create_note(
@@ -56,9 +59,10 @@ def _note(
         note_id=note_id,
         body=body,
         envelope={"kind": "message", "messageId": note_id},
-        author_display="Ada Lovelace",
-        author_auth_method="jwt",
+        author_display=author_display,
+        author_auth_method=author_auth_method,
         created_by_user_id=created_by_user_id,
+        created_by_managed_agent_id=created_by_managed_agent_id,
         expires_at=expires_at,
     )
 
@@ -337,3 +341,82 @@ def test_count_recent_notes_by_author_scopes_to_a_session_without_an_agent(
         )
         == 1
     )
+
+
+def test_a_note_can_record_an_agent_author_instead_of_a_user(
+    db_session, create_account
+) -> None:
+    """The ``send_note`` tool's author: an agent, with an agent credential."""
+    account = create_account()
+    agent = _agent(db_session, account.id)
+    writer = _agent(db_session, account.id, name="Note Author Agent")
+
+    note = _note(
+        db_session,
+        account,
+        agent,
+        created_by_managed_agent_id=writer.id,
+        author_display="Note Author Agent (agent)",
+        author_auth_method="agent",
+    )
+
+    assert note.created_by_user_id is None
+    assert note.created_by_managed_agent_id == writer.id
+    assert note.author_auth_method == "agent"
+
+
+def test_count_recent_notes_keys_on_the_agent_author(
+    db_session, create_account, create_user
+) -> None:
+    """An agent author's count is its own, not the account's or a user's."""
+    account = create_account()
+    agent = _agent(db_session, account.id)
+    writer = _agent(db_session, account.id, name="Writer")
+    other_writer = _agent(db_session, account.id, name="Other Writer")
+    human = create_user(account=account)
+
+    _note(db_session, account, agent, created_by_managed_agent_id=writer.id)
+    _note(db_session, account, agent, created_by_managed_agent_id=writer.id)
+    _note(db_session, account, agent, created_by_managed_agent_id=other_writer.id)
+    _note(db_session, account, agent, created_by_user_id=human.id)
+
+    since = (datetime.now(UTC) - timedelta(hours=1)).replace(tzinfo=None)
+    assert (
+        crud_agent_control_command.count_recent_notes_by_author(
+            db_session,
+            account_id=account.id,
+            managed_agent_id=agent.id,
+            created_by_managed_agent_id=writer.id,
+            since=since,
+        )
+        == 2
+    )
+    assert (
+        crud_agent_control_command.count_recent_notes_by_author(
+            db_session,
+            account_id=account.id,
+            managed_agent_id=agent.id,
+            created_by_user_id=human.id,
+            since=since,
+        )
+        == 1
+    )
+
+
+def test_count_recent_notes_refuses_to_count_without_an_author(
+    db_session, create_account
+) -> None:
+    """Counting every author's notes is not a rate limit, so it is refused."""
+    import pytest
+
+    account = create_account()
+    agent = _agent(db_session, account.id)
+    since = (datetime.now(UTC) - timedelta(hours=1)).replace(tzinfo=None)
+
+    with pytest.raises(ValueError):
+        crud_agent_control_command.count_recent_notes_by_author(
+            db_session,
+            account_id=account.id,
+            managed_agent_id=agent.id,
+            since=since,
+        )

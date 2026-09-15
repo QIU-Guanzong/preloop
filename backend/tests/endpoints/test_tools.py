@@ -100,6 +100,7 @@ class TestListAllTools:
             "resolve_sbom_upstreams",
             "get_issue_triage_context",
             "apply_issue_triage",
+            "send_note",
             "run_flow",
             "get_execution",
         }

@@ -26,7 +26,7 @@ Indexes created here:
   later embedding worker can find its backlog without scanning the corpus.
 
 Revision ID: 20260915_session_search
-Revises: 20260915_queued_lineage_merge
+Revises: 20260915_agent_note_author
 Create Date: 2026-09-15
 """
 
@@ -37,7 +37,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision: str = "20260915_session_search"
-down_revision: Union[str, None] = "20260915_session_hold"
+down_revision: Union[str, None] = "20260915_agent_note_author"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 # Alembic reads these module globals by name; keep a local reference so static

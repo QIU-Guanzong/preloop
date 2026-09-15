@@ -300,6 +300,69 @@ def test_list_notes_for_an_agent_newest_first(client, agent, runtime_session):
     assert all(note["state"] == "pending" for note in notes)
 
 
+def test_send_and_list_by_execution_resolve_the_same_session(
+    client, db_session, test_user, agent, runtime_session
+):
+    """Both routes reach an execution through its newest governed call."""
+    from preloop.models import models
+    from preloop.models.models.api_usage import ApiUsage
+
+    flow = models.Flow(
+        account_id=test_user.account_id,
+        name="Example flow",
+        prompt_template="Example",
+        agent_config={},
+    )
+    db_session.add(flow)
+    db_session.flush()
+    execution = models.FlowExecution(flow_id=flow.id)
+    db_session.add(execution)
+    db_session.flush()
+    db_session.add(
+        ApiUsage(
+            account_id=test_user.account_id,
+            endpoint="/v1/chat/completions",
+            method="POST",
+            status_code=200,
+            duration=0.2,
+            flow_execution_id=execution.id,
+            runtime_session_id=runtime_session.id,
+            timestamp=datetime.now(UTC).replace(tzinfo=None),
+        )
+    )
+    db_session.flush()
+
+    sent = client.post(
+        NOTES_URL,
+        json={"execution_id": str(execution.id), "text": "Your base branch moved."},
+    )
+    assert sent.status_code == 201, sent.text
+    assert sent.json()["runtime_session_id"] == str(runtime_session.id)
+
+    listed = client.get(NOTES_URL, params={"execution_id": str(execution.id)})
+    assert listed.status_code == 200, listed.text
+    assert [note["text"] for note in listed.json()["notes"]] == [
+        "Your base branch moved."
+    ]
+
+
+def test_a_note_from_a_person_records_a_user_author_not_an_agent(
+    client, db_session, agent
+):
+    """The author fields are exclusive: a person's note names no agent."""
+    body = client.post(
+        NOTES_URL, json={"agent_id": str(agent.id), "text": "Stop after this test."}
+    ).json()
+
+    assert body["author"]["user_id"] is not None
+    assert body["author"]["agent_id"] is None
+    assert body["author"]["auth_method"] == "session"
+    stored = crud_agent_control_command.get_note(
+        db_session, account_id=agent.account_id, note_id=body["note_id"]
+    )
+    assert stored.created_by_managed_agent_id is None
+
+
 def test_list_notes_requires_a_target(client):
     """Listing every note in an account is not a question anyone asks."""
     assert client.get(NOTES_URL).status_code == 400
