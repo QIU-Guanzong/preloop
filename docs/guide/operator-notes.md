@@ -103,7 +103,7 @@ evented before it leaves.
 | Claude Code (channels) | An MCP channel server you run | `POST /agents/notes/pending`, then push `channel_event` as `notifications/claude/channel`. The harness wraps our block in its own `<channel source= severity=>` tag |
 | Claude Code (cross-session messaging) | A bridge process holding `CLAUDE_CODE_MESSAGING_TOKEN`, with `crossSessionInbound: accept` on headless `-p` workers | `POST /agents/notes/pending`, then post `text` to the session inbox socket. The harness delivers it between tool calls |
 | Codex CLI | `PreToolUse` and `PermissionRequest` | `operator_note` on the permission-check response, written into the `PreToolUse` `hookSpecificOutput.additionalContext`. `PermissionRequest` has no field for it, so a note claimed there rides the next `PreToolUse` |
-| Cursor CLI | `beforeShellExecution`, `beforeMCPExecution`, `preToolUse` | `operator_note` on the permission-check response, written into the `preToolUse` `additional_context`. The two `before*` hooks have no field for it, so a note claimed there rides the next `preToolUse` |
+| Cursor CLI | `beforeShellExecution`, `beforeMCPExecution`, `preToolUse` | `operator_note` on the permission-check response, written into the `preToolUse` `additional_context` on allow and deny. The two `before*` hooks have no field for it, and on this build `preToolUse` collects `additional_context` only on allow and deny, so a note claimed on `ask` also rides the next carrying call |
 | OpenCode | `tool.execute.before`, via `@preloop-ai/opencode-plugin` | `operator_note` on the permission-check response |
 | OpenClaw, Hermes | Gateway path only, no hook needed | Trailing message in the model request |
 
@@ -117,11 +117,13 @@ Each field above was read from the installed harness, which is why they differ:
 only some hook events have a field that reaches the model at all. Codex accepts
 `additionalContext` on `PreToolUse` and rejects any unknown field on a
 `PermissionRequest` response; Cursor keeps `additional_context` for
-`preToolUse` and strips it from `beforeShellExecution` and
-`beforeMCPExecution`. A note claimed by one of those hooks is held for its
-session and written into the next tool call's carrying hook, once, which is one
-tool call later and still a turn boundary. The versions each shape was captured
-from are recorded in `cli/internal/cmd/testdata/operator-notes/`.
+`preToolUse` on allow and deny and strips it from `beforeShellExecution` and
+`beforeMCPExecution`. On this build `preToolUse` collects `additional_context`
+only on allow and deny, so a note claimed on `ask` also rides the next carrying
+call. A note claimed by one of those hooks is held for its session and written
+into the next tool call's carrying hook, once, which is one tool call later and
+still a turn boundary. The versions each shape was captured from are recorded
+in `cli/internal/cmd/testdata/operator-notes/`.
 
 The channel and inbox bridges remain a follow-up: they need a process the
 operator runs, not a hook Preloop already installs.
