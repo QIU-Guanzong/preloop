@@ -384,6 +384,14 @@ class Settings(BaseSettings):
             "into the gateway semantic-search corpus"
         ),
     )
+    session_search_index_enabled: bool = Field(
+        True,
+        description=(
+            "Whether session content (gateway interactions, transcript "
+            "messages, tool calls, operator notes, summaries, flow logs) is "
+            "chunked into the session search corpus as it is written"
+        ),
+    )
     model_gateway_auto_index_failed_interactions: bool = Field(
         False,
         description=(
@@ -1305,6 +1313,10 @@ class Settings(BaseSettings):
             in ("true", "1", "t", "yes"),
             model_gateway_auto_index_interactions=os.getenv(
                 "MODEL_GATEWAY_AUTO_INDEX_INTERACTIONS", "true"
+            ).lower()
+            in ("true", "1", "t", "yes"),
+            session_search_index_enabled=os.getenv(
+                "SESSION_SEARCH_INDEX_ENABLED", "true"
             ).lower()
             in ("true", "1", "t", "yes"),
             model_gateway_auto_index_failed_interactions=os.getenv(

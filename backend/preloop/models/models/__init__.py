@@ -97,6 +97,7 @@ from .runtime_session_optimization_action import RuntimeSessionOptimizationActio
 from .runtime_session_optimization_result import RuntimeSessionOptimizationResult
 from .runtime_session_replay_run import RuntimeSessionReplayRun
 from .secret_reference import SecretReference
+from .session_search_document import SessionSearchDocument
 from .tool_cost_flag import ToolCostFlag
 from .tool_output_filter import ToolOutputFilter
 from .oauth_mcp_client import OAuthMCPClient
@@ -233,6 +234,7 @@ __all__ = [
     "RuntimeSessionReplayRun",
     "RuntimeSessionOptimizationResult",
     "SecretReference",
+    "SessionSearchDocument",
     "ToolCostFlag",
     "ToolOutputFilter",
     "BudgetPolicy",

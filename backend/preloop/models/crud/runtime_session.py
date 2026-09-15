@@ -846,6 +846,23 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
             db.refresh(db_obj)
         else:
             db.flush()
+
+        # Search corpus chunk for the session's own title and summary.
+        # Imported here rather than at module import time because the
+        # indexing service imports the CRUD package; the writer swallows its
+        # own failures, so a broken corpus never loses a title.
+        from preloop.services.session_search_index import index_session_summary
+
+        index_session_summary(
+            db,
+            account_id=db_obj.account_id,
+            runtime_session_id=db_obj.id,
+            title=db_obj.title,
+            summary=db_obj.summary,
+            occurred_at=db_obj.summary_updated_at or db_obj.last_activity_at,
+            meta_data={"session_source_type": db_obj.session_source_type},
+            commit=commit,
+        )
         return db_obj
 
     def get_account_session(

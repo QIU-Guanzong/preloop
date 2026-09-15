@@ -270,6 +270,18 @@ class GatewayUsageSearchService:
         return self.persist_index_document(document)
 
     @classmethod
+    def payload_for_indexing(
+        cls, payload: Optional[dict[str, Any]]
+    ) -> Optional[dict[str, Any]]:
+        """Public entry point to the indexing policy for one payload.
+
+        The session search corpus indexes the same gateway payloads and must
+        apply the same capture policy and the same redaction, so it calls this
+        rather than growing a second sanitiser.
+        """
+        return cls._payload_for_indexing(payload)
+
+    @classmethod
     def _payload_for_indexing(
         cls, payload: Optional[dict[str, Any]]
     ) -> Optional[dict[str, Any]]:
