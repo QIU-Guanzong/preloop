@@ -32,11 +32,28 @@ const COVERAGE_REASONS: Record<string, string> = {
   unpriced_hosted_usage: 'Some built-in model requests have no verified cost.',
 };
 
-/** Authenticated plan selection. Loading this component never changes a subscription. */
+const SWITCHING_DISABLED = html`Plan changes from the console are not available
+  yet. Manage in Stripe or
+  <a href="mailto:sales@preloop.ai">contact support</a>.`;
+
+/**
+ * Authenticated plan selection. Loading this component never changes a
+ * subscription.
+ *
+ * The section is progressive: collapsed it states the plan you are on and
+ * offers one action. Everything else (the plan picker, the limits table, the
+ * recorded usage table, the provider warnings) appears only once the reader
+ * asks for it. A settings page that opens with two warnings and four tables
+ * tells a reader who came to check their plan nothing about their plan.
+ */
 @customElement('billing-plan-comparison')
 export class BillingPlanComparison extends LitElement {
   @state() private options: PlanChangeOptions | null = null;
   @state() private loading = true;
+  /** Step 2: the reader asked to change plan. */
+  @state() private changing = false;
+  @state() private showComparison = false;
+  @state() private showUsage = false;
   @state() private busy: 'preview' | 'confirm' | 'checkout' | null = null;
   @state() private error = '';
   @state() private selectedPlan = '';
@@ -147,15 +164,12 @@ export class BillingPlanComparison extends LitElement {
         }
       }
       this.refreshRequired = false;
-      const candidates = options.plans.filter(
-        (p) => !this.isLegacy(p) && p.id !== options.current_plan?.id
-      );
       if (
         !options.plans.some(
           (p) => p.id === this.selectedPlan && !this.isLegacy(p)
         )
       )
-        this.selectedPlan = candidates[0]?.id ?? '';
+        this.selectedPlan = this.defaultSelection(options);
       this.permissionChanged(options.can_manage_billing === true);
     } catch (error) {
       if (revision !== this.revision) return;
@@ -180,6 +194,90 @@ export class BillingPlanComparison extends LitElement {
     return response.status === 403
       ? 'Only a billing owner or account administrator can change this subscription.'
       : 'Could not verify the billing request. Refresh and try again.';
+  }
+
+  /**
+   * Same fallback as account-view: a trialing row whose period has ended is
+   * Free. plan-change-options still reports the subscription row until the
+   * entitlement demotion lands.
+   */
+  private trialExpired(options: PlanChangeOptions): boolean {
+    const subscription = options.current_subscription;
+    if (subscription?.status !== 'trialing') return false;
+    if (!subscription.current_period_end) return false;
+    const date = new Date(subscription.current_period_end);
+    return !Number.isNaN(date.getTime()) && date.getTime() < Date.now();
+  }
+
+  /** Entitled plan for the collapsed line and the picker ladder floor. */
+  private effectiveCurrentPlan(options: PlanChangeOptions): BillingPlan | null {
+    if (this.trialExpired(options)) {
+      return (
+        options.plans.find((p) => p.id === 'free') ?? {
+          id: 'free',
+          name: 'Free',
+          features: {},
+        }
+      );
+    }
+    return options.current_plan;
+  }
+
+  /**
+   * The plan the picker opens on: the cheapest plan above what the account is
+   * entitled to today. Opening on Free would offer a downgrade to someone who
+   * clicked "Change plan", and would offer an expired trial the plan it is
+   * already on.
+   */
+  private defaultSelection(options: PlanChangeOptions): string {
+    const price = (plan: BillingPlan): number =>
+      typeof plan.price_monthly === 'number'
+        ? plan.price_monthly
+        : Number.POSITIVE_INFINITY;
+    const selectable = options.plans.filter((p) => !this.isLegacy(p));
+    const currentPlan = this.effectiveCurrentPlan(options);
+    const currentId = currentPlan?.id;
+    const ladder = selectable
+      .filter(
+        (p) =>
+          p.id !== 'free' &&
+          p.id !== currentId &&
+          Number.isFinite(price(p)) &&
+          p.purchasable !== false
+      )
+      .sort((a, b) => price(a) - price(b));
+    const current = this.trialExpired(options)
+      ? 0
+      : currentPlan
+        ? price(currentPlan)
+        : 0;
+    return (
+      ladder.find((p) => price(p) > current)?.id ??
+      ladder[0]?.id ??
+      selectable.find((p) => p.id !== currentId && p.id !== 'free')?.id ??
+      ''
+    );
+  }
+
+  /** One line of what the plan includes, for the collapsed state. */
+  private tagline(plan: BillingPlan | null | undefined): string {
+    const users = plan?.features?.max_users;
+    const seats =
+      users === -1
+        ? 'Unlimited users'
+        : typeof users === 'number'
+          ? `${this.count(users)} ${users === 1 ? 'user' : 'users'}`
+          : null;
+    const priced =
+      typeof plan?.features?.hosted_models_monthly_limit_usd === 'number' ||
+      typeof plan?.features?.hosted_credit_one_time_usd === 'number';
+    const hosted = priced
+      ? `${this.feature(plan, 'hosted_models_monthly_limit_usd')} for built-in models`
+      : null;
+    const parts = [seats, hosted].filter((part) => part !== null);
+    return parts.length
+      ? `${parts.join(', ')}.`
+      : 'Your included limits are shown when you compare plans.';
   }
 
   private choose(plan: string, interval = this.interval): void {
@@ -521,24 +619,69 @@ export class BillingPlanComparison extends LitElement {
       (a) => a.plan_id === this.selectedPlan
     );
   }
-  private fitLabel(assessment?: PlanAssessment): string {
-    if (assessment?.fit === 'blocked')
-      return 'Current account capacity exceeds this plan';
-    if (assessment?.fit === 'exceeds' || assessment?.fit === 'exceeded')
-      return 'Exceeds one or more observed limits';
+  /**
+   * A fit is only claimed when three complete months back it up. An
+   * assessment of "fits" over missing history is an opinion, not a record.
+   */
+  private fitsSelected(assessment?: PlanAssessment): boolean {
+    if (assessment?.fit !== 'fits') return false;
     const completed =
       this.options?.monthly_usage.filter((m) => !m.is_partial) ?? [];
-    const proven =
+    return (
       completed.length === 3 &&
       completed.every(
         (m) =>
           m.coverage === 'complete' &&
           m.observed_byok_tokens != null &&
           m.observed_hosted_cost_usd != null
-      );
-    return assessment?.fit === 'fits' && proven
+      )
+    );
+  }
+  private fitLabel(assessment?: PlanAssessment): string {
+    if (assessment?.fit === 'blocked')
+      return 'Current account capacity exceeds this plan';
+    if (assessment?.fit === 'exceeds' || assessment?.fit === 'exceeded')
+      return 'Exceeds one or more observed limits';
+    return this.fitsSelected(assessment)
       ? 'Within the recorded monthly limits'
       : 'Not enough evidence to confirm a fit';
+  }
+  /** Step 3: the fit summary, and the control that reveals the months. */
+  private renderFit() {
+    const assessment = this.assessment();
+    const fits = this.fitsSelected(assessment);
+    const reasons = [
+      ...(assessment?.blockers ?? []),
+      ...(assessment?.advisories ?? []),
+    ].map((n) => this.notice(n));
+    return html`${
+        fits
+          ? html`<p data-testid="fit-summary">
+              Your current usage fits this plan.
+            </p>`
+          : html`<div class="warning" data-testid="fit-summary">
+              <p>${this.fitLabel(assessment)}.</p>
+              ${
+                reasons.length
+                  ? html`<ul>
+                      ${reasons.map((reason) => html`<li>${reason}</li>`)}
+                    </ul>`
+                  : nothing
+              }
+            </div>`
+      }
+      <button
+        class="link"
+        type="button"
+        data-testid="show-usage"
+        aria-expanded=${this.showUsage ? 'true' : 'false'}
+        @click=${() => {
+          this.showUsage = !this.showUsage;
+        }}
+      >
+        ${this.showUsage ? 'Hide recorded usage' : 'Show recorded usage'}
+      </button>
+      ${this.showUsage ? this.renderHistory() : nothing}`;
   }
 
   private renderHistory() {
@@ -827,6 +970,189 @@ export class BillingPlanComparison extends LitElement {
     </section>`;
   }
 
+  /**
+   * The current subscription in one sentence.
+   *
+   * Amounts print only when the provider has actually confirmed them.
+   * "Unavailable per user, Unknown users" is not a price; it is placeholder
+   * text where a price should be, and it reads as a billing fault.
+   */
+  private renderCurrentSubscription() {
+    const o = this.options!;
+    const subscription = o.current_subscription;
+    if (!subscription)
+      return html`<p>
+        You are comparing cloud plans. The free open-source self-hosted edition
+        has its own terms and is not subject to these cloud plan limits.
+      </p>`;
+    if (
+      !Number.isFinite(subscription.total_amount_cents) ||
+      !subscription.interval
+    )
+      return html`<p data-testid="amount-unverified">
+        Current subscription amount: not yet verified with the payment provider.
+      </p>`;
+    const legacy = this.isLegacy(o.current_plan);
+    const perUser =
+      legacy &&
+      Number.isFinite(subscription.unit_amount_cents) &&
+      Number.isFinite(subscription.quantity);
+    return html`<p>
+      <strong>${o.current_plan?.name ?? 'Current plan'}</strong
+      >${legacy ? ' (grandfathered)' : ''}. Current recurring subtotal before
+      discounts and tax:
+      <strong
+        >${this.money(subscription.total_amount_cents, subscription.currency)} /
+        ${subscription.interval}</strong
+      >${perUser ? html` (${this.money(subscription.unit_amount_cents, subscription.currency)} per user, ${this.count(subscription.quantity)} users). Your grandfathered per-user rate stays until you choose to change plans.` : '.'}
+    </p>`;
+  }
+
+  /** Step 1: what you are on, and the one control that opens the rest. */
+  private renderCollapsed() {
+    const o = this.options!;
+    const blocked = !o.switching_enabled;
+    const current = this.effectiveCurrentPlan(o);
+    return html`
+      <p data-testid="current-plan">
+        <strong>${current?.name ?? 'Free'}</strong
+        >${this.isLegacy(current) ? ' (grandfathered)' : ''}.
+        ${this.tagline(current)}
+      </p>
+      <button
+        data-testid="change-plan"
+        type="button"
+        ?disabled=${blocked || this.loading}
+        @click=${() => {
+          this.changing = true;
+        }}
+      >
+        Change plan
+      </button>
+      ${
+        blocked
+          ? html`<p class="muted" data-testid="switching-disabled">
+              ${SWITCHING_DISABLED}
+            </p>`
+          : nothing
+      }
+    `;
+  }
+
+  /** Step 2: the picker, the price, the action, and what they imply. */
+  private renderChange() {
+    const o = this.options!;
+    const target = this.target;
+    return html`
+      ${this.renderCurrentSubscription()}
+      <div class="selectors">
+        <label
+          >Change to<select
+            data-testid="plan"
+            .value=${this.selectedPlan}
+            ?disabled=${this.busy === 'confirm' || this.busy === 'checkout' || !!this.pendingConfirmation}
+            @change=${(e: Event) => this.choose((e.target as HTMLSelectElement).value)}
+          >
+            ${o.plans.filter((p) => !this.isLegacy(p)).map((p) => html`<option value=${p.id}>${p.name}</option>`)}
+          </select></label
+        >
+        <label
+          >Billing period<select
+            data-testid="interval"
+            .value=${this.interval}
+            ?disabled=${this.busy === 'confirm' || this.busy === 'checkout' || !!this.pendingConfirmation}
+            @change=${(e: Event) => this.choose(this.selectedPlan, (e.target as HTMLSelectElement).value as 'month' | 'year')}
+          >
+            <option value="month">Monthly</option>
+            <option value="year">Annually</option>
+          </select></label
+        >
+      </div>
+      ${
+        target
+          ? html`
+              ${
+                this.salesLed
+                  ? html`<p>
+                        Enterprise starts at $30,000 per year for a scoped
+                        deployment with up to 100 users. Deployment and support
+                        requirements need an agreed quote.
+                      </p>
+                      <a class="contact" href="/request-demo"
+                        >Contact us about Enterprise</a
+                      >`
+                  : html`
+                      <p data-testid="price">
+                        ${target.name}:
+                        ${this.money((this.interval === 'year' ? target.price_annually : target.price_monthly) == null ? null : (this.interval === 'year' ? target.price_annually! : target.price_monthly!) * 100)}
+                        /
+                        ${this.interval}.${o.current_subscription ? ' The preview shows the exact amount and effective date before anything changes.' : ' Secure checkout shows the final amount and any taxes before you subscribe.'}
+                      </p>
+                      ${this.renderActionNotices()}
+                      ${
+                        o.current_subscription
+                          ? html`<button
+                              data-testid="preview"
+                              ?disabled=${!this.canAct}
+                              @click=${this.requestPreview}
+                            >
+                              ${this.busy === 'preview' ? 'Preparing price preview…' : 'Preview price and effective date'}
+                            </button>`
+                          : html`<button
+                              data-testid="checkout"
+                              ?disabled=${!this.canAct || target.id === 'free'}
+                              @click=${this.checkout}
+                            >
+                              Continue to secure checkout
+                            </button>`
+                      }
+                    `
+              }
+              <button
+                class="link"
+                type="button"
+                data-testid="show-comparison"
+                aria-expanded=${this.showComparison ? 'true' : 'false'}
+                @click=${() => {
+                  this.showComparison = !this.showComparison;
+                }}
+              >
+                ${this.showComparison ? 'Hide detailed comparison' : 'Show detailed comparison'}
+              </button>
+              ${this.showComparison ? this.renderLimits() : nothing}
+              ${this.renderFit()}${this.renderPreview()}
+            `
+          : html`<p>
+              No other cloud plans are available.
+              <a href="/request-demo">Contact us</a> for a custom deployment.
+            </p>`
+      }
+    `;
+  }
+
+  /** Conditions that change what the action does, shown beside the action. */
+  private renderActionNotices() {
+    const o = this.options!;
+    return html`
+      ${!o.can_manage_billing ? html`<p class="warning">Only a billing owner or account administrator can change this subscription. You can review the comparison.</p>` : nothing}
+      ${
+        !o.switching_enabled
+          ? html`<p class="warning" data-testid="switching-disabled">
+              ${SWITCHING_DISABLED}
+            </p>`
+          : nothing
+      }
+      ${o.current_subscription?.pending_change || o.current_subscription?.cancel_at_period_end ? html`<p class="warning">A subscription change is already scheduled. Review it before choosing another change.</p>` : nothing}
+      ${
+        o.warnings?.length
+          ? html`<ul class="warning" data-testid="warnings">
+              ${o.warnings.map((n) => html`<li>${this.notice(n)}</li>`)}
+            </ul>`
+          : nothing
+      }
+    `;
+  }
+
   render() {
     const o = this.options;
     return html`<section
@@ -834,7 +1160,7 @@ export class BillingPlanComparison extends LitElement {
       aria-busy=${this.loading || !!this.busy}
     >
       <div class="heading">
-        <h2 id="compare-title">Compare and change your cloud plan</h2>
+        <h2 id="compare-title">Cloud plan</h2>
         <button
           class="secondary"
           data-testid="refresh"
@@ -880,95 +1206,7 @@ export class BillingPlanComparison extends LitElement {
       }
       ${this.result ? html`<p class="success" role="status">${this.result.status === 'scheduled' ? 'Plan change scheduled' : 'Plan changed'}: ${this.result.plan_id}, effective ${this.date(this.result.effective_at)}. Refresh to see your subscription.</p>` : nothing}
       ${this.loading ? html`<p role="status">Loading current prices and usage coverage…</p>` : nothing}
-      ${
-        !this.loading && o
-          ? html`
-              ${!o.can_manage_billing ? html`<p class="warning">Only a billing owner or account administrator can change this subscription. You can review the comparison.</p>` : nothing}
-              ${!o.switching_enabled ? html`<p class="warning">Plan changes are currently unavailable. Your existing subscription is unchanged. <a href="mailto:sales@preloop.ai">Contact support</a> if you need help.</p>` : nothing}
-              ${
-                o.warnings?.length
-                  ? html`<ul class="warning">
-                      ${o.warnings.map((n) => html`<li>${this.notice(n)}</li>`)}
-                    </ul>`
-                  : nothing
-              }
-              ${o.current_subscription ? html`<p><strong>${o.current_plan?.name ?? 'Current plan details unavailable'}</strong>${this.isLegacy(o.current_plan) ? ' (grandfathered)' : ''}. Current recurring subtotal before discounts and tax: <strong>${this.money(o.current_subscription.total_amount_cents, o.current_subscription.currency)} / ${o.current_subscription.interval ?? 'unverified period'}</strong>${this.isLegacy(o.current_plan) ? html` (${this.money(o.current_subscription.unit_amount_cents, o.current_subscription.currency)} per user, ${this.count(o.current_subscription.quantity)} users). Your grandfathered per-user rate stays until you choose to change plans.` : '.'}</p>` : html`<p>You are comparing cloud plans. The free open-source self-hosted edition has its own terms and is not subject to these cloud plan limits.</p>`}
-              ${o.current_subscription?.pending_change || o.current_subscription?.cancel_at_period_end ? html`<p class="warning">A subscription change is already scheduled. Review it before choosing another change.</p>` : nothing}
-              <div class="selectors">
-                <label
-                  >Compare with<select
-                    data-testid="plan"
-                    .value=${this.selectedPlan}
-                    ?disabled=${this.busy === 'confirm' || this.busy === 'checkout' || !!this.pendingConfirmation}
-                    @change=${(e: Event) => this.choose((e.target as HTMLSelectElement).value)}
-                  >
-                    ${o.plans.filter((p) => !this.isLegacy(p)).map((p) => html`<option value=${p.id}>${p.name}</option>`)}
-                  </select></label
-                >
-                <label
-                  >Billing period<select
-                    data-testid="interval"
-                    .value=${this.interval}
-                    ?disabled=${this.busy === 'confirm' || this.busy === 'checkout' || !!this.pendingConfirmation}
-                    @change=${(e: Event) => this.choose(this.selectedPlan, (e.target as HTMLSelectElement).value as 'month' | 'year')}
-                  >
-                    <option value="month">Monthly</option>
-                    <option value="year">Annually</option>
-                  </select></label
-                >
-              </div>
-              ${
-                this.target
-                  ? html`
-                      ${this.renderLimits()}${this.renderHistory()}
-                      ${
-                        this.salesLed
-                          ? html`<p>
-                                Enterprise starts at $30,000 per year for a
-                                scoped deployment with up to 100 users.
-                                Deployment and support requirements need an
-                                agreed quote.
-                              </p>
-                              <a class="contact" href="/request-demo"
-                                >Contact us about Enterprise</a
-                              >`
-                          : html`
-                              ${
-                                o.current_subscription
-                                  ? html`<button
-                                      data-testid="preview"
-                                      ?disabled=${!this.canAct}
-                                      @click=${this.requestPreview}
-                                    >
-                                      ${this.busy === 'preview' ? 'Preparing price preview…' : 'Preview price and effective date'}
-                                    </button>`
-                                  : html`<p>
-                                        ${this.target.name}:
-                                        ${this.money((this.interval === 'year' ? this.target.price_annually : this.target.price_monthly) == null ? null : (this.interval === 'year' ? this.target.price_annually! : this.target.price_monthly!) * 100)}
-                                        / ${this.interval}. Secure checkout
-                                        shows the final amount and any taxes
-                                        before you subscribe.
-                                      </p>
-                                      <button
-                                        data-testid="checkout"
-                                        ?disabled=${!this.canAct || this.target.id === 'free'}
-                                        @click=${this.checkout}
-                                      >
-                                        Continue to secure checkout
-                                      </button>`
-                              }
-                            `
-                      }${this.renderPreview()}
-                    `
-                  : html`<p>
-                      No other cloud plans are available.
-                      <a href="/request-demo">Contact us</a> for a custom
-                      deployment.
-                    </p>`
-              }
-            `
-          : nothing
-      }
+      ${!this.loading && o ? (this.changing ? this.renderChange() : this.renderCollapsed()) : nothing}
     </section>`;
   }
 
@@ -1036,6 +1274,16 @@ export class BillingPlanComparison extends LitElement {
       background: transparent;
       color: inherit;
       border-color: var(--sl-color-neutral-300);
+    }
+    /* A disclosure control is a link in everything but tag name: it reveals
+       text on the same page and never writes anything. */
+    button.link {
+      background: transparent;
+      border: none;
+      color: var(--sl-color-primary-700);
+      text-decoration: underline;
+      padding: 0.55rem 0;
+      justify-self: start;
     }
     button:disabled {
       opacity: 0.55;

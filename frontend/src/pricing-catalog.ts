@@ -48,12 +48,38 @@ export function applyPricingCatalog(
       );
     return entry;
   });
+  /**
+   * Quoted plans (Enterprise, anything the catalog marks unpurchasable) are
+   * self-managed or dedicated deals. One predicate drives both the tab split
+   * and the contact-only CTA so those cannot drift.
+   */
+  const isQuoted = (p: BillingPlan) =>
+    p.id === 'enterprise' || p.purchasable === false;
+  const catalogDeployment = (p: BillingPlan): 'cloud' | 'dedicated' =>
+    isQuoted(p) ? 'dedicated' : 'cloud';
+  /**
+   * Brand config wins so EE brands.yaml can route a plan between tabs
+   * without a catalog change. Catalog is the default when the brand leaves
+   * `deployment` unset.
+   */
+  const deploymentOf = (
+    configPlan: { deployment?: 'cloud' | 'dedicated' },
+    entry: BillingPlan
+  ): 'cloud' | 'dedicated' => configPlan.deployment ?? catalogDeployment(entry);
+  /**
+   * The comparison table describes cloud subscriptions only. A quoted plan has
+   * no fixed quota to put in a cell, and the founder review rejected the fifth
+   * column it produced. Honour the same brand override as the tab split.
+   */
+  const cloudPlans = plans.filter(
+    (entry, index) => deploymentOf(configured[index], entry) === 'cloud'
+  );
   const row = (
     label: string,
     value: (p: BillingPlan) => string | boolean
   ): PricingComparisonRow => ({
     label,
-    values: Object.fromEntries(plans.map((p) => [p.id, value(p)])),
+    values: Object.fromEntries(cloudPlans.map((p) => [p.id, value(p)])),
   });
   const number = (p: BillingPlan, key: string): number | null => {
     const value = p.features[key];
@@ -104,13 +130,11 @@ export function applyPricingCatalog(
     row('Extra users', (p) =>
       p.seat_addon
         ? `${money(p.seat_addon.price_per_user_monthly)}/user/mo or ${money(p.seat_addon.price_per_user_annually)}/user/yr, up to ${p.seat_addon.max_users}`
-        : p.id === 'enterprise'
-          ? 'By agreement'
-          : false
+        : false
     ),
   ];
   const capabilityRows = Object.entries(CAPABILITIES)
-    .filter(([key]) => plans.some((p) => p.capabilities?.includes(key)))
+    .filter(([key]) => cloudPlans.some((p) => p.capabilities?.includes(key)))
     .map(([key, label]) =>
       row(label, (p) => p.capabilities?.includes(key) === true)
     );
@@ -119,8 +143,7 @@ export function applyPricingCatalog(
     ...pricing,
     plans: configured.map((p) => {
       const entry = plans.find((c) => c.id === p.id)!;
-      const isContact =
-        entry.id === 'enterprise' || entry.purchasable === false;
+      const isContact = isQuoted(entry);
       const annual = entry.price_annually;
       const monthly = entry.price_monthly;
       if (
@@ -131,6 +154,7 @@ export function applyPricingCatalog(
       const users = number(entry, 'max_users');
       return {
         ...p,
+        deployment: deploymentOf(p, entry),
         name: entry.name,
         price_monthly: monthly ?? null,
         price_annually: annual ?? null,
@@ -171,16 +195,6 @@ export function applyPricingCatalog(
         ...(capabilityRows.length
           ? [{ title: 'Additional capabilities', rows: capabilityRows }]
           : []),
-        {
-          title: 'Deployment',
-          rows: [
-            row('Deployment and support scope', (p) =>
-              p.id === 'enterprise'
-                ? 'Dedicated or self-hosted; support by agreement'
-                : 'Preloop Cloud'
-            ),
-          ],
-        },
       ],
     },
   };
