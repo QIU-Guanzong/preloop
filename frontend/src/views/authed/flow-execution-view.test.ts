@@ -1707,4 +1707,68 @@ describe('FlowExecutionView', () => {
       }
     });
   });
+  /**
+   * Stopping a run that never started.
+   *
+   * The command endpoint writes STOPPED itself, and a queued run has no
+   * runtime to publish a status update, so the page has to show the result of
+   * the operator's own click without waiting for the follow-up fetch.
+   */
+  it('reads STOPPED as soon as a queued run is stopped', async () => {
+    const element = (await fixture(
+      html`<flow-execution-view></flow-execution-view>`
+    )) as FlowExecutionView;
+    (element as any).executionId = 'exec-pending';
+    (element as any).execution = {
+      id: 'exec-pending',
+      flow_id: 'flow-1',
+      status: 'PENDING',
+      start_time: '2026-09-15T15:25:00Z',
+      end_time: null,
+    };
+    await element.updateComplete;
+
+    let release: () => void = () => {};
+    const refetch = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let commands = 0;
+    fetchStub.callsFake(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const method = (init?.method || 'GET').toUpperCase();
+        if (url.includes('/command') && method === 'POST') {
+          commands += 1;
+          return new Response(JSON.stringify({ status: 'stopped' }), {
+            status: 200,
+          });
+        }
+        if (url.endsWith('/flows/executions/exec-pending')) {
+          await refetch;
+          return new Response(
+            JSON.stringify({
+              id: 'exec-pending',
+              flow_id: 'flow-1',
+              status: 'STOPPED',
+              start_time: '2026-09-15T15:25:00Z',
+              end_time: '2026-09-15T15:30:00Z',
+            }),
+            { status: 200 }
+          );
+        }
+        return new Response(JSON.stringify({ logs: [] }), { status: 200 });
+      }
+    );
+
+    const stopping = (element as any).stopExecution() as Promise<void>;
+    await waitUntil(
+      () => (element as any).execution?.status === 'STOPPED',
+      'the page waited for a reload to admit the run had stopped'
+    );
+    expect(commands).to.equal(1);
+
+    release();
+    await stopping;
+    expect((element as any).execution.status).to.equal('STOPPED');
+  });
 });

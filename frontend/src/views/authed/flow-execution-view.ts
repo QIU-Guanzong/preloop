@@ -3323,6 +3323,13 @@ ${log.payload.content}</pre>
       // Send stop command to backend (which stops the container directly)
       await sendCommandToExecution(this.executionId, 'stop');
 
+      // Say so at once. The command has already written STOPPED, and a run
+      // stopped while it was still queued has no runtime to publish a status
+      // update, so the page would otherwise read PENDING until a reload.
+      if (this.execution) {
+        this.execution = { ...this.execution, status: 'STOPPED' };
+      }
+
       // Wait a moment for the container to stop
       await new Promise((resolve) => setTimeout(resolve, 500));
 
