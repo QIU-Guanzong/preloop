@@ -91,7 +91,6 @@ def send_note_from_agent(
     agent_id: Optional[Any] = None,
     runtime_session_id: Optional[Any] = None,
     execution_id: Optional[Any] = None,
-    expires_in_seconds: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Write one note authored by a managed agent, or refuse and write none.
 
@@ -105,8 +104,6 @@ def send_note_from_agent(
         agent_id: Target managed agent, current or next session.
         runtime_session_id: Target runtime session, and only that session.
         execution_id: Target flow execution, resolved to its live session.
-        expires_in_seconds: How long the note stays deliverable; the shared
-            default (24 hours) when omitted.
 
     Returns:
         ``{"ok": True, "note": {...}}`` on success, or a structured refusal.
@@ -213,8 +210,9 @@ def send_note_from_agent(
     note_id = operator_notes.new_note_id()
     author_display = _agent_display(author)
     auth_method = operator_notes.classify_author_auth_method(db, is_managed_agent=True)
-    ttl = expires_in_seconds or operator_notes.DEFAULT_NOTE_TTL_SECONDS
-    expires_at = now + timedelta(seconds=ttl)
+    # The tool schema does not expose expiry. Agent notes use the same 24 hour
+    # default REST uses when a human omits expires_in_seconds.
+    expires_at = now + timedelta(seconds=operator_notes.DEFAULT_NOTE_TTL_SECONDS)
     # The same envelope builder, so delivery and rendering see exactly the
     # shape they already handle. ``author_user_id`` is null because there is
     # no user: the agent behind it is on the row and in the audit record.
