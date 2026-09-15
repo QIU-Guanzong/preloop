@@ -19,7 +19,10 @@ The one deliberate asymmetry is usage. Gateway chunks quote an ``api_usage``
 row, so purging the usage class takes them too, except where the chunk's
 session is under legal hold: a hold is an instruction to preserve the record
 and it outranks a retention cutoff. The held session's chunks then outlive the
-usage row they quote, which is exactly what a hold is for.
+usage row they quote for as long as the hold lasts. Once the hold is released,
+the next usage pass reclaims those orphans: the original usage ids cannot
+appear in a later batch, so the pass sweeps gateway chunks whose source row
+is gone and whose session is no longer held.
 """
 
 from __future__ import annotations
@@ -83,7 +86,9 @@ def delete_chunks_for_sessions(db: Session, *, ids: Sequence[Any]) -> int:
     )
 
 
-def delete_chunks_for_usage(db: Session, *, ids: Sequence[Any]) -> int:
+def delete_chunks_for_usage(
+    db: Session, *, ids: Sequence[Any], account_id: Optional[Any] = None
+) -> int:
     """Remove gateway chunks quoting usage rows this batch is about to delete.
 
     Nothing cascades here: a gateway chunk names its ``api_usage`` row by id
@@ -94,17 +99,27 @@ def delete_chunks_for_usage(db: Session, *, ids: Sequence[Any]) -> int:
     Chunks of a session under legal hold are kept. A hold says preserve this
     session's record, and a retention cutoff on a different record class does
     not get to overrule it. The cost is a chunk that outlives the usage row it
-    quotes for as long as the hold lasts, which is the intended direction of
-    the trade.
+    quotes for as long as the hold lasts. After the hold is released, this
+    pass also deletes gateway chunks whose usage row is already gone and whose
+    session is no longer held, because those usage ids can never appear in a
+    later batch.
     """
-    if not ids:
-        return 0
-    return crud_session_search_document.delete_for_sources(
+    deleted = 0
+    if ids:
+        deleted += crud_session_search_document.delete_for_sources(
+            db,
+            source_kind=SOURCE_KIND_GATEWAY_INTERACTION,
+            source_ids=list(ids),
+            excluding_held_sessions=True,
+        )
+    deleted += crud_session_search_document.delete_orphans_for_sources(
         db,
         source_kind=SOURCE_KIND_GATEWAY_INTERACTION,
-        source_ids=list(ids),
+        source_model=ApiUsage,
         excluding_held_sessions=True,
+        account_id=account_id,
     )
+    return deleted
 
 
 #: Per record class, the function that removes the corpus rows derived from a
@@ -118,10 +133,20 @@ DERIVED_CHUNK_DELETES: dict[str, Callable[..., int]] = {
 }
 
 
-def delete_derived_chunks(db: Session, *, record_class: str, ids: Sequence[Any]) -> int:
+def delete_derived_chunks(
+    db: Session,
+    *,
+    record_class: str,
+    ids: Sequence[Any],
+    account_id: Optional[Any] = None,
+) -> int:
     """Remove the corpus rows derived from one purge batch of one class."""
     handler = DERIVED_CHUNK_DELETES.get(record_class)
-    if handler is None or not ids:
+    if handler is None:
+        return 0
+    if record_class == CLASS_USAGE:
+        return handler(db, ids=list(ids), account_id=account_id)
+    if not ids:
         return 0
     return handler(db, ids=list(ids))
 
@@ -137,7 +162,8 @@ def orphan_chunk_report(db: Session) -> OrphanChunkReport:
     Usage orphans share the hold exclusion with
     :func:`delete_chunks_for_usage`. A held session's gateway chunk that
     outlives the usage row it quotes is the hold working, not a purge bug,
-    so it does not count.
+    so it does not count. After the hold is released, the next usage pass
+    reclaims that chunk and this check is clean again.
     """
     return OrphanChunkReport(
         orphaned_sessions=crud_session_search_document.count_orphans_for_sessions(db),

@@ -474,6 +474,16 @@ def purge_class(
             .all()
         )
         if not ids:
+            if record_class == CLASS_USAGE:
+                # Held sessions keep gateway chunks after their usage rows go.
+                # Those usage ids never appear in a later batch, so an empty
+                # usage pass still reclaims released-hold orphans.
+                result.derived_deleted += delete_derived_chunks(
+                    db,
+                    record_class=record_class,
+                    ids=[],
+                    account_id=account_id,
+                )
             db.commit()
             break
         if record_class == CLASS_EVIDENCE:
@@ -489,7 +499,7 @@ def purge_class(
         # from a record the purge already deleted, and a purge that is only
         # eventually true is not a deletion (issue #655).
         result.derived_deleted += delete_derived_chunks(
-            db, record_class=record_class, ids=ids
+            db, record_class=record_class, ids=ids, account_id=account_id
         )
         deleted = db.execute(
             delete(model)

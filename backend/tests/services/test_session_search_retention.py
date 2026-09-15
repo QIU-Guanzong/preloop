@@ -29,7 +29,7 @@ from preloop.models.models.session_search_document import (
 from preloop.services import retention_purge as purge
 from preloop.services import session_search_index as index
 from preloop.services import session_search_retention as corpus_retention
-from preloop.services.legal_hold import place_hold
+from preloop.services.legal_hold import place_hold, release_hold
 from preloop.services.retention_policy import CLASS_RUNTIME_SESSIONS, CLASS_USAGE
 
 
@@ -346,6 +346,98 @@ def test_a_held_sessions_chunks_survive_the_usage_purge_as_well(
     assert report.clean, report.as_dict()
     corpus_retention.assert_no_orphan_chunks(
         db_session, context="a usage purge of a held session"
+    )
+
+
+def test_releasing_a_hold_lets_the_next_usage_pass_take_the_chunk(
+    db_session, test_user, account
+):
+    """Usage ids purged under a hold never come back; the sweep reclaims them.
+
+    After release, and before the next usage pass, the operator check reports
+    a usage orphan. The next usage pass, even with no remaining usage rows,
+    deletes the released chunk and leaves a still-held sibling alone.
+    """
+    released = _session(db_session, test_user, age_days=2)
+    released_usage = _usage(db_session, test_user, session_id=released.id, age_days=500)
+    _chunk(
+        db_session,
+        test_user,
+        session_id=released.id,
+        source_kind=SOURCE_KIND_GATEWAY_INTERACTION,
+        source_id=released_usage.id,
+    )
+    still_held = _session(db_session, test_user, age_days=2)
+    still_usage = _usage(db_session, test_user, session_id=still_held.id, age_days=500)
+    _chunk(
+        db_session,
+        test_user,
+        session_id=still_held.id,
+        source_kind=SOURCE_KIND_GATEWAY_INTERACTION,
+        source_id=still_usage.id,
+    )
+    db_session.commit()
+    released_hold = place_hold(
+        db_session,
+        account_id=account.id,
+        resource_type="runtime_session",
+        resource_id=str(released.id),
+        reason="regulator request 2026-08",
+        user_id=test_user.id,
+    )
+    place_hold(
+        db_session,
+        account_id=account.id,
+        resource_type="runtime_session",
+        resource_id=str(still_held.id),
+        reason="matter still open 2026-09",
+        user_id=test_user.id,
+    )
+
+    first = purge.purge_class(
+        db_session,
+        account=account,
+        record_class=CLASS_USAGE,
+        now=datetime.now(UTC),
+        batch_size=100,
+        max_batches=5,
+        dry_run=False,
+    )
+
+    assert first.derived_deleted == 0
+    assert _chunk_count(db_session, released.id) == 1
+    assert _chunk_count(db_session, still_held.id) == 1
+    assert corpus_retention.orphan_chunk_report(db_session).clean
+
+    release_hold(
+        db_session,
+        account_id=account.id,
+        hold_id=released_hold.hold.id,
+        reason="matter closed 2026-09",
+        user_id=test_user.id,
+    )
+
+    after_release = corpus_retention.orphan_chunk_report(db_session)
+    assert after_release.orphaned_usage == 1
+    assert after_release.clean is False
+
+    second = purge.purge_class(
+        db_session,
+        account=account,
+        record_class=CLASS_USAGE,
+        now=datetime.now(UTC),
+        batch_size=100,
+        max_batches=5,
+        dry_run=False,
+    )
+
+    assert second.derived_deleted == 1
+    assert _chunk_count(db_session, released.id) == 0
+    assert _chunk_count(db_session, still_held.id) == 1
+    report = corpus_retention.orphan_chunk_report(db_session)
+    assert report.clean, report.as_dict()
+    corpus_retention.assert_no_orphan_chunks(
+        db_session, context="a usage pass after a hold release"
     )
 
 

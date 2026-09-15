@@ -31,14 +31,23 @@ from .base import CRUDBase
 def _held_session_exists() -> Any:
     """True when the chunk's session is under legal hold.
 
-    Shared by the usage-purge delete and the usage-orphan count so the two
-    cannot disagree about which chunks a hold is allowed to keep after the
-    usage row they quote is gone.
+    Shared by the usage-purge delete, the released-orphan sweep, and the
+    usage-orphan count so those paths cannot disagree about which chunks a
+    hold is allowed to keep after the usage row they quote is gone.
     """
     return (
         select(RuntimeSession.id)
         .where(RuntimeSession.id == SessionSearchDocument.runtime_session_id)
         .where(RuntimeSession.legal_hold.is_(True))
+        .exists()
+    )
+
+
+def _source_row_gone(source_model: Any) -> Any:
+    """True when no row of ``source_model`` matches the chunk's source id."""
+    return ~(
+        select(source_model.id)
+        .where(func.cast(source_model.id, String) == SessionSearchDocument.source_id)
         .exists()
     )
 
@@ -158,6 +167,39 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         result = db.execute(stmt.execution_options(synchronize_session=False))
         return int(result.rowcount or 0)
 
+    def delete_orphans_for_sources(
+        self,
+        db: Session,
+        *,
+        source_kind: str,
+        source_model: Any,
+        excluding_held_sessions: bool = False,
+        account_id: Optional[Any] = None,
+    ) -> int:
+        """Delete chunks of one kind whose source row is gone.
+
+        The usage pass calls this after its batch delete. A held session's
+        gateway chunks survive the pass that removed the usage row they
+        quote; once the hold is released those usage ids never appear in a
+        later batch, so only this sweep can reclaim them. The hold
+        exclusion is the same EXISTS predicate as
+        :meth:`delete_for_sources` and :meth:`count_orphans_for_sources`.
+        """
+        clauses: List[Any] = [
+            SessionSearchDocument.source_kind == source_kind,
+            _source_row_gone(source_model),
+        ]
+        if excluding_held_sessions:
+            clauses.append(~_held_session_exists())
+        if account_id is not None:
+            clauses.append(SessionSearchDocument.account_id == account_id)
+        result = db.execute(
+            delete(SessionSearchDocument)
+            .where(*clauses)
+            .execution_options(synchronize_session=False)
+        )
+        return int(result.rowcount or 0)
+
     def delete_for_sessions(
         self, db: Session, *, runtime_session_ids: Sequence[Any]
     ) -> int:
@@ -243,11 +285,7 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         """
         clauses: List[Any] = [
             SessionSearchDocument.source_kind == source_kind,
-            ~select(source_model.id)
-            .where(
-                func.cast(source_model.id, String) == SessionSearchDocument.source_id
-            )
-            .exists(),
+            _source_row_gone(source_model),
         ]
         if excluding_held_sessions:
             clauses.append(~_held_session_exists())

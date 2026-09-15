@@ -335,3 +335,60 @@ def test_deleting_sources_skips_chunks_of_held_sessions(db_session, test_user):
         )
         == 0
     )
+
+
+def test_deleting_source_orphans_skips_held_sessions(db_session, test_user):
+    """The released-hold sweep uses the same hold exclusion as the purge."""
+    from preloop.models.models.api_usage import ApiUsage
+    from preloop.models.models.session_search_document import (
+        SOURCE_KIND_GATEWAY_INTERACTION,
+    )
+
+    held = _session(db_session, test_user.account_id, source_id="held-orphan")
+    unheld = _session(db_session, test_user.account_id, source_id="unheld-orphan")
+    crud_session_search_document.replace_source_chunks(
+        db_session,
+        account_id=test_user.account_id,
+        runtime_session_id=held.id,
+        source_kind=SOURCE_KIND_GATEWAY_INTERACTION,
+        source_id="missing-held-usage",
+        occurred_at=OCCURRED_AT,
+        chunks=_chunks("kept"),
+    )
+    crud_session_search_document.replace_source_chunks(
+        db_session,
+        account_id=test_user.account_id,
+        runtime_session_id=unheld.id,
+        source_kind=SOURCE_KIND_GATEWAY_INTERACTION,
+        source_id="missing-unheld-usage",
+        occurred_at=OCCURRED_AT,
+        chunks=_chunks("gone"),
+    )
+    held.legal_hold = True
+    db_session.flush()
+
+    deleted = crud_session_search_document.delete_orphans_for_sources(
+        db_session,
+        source_kind=SOURCE_KIND_GATEWAY_INTERACTION,
+        source_model=ApiUsage,
+        excluding_held_sessions=True,
+        account_id=test_user.account_id,
+    )
+
+    assert deleted == 1
+    assert (
+        crud_session_search_document.count_for_session(
+            db_session,
+            account_id=test_user.account_id,
+            runtime_session_id=held.id,
+        )
+        == 1
+    )
+    assert (
+        crud_session_search_document.count_for_session(
+            db_session,
+            account_id=test_user.account_id,
+            runtime_session_id=unheld.id,
+        )
+        == 0
+    )

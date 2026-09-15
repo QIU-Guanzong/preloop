@@ -290,7 +290,7 @@ gateway chunks survive the `usage` pass even when the usage row itself is past
 its cutoff, so such a chunk can outlive the row it quotes for as long as the
 hold lasts. That is the intended direction. A hold is an instruction to
 preserve the record and a retention cutoff on a different class does not
-overrule it. Release the hold and the next pass takes the chunk.
+overrule it. Release the hold and the next usage pass takes the chunk.
 
 **Redaction reaches the copy.** A source redacted after it was indexed is
 either re-indexed, so the chunks hold the redacted text, or dropped. Where
