@@ -1653,6 +1653,72 @@ async def test_send_execution_command_stop_queued_runner_touches_nothing(
     assert final_call.kwargs["obj_in"].status == "STOPPED"
 
 
+@pytest.mark.asyncio
+async def test_send_execution_command_stop_pending_execution(
+    mock_account: Account, mocker: MockerFixture
+):
+    """A run still queued can be stopped, and the status write is the whole
+    stop: PENDING is in the stoppable set, there is no session reference, so
+    no runner and no container executor are reached for a run that never
+    started. The console offers Stop on these rows on the strength of this."""
+    # Arrange
+    execution_id = uuid.uuid4()
+
+    mock_execution = MagicMock()
+    mock_execution.id = execution_id
+    mock_execution.flow_id = uuid.uuid4()
+    mock_execution.status = "PENDING"
+    mock_execution.agent_session_reference = None
+
+    mock_crud_flow_execution = mocker.patch(
+        "preloop.api.endpoints.flows.crud_flow_execution",
+        new_callable=MagicMock,
+    )
+    mock_crud_flow_execution.get.return_value = mock_execution
+    mock_crud_flow_execution.update.return_value = mock_execution
+
+    mock_crud_flow_runner = mocker.patch(
+        "preloop.api.endpoints.flows.crud_flow_runner",
+        new_callable=MagicMock,
+    )
+
+    mock_nats_client = MagicMock()
+    mocker.patch(
+        "preloop.sync.services.event_bus.get_nats_client",
+        return_value=mock_nats_client,
+    )
+    mock_codex_agent = mocker.patch("preloop.agents.codex.CodexAgent")
+    mock_container_executor = mocker.patch(
+        "preloop.agents.container.ContainerAgentExecutor"
+    )
+    mocker.patch(
+        "preloop.services.flow_orchestrator.FlowExecutionOrchestrator.send_command",
+        new=mocker.AsyncMock(),
+    )
+
+    command_data = schemas.FlowExecutionCommand(command="stop", payload={})
+
+    # Act
+    result = await maybe_await(
+        flows.send_execution_command(
+            db=MagicMock(),
+            execution_id=execution_id,
+            command_data=command_data,
+            current_user=mock_account,
+        )
+    )
+
+    # Assert
+    assert result == {"status": "stopped"}
+    mock_crud_flow_runner.get.assert_not_called()
+    mock_codex_agent.assert_not_called()
+    mock_container_executor.assert_not_called()
+    assert mock_crud_flow_execution.append_log.call_count == 0
+    final_call = mock_crud_flow_execution.update.call_args
+    assert final_call.kwargs["obj_in"].status == "STOPPED"
+    assert final_call.kwargs["obj_in"].error_message == "Manually stopped by user"
+
+
 def _mock_execution_log_row(execution_id: uuid.UUID, message: str) -> MagicMock:
     row = MagicMock()
     row.execution_id = execution_id

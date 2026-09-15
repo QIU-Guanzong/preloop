@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -19,6 +20,8 @@ from preloop.models.schemas.flow_execution import (
     FlowExecutionUpdate,
 )
 from .base import CRUDBase
+
+logger = logging.getLogger(__name__)
 
 
 async def get_flow_execution(
@@ -96,6 +99,53 @@ async def delete_flow_execution(
         await db.delete(db_flow_execution)
         await db.commit()
     return db_flow_execution
+
+
+# Worst-case rows loaded for one-object coalescing. The JSONB match should
+# return 0 or 1; this only caps a malformed key or a filter miss.
+TRACKER_OBJECT_LOOKUP_LIMIT = 16
+
+
+def tracker_object_payload_match(object_key: str) -> Optional[ColumnElement[bool]]:
+    """SQL filter that narrows trigger payloads to one tracker object.
+
+    The Python extractor remains the source of truth. This only avoids
+    loading every active JSONB blob; an over-inclusive match is fine.
+    """
+    parts = object_key.split(":")
+    if len(parts) < 4:
+        return None
+    source = parts[0].lower()
+    ident = parts[-1]
+    kind = parts[-2]
+    repo = ":".join(parts[1:-2])
+    if not source or not kind or not ident or not repo:
+        return None
+
+    details = FlowExecution.trigger_event_details
+    payload = details["payload"]
+    source_col = details["source"].astext
+
+    if source == "github" and kind == "pr":
+        return and_(
+            source_col == "github",
+            payload["repository"]["full_name"].astext == repo,
+            payload["pull_request"]["number"].astext == ident,
+        )
+    if source == "github" and kind == "issue":
+        return and_(
+            source_col == "github",
+            payload["repository"]["full_name"].astext == repo,
+            payload["issue"]["number"].astext == ident,
+        )
+    if source == "gitlab":
+        return and_(
+            source_col == "gitlab",
+            payload["project"]["path_with_namespace"].astext == repo,
+            payload["object_kind"].astext == kind,
+            payload["object_attributes"]["iid"].astext == ident,
+        )
+    return None
 
 
 class CRUDFlowExecution(CRUDBase[FlowExecution]):
@@ -641,11 +691,18 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         flow_id: uuid.UUID,
         account_id: Optional[uuid.UUID] = None,
         running_statuses: Optional[List[str]] = None,
+        *,
+        tracker_object_key: Optional[str] = None,
+        limit: Optional[int] = None,
     ) -> List[FlowExecution]:
         """Get running flow executions for a specific flow.
 
         Unlike get_by_flow, this specifically queries for executions in running states
         without a limit, ensuring long-running executions are not missed.
+
+        When ``tracker_object_key`` is set (one-active-run coalescing), the
+        query loads only ``id``, ``status`` and ``trigger_event_details``,
+        pushes the object-key match into JSONB, and caps the rows read.
 
         Args:
             db: Database session
@@ -653,6 +710,11 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             account_id: Optional account ID to filter by
             running_statuses: List of statuses considered "running".
                              Defaults to ["PENDING", "INITIALIZING", "STARTING", "RUNNING"]
+            tracker_object_key: Optional ``source:repo:kind:id`` key. When
+                set, only matching payloads are loaded.
+            limit: Optional row cap. Defaults to
+                ``TRACKER_OBJECT_LOOKUP_LIMIT`` when ``tracker_object_key``
+                is set, otherwise unbounded.
 
         Returns:
             List of flow executions in running states
@@ -666,6 +728,33 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         )
         if account_id:
             query = query.join(Flow).filter(Flow.account_id == account_id)
+        if tracker_object_key is not None:
+            query = query.options(
+                load_only(
+                    FlowExecution.id,
+                    FlowExecution.status,
+                    FlowExecution.trigger_event_details,
+                )
+            )
+            payload_match = tracker_object_payload_match(tracker_object_key)
+            if payload_match is not None:
+                query = query.filter(payload_match)
+            row_limit = (
+                TRACKER_OBJECT_LOOKUP_LIMIT if limit is None else max(1, int(limit))
+            )
+            rows = query.limit(row_limit + 1).all()
+            if len(rows) > row_limit:
+                logger.debug(
+                    "Tracker-object lookup for flow %s key %s exceeded "
+                    "limit %s; extra rows are ignored",
+                    flow_id,
+                    tracker_object_key,
+                    row_limit,
+                )
+                return rows[:row_limit]
+            return rows
+        if limit is not None:
+            return query.limit(max(1, int(limit))).all()
         return query.all()
 
     def get_multi(
@@ -708,6 +797,10 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
                     # failures; omitting it here would make the schema
                     # projection lazy-load it one row at a time.
                     FlowExecution.failure_category,
+                    # Same reason: the list view is where a queued run is
+                    # noticed, so "why is it not starting" must not be a
+                    # per-row lazy load.
+                    FlowExecution.queued_reason,
                     FlowExecution.runner_id,
                     FlowExecution.agent_session_reference,
                     FlowExecution.retry_of_execution_id,
@@ -1591,6 +1684,75 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             ),
         )
 
+    @staticmethod
+    def _admitted_predicate(stale_before: datetime) -> ColumnElement[bool]:
+        """Executions that hold, or are about to hold, a runtime slot.
+
+        An agent session means a container exists whatever the worker is
+        doing. A live claim heartbeat means a worker is starting one. A claim
+        whose heartbeat went stale is a dead worker and must not keep an
+        account's slot occupied forever.
+        """
+        from sqlalchemy import and_
+
+        return or_(
+            models.FlowExecution.agent_session_reference.isnot(None),
+            and_(
+                models.FlowExecution.orchestrator_worker_id.isnot(None),
+                models.FlowExecution.orchestrator_heartbeat_at.isnot(None),
+                models.FlowExecution.orchestrator_heartbeat_at >= stale_before,
+            ),
+        )
+
+    def count_admitted_by_account(
+        self,
+        db: Session,
+        *,
+        stale_after_seconds: int = 120,
+        account_id: Optional[Any] = None,
+        exclude_execution_id: Optional[Any] = None,
+    ) -> Dict[Any, int]:
+        """How many executions each account currently has admitted.
+
+        Parked runs (WAITING_FOR_HUMAN) are deliberately absent: they hold no
+        container, no runner and no worker, so counting them would let one
+        human decision block an account's remaining slots for days.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        from sqlalchemy import func
+
+        stale_before = datetime.now(timezone.utc) - timedelta(
+            seconds=max(1, stale_after_seconds)
+        )
+        query = (
+            db.query(
+                models.Flow.account_id,
+                func.count(models.FlowExecution.id),
+            )
+            .join(models.Flow, models.Flow.id == models.FlowExecution.flow_id)
+            .filter(
+                models.FlowExecution.status.in_(self.ACTIVE_ORCHESTRATOR_STATUSES),
+                self._admitted_predicate(stale_before),
+            )
+        )
+        if account_id is not None:
+            query = query.filter(models.Flow.account_id == account_id)
+        if exclude_execution_id is not None:
+            query = query.filter(models.FlowExecution.id != exclude_execution_id)
+        return {
+            row_account: int(count)
+            for row_account, count in query.group_by(models.Flow.account_id).all()
+        }
+
+    def get_queued_reason(self, db: Session, *, execution_id: Any) -> Optional[str]:
+        """Why this execution has not been admitted yet, or None."""
+        return (
+            db.query(FlowExecution.queued_reason)
+            .filter(FlowExecution.id == execution_id)
+            .scalar()
+        )
+
     def claim_execution(
         self,
         db: Session,
@@ -1598,6 +1760,8 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         execution_id: Any,
         worker_id: str,
         stale_after_seconds: int = 120,
+        account_cap: Optional[int] = None,
+        enforce_account_cap: bool = True,
     ) -> Optional[FlowExecution]:
         """Atomically claim an active execution for a worker.
 
@@ -1605,20 +1769,41 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         An execution is claimable when unclaimed, claimed by this worker, or the
         previous claim heartbeat is older than ``stale_after_seconds``.
 
+        Admission is additionally bounded per account. A fresh PENDING
+        execution whose account already has its cap admitted is NOT claimed:
+        it stays PENDING with ``queued_reason`` set so the instance-wide
+        worker pool cannot be monopolised by one account. The count and the
+        claim happen under one transaction-scoped advisory lock keyed on the
+        account, so two workers cannot both take the last slot.
+
+        The cap applies to admission only. An execution that already has an
+        agent session, or that this worker already owns, is always claimable:
+        refusing it would leave a live container unmonitored, which is worse
+        than being one over the cap for one run.
+
         Args:
             db: Database session.
             execution_id: Flow execution id.
             worker_id: Stable id for the claiming worker (pod name / hostname).
             stale_after_seconds: Seconds after last heartbeat before a claim is
                 considered abandoned.
+            account_cap: Override the resolved per-account cap (tests, callers
+                that already know it).
+            enforce_account_cap: Set False to skip the cap entirely.
 
         Returns:
             The claimed execution row, or ``None`` if another worker holds a
-            fresh claim or the execution is not claimable.
+            fresh claim, the execution is not claimable, or the account is at
+            its concurrency cap (``queued_reason`` says which).
         """
         from datetime import datetime, timedelta, timezone
 
-        from sqlalchemy import or_
+        from sqlalchemy import or_, text
+
+        from preloop.services.execution_concurrency import (
+            QUEUED_REASON_ACCOUNT_CAP,
+            account_running_cap,
+        )
 
         now = datetime.now(timezone.utc)
         stale_before = now - timedelta(seconds=max(1, stale_after_seconds))
@@ -1642,9 +1827,60 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         if row is None:
             return None
 
+        is_fresh_admission = (
+            row.agent_session_reference is None
+            and row.status == "PENDING"
+            and row.orchestrator_worker_id != worker_id
+        )
+        if enforce_account_cap and is_fresh_admission:
+            account_id = (
+                db.query(models.Flow.account_id)
+                .filter(models.Flow.id == row.flow_id)
+                .scalar()
+            )
+        else:
+            account_id = None
+        if account_id is not None:
+            # Serialize admission decisions for this account so two workers
+            # cannot both take the last slot. Transaction scoped: every path
+            # below commits, which releases it. Taken after the row lock on
+            # purpose, so a worker never holds it while waiting for a row.
+            # Postgres only; other dialects keep the pre-cap behaviour.
+            if db.bind is not None and db.bind.dialect.name == "postgresql":
+                db.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": f"flow_execution_account_cap:{account_id}"},
+                )
+            if account_cap is None:
+                cap = account_running_cap(db.get(models.Account, account_id))
+            else:
+                cap = max(1, int(account_cap))
+            admitted = self.count_admitted_by_account(
+                db,
+                stale_after_seconds=stale_after_seconds,
+                account_id=account_id,
+                exclude_execution_id=row.id,
+            ).get(account_id, 0)
+            if admitted >= cap:
+                if row.queued_reason != QUEUED_REASON_ACCOUNT_CAP:
+                    row.queued_reason = QUEUED_REASON_ACCOUNT_CAP
+                    db.add(row)
+                db.commit()
+                logger.info(
+                    "Not claiming execution %s: account %s already has %s/%s "
+                    "admitted executions; it stays PENDING (%s)",
+                    row.id,
+                    account_id,
+                    admitted,
+                    cap,
+                    QUEUED_REASON_ACCOUNT_CAP,
+                )
+                return None
+
         row.orchestrator_worker_id = worker_id
         row.orchestrator_claimed_at = now
         row.orchestrator_heartbeat_at = now
+        row.queued_reason = None
         db.add(row)
         db.commit()
         db.refresh(row)

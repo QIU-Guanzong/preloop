@@ -633,24 +633,26 @@ async def execute_flow(
     execution_id: str,
     *,
     _ack: Any = None,
+    _nak: Any = None,
 ) -> dict[str, Any] | None:
     """Claim and run a flow execution on a sync worker."""
     from preloop.services.flow_execution_runner import claim_and_run_execution
 
     logger.info("execute_flow task started for execution %s", execution_id)
-    return await claim_and_run_execution(execution_id, resume=False, ack=_ack)
+    return await claim_and_run_execution(execution_id, resume=False, ack=_ack, nak=_nak)
 
 
 async def resume_flow_execution(
     execution_id: str,
     *,
     _ack: Any = None,
+    _nak: Any = None,
 ) -> dict[str, Any] | None:
     """Claim and resume monitoring for an orphaned/stale flow execution."""
     from preloop.services.flow_execution_runner import claim_and_run_execution
 
     logger.info("resume_flow_execution task started for execution %s", execution_id)
-    return await claim_and_run_execution(execution_id, resume=True, ack=_ack)
+    return await claim_and_run_execution(execution_id, resume=True, ack=_ack, nak=_nak)
 
 
 async def reconcile_flow_feedback() -> int:

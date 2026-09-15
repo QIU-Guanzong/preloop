@@ -262,7 +262,9 @@ API HPA is off until you set `autoscaling.enabled: true`.
 Flow-execution workers babysit hosted agent Jobs. One process may run
 `flowExecution.maxInflight` monitors at once (default 10) and uses
 `flowExecution.databasePool` so those short-lived sessions are not squeezed
-through the generic worker 2+4 pool.
+through the generic worker 2+4 pool. `flowExecution.maxRunningPerAccount`
+(default 3) is the instance-wide fairness cap injected as
+`FLOW_EXECUTION_MAX_RUNNING_PER_ACCOUNT` on that same worker.
 
 ## Uninstalling the Chart
 

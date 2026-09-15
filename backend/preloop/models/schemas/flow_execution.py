@@ -228,6 +228,15 @@ class FlowExecutionBase(BaseModel):
             "for executions that predate this field."
         ),
     )
+    queued_reason: Optional[str] = Field(
+        None,
+        description=(
+            "Why a PENDING execution has not been admitted yet: "
+            "account_concurrency_cap when the account already has its "
+            "maximum number of executions running. Cleared when the "
+            "execution is claimed; null for every other row."
+        ),
+    )
     retry_of_execution_id: Optional[uuid.UUID] = Field(
         None, description="ID of the original execution if this is a retry"
     )
@@ -337,6 +346,13 @@ class FlowExecutionListResponse(ExecutionModelProjection):
             "Coarse machine-readable failure class for terminal executions "
             "(runner_conflict, model_transient, agent_error, ...). Null when "
             "the execution succeeded, is still running, or predates the field."
+        ),
+    )
+    queued_reason: Optional[str] = Field(
+        None,
+        description=(
+            "Why a PENDING execution has not been admitted yet "
+            "(account_concurrency_cap). Null for every other row."
         ),
     )
     retry_of_execution_id: Optional[uuid.UUID] = None

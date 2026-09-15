@@ -162,6 +162,32 @@ export function normalizePath(path: string): string {
   return collapsed.length > 1 ? collapsed.replace(/\/$/u, '') : '/';
 }
 
+/**
+ * The deployment prefix to hang app paths off, from an explicit `<base href>`.
+ *
+ * `document.baseURI` falls back to the address of the current page when the
+ * document declares no base, so resolving an app path against it as if it
+ * were relative repeats the directory the page is already in: the executions
+ * list, sitting on `/console/flows/executions`, produced row links to
+ * `/console/flows/console/flows/executions/<id>` and every one of them 404ed.
+ * Only a real `<base href>` means "the app is mounted here", and a base of
+ * `/` adds nothing, so the common case is the empty string.
+ */
+export function baseHrefPrefix(): string {
+  if (typeof document === 'undefined') return '';
+  const element = document.querySelector('base[href]');
+  const href = element?.getAttribute('href');
+  if (!href) return '';
+  try {
+    const { pathname } = new URL(href, window.location.href);
+    const trimmed = pathname.replace(/\/+$/u, '');
+    return trimmed === '/' ? '' : trimmed;
+  } catch {
+    // A base nobody can parse is a base nobody can honour.
+    return '';
+  }
+}
+
 /** Compile `/console/agents/:agentId` (or `(.*)`) into a matcher. */
 function compilePath(path: string): { pattern: RegExp; keys: string[] } {
   const keys: string[] = [];
@@ -323,7 +349,11 @@ export class Router {
     for (const [key, value] of Object.entries(params ?? {})) {
       out = out.replace(':' + key, encodeURIComponent(String(value)));
     }
-    return new URL(out.replace(/^\//u, ''), document.baseURI).pathname;
+    // Absolute from the app root (plus any `<base href>` mount point). This
+    // used to resolve `out` as a relative URL against `document.baseURI`,
+    // which on every page below the root produced a doubled prefix.
+    const prefix = baseHrefPrefix();
+    return prefix && out === '/' ? prefix : prefix + out;
   }
 
   setOutlet(outlet: Element | null): void {

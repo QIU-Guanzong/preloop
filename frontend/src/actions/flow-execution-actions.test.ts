@@ -16,6 +16,15 @@ describe('flowExecutionActions', () => {
     expect(ids).to.deep.equal(['open', 'cancel']);
   });
 
+  it('offers Cancel run on a run that has not started yet', () => {
+    // The founder-reported case: a queued run, nothing dispatched, and no way
+    // to call it off. The stop command accepts all four of these.
+    for (const status of ['PENDING', 'INITIALIZING', 'STARTING', 'RUNNING']) {
+      const ids = actionIds(flowExecutionActions({ id: 'e1', status }, ctx));
+      expect(ids, status).to.deep.equal(['open', 'cancel']);
+    }
+  });
+
   it('offers Retry run on a failed run, and no cancel', () => {
     for (const status of ['FAILED', 'STOPPED', 'TIMEOUT', 'CANCELLED']) {
       const ids = actionIds(flowExecutionActions({ id: 'e1', status }, ctx));
