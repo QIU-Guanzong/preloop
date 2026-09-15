@@ -166,7 +166,7 @@ candidate before publication. Human PR merge controls feed publication. No
 additional AI service key or private factory configuration is required.
 
 The template's isolated pricing gate runs unit coverage without an account
-database. It excludes five named gateway/repricing integration functions that
+database. It excludes six named gateway/repricing integration functions that
 require `db_session` and `test_user`; repository integration CI must still run
 those with its test database. The Alibaba pricing, native catalog, discovery,
 gateway unit tests and publication tooling all run in the isolated gate.
@@ -196,8 +196,11 @@ The approved reviewed publication takes precedence until its expiry, so a native
 refresh cannot silently replace reviewed prices. Expired native/reviewed data is not treated as
 fresh. Historical requests cannot consume a tariff before its effective date.
 Unsupported currencies, time-band policies and unknown cache rates stay unpriced.
-The public Flash cache-hit table points to the console: a generic Qwen discount
-must never be substituted for missing Flash cache evidence.
+The public Flash cache-hit table points to the console. The current Flash entry
+uses an operator-confirmed Singapore console snapshot, identified by
+`evidence_kind: operator_confirmed_console`; its source URL points to the official
+exception guidance, and the review document records the supplied rates. A generic
+Qwen discount must never replace model-specific console evidence.
 
 To regenerate the Singapore seed from an explicitly supplied native dump, combine
 all pages under `output.models` with `output.total`, and attach `_meta` containing
@@ -213,7 +216,9 @@ The builder rejects incomplete pages, duplicate identifiers, wrong regions,
 empty supported catalogs, and evidence older than fourteen days or in the future.
 It preserves the original retrieval date. Running the builder does not verify
 an old dump again. The scheduled agent does not fetch authenticated catalogs;
-public evidence or an explicitly attached verified dump is required.
+public evidence, an explicitly attached verified dump, or a dated operator-confirmed
+console quote for the exact regional tariff is required. Old console quotes must
+not be marked freshly verified merely because the weekly review runs again.
 
 ## Install the recurring review
 
@@ -241,11 +246,14 @@ verified PR. Enable the platform scheduler/worker normally. Model discovery's
 `MODEL_CATALOG_SYNC_SCHEDULED_ENABLED` flag is independent of this schedule.
 
 The initial checked-in manifest and feed contain two Singapore entries reviewed
-on 2026-09-15: `qwen3.7-flash` and `qwen3.8-flash`. The Flash entry has input,
-output and cache creation rates, with unknown cache-hit rates deliberately absent.
+on 2026-09-15: `qwen3.7-flash` and `qwen3.8-flash`. Flash uses the operator-confirmed
+Singapore console rates per million tokens: $0.15 input, $0.47 output, $0.016
+implicit read, $0.016 explicit read, and $0.20 cache creation. These token tariffs
+do not include separate provider tool charges.
 See `docs/pricing/reviews/2026-09-15-alibaba.md` for evidence and limits. Effective
-dates conservatively start at verification because the public page does not give
-an earlier effective date. This is not a fresh audit of all 92 seed models.
+dates conservatively start at each evidence confirmation because no earlier
+effective date was established. Flash uses its console confirmation at
+2026-09-15T16:26:50Z; the public Qwen3.7 review retains its original date. This is not a fresh audit of all 92 seed models.
 The initial feed expires 2026-09-29; renew the review before activation if expired.
 Host the approved branch's `backend/preloop/services/data/reviewed_model_prices.json`
 artifact on trusted HTTPS, configure `MODEL_PRICE_REFRESH_URL` and the same

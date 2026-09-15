@@ -8,7 +8,7 @@
     "note": "Singapore International standard token tariffs. Estimates, not invoices. Live native GET /api/v1/models overlays this seed.",
     "cache_source_url": "https://www.alibabacloud.com/help/en/model-studio/context-cache",
     "cache_verified_at": "2026-09-15",
-    "cache_note": "Only exact Singapore-supported SKUs and documented ratios. Console-only cache-hit exceptions remain unpriced until a reviewed or native tariff supplies them."
+    "cache_note": "Exact Singapore supported SKUs and documented ratios, with qwen3.8-flash operator-confirmed console tariffs. Other console-only cache-hit exceptions remain unpriced until a reviewed or native tariff supplies them."
   },
   "models": {
     "ZHIPU/GLM-5.2": {
@@ -898,9 +898,14 @@
           "max_input": 1000000,
           "input": 0.15,
           "output": 0.47,
-          "creation": 0.1875
+          "creation": 0.2,
+          "implicit_read": 0.016,
+          "explicit_read": 0.016
         }
-      ]
+      ],
+      "cache_verified_at": "2026-09-15T16:26:50Z",
+      "cache_effective_from": "2026-09-15T16:26:50Z",
+      "cache_source": "Operator-confirmed Alibaba Cloud Model Studio Singapore console quote; current snapshot, not an earlier provider effective date."
     },
     "qwen3.8-max": {
       "tiers": [

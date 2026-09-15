@@ -172,6 +172,7 @@ class ReviewedPrice(BaseModel):
     model_config = ConfigDict(extra="forbid")
     policy: Literal["flat_per_token", "deepseek_utc_bands", "alibaba_regional_tokens"]
     source_url: str
+    evidence_kind: Literal["public", "operator_confirmed_console"] = "public"
     verified_at: datetime
     effective_from: datetime
     prices: dict[str, float] | None = None
@@ -512,6 +513,7 @@ class ReviewedPriceRefresher:
                     "published_at": feed.published_at.isoformat(),
                     "expires_at": feed.expires_at.isoformat(),
                     "source_url": entry.source_url,
+                    "evidence_kind": entry.evidence_kind,
                     "verified_at": entry.verified_at.isoformat(),
                     "effective_from": entry.effective_from.isoformat(),
                 }

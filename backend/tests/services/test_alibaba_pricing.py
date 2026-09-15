@@ -290,24 +290,66 @@ def test_verified_flash_all_context_tiers(prompt: int, rate: float) -> None:
     ) == pytest.approx(round(prompt * rate / 1_000_000, 6))
 
 
-def test_flash_creation_is_verified_but_hit_rate_requires_console_evidence() -> None:
+@pytest.mark.parametrize(
+    ("mode", "created", "expected"),
+    [
+        ("implicit", 0, 0.001538),
+        ("explicit", 1000, 0.001588),
+    ],
+)
+def test_operator_verified_flash_workspace_cache_tariffs(
+    mode: str,
+    created: int,
+    expected: float,
+) -> None:
     from preloop.services.alibaba_pricing import pricing_failure_reason
 
+    model = _model(
+        "qwen3.8-flash",
+        endpoint="https://workspace.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    )
     usage = {
-        "_preloop_cache_mode": "explicit",
-        "prompt_tokens_details": {"cache_creation_input_tokens": 5000},
+        "_preloop_cache_mode": mode,
+        "prompt_tokens_details": {
+            "cached_tokens": 48000,
+            "cache_creation_input_tokens": created,
+        },
     }
-    assert _estimate(_model("qwen3.8-flash"), usage).cost == pytest.approx(0.002158)
+    result = estimate_ai_model_usage_cost_detailed(
+        model,
+        prompt_tokens=50000,
+        completion_tokens=1000,
+        total_tokens=51000,
+        usage_details=usage,
+    )
+    assert result.source == "catalog"
+    assert result.cost == pytest.approx(expected)
+    assert (
+        pricing_failure_reason(model, prompt_tokens=50000, usage_details=usage) is None
+    )
+
+
+def test_console_seed_cache_quote_does_not_invent_historical_applicability() -> None:
+    from datetime import datetime, timezone
+    from preloop.services.alibaba_pricing import estimate
+
+    model = _model("qwen3.8-flash")
+    before = datetime(2026, 9, 15, 16, 26, 49, tzinfo=timezone.utc)
+    confirmed = datetime(2026, 9, 15, 16, 26, 50, tzinfo=timezone.utc)
     usage = {
         "_preloop_cache_mode": "implicit",
-        "prompt_tokens_details": {"cached_tokens": 5000},
+        "prompt_tokens_details": {"cached_tokens": 48000},
     }
-    assert (
-        pricing_failure_reason(
-            _model("qwen3.8-flash"), prompt_tokens=10000, usage_details=usage
-        )
-        == "missing_implicit_cache_tariff"
-    )
+    kwargs = {"prompt_tokens": 50000, "completion_tokens": 1000, "usage_details": usage}
+    assert estimate(model, **kwargs, observed_at=before) is None
+    assert estimate(model, **kwargs, observed_at=confirmed) == pytest.approx(0.001538)
+    assert estimate(
+        model,
+        prompt_tokens=50000,
+        completion_tokens=1000,
+        usage_details=None,
+        observed_at=before,
+    ) == pytest.approx(0.00797)
 
 
 def test_reviewed_flash_cache_rate_prices_workspace_without_native_credentials() -> (

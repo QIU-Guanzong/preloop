@@ -614,3 +614,86 @@ def test_alibaba_endpoint_records_cache_mode_across_provider_aliases(
             provider="openai",
         )
     assert service._last_alibaba_cache_mode == ("explicit" if explicit else "implicit")
+
+
+@pytest.mark.parametrize("provider", ["qwen", "openai-compatible"])
+def test_workspace_flash_cached_stream_has_exact_cost_without_pricing_alert(
+    db_session, test_user, provider: str
+) -> None:
+    """Console-verified cache hits price the full recorded workspace request."""
+    from preloop.services import alibaba_price_catalog
+
+    alibaba_price_catalog.reset_live_state_for_tests()
+    model = crud_ai_model.create_with_account(
+        db=db_session,
+        obj_in={
+            "name": "Synthetic workspace Flash",
+            "provider_name": provider,
+            "model_identifier": "qwen3.8-flash",
+            "api_endpoint": "https://example.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+            "api_key": "synthetic-provider-key",
+            "meta_data": {
+                "gateway": {
+                    "enabled": True,
+                    "model_alias": "qwen/flash-example",
+                    "provider_adapter": "preloop",
+                }
+            },
+            "is_default": True,
+        },
+        account_id=test_user.account_id,
+    )
+    service = OpenAIGatewayService(
+        db_session, ModelGatewayAuthContext(token="synthetic-token", user=test_user)
+    )
+    chunks = [
+        {
+            "id": "synthetic-flash-stream",
+            "choices": [{"index": 0, "delta": {"content": "hello"}}],
+        },
+        {
+            "id": "synthetic-flash-stream",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        },
+        {
+            "id": "synthetic-flash-stream",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 60000,
+                "completion_tokens": 1000,
+                "total_tokens": 61000,
+                "prompt_tokens_details": {"cached_tokens": 48000},
+            },
+        },
+    ]
+    with (
+        patch(
+            "preloop.services.openai_gateway.litellm.completion",
+            return_value=iter(chunks),
+        ),
+        patch("preloop.services.openai_gateway.schedule_price_lookup") as refresh,
+        patch("preloop.services.openai_gateway.notify_unpriced_model") as alert,
+    ):
+        events = list(
+            service.stream_chat_completion(
+                {
+                    "model": "qwen/flash-example",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                }
+            )
+        )
+        service.flush_deferred_stream_record()
+    usage = db_session.execute(
+        select(models.ApiUsage).where(models.ApiUsage.ai_model_id == model.id)
+    ).scalar_one()
+    assert usage.prompt_tokens == 60000
+    assert usage.cache_read_tokens == 48000
+    assert usage.meta_data["usage_details"]["_preloop_cache_mode"] == "implicit"
+    # 12k uncached * $0.15 + 48k cached * $0.016 + 1k output * $0.47 / 1M.
+    assert usage.estimated_cost == pytest.approx(0.003038)
+    assert usage.cost_source == "catalog"
+    assert all("_preloop_cache_mode" not in str(event) for event in events)
+    refresh.assert_not_called()
+    alert.assert_not_called()

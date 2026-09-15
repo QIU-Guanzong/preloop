@@ -596,9 +596,34 @@ def reviewed_before_effective(
 
 
 def pricing_snapshot(
-    ai_model: models.AIModel, *, observed_at: datetime | None = None
+    ai_model: models.AIModel,
+    *,
+    observed_at: datetime | None = None,
+    prompt_tokens: int = 0,
+    usage_details: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Expose reviewed provenance for an applicable tariff's usage record."""
+    from preloop.services.alibaba_pricing import (
+        _SEED,
+        _SEED_CACHE_DATES,
+        tariff_for_usage,
+    )
+
+    ident = (ai_model.model_identifier or "").strip()
+    selected = tariff_for_usage(
+        ai_model,
+        prompt_tokens=prompt_tokens,
+        usage_details=usage_details,
+        observed_at=observed_at,
+    )
+    if selected is not None and selected is _SEED.get(ident):
+        stamp = _SEED_CACHE_DATES.get(ident)
+        return {
+            "provider": "alibaba",
+            "region": "singapore-international",
+            "source": "seed",
+            "cache_effective_from": stamp.isoformat() if stamp else None,
+        }
     tariff = live_tariff(ai_model, observed_at=observed_at)
     target = native_catalog_target(ai_model)
     if tariff is None or target is None:

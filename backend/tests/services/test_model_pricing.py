@@ -1168,3 +1168,70 @@ def test_alibaba_detailed_estimate_forwards_historical_instant_and_provenance(
     assert seen == [observed]
     assert result.cost == 0.01
     assert result.pricing_snapshot == snapshot
+
+
+@pytest.mark.parametrize(
+    "native_input,native_read,created,prompt_tokens,can_fallback",
+    [
+        (0.15, None, 0, 60000, True),
+        (0.2, None, 0, 60000, False),
+        (0.15, 0.02, 1000, 60000, False),
+        (0.15, None, 0, 1000001, False),
+    ],
+)
+@pytest.mark.parametrize("native_max_input", [1000000, None])
+def test_partial_native_flash_tariff_only_uses_matching_verified_seed(
+    native_input: float,
+    native_read: float | None,
+    created: int,
+    prompt_tokens: int,
+    can_fallback: bool,
+    native_max_input: int | None,
+) -> None:
+    """Missing native dimensions cannot erase matching seed evidence or mix prices."""
+    from preloop.models import models
+    from preloop.services import alibaba_price_catalog
+    from preloop.services.alibaba_pricing import Tariff
+    from preloop.services.model_pricing import estimate_ai_model_usage_cost_detailed
+
+    model = models.AIModel(
+        provider_name="qwen",
+        model_identifier="qwen3.8-flash",
+        api_endpoint="https://example.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    )
+    alibaba_price_catalog.reset_live_state_for_tests()
+    partial_native = Tariff(
+        input=native_input,
+        output=0.47,
+        max_input=native_max_input,
+        implicit_read=native_read,
+    )
+    alibaba_price_catalog.install_live_tariff(
+        "singapore-international", "qwen3.8-flash", partial_native
+    )
+    try:
+        result = estimate_ai_model_usage_cost_detailed(
+            model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=1000,
+            total_tokens=prompt_tokens + 1000,
+            usage_details={
+                "_preloop_cache_mode": "implicit",
+                "prompt_tokens_details": {
+                    "cached_tokens": 48000,
+                    "cache_creation_input_tokens": created,
+                },
+            },
+        )
+        if can_fallback:
+            assert result.cost == pytest.approx(0.003038)
+            assert result.source == "catalog"
+            assert result.pricing_snapshot is not None
+            assert "seed" in result.pricing_snapshot["source"]
+        else:
+            assert result.cost is None
+            assert result.source == "unpriced"
+        assert alibaba_price_catalog.native_tariff(model) is partial_native
+        assert partial_native.implicit_read == native_read
+    finally:
+        alibaba_price_catalog.reset_live_state_for_tests()

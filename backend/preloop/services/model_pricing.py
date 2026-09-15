@@ -399,7 +399,12 @@ def estimate_ai_model_usage_cost_detailed(
             pricing_snapshot as alibaba_snapshot,
         )
 
-        pricing_snapshot = alibaba_snapshot(ai_model, observed_at=observed_at)
+        pricing_snapshot = alibaba_snapshot(
+            ai_model,
+            observed_at=observed_at,
+            prompt_tokens=prompt_tokens,
+            usage_details=usage_details,
+        )
     if pricing_override:
         # Override carries only adjustments (discount/prepaid) — apply them
         # on top of the list price.

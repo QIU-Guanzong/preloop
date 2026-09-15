@@ -56,6 +56,11 @@ prompt_template: |
      dated native dump was explicitly attached. Never infer a universal cache
      discount. If supplied, regenerate with scripts/update_alibaba_prices.py
      --from-native <verified-dump>; incomplete/wrong-region/stale dumps must fail.
+     An explicitly supplied operator-confirmed console quote may establish an
+     exact regional tariff. Mark evidence_kind: operator_confirmed_console,
+     record the supplied quote and confirmation time in the review, and keep
+     source_url as the official console-exception guidance when no exact
+     console URL was supplied. Never relabel an old quote as freshly verified.
      Include evidence excerpts, dates, and supported/unsupported SKU coverage.
      A /models API listing identifiers
      does not establish prices. Do not use account credentials or private
@@ -138,7 +143,7 @@ git_clone_config:
       description: Verify the reviewed artifact and focused estimator regressions.
       always:
         - id: price-regressions
-          # This isolated publication gate has no account database. The five
+          # This isolated publication gate has no account database. The six
           # named integration tests remain required in repository CI with
           # db_session/test_user fixtures; they are not globally skipped.
           command: >-
@@ -157,7 +162,8 @@ git_clone_config:
             and not test_manual_reprice_uses_usage_timestamp_and_records_tariff
             and not test_gateway_stream_routes_tools_and_records_provider_usage
             and not test_nonstream_tool_stop_continues_with_tool_result
-            and not test_schedule_price_lookup_resolves_credentials_from_persisted_model_id' -q
+            and not test_schedule_price_lookup_resolves_credentials_from_persisted_model_id
+            and not test_workspace_flash_cached_stream_has_exact_cost_without_pricing_alert' -q
           reason: Verify current pricing without account DB fixtures; CI covers gateway and repricing integration.
           scope: shared
         - id: regenerate-feed
