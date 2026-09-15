@@ -22,6 +22,7 @@ from preloop.models.crud.session_search_document import (
     normalize_query,
 )
 from preloop.models.models.session_search_document import (
+    REDACTION_STATE_WITHHELD,
     SOURCE_KIND_TOOL_CALL,
     SOURCE_KIND_TRANSCRIPT_MESSAGE,
 )
@@ -338,6 +339,28 @@ def test_disabling_snippet_text_still_returns_snippet_identity(db_session, test_
     assert snippet.text is None
     assert snippet.source_id == "quiet-message"
     assert snippet.rank > 0
+
+
+def test_ranked_snippets_do_not_return_withheld_text(db_session, test_user):
+    """Ranked search uses the same withheld whitelist as search_account_hits."""
+    session = _session(db_session, test_user.account_id, "withheld")
+    _write(
+        db_session,
+        test_user.account_id,
+        session,
+        "a secret sounding sentence about the ledger",
+        source_id="withheld-message",
+        redaction_state=REDACTION_STATE_WITHHELD,
+    )
+    db_session.flush()
+
+    results, total = _search(db_session, test_user.account_id, "ledger")
+
+    assert total == 1
+    snippet = results[0].snippets[0]
+    assert snippet.redaction_state == REDACTION_STATE_WITHHELD
+    assert snippet.text is None
+    assert snippet.source_id == "withheld-message"
 
 
 def test_zero_snippets_returns_scored_sessions_with_no_snippet_rows(
