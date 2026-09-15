@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, Optional
 
 import litellm
 
-from preloop.models.models.ai_model import AIModel
+from preloop.models import models
 from preloop.services import alibaba_pricing, deepseek_pricing
 from preloop.services.litellm_routing import PROVIDER_PREFIX as _PROVIDER_PREFIX
 
@@ -297,7 +297,7 @@ def provider_reported_cost(
 
 
 def estimate_ai_model_usage_cost(
-    ai_model: AIModel,
+    ai_model: models.AIModel,
     *,
     prompt_tokens: int,
     completion_tokens: int,
@@ -319,7 +319,7 @@ def estimate_ai_model_usage_cost(
 
 
 def estimate_ai_model_usage_cost_detailed(
-    ai_model: AIModel,
+    ai_model: models.AIModel,
     *,
     prompt_tokens: int,
     completion_tokens: int,
@@ -389,9 +389,17 @@ def estimate_ai_model_usage_cost_detailed(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         usage_details=usage_details,
+        observed_at=observed_at,
     )
     if list_cost is None:
         return CostEstimate(cost=None, source="unpriced")
+    pricing_snapshot = None
+    if alibaba_pricing.is_alibaba(ai_model):
+        from preloop.services.alibaba_price_catalog import (
+            pricing_snapshot as alibaba_snapshot,
+        )
+
+        pricing_snapshot = alibaba_snapshot(ai_model, observed_at=observed_at)
     if pricing_override:
         # Override carries only adjustments (discount/prepaid) — apply them
         # on top of the list price.
@@ -402,8 +410,11 @@ def estimate_ai_model_usage_cost_detailed(
                 total_tokens=total_tokens,
             ),
             source="override",
+            pricing_snapshot=pricing_snapshot,
         )
-    return CostEstimate(cost=list_cost, source="catalog")
+    return CostEstimate(
+        cost=list_cost, source="catalog", pricing_snapshot=pricing_snapshot
+    )
 
 
 def _litellm_entry_has_explicit_price(candidate: str) -> bool:
@@ -426,11 +437,12 @@ def _litellm_entry_has_explicit_price(candidate: str) -> bool:
 
 
 def _estimate_litellm_cost(
-    ai_model: AIModel,
+    ai_model: models.AIModel,
     *,
     prompt_tokens: int,
     completion_tokens: int,
     usage_details: Optional[Dict[str, Any]] = None,
+    observed_at: Optional[datetime] = None,
 ) -> Optional[float]:
     """Estimate list-price model cost using LiteLLM metadata."""
     if alibaba_pricing.is_alibaba(ai_model):
@@ -439,6 +451,7 @@ def _estimate_litellm_cost(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             usage_details=usage_details,
+            observed_at=observed_at,
         )
     for candidate in _iter_litellm_model_candidates(ai_model):
         if usage_details:
@@ -481,7 +494,7 @@ def _estimate_litellm_cost(
     return None
 
 
-def _get_configured_pricing(ai_model: AIModel) -> Optional[Dict[str, Any]]:
+def _get_configured_pricing(ai_model: models.AIModel) -> Optional[Dict[str, Any]]:
     """Return manually configured pricing metadata when present."""
     pricing = None
     if ai_model.meta_data and isinstance(ai_model.meta_data, dict):
@@ -592,7 +605,7 @@ def _apply_pricing_adjustments(
     return round(adjusted_cost, 6)
 
 
-def _iter_litellm_model_candidates(ai_model: AIModel) -> Iterable[str]:
+def _iter_litellm_model_candidates(ai_model: models.AIModel) -> Iterable[str]:
     """Yield likely LiteLLM model names for the configured AI model."""
     # Alibaba prices depend on serving region, deployment scope and cache mode.
     # A bare/native-provider fallback can underprice the same SKU substantially.
@@ -740,7 +753,7 @@ def estimate_external_model_usage_cost(
     normalized = normalize_external_model_name(model_name)
     if not normalized:
         return CostEstimate(cost=None, source="unpriced")
-    ai_model = AIModel(
+    ai_model = models.AIModel(
         provider_name=infer_provider_for_model_name(normalized),
         model_identifier=normalized,
     )

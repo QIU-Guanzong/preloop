@@ -126,16 +126,57 @@ class HistoricalPolicy(BaseModel):
     provenance: dict[str, Any]
 
 
+class AlibabaTier(BaseModel):
+    """One reviewed regional tariff in USD per million tokens."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    input: float = Field(ge=0, le=1_000_000, allow_inf_nan=False)
+    output: float = Field(ge=0, le=1_000_000, allow_inf_nan=False)
+    implicit_read: float | None = Field(
+        default=None, ge=0, le=1_000_000, allow_inf_nan=False
+    )
+    explicit_read: float | None = Field(
+        default=None, ge=0, le=1_000_000, allow_inf_nan=False
+    )
+    creation: float | None = Field(
+        default=None, ge=0, le=1_000_000, allow_inf_nan=False
+    )
+    max_input: int | None = Field(default=None, gt=0)
+
+
+class AlibabaPolicy(BaseModel):
+    """Only supported USD regions and whole-request token-length tiers."""
+
+    model_config = ConfigDict(extra="forbid")
+    region: Literal["singapore-international", "united-states"]
+    currency: Literal["USD"]
+    model_identifier: str = Field(
+        min_length=1, max_length=256, pattern=r"^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$"
+    )
+    tiers: list[AlibabaTier] = Field(min_length=1, max_length=100)
+
+    @field_validator("tiers")
+    @classmethod
+    def ordered_tiers(cls, value: list[AlibabaTier]) -> list[AlibabaTier]:
+        """Reject ambiguous, duplicate, or unsorted context ranges."""
+        bounds = [tier.max_input for tier in value]
+        finite = [bound for bound in bounds if bound is not None]
+        if finite != sorted(set(finite)) or None in bounds[:-1]:
+            raise ValueError("Alibaba tiers must have increasing upper bounds")
+        return value
+
+
 class ReviewedPrice(BaseModel):
     """An explicitly reviewed USD price with first-party evidence."""
 
     model_config = ConfigDict(extra="forbid")
-    policy: Literal["flat_per_token", "deepseek_utc_bands"]
+    policy: Literal["flat_per_token", "deepseek_utc_bands", "alibaba_regional_tokens"]
     source_url: str
     verified_at: datetime
     effective_from: datetime
     prices: dict[str, float] | None = None
     price_policy: DeepSeekPolicy | None = None
+    alibaba_policy: AlibabaPolicy | None = None
     price_policy_history: list[HistoricalPolicy] = Field(
         default_factory=list, max_length=100
     )
@@ -194,10 +235,30 @@ def validate_feed(payload: Any, *, now: datetime | None = None) -> ReviewedPrice
         raise ValueError("Feed is expired or not yet published")
     if (feed.expires_at - feed.published_at).total_seconds() > 31 * 86400:
         raise ValueError("Feed validity must not exceed 31 days")
-    for entry in feed.models.values():
+    for model, entry in feed.models.items():
         if entry.verified_at > feed.published_at:
             raise ValueError("Evidence cannot postdate publication")
-        if entry.policy == "flat_per_token":
+        if (
+            entry.policy != "alibaba_regional_tokens"
+            and entry.alibaba_policy is not None
+        ):
+            raise ValueError("Alibaba data requires its dedicated policy")
+        if entry.policy == "alibaba_regional_tokens":
+            policy = entry.alibaba_policy
+            if (
+                policy is None
+                or entry.prices is not None
+                or entry.price_policy is not None
+                or entry.price_policy_history
+            ):
+                raise ValueError("Alibaba policy requires regional tiers only")
+            if model != f"alibaba/{policy.region}/{policy.model_identifier}":
+                raise ValueError(
+                    "Alibaba model key must match its exact region and SKU"
+                )
+            if entry.effective_from > entry.verified_at:
+                raise ValueError("Alibaba tariffs must already be effective")
+        elif entry.policy == "flat_per_token":
             if entry.effective_from > entry.verified_at:
                 raise ValueError("Flat prices must already be effective when verified")
             if (
@@ -276,6 +337,17 @@ class ReviewedPriceRefresher:
         self.allowed_models = frozenset(allowed_models)
         if not self.allowed_models:
             raise ValueError("Reviewed price refresh needs an explicit model allowlist")
+        supported_region_scopes = {
+            "alibaba/singapore-international/*",
+            "alibaba/united-states/*",
+        }
+        if any(
+            "*" in model and model not in supported_region_scopes
+            for model in self.allowed_models
+        ):
+            raise ValueError(
+                "Only supported Alibaba regional scopes may use a wildcard"
+            )
         self.interval_seconds = max(60, interval_seconds)
         self.task: asyncio.Task[None] | None = None
         self.applied_at: datetime | None = None
@@ -295,8 +367,74 @@ class ReviewedPriceRefresher:
             and self.digest != digest
         ):
             raise ValueError("Refusing older or mutated published price revision")
-        if set(feed.models) - self.allowed_models:
-            raise ValueError("Feed contains models outside the operator allowlist")
+        for model, entry in feed.models.items():
+            region_scope = (
+                f"alibaba/{entry.alibaba_policy.region}/*"
+                if entry.alibaba_policy is not None
+                else None
+            )
+            if (
+                model not in self.allowed_models
+                and region_scope not in self.allowed_models
+            ):
+                raise ValueError("Feed contains models outside the operator allowlist")
+        from preloop.services.alibaba_price_catalog import (
+            install_reviewed_catalogs,
+            validate_reviewed_catalogs,
+        )
+        from preloop.services.alibaba_pricing import Tariff
+
+        alibaba_catalogs: dict[str, dict[str, Tariff]] = {}
+        alibaba_verified = []
+        alibaba_effective: dict[str, dict[str, datetime]] = {}
+        for entry in feed.models.values():
+            policy = entry.alibaba_policy
+            if policy is None:
+                continue
+            tiers = tuple(Tariff(**tier.model_dump()) for tier in policy.tiers)
+            first = tiers[0]
+            tariff = Tariff(
+                input=first.input,
+                output=first.output,
+                implicit_read=first.implicit_read,
+                explicit_read=first.explicit_read,
+                creation=first.creation,
+                max_input=first.max_input,
+                tiers=tiers if len(tiers) > 1 else (),
+            )
+            alibaba_catalogs.setdefault(policy.region, {})[policy.model_identifier] = (
+                tariff
+            )
+            alibaba_verified.append(entry.verified_at)
+            alibaba_effective.setdefault(policy.region, {})[policy.model_identifier] = (
+                entry.effective_from
+            )
+
+        def install_alibaba() -> None:
+            if alibaba_catalogs:
+                install_reviewed_catalogs(
+                    alibaba_catalogs,
+                    verified_at=min(alibaba_verified),
+                    expires_at=feed.expires_at,
+                    revision=feed.revision,
+                    effective_from=alibaba_effective,
+                )
+
+        if alibaba_catalogs:
+            validate_reviewed_catalogs(
+                alibaba_catalogs,
+                verified_at=min(alibaba_verified),
+                expires_at=feed.expires_at,
+                revision=feed.revision,
+                effective_from=alibaba_effective,
+            )
+        alibaba_count = sum(len(entries) for entries in alibaba_catalogs.values())
+        if alibaba_count == len(feed.models):
+            install_alibaba()
+            changed = int(self.digest != digest) * alibaba_count
+            self.applied_at, self.digest = feed.published_at, digest
+            return changed
+
         from litellm import utils as litellm_utils
 
         # This private helper clears LiteLLM's derived model-info caches. A
@@ -330,6 +468,8 @@ class ReviewedPriceRefresher:
             changed = 0
             updated = dict(litellm.model_cost)
             for model, entry in feed.models.items():
+                if entry.alibaba_policy is not None:
+                    continue
                 existing = updated.get(model)
                 if not isinstance(existing, dict):
                     raise ValueError("Feed may only refresh existing catalog models")
@@ -378,7 +518,10 @@ class ReviewedPriceRefresher:
                 changed += replacement != existing
                 updated[model] = replacement
             if not changed:
-                return 0
+                install_alibaba()
+                regional_changes = alibaba_count if self.digest != digest else 0
+                self.applied_at, self.digest = feed.published_at, digest
+                return regional_changes
             # Probe before publishing: signature/internal API incompatibility
             # normally fails here while all prices still use the old map.
             try:
@@ -403,10 +546,16 @@ class ReviewedPriceRefresher:
                 raise PriceRefreshCompatibilityError(
                     "LiteLLM price caches are incompatible"
                 ) from None
+            try:
+                install_alibaba()
+            except (ValueError, TypeError):
+                litellm.model_cost = previous
+                invalidate()
+                raise
         self.applied_at = feed.published_at
         self.digest = digest
         logger.info("Applied reviewed model price feed: %d models", len(feed.models))
-        return changed
+        return changed + alibaba_count
 
     async def refresh(self, client: httpx.AsyncClient) -> int:
         """Download a bounded feed; redirects and invalid payloads fail closed."""

@@ -16,7 +16,10 @@ import logging
 import math
 import re
 import threading
+import time
 from enum import Enum
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
@@ -45,6 +48,111 @@ _TOKEN_UNITS = {
 _lock = threading.Lock()
 # region -> {model_id: Tariff}
 _live: dict[str, dict[str, Tariff]] = {}
+_live_dates: dict[tuple[str, str], datetime] = {}
+_reviewed: dict[str, dict[str, Tariff]] = {}
+_reviewed_verified_at: datetime | None = None
+_reviewed_expires_at: datetime | None = None
+_reviewed_revision: str | None = None
+_reviewed_effective: dict[str, dict[str, datetime]] = {}
+NATIVE_TTL_SECONDS = 24 * 60 * 60
+USD_REGIONS = frozenset({"singapore-international", "united-states"})
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def validate_reviewed_catalogs(
+    catalogs: dict[str, dict[str, Tariff]],
+    *,
+    verified_at: datetime,
+    expires_at: datetime,
+    revision: str,
+    effective_from: dict[str, dict[str, datetime]] | None = None,
+) -> None:
+    """Validate an entire reviewed USD catalog before any store mutation."""
+    if (
+        verified_at.tzinfo is None
+        or expires_at.tzinfo is None
+        or expires_at <= verified_at
+        or not revision.strip()
+    ):
+        raise ValueError("Reviewed Alibaba catalog needs dated provenance")
+    for region, entries in catalogs.items():
+        if region not in USD_REGIONS:
+            raise ValueError("Unsupported Alibaba USD region")
+        for ident, tariff in entries.items():
+            effective = (effective_from or {}).get(region, {}).get(ident, verified_at)
+            if effective.tzinfo is None:
+                raise ValueError("Alibaba effective dates must be timezone-aware")
+            if not ident.strip() or not isinstance(tariff, Tariff):
+                raise ValueError("Invalid Alibaba model tariff")
+            for tier in (tariff, *tariff.tiers):
+                values = (
+                    tier.input,
+                    tier.output,
+                    tier.implicit_read,
+                    tier.explicit_read,
+                    tier.creation,
+                )
+                if any(
+                    v is not None and (not math.isfinite(v) or v < 0) for v in values
+                ):
+                    raise ValueError("Invalid Alibaba token price")
+                if tier.max_input is not None and tier.max_input <= 0:
+                    raise ValueError("Invalid Alibaba context limit")
+
+
+def install_reviewed_catalogs(
+    catalogs: dict[str, dict[str, Tariff]],
+    *,
+    verified_at: datetime,
+    expires_at: datetime,
+    revision: str,
+    effective_from: dict[str, dict[str, datetime]] | None = None,
+) -> None:
+    """Atomically replace reviewed regional prices from the trusted feed.
+
+    The feed consumer distributes this same snapshot to every process. Native
+    downloads are a fallback after the reviewed feed expires, within their TTL.
+    """
+    validate_reviewed_catalogs(
+        catalogs,
+        verified_at=verified_at,
+        expires_at=expires_at,
+        revision=revision,
+        effective_from=effective_from,
+    )
+    global _reviewed_verified_at, _reviewed_expires_at, _reviewed_revision
+    with _lock:
+        _reviewed.clear()
+        _reviewed.update(
+            {region: dict(entries) for region, entries in catalogs.items()}
+        )
+        _reviewed_verified_at = verified_at
+        _reviewed_expires_at = expires_at
+        _reviewed_revision = revision
+        _reviewed_effective.clear()
+        _reviewed_effective.update(
+            {
+                region: {
+                    ident: (effective_from or {})
+                    .get(region, {})
+                    .get(ident, verified_at)
+                    for ident in entries
+                }
+                for region, entries in catalogs.items()
+            }
+        )
+
+
+@dataclass(frozen=True)
+class PreparedCatalogRefresh:
+    """Credential snapshot prepared before releasing a database session."""
+
+    url: str
+    service_site: str
+    api_key: str = field(repr=False)
 
 
 class CatalogRefreshStatus(str, Enum):
@@ -62,6 +170,9 @@ def reset_live_state_for_tests() -> None:
     """Drop the in-process overlay (test isolation only)."""
     with _lock:
         _live.clear()
+        _live_dates.clear()
+        _reviewed.clear()
+        _reviewed_effective.clear()
 
 
 def native_catalog_target(ai_model: models.AIModel) -> tuple[str, str] | None:
@@ -93,7 +204,9 @@ def region_key(service_site: str) -> str:
     return "singapore-international"
 
 
-def live_tariff(ai_model: models.AIModel) -> Tariff | None:
+def live_tariff(
+    ai_model: models.AIModel, *, observed_at: datetime | None = None
+) -> Tariff | None:
     """Return a live overlay tariff for this exact model id, if present."""
     target = native_catalog_target(ai_model)
     if target is None:
@@ -102,8 +215,30 @@ def live_tariff(ai_model: models.AIModel) -> Tariff | None:
     if not ident:
         return None
     key = region_key(target[1])
+    now = _utcnow()
+    when = observed_at or now
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
     with _lock:
-        return _live.get(key, {}).get(ident)
+        effective = _reviewed_effective.get(key, {}).get(ident)
+        if effective is not None and when < effective:
+            return None
+        native = _live.get(key, {}).get(ident)
+        native_date = _live_dates.get((key, ident))
+        if native_date is None or now - native_date >= timedelta(
+            seconds=NATIVE_TTL_SECONDS
+        ):
+            native = None
+        reviewed = _reviewed.get(key, {}).get(ident)
+        # Explicitly reviewed prices remain authoritative until expiry. A
+        # native fetch cannot supersede newer evidence in a mixed-date feed.
+        if reviewed is not None and (
+            _reviewed_expires_at is not None and now < _reviewed_expires_at
+        ):
+            return reviewed
+        # Evidence expiry is not evidence of a price change. Prefer a fresh
+        # native tariff, otherwise retain reviewed rates with stale metadata.
+        return native if native is not None else reviewed
 
 
 def ingest_native_models(
@@ -142,7 +277,39 @@ def ingest_native_models(
             _live[region] = incoming
         else:
             _live.setdefault(region, {}).update(incoming)
+        now = _utcnow()
+        for ident in incoming:
+            _live_dates[(region, ident)] = now
     return accepted
+
+
+def tariff_source(ai_model: models.AIModel) -> str | None:
+    """Identify the overlay that supplies the currently selected tariff."""
+    tariff = live_tariff(ai_model)
+    target = native_catalog_target(ai_model)
+    if tariff is None or target is None:
+        return None
+    ident = (ai_model.model_identifier or "").strip()
+    with _lock:
+        if _reviewed.get(region_key(target[1]), {}).get(ident) is tariff:
+            return "reviewed-catalog"
+    return "native-catalog"
+
+
+def native_tariff(ai_model: models.AIModel) -> Tariff | None:
+    """Read a fresh native quote without overriding the active reviewed tariff."""
+    target = native_catalog_target(ai_model)
+    if target is None:
+        return None
+    region = region_key(target[1])
+    ident = (ai_model.model_identifier or "").strip()
+    with _lock:
+        fetched = _live_dates.get((region, ident))
+        if fetched is None or _utcnow() - fetched >= timedelta(
+            seconds=NATIVE_TTL_SECONDS
+        ):
+            return None
+        return _live.get(region, {}).get(ident)
 
 
 def parse_native_model(entry: Any) -> Tariff | None:
@@ -198,7 +365,7 @@ def _tariff_from_price_group(group: dict[str, Any]) -> Tariff | None:
             amount = float(item.get("price"))
         except (TypeError, ValueError):
             continue
-        if amount < 0 or math.isnan(amount):
+        if amount < 0 or not math.isfinite(amount):
             continue
         parsed[kind] = amount
     if "input" not in parsed or "output" not in parsed:
@@ -261,58 +428,69 @@ def _credential_host_matches_catalog(
     return bool(catalog_host) and _host(ai_model) == catalog_host
 
 
-def refresh_from_model(ai_model: models.AIModel) -> CatalogRefreshStatus:
-    """Fetch the native catalog with this model's key and refresh the overlay.
-
-    Credentials are sent only when the model's configured host matches the
-    catalog URL. A complete download wholesale-replaces that region's
-    overlay; a failed or truncated download leaves existing SKUs in place
-    (discovery still merges).
-
-    Returns:
-        Why the refresh ingested, failed, or stayed empty.
-    """
+def prepare_refresh(
+    ai_model: models.AIModel,
+) -> PreparedCatalogRefresh | CatalogRefreshStatus:
+    """Resolve scoped credentials without performing network I/O."""
     target = native_catalog_target(ai_model)
     if target is None:
         return CatalogRefreshStatus.no_target
     url, service_site = target
     if not _credential_host_matches_catalog(ai_model, url):
-        logger.debug(
-            "Alibaba native catalog refresh skipped: credentials belong to "
-            "a different host than %s",
-            urlparse(url).hostname,
-        )
         return CatalogRefreshStatus.host_mismatch
     api_key = _api_key(ai_model)
     if not api_key:
         return CatalogRefreshStatus.no_credentials
+    return PreparedCatalogRefresh(url, service_site, api_key)
+
+
+def refresh_prepared(
+    prepared: PreparedCatalogRefresh, *, max_duration_seconds: float | None = None
+) -> CatalogRefreshStatus:
+    """Download an already scoped snapshot without accessing model credentials."""
     try:
-        entries, complete = _download_catalog(url, api_key, service_site)
+        kwargs = (
+            {"max_duration_seconds": max_duration_seconds}
+            if max_duration_seconds is not None
+            else {}
+        )
+        entries, complete = _download_catalog(
+            prepared.url, prepared.api_key, prepared.service_site, **kwargs
+        )
     except Exception:  # noqa: BLE001 - overlay refresh is best-effort
         logger.debug("Alibaba native catalog refresh failed", exc_info=True)
         return CatalogRefreshStatus.unreachable
     accepted = ingest_native_models(
         entries,
-        region=region_key(service_site),
+        region=region_key(prepared.service_site),
         replace=complete,
     )
     if accepted > 0:
         return CatalogRefreshStatus.ingested
-    if complete:
-        return CatalogRefreshStatus.empty
-    return CatalogRefreshStatus.unreachable
+    return CatalogRefreshStatus.empty if complete else CatalogRefreshStatus.unreachable
+
+
+def refresh_from_model(ai_model: models.AIModel) -> CatalogRefreshStatus:
+    """Prepare then refresh. Session-owning callers should use the split API."""
+    prepared = prepare_refresh(ai_model)
+    if isinstance(prepared, CatalogRefreshStatus):
+        return prepared
+    return refresh_prepared(prepared)
 
 
 def install_live_tariff(region: str, model_id: str, tariff: Tariff) -> None:
     """Install one overlay tariff (tests and Fetch Models)."""
     with _lock:
         _live.setdefault(region, {})[model_id] = tariff
+        _live_dates[(region, model_id)] = _utcnow()
 
 
 def _download_catalog(
     url: str,
     api_key: str,
     service_site: str,
+    *,
+    max_duration_seconds: float = 30.0,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Download native catalog pages.
 
@@ -325,14 +503,19 @@ def _download_catalog(
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname:
         return [], False
+    deadline = time.monotonic() + max(0.0, max_duration_seconds)
     models_out: list[dict[str, Any]] = []
     seen_pages: set[tuple[str, ...]] = set()
     complete = False
     with httpx.Client(timeout=NATIVE_TIMEOUT_SECONDS, follow_redirects=False) as client:
         for page_no in range(1, _MAX_PAGES + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             response = client.get(
                 url,
                 headers={"Authorization": f"Bearer {api_key}"},
+                timeout=min(NATIVE_TIMEOUT_SECONDS, remaining),
                 params={
                     "capabilities": "TG",
                     "service_site": service_site,
@@ -394,3 +577,49 @@ def _api_key(ai_model: models.AIModel) -> str | None:
         logger.debug("Alibaba catalog could not resolve credentials", exc_info=True)
         return _legacy_api_key(ai_model)
     return _legacy_api_key(ai_model)
+
+
+def reviewed_before_effective(
+    ai_model: models.AIModel, *, observed_at: datetime | None = None
+) -> bool:
+    """Fail closed before the only available reviewed tariff revision."""
+    target = native_catalog_target(ai_model)
+    if target is None:
+        return False
+    ident = (ai_model.model_identifier or "").strip()
+    when = observed_at or _utcnow()
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    with _lock:
+        effective = _reviewed_effective.get(region_key(target[1]), {}).get(ident)
+        return effective is not None and when < effective
+
+
+def pricing_snapshot(
+    ai_model: models.AIModel, *, observed_at: datetime | None = None
+) -> dict[str, Any] | None:
+    """Expose reviewed provenance for an applicable tariff's usage record."""
+    tariff = live_tariff(ai_model, observed_at=observed_at)
+    target = native_catalog_target(ai_model)
+    if tariff is None or target is None:
+        return None
+    region = region_key(target[1])
+    ident = (ai_model.model_identifier or "").strip()
+    with _lock:
+        if _reviewed.get(region, {}).get(ident) is not tariff:
+            return {"provider": "alibaba", "region": region, "source": "native-catalog"}
+        return {
+            "provider": "alibaba",
+            "region": region,
+            "source": "reviewed-catalog",
+            "revision": _reviewed_revision,
+            "stale": _reviewed_expires_at is not None
+            and _utcnow() >= _reviewed_expires_at,
+            "verified_at": _reviewed_verified_at.isoformat()
+            if _reviewed_verified_at
+            else None,
+            "effective_from": _reviewed_effective[region][ident].isoformat(),
+            "expires_at": _reviewed_expires_at.isoformat()
+            if _reviewed_expires_at
+            else None,
+        }

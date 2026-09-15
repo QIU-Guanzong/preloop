@@ -170,6 +170,8 @@ _negative_cache: Dict[str, float] = {}
 _MAX_NEGATIVE_CACHE_ENTRIES = 4096
 # candidate names with a lookup currently in flight.
 _pending_lookups: set[str] = set()
+_pending_usage: dict[str, list[tuple[str, bool]]] = {}
+_MAX_PENDING_USAGE_PER_LOOKUP = 500
 # Bound concurrent live lookups so unknown models cannot spawn unbounded threads.
 _LOOKUP_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="price-lookup")
 
@@ -530,8 +532,9 @@ def _ai_model_price_lookup_session(ai_model_id: Any) -> Iterator[Any]:
     """Yield the AIModel row on a worker-owned Session.
 
     HTTP accounting passes only the model id so snapshots never carry
-    credentials into the lookup pool. The Session stays open for the
-    caller so ``credentials_secret`` can resolve, then closes.
+    credentials into the lookup pool. Resolve ``credentials_secret`` and
+    prepare any native request inside this context; perform network I/O only
+    after it closes.
     """
     from preloop.models.crud import crud_ai_model
     from preloop.models.db.session import get_db_session
@@ -544,121 +547,137 @@ def _ai_model_price_lookup_session(ai_model_id: Any) -> Iterator[Any]:
 
 
 def schedule_price_lookup(
-    *, ai_model_id: Any, api_usage_id: Optional[str] = None
+    *,
+    ai_model_id: Any,
+    api_usage_id: Optional[str] = None,
+    notify_after_lookup: bool = False,
 ) -> bool:
-    """Schedule a one-shot background price lookup for an unpriced model.
+    """Schedule bounded recovery, repairing queued rows before unresolved alerts.
 
-    Fired from the gateway recording path when a usage row lands as
-    ``unpriced``. Callers pass the persisted model id only. The worker
-    re-fetches the row through CRUD on its own Session so Alibaba overlay
-    refresh can resolve stored credentials. Runs off the hot path via a
-    bounded thread pool; when the lookup succeeds and ``api_usage_id`` is
-    given, the triggering row is re-priced in place. De-duplicated against
-    in-flight lookups and the negative cache.
-
-    Args:
-        ai_model_id: Persisted ``AIModel.id`` the request was routed to.
-        api_usage_id: The unpriced ``ApiUsage`` row to fix on success.
-
-    Returns:
-        True when a lookup was submitted to the pool.
+    True means recovery owns this row, including when joined to an in-flight
+    lookup. False means disabled, unavailable, negative-cached, or queue full;
+    callers retain responsibility for an immediate unresolved alert.
+    Only identifiers enter the pool. Credentials are resolved on the worker,
+    and its database session closes before provider I/O.
     """
-    import os
-
     from preloop.config import settings
-
-    if not getattr(settings, "model_price_live_lookup_enabled", True):
-        return False
-    if os.getenv("TESTING") == "true":
-        return False
-    if ai_model_id is None:
-        return False
-
     from preloop.services import alibaba_pricing
     from preloop.services.alibaba_price_catalog import native_catalog_target, region_key
     from preloop.services.model_pricing import _iter_litellm_model_candidates
+    from preloop.services.litellm_routing import endpoint_host
 
+    if (
+        not getattr(settings, "model_price_live_lookup_enabled", True)
+        or os.getenv("TESTING") == "true"
+        or ai_model_id is None
+    ):
+        return False
     with _ai_model_price_lookup_session(ai_model_id) as ai_model:
         if ai_model is None:
             return False
         is_alibaba_model = alibaba_pricing.is_alibaba(ai_model)
-        alibaba_target = native_catalog_target(ai_model) if is_alibaba_model else None
-        alibaba_identifier = (ai_model.model_identifier or "").strip() or "unknown"
+        target = native_catalog_target(ai_model) if is_alibaba_model else None
+        identifier = (ai_model.model_identifier or "").strip() or "unknown"
+        credential_host = (
+            endpoint_host(getattr(ai_model, "api_endpoint", None)) or "default"
+        )
         candidates = (
             [] if is_alibaba_model else list(_iter_litellm_model_candidates(ai_model))
         )
-
     if is_alibaba_model:
-        if alibaba_target is None:
+        if target is None:
             return False
-        dedupe_key = f"alibaba:{region_key(alibaba_target[1])}:{alibaba_identifier}"
-        log_token = _model_log_token(dedupe_key)
-        now = time.monotonic()
-        with _lookup_lock:
-            if dedupe_key in _pending_lookups:
-                return False
-            if (
-                now - _negative_cache.get(dedupe_key, -_NEGATIVE_TTL_SECONDS)
-                < _NEGATIVE_TTL_SECONDS
-            ):
-                return False
-            _pending_lookups.add(dedupe_key)
-
-        def _run_alibaba() -> None:
-            from preloop.services.alibaba_price_catalog import (
-                CatalogRefreshStatus,
-                refresh_from_model,
-            )
-
-            try:
-                with _ai_model_price_lookup_session(ai_model_id) as live_model:
-                    if live_model is None:
-                        matched = CatalogRefreshStatus.no_target
-                    else:
-                        matched = refresh_from_model(live_model)
-                if matched is CatalogRefreshStatus.ingested and api_usage_id:
-                    _reprice_usage_row(api_usage_id)
-                elif matched is not CatalogRefreshStatus.ingested:
-                    with _lookup_lock:
-                        _remember_negative_lookup(dedupe_key)
-            except Exception:  # noqa: BLE001 - background best-effort
-                logger.exception("Live price lookup failed for %s", log_token)
-            finally:
-                with _lookup_lock:
-                    _pending_lookups.discard(dedupe_key)
-
-        _LOOKUP_EXECUTOR.submit(_run_alibaba)
-        return True
-
-    if not candidates:
-        return False
-
-    dedupe_key = candidates[0]
-    log_token = _model_log_token(dedupe_key)
+        dedupe_key = f"alibaba:{region_key(target[1])}:{credential_host}:{identifier}"
+        negative_keys = [dedupe_key]
+    else:
+        if not candidates:
+            return False
+        dedupe_key = candidates[0]
+        negative_keys = candidates
     now = time.monotonic()
     with _lookup_lock:
         if dedupe_key in _pending_lookups:
-            return False
+            queued = _pending_usage.setdefault(dedupe_key, [])
+            if not api_usage_id or len(queued) >= _MAX_PENDING_USAGE_PER_LOOKUP:
+                return False
+            queued.append((api_usage_id, notify_after_lookup))
+            return True
         if all(
-            now - _negative_cache.get(candidate, -_NEGATIVE_TTL_SECONDS)
+            now - _negative_cache.get(key, -_NEGATIVE_TTL_SECONDS)
             < _NEGATIVE_TTL_SECONDS
-            for candidate in candidates
+            for key in negative_keys
         ):
             return False
         _pending_lookups.add(dedupe_key)
+        _pending_usage[dedupe_key] = (
+            [(api_usage_id, notify_after_lookup)] if api_usage_id else []
+        )
 
     def _run() -> None:
+        status = "failed"
+        matched = False
         try:
-            matched = lookup_model_price_now(candidates)
-            if matched and api_usage_id:
-                _reprice_usage_row(api_usage_id)
+            if is_alibaba_model:
+                from preloop.services.alibaba_price_catalog import (
+                    CatalogRefreshStatus,
+                    prepare_refresh,
+                    refresh_prepared,
+                )
+
+                with _ai_model_price_lookup_session(ai_model_id) as live_model:
+                    prepared = (
+                        prepare_refresh(live_model)
+                        if live_model is not None
+                        else CatalogRefreshStatus.no_target
+                    )
+                outcome = (
+                    prepared
+                    if isinstance(prepared, CatalogRefreshStatus)
+                    else refresh_prepared(prepared)
+                )
+                status = outcome.value
+                matched = outcome is CatalogRefreshStatus.ingested
+                # A successful download may still lack this SKU or its cache
+                # rate. Repeating the same regional download on every next
+                # unpriced request cannot repair that billing dimension.
+                with _lookup_lock:
+                    _remember_negative_lookup(dedupe_key)
+            else:
+                matched = bool(lookup_model_price_now(candidates))
+                status = "ingested" if matched else "unavailable"
         except Exception:  # noqa: BLE001 - background best-effort
-            logger.exception("Live price lookup failed for %s", log_token)
+            logger.exception(
+                "Live price lookup failed for %s", _model_log_token(dedupe_key)
+            )
         finally:
             with _lookup_lock:
+                queued = _pending_usage.pop(dedupe_key, [])
                 _pending_lookups.discard(dedupe_key)
+            for usage_id, notify in queued:
+                row_status = status
+                try:
+                    if matched:
+                        _reprice_usage_row(usage_id)
+                except Exception:  # noqa: BLE001 - preserve unresolved notification
+                    row_status = f"{status}_repricing_failed"
+                    logger.exception("Post-refresh usage recovery failed")
+                if notify:
+                    try:
+                        from preloop.services.unpriced_model_alert import (
+                            notify_unpriced_usage_row,
+                        )
 
-    _LOOKUP_EXECUTOR.submit(_run)
+                        notify_unpriced_usage_row(usage_id, refresh_status=row_status)
+                    except Exception:  # noqa: BLE001 - one row must not block others
+                        logger.exception("Post-refresh unresolved notification failed")
+
+    try:
+        _LOOKUP_EXECUTOR.submit(_run)
+    except Exception:
+        with _lookup_lock:
+            _pending_usage.pop(dedupe_key, None)
+            _pending_lookups.discard(dedupe_key)
+        raise
     return True
 
 
@@ -681,6 +700,7 @@ def reset_lookup_state_for_tests() -> None:
     with _lookup_lock:
         _negative_cache.clear()
         _pending_lookups.clear()
+        _pending_usage.clear()
 
 
 def _module_state_for_tests() -> dict[str, Any]:

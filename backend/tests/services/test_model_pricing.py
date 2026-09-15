@@ -1127,3 +1127,44 @@ def test_estimate_external_model_usage_cost_zero_tokens_unpriced() -> None:
     )
     assert estimate.cost is None
     assert estimate.source == "unpriced"
+
+
+def test_alibaba_detailed_estimate_forwards_historical_instant_and_provenance(
+    monkeypatch,
+):
+    from datetime import datetime, timezone
+    from preloop.models import models
+    from preloop.services import alibaba_pricing, alibaba_price_catalog
+    from preloop.services.model_pricing import estimate_ai_model_usage_cost_detailed
+
+    model = models.AIModel(
+        provider_name="qwen",
+        model_identifier="qwen-provenance-example",
+        api_endpoint="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    )
+    observed = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    seen = []
+    snapshot = {
+        "provider": "alibaba",
+        "source": "reviewed",
+        "effective_from": "2026-01-01T00:00:00Z",
+    }
+
+    def estimate(ai_model, **kwargs):
+        seen.append(kwargs["observed_at"])
+        return 0.01
+
+    monkeypatch.setattr(alibaba_pricing, "estimate", estimate)
+    monkeypatch.setattr(
+        alibaba_price_catalog, "pricing_snapshot", lambda *args, **kwargs: snapshot
+    )
+    result = estimate_ai_model_usage_cost_detailed(
+        model,
+        prompt_tokens=100,
+        completion_tokens=10,
+        total_tokens=110,
+        observed_at=observed,
+    )
+    assert seen == [observed]
+    assert result.cost == 0.01
+    assert result.pricing_snapshot == snapshot

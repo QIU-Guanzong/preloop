@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -95,7 +96,7 @@ def _tariff_from_seed_entry(entry: dict[str, Any]) -> Tariff | None:
             out = float(row["output"])
         except (KeyError, TypeError, ValueError):
             continue
-        if inp < 0 or out < 0:
+        if inp < 0 or out < 0 or not math.isfinite(inp) or not math.isfinite(out):
             continue
         max_input = row.get("max_input")
         parsed.append(
@@ -129,7 +130,7 @@ def _optional_rate(value: Any) -> float | None:
         rate = float(value)
     except (TypeError, ValueError):
         return None
-    if rate < 0 or math.isnan(rate):
+    if rate < 0 or not math.isfinite(rate):
         return None
     return rate
 
@@ -155,7 +156,9 @@ def _load_seed() -> dict[str, Tariff]:
 _SEED = _load_seed()
 
 
-def tariff_for(ai_model: models.AIModel) -> Tariff | None:
+def tariff_for(
+    ai_model: models.AIModel, *, observed_at: datetime | None = None
+) -> Tariff | None:
     """Resolve an exact SKU on a USD Alibaba host.
 
     Live native-catalog overlay wins. The Singapore International seed covers
@@ -167,11 +170,18 @@ def tariff_for(ai_model: models.AIModel) -> Tariff | None:
     ident = (ai_model.model_identifier or "").strip()
     if not ident:
         return None
-    from preloop.services.alibaba_price_catalog import live_tariff
+    from preloop.services.alibaba_price_catalog import (
+        live_tariff,
+        reviewed_before_effective,
+    )
 
-    live = live_tariff(ai_model)
+    if reviewed_before_effective(ai_model, observed_at=observed_at):
+        return None
+    live = live_tariff(ai_model, observed_at=observed_at)
     if live is not None:
         return live
+    if reviewed_before_effective(ai_model, observed_at=observed_at):
+        return None
     if region == "singapore-international":
         return _SEED.get(ident)
     return None
@@ -194,9 +204,9 @@ def catalog_entry(ai_model: models.AIModel) -> tuple[str, dict[str, Any]] | None
         tariff.implicit_read,
     ):
         entry["cache_read_input_token_cost"] = tariff.implicit_read / 1_000_000
-    prefix = (
-        "alibaba/native-catalog" if _is_live(ai_model, tariff) else f"alibaba/{region}"
-    )
+    from preloop.services.alibaba_price_catalog import tariff_source
+
+    prefix = f"alibaba/{tariff_source(ai_model) or region}"
     return f"{prefix}/{ai_model.model_identifier}", entry
 
 
@@ -230,6 +240,7 @@ def estimate(
     prompt_tokens: int,
     completion_tokens: int,
     usage_details: dict[str, Any] | None,
+    observed_at: datetime | None = None,
 ) -> float | None:
     """Estimate known token classes; unknown tariff/mode yields no estimate.
 
@@ -237,7 +248,7 @@ def estimate(
     already include reasoning tokens, which must never be added a second time.
     The internal cache-mode tag comes from the forwarded request, not the model.
     """
-    resolved = tariff_for(ai_model)
+    resolved = tariff_for(ai_model, observed_at=observed_at)
     if resolved is None:
         return None
     tariff = select_tier(resolved, prompt_tokens)
@@ -281,3 +292,55 @@ def estimate(
         / 1_000_000,
         6,
     )
+
+
+def pricing_failure_reason(
+    ai_model: models.AIModel,
+    *,
+    prompt_tokens: int = 0,
+    usage_details: dict[str, Any] | None = None,
+    observed_at: datetime | None = None,
+) -> str | None:
+    """Explain an unsupported pricing dimension without guessing a tariff."""
+    from preloop.services.alibaba_price_catalog import reviewed_before_effective
+
+    if usd_region(ai_model) is None:
+        return "unsupported_region"
+    if reviewed_before_effective(ai_model, observed_at=observed_at):
+        return "tariff_not_effective"
+    resolved = tariff_for(ai_model, observed_at=observed_at)
+    if resolved is None:
+        return "missing_model_tariff"
+    tariff = select_tier(resolved, prompt_tokens)
+    if tariff is None:
+        return "context_out_of_range"
+    usage = usage_details or {}
+    details = usage.get("prompt_tokens_details") or {}
+    if not isinstance(details, dict):
+        return "invalid_usage"
+    creation = details.get("cache_creation") or {}
+    if not isinstance(creation, dict):
+        return "invalid_usage"
+    try:
+        cached = int(details.get("cached_tokens") or 0)
+        created = int(
+            details.get("cache_creation_input_tokens")
+            or details.get("cache_creation_tokens")
+            or creation.get("ephemeral_5m_input_tokens")
+            or usage.get("cache_creation_input_tokens")
+            or 0
+        )
+    except (TypeError, ValueError, OverflowError):
+        return "invalid_usage"
+    if min(prompt_tokens, cached, created) < 0 or cached + created > prompt_tokens:
+        return "invalid_usage"
+    mode = usage.get("_preloop_cache_mode")
+    if cached:
+        if mode not in {"implicit", "explicit"}:
+            return "unknown_cache_mode"
+        rate = tariff.explicit_read if mode == "explicit" else tariff.implicit_read
+        if rate is None:
+            return f"missing_{mode}_cache_tariff"
+    if created and tariff.creation is None:
+        return "missing_cache_creation_tariff"
+    return None

@@ -581,3 +581,36 @@ def test_nonstream_tool_stop_continues_with_tool_result(
     assert final["choices"][0]["message"]["content"] == "pong"
     assert final["choices"][0]["finish_reason"] == "stop"
     assert upstream.call_args.kwargs["messages"][-1]["tool_call_id"] == "call_1"
+
+
+@pytest.mark.parametrize(
+    "provider,endpoint",
+    [
+        ("dashscope", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
+        (
+            "openai-compatible",
+            "https://example.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        ),
+        ("custom", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
+    ],
+)
+@pytest.mark.parametrize("explicit", [False, True])
+def test_alibaba_endpoint_records_cache_mode_across_provider_aliases(
+    provider: str, endpoint: str, explicit: bool
+) -> None:
+    service = _service()
+    block = {"type": "text", "text": "hello"}
+    if explicit:
+        block["cache_control"] = {"type": "ephemeral"}
+    with patch("preloop.services.openai_gateway.get_secret_service") as secret:
+        secret.return_value.resolve_ai_model_credentials.return_value = SimpleNamespace(
+            credential_type="api_key", value="synthetic"
+        )
+        service._build_completion_kwargs(
+            _model(endpoint, provider),
+            messages=[{"role": "user", "content": [block]}],
+            payload={},
+            stream=False,
+            provider="openai",
+        )
+    assert service._last_alibaba_cache_mode == ("explicit" if explicit else "implicit")

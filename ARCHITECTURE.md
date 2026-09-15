@@ -18,6 +18,14 @@ The [account kill switch](docs/guide/account-kill-switch.md) serializes halt tra
 Database worker ownership, row-lock compatibility, and cancellation rules are
 documented in [Transactions and asynchronous request handling](docs/architecture/data-model.md#transactions-and-asynchronous-request-handling).
 
+[Reviewed price feeds](docs/guide/model-price-refresh.md) update the generic model
+map and Alibaba's dedicated regional tariff store in each API, gateway, and
+worker process. Alibaba estimates retain input tiers and distinct implicit,
+explicit, and cache-creation rates. Native discovery keeps credentials on their
+documented host; workspace routes can use reviewed regional prices without a
+cross-host credential transfer. Weekly review produces a PR with source evidence
+and verification gates. Feed ingestion never rewrites historical usage.
+
 Audit rows are sealed into a per-account hash chain with signed checkpoints.
 Period exports and evidence packs carry detached Ed25519 signatures.
 `preloop audit verify` and `preloop evidence verify` recompute both on the

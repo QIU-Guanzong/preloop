@@ -331,6 +331,9 @@ def reprice_gateway_usage_task(
                 last_heartbeat = monotonic()
 
         load_catalog()
+        # Claim writes have committed; release subsequent read state before
+        # native catalog preflight. Scalar job/request data above is retained.
+        db.rollback()
         result = reprice_gateway_usage(
             db,
             account_id=account_id,

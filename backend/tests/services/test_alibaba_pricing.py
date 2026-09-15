@@ -267,6 +267,83 @@ def test_seed_covers_current_singapore_chat_skus() -> None:
     assert len(_SEED) >= 80
 
 
+def test_verified_standard_cache_ratios_cover_supported_qwen() -> None:
+    usage = {
+        "_preloop_cache_mode": "implicit",
+        "prompt_tokens_details": {"cached_tokens": 5000},
+    }
+    assert _estimate(_model("qwen3.7-flash"), usage).cost == pytest.approx(0.00031)
+
+
+@pytest.mark.parametrize(
+    ("prompt", "rate"),
+    [(32000, 0.03), (32001, 0.1), (256000, 0.1), (256001, 0.2), (1000000, 0.2)],
+)
+def test_verified_flash_all_context_tiers(prompt: int, rate: float) -> None:
+    from preloop.services.alibaba_pricing import estimate
+
+    assert estimate(
+        _model("qwen3.7-flash"),
+        prompt_tokens=prompt,
+        completion_tokens=0,
+        usage_details=None,
+    ) == pytest.approx(round(prompt * rate / 1_000_000, 6))
+
+
+def test_flash_creation_is_verified_but_hit_rate_requires_console_evidence() -> None:
+    from preloop.services.alibaba_pricing import pricing_failure_reason
+
+    usage = {
+        "_preloop_cache_mode": "explicit",
+        "prompt_tokens_details": {"cache_creation_input_tokens": 5000},
+    }
+    assert _estimate(_model("qwen3.8-flash"), usage).cost == pytest.approx(0.002158)
+    usage = {
+        "_preloop_cache_mode": "implicit",
+        "prompt_tokens_details": {"cached_tokens": 5000},
+    }
+    assert (
+        pricing_failure_reason(
+            _model("qwen3.8-flash"), prompt_tokens=10000, usage_details=usage
+        )
+        == "missing_implicit_cache_tariff"
+    )
+
+
+def test_reviewed_flash_cache_rate_prices_workspace_without_native_credentials() -> (
+    None
+):
+    from datetime import datetime, timedelta, timezone
+    from preloop.services.alibaba_price_catalog import install_reviewed_catalogs
+    from preloop.services.alibaba_pricing import Tariff
+
+    now = datetime.now(timezone.utc)
+    # Synthetic reviewed tariff tests delivery; not an asserted provider rate.
+    install_reviewed_catalogs(
+        {
+            "singapore-international": {
+                "qwen3.8-flash": Tariff(input=1, output=2, implicit_read=0.1)
+            }
+        },
+        verified_at=now,
+        expires_at=now + timedelta(days=1),
+        revision="fixture",
+    )
+    model = _model(
+        "qwen3.8-flash",
+        endpoint="https://tenant.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    )
+    result = _estimate(
+        model,
+        {
+            "_preloop_cache_mode": "implicit",
+            "prompt_tokens_details": {"cached_tokens": 5000},
+        },
+    )
+    assert result.cost == pytest.approx(0.0075)
+    assert _catalog_entry(model)[0] == "alibaba/reviewed-catalog/qwen3.8-flash"
+
+
 def test_live_native_overlay_prices_cache_on_usd_site() -> None:
     ingest_native_models(
         [
@@ -364,3 +441,40 @@ def test_whole_request_tier_is_selected_not_the_lowest() -> None:
     assert low.cost == pytest.approx(0.01)
     assert mid.cost == pytest.approx(0.4)
     assert over.cost is None
+
+
+def test_reviewed_effective_dates_are_per_model_and_block_seed_fallback() -> None:
+    from datetime import datetime, timedelta, timezone
+    from preloop.services.alibaba_price_catalog import install_reviewed_catalogs
+    from preloop.services.alibaba_pricing import Tariff, estimate
+
+    now = datetime.now(timezone.utc)
+    earlier = now - timedelta(days=2)
+    later = now - timedelta(days=1)
+    install_reviewed_catalogs(
+        {
+            "singapore-international": {
+                "qwen3.8-flash": Tariff(input=1, output=2),
+                "qwen3.8-max": Tariff(input=3, output=4),
+            }
+        },
+        verified_at=now,
+        expires_at=now + timedelta(days=1),
+        revision="dated",
+        effective_from={
+            "singapore-international": {
+                "qwen3.8-flash": earlier,
+                "qwen3.8-max": later,
+            }
+        },
+    )
+    kwargs = {
+        "prompt_tokens": 1000,
+        "completion_tokens": 100,
+        "usage_details": None,
+        "observed_at": earlier,
+    }
+    assert estimate(_model("qwen3.8-flash"), **kwargs) == pytest.approx(0.0012)
+    assert estimate(_model("qwen3.8-max"), **kwargs) is None
+    kwargs["observed_at"] = later
+    assert estimate(_model("qwen3.8-max"), **kwargs) == pytest.approx(0.0034)
