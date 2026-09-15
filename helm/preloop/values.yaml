@@ -274,6 +274,19 @@ gateway:
   # maxReplicas even though CPU was 5-55m. Request 768Mi so utilization
   # is honest (~85% idle); limit 2Gi is spike headroom, not a reason to
   # run more replicas. More replicas copy the same idle RSS.
+  # The headroom above the request is what concurrent large responses
+  # spend. Measured per 1MiB request plus 1MiB response (see
+  # docs/operations/gateway-memory.md and
+  # scripts/measure_gateway_index_memory.py): the payloads themselves, plus
+  # ~0.01MiB of search indexing, which used to be ~9MiB per response and
+  # scaled with concurrency. 1.25Gi of headroom therefore covers many more
+  # than the three concurrent responses that OOMKilled a 1Gi replica.
+  # Background passes are not part of this budget: a pod with
+  # PRELOOP_SERVICE_ROLE=gateway runs none of them.
+  # Search-index queue knobs (process env, not chart keys):
+  # GATEWAY_USAGE_INDEX_QUEUE_MAX_PENDING (default 256) and
+  # GATEWAY_USAGE_INDEX_QUEUE_ENABLED (default true). A full queue drops
+  # documents rather than growing. See docs/operations/gateway-memory.md.
   resources:
     requests:
       cpu: "100m"

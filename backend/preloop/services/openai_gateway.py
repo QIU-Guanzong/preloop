@@ -181,6 +181,9 @@ from preloop.services.model_runtime_resolver import (
     is_agent_managed_model,
     resolve_ai_model_runtime,
 )
+from preloop.services.gateway_usage_index_queue import (
+    get_gateway_usage_index_queue,
+)
 from preloop.services.gateway_usage_search import GatewayUsageSearchService
 from preloop.services.model_content_policy import (
     enforce_request_policy,
@@ -8901,11 +8904,18 @@ class OpenAIGatewayService:
             # this can contain customer content.
             self._rollback_activity_recording(exc, context="gateway activity event")
         try:
-            GatewayUsageSearchService(self.db).auto_index_interaction(
+            # Build the bounded document here, write it elsewhere. Building
+            # reads the payloads once and keeps none of them, so the bodies
+            # of a large response stop being referenced by indexing as soon
+            # as this returns; the database write happens on the queue's own
+            # worker with its own session (issue #670).
+            index_document = GatewayUsageSearchService().build_index_document(
                 usage=usage_row,
                 request_payload=request_payload,
                 response_payload=response_payload,
             )
+            if index_document is not None:
+                get_gateway_usage_index_queue().submit(index_document)
         except Exception:
             logger.exception(
                 "Automatic gateway interaction indexing failed for usage %s",

@@ -98,7 +98,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a 90% memory target. Hosted idle RSS is ~650Mi; a 256Mi request
   made HPA report ~250% and pin at maxReplicas while CPU was idle. More
   replicas copy that idle RSS. Use maxReplicas for real CPU/traffic, not to
-  paper over an undersized request.
+  paper over an undersized request. Search-corpus indexing is queued off
+  the response path, bounded by `GATEWAY_USAGE_INDEX_QUEUE_MAX_PENDING`
+  (default 256) and `GATEWAY_USAGE_INDEX_QUEUE_ENABLED`. Dedicated gateway
+  pods still run no audit-seal, retention, or optimization passes, so at
+  least one `api` or `all` process must remain.
 - CodeQL advanced setup uploads SARIF so Scorecard SAST sees every push and
   pull request. Disable GitHub default CodeQL setup or the upload is
   rejected.
