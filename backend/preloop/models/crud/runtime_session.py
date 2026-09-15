@@ -394,8 +394,16 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
         last_activity_at: Optional[datetime] = None,
         ended_at: Optional[datetime] = None,
         reopen_if_ended: bool = False,
+        parent_session_id: Optional[Any] = None,
     ) -> RuntimeSession:
-        """Create or update a runtime session keyed by source identity."""
+        """Create or update a runtime session keyed by source identity.
+
+        ``parent_session_id`` is write-once: it is stored when the row is
+        created, and on an existing row only fills a NULL. A harness reports
+        lineage on the subagent's first turn, so a later request that claims a
+        different parent for the same conversation is either a race or a lie,
+        and either way the first answer is the one that was observed.
+        """
         db_obj = self.get_by_source(
             db,
             account_id=account_id,
@@ -420,6 +428,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
                 started_at=started_at or last_activity_at,
                 last_activity_at=last_activity_at,
                 ended_at=ended_at,
+                parent_session_id=parent_session_id,
             )
             db.add(db_obj)
             db.flush()
@@ -454,6 +463,8 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
             db_obj.runtime_principal_id = runtime_principal_id
         if runtime_principal_name is not None:
             db_obj.runtime_principal_name = runtime_principal_name
+        if parent_session_id is not None and db_obj.parent_session_id is None:
+            db_obj.parent_session_id = parent_session_id
         if reopen_if_ended and db_obj.ended_at is not None and ended_at is None:
             db_obj.ended_at = None
             db_obj.started_at = started_at or last_activity_at
@@ -752,6 +763,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
                 self.model.session_source_type,
                 self.model.session_source_id,
                 self.model.session_reference,
+                self.model.parent_session_id,
                 self.model.runtime_principal_type,
                 self.model.runtime_principal_id,
                 self.model.runtime_principal_name,
@@ -798,6 +810,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
                 self.model.session_source_type,
                 self.model.session_source_id,
                 self.model.session_reference,
+                self.model.parent_session_id,
                 self.model.runtime_principal_type,
                 self.model.runtime_principal_id,
                 self.model.runtime_principal_name,
@@ -1023,6 +1036,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
                 self.model.session_source_type,
                 self.model.session_source_id,
                 self.model.session_reference,
+                self.model.parent_session_id,
                 self.model.runtime_principal_type,
                 self.model.runtime_principal_id,
                 self.model.runtime_principal_name,
@@ -1072,6 +1086,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
                 self.model.session_source_type,
                 self.model.session_source_id,
                 self.model.session_reference,
+                self.model.parent_session_id,
                 self.model.runtime_principal_type,
                 self.model.runtime_principal_id,
                 self.model.runtime_principal_name,
@@ -1195,6 +1210,11 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
             "session_source_type": row.session_source_type,
             "session_source_id": row.session_source_id,
             "session_reference": row.session_reference,
+            "parent_session_id": (
+                str(row.parent_session_id)
+                if row.parent_session_id is not None
+                else None
+            ),
             "runtime_principal_type": row.runtime_principal_type,
             "runtime_principal_id": row.runtime_principal_id,
             "runtime_principal_name": row.runtime_principal_name,
