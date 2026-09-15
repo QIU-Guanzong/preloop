@@ -442,6 +442,9 @@ class TestProjectScopedReleaseAudit:
         norm = _norm(prompt)
         assert 'no leading "/" and no ".." segment' in norm
         assert "NEVER silently widen the scope back to the whole repository" in norm
+        assert "Do NOT put a rejected path into scope.project_path" in norm
+        assert "name the rejected value in incomplete.reason only" in norm
+        assert "The scope block is not required for this case" in norm
 
     def test_no_sbom_for_the_project_is_not_checkable_with_a_reason(self, prompt):
         norm = _norm(prompt)

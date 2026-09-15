@@ -9,7 +9,10 @@ tests pin the contract that makes that honest:
 - with a project path, every evidence pointer is inside it and another
   project's SBOM is not this project's evidence;
 - a project with no SBOM of its own is ``not_checkable`` with a reason,
-  never a clean bill of health.
+  never a clean bill of health;
+- a payload ``project_path`` that escapes the checkout is named in
+  ``incomplete.reason`` only: putting the rejected path into
+  ``scope.project_path`` is itself invalid.
 
 ``not_checkable`` is the review family's word for an absence of evidence
 (``docs/guide/flows/repo-review-presets.md``). The assertions run against
@@ -112,6 +115,33 @@ def _not_checkable_envelope(**overrides: Any) -> dict[str, Any]:
             "covers": "project",
             "status": "not_checkable",
             "reason": "no SBOM available",
+        },
+        "disclaimer": DISCLAIMER,
+    }
+    envelope.update(overrides)
+    return envelope
+
+
+BAD_PATH = "../other-repo"
+BAD_PATH_REASON = f"project_path {BAD_PATH!r} escapes the checkout"
+
+
+def _bad_path_envelope(**overrides: Any) -> dict[str, Any]:
+    """The incompletion envelope the preset prescribes for a rejected path.
+
+    The rejected value lives in ``incomplete.reason`` only. A scope block
+    whose ``project_path`` escapes the checkout is itself invalid, so the
+    mandated envelope must not carry one.
+    """
+    envelope: dict[str, Any] = {
+        "schema": SCHEMA_RELEASEAUDIT_V1,
+        "flow": "release-security-audit",
+        "run_at": "2026-09-15T10:00:00Z",
+        "regime_profile": "cra",
+        "verdict": "error",
+        "incomplete": {
+            "reason": BAD_PATH_REASON,
+            "stage": "PHASE 0",
         },
         "disclaimer": DISCLAIMER,
     }
@@ -337,3 +367,33 @@ class TestScopeIsReleaseAuditOnly:
         result = validate_cra_result(envelope, expected_schema=SCHEMA_VULNSCAN_V1)
         assert not result.ok
         assert any("scope is not part of" in failure for failure in result.failures)
+
+
+class TestBadPathEnvelope:
+    """A rejected project_path is named in prose, not in the scope block."""
+
+    def test_prescribed_bad_path_envelope_validates(self):
+        envelope = _bad_path_envelope()
+        result = _validate(envelope)
+        assert result.ok, result.failures
+        assert result.incomplete is True
+        assert result.execution_completed is False
+        assert result.release_denied is True
+        serialised = json.loads(json.dumps(envelope))
+        assert "scope" not in serialised
+        assert serialised["incomplete"]["reason"] == BAD_PATH_REASON
+        assert BAD_PATH in serialised["incomplete"]["reason"]
+
+    def test_naming_the_rejected_path_in_scope_is_invalid(self):
+        envelope = _bad_path_envelope(
+            scope={
+                "project_path": BAD_PATH,
+                "covers": "project",
+                "status": "not_checkable",
+                "reason": "project_path escapes the checkout",
+            }
+        )
+        result = _validate(envelope)
+        assert not result.ok
+        assert any("project_path" in failure for failure in result.failures)
+        assert any("'..'" in failure or ".." in failure for failure in result.failures)

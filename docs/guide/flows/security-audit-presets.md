@@ -735,7 +735,12 @@ review:
 - **The path is validated first.** It must be relative to the
   repository root, carry no `..` segment, and exist in the checkout. A
   bad path is a bad input: the run writes the incompletion envelope
-  naming it rather than quietly auditing the whole repository.
+  naming the rejected value in `incomplete.reason` (for example
+  `project_path '../other-repo' escapes the checkout`) rather than
+  quietly auditing the whole repository. Do not put a rejected path
+  into `scope.project_path`; the validator refuses any scope block
+  whose path escapes the checkout, so that envelope would be discarded.
+  The scope block is not required for this case.
 - **Discovery is scoped.** SBOM lookup, the gap-register file walk,
   gitleaks, the history pickaxe and zizmor all run inside the path. An
   SBOM belonging to a sibling project is not this project's SBOM and is

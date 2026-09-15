@@ -151,8 +151,14 @@ prompt_template: |
   - Validate it first. It must be relative to the repository root, with
     no leading "/" and no ".." segment, and it must exist in the
     checkout. A path that fails any of that is a bad input: write the
-    incompletion envelope naming it and stop. NEVER silently widen the
-    scope back to the whole repository.
+    incompletion envelope naming it and stop. "Naming it" means naming
+    it in prose under incomplete.reason (for example: "project_path
+    '../other-repo' escapes the checkout"). Do NOT put a rejected path
+    into scope.project_path - the validator refuses any scope block
+    whose path escapes the checkout, so an envelope that names the bad
+    value there is itself invalid. The scope block is not required for
+    this case; the path being wrong is the finding. NEVER silently
+    widen the scope back to the whole repository.
   - SBOM lookup is scoped. Look for SBOM artifacts only under
     <checkout>/<project_path>, plus seed or payload artifacts that
     declare that project. A sibling project's SBOM is NOT this
@@ -1230,9 +1236,10 @@ prompt_template: |
   ═══════════════════════════════════════════════════════════
   IF THE AUDIT CANNOT FINISH
   ═══════════════════════════════════════════════════════════
-  This applies to the two cases that actually happen: an interactive
-  waiver question that no human answers before the execution limit, and
-  a scoped project with no SBOM of its own (PROJECT SCOPE RULE). Do NOT
+  This applies to the cases that actually happen: an interactive
+  waiver question that no human answers before the execution limit, a
+  scoped project with no SBOM of its own, and a payload project_path
+  that fails validation (PROJECT SCOPE RULE). Do NOT
   write a bare {"status": "failure", "reason": "..."} object: it carries
   no schema, so the platform cannot tell it from a broken run and your
   explanation is discarded. Do NOT invent an audit body you never
@@ -1254,11 +1261,13 @@ prompt_template: |
 
   You MAY add git, tool_versions, inputs_declared, runner, checks,
   assessments and artifacts when you have them. You MUST add "scope"
-  when project_path scoped the run: a reader of this envelope has to be
-  told which project the silence is about, and a project with no SBOM
-  is exactly the not_checkable case
+  when project_path scoped the run AND the path itself was valid: a
+  reader of this envelope has to be told which project the silence is
+  about, and a project with no SBOM is exactly the not_checkable case
   ({"project_path": "<path>", "covers": "project",
-    "status": "not_checkable", "reason": "no SBOM available"}).
+    "status": "not_checkable", "reason": "no SBOM available"}). Do NOT
+  add "scope" when the path itself was the bad input (PROJECT SCOPE
+  RULE): name the rejected value in incomplete.reason only.
   You MAY also add
   "drift" when PHASE 3 actually ran and evidence/drift-report.md
   exists, with artifacts.drift_report naming it: drift finishes before
