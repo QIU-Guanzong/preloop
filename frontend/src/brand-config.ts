@@ -129,6 +129,14 @@ export interface PricingPlan {
    * the comparison table below the fold, never on the card.
    */
   tagline?: string;
+  /**
+   * Which pricing tab the plan belongs to. `cloud` plans are the hosted
+   * subscriptions shown with the billing period toggle and the comparison
+   * table; `dedicated` plans are quoted (self-managed or dedicated) and are
+   * shown alongside the deployment options instead. Defaults to `cloud` when
+   * a brand config predates the tabs.
+   */
+  deployment?: 'cloud' | 'dedicated';
   features: string[];
 }
 

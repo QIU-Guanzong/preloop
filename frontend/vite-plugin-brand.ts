@@ -1569,6 +1569,7 @@ function generatePricingSlottedContent(config: BrandConfig): string {
              data-highlight="${plan.highlight ? 'true' : 'false'}"
              data-cta-text="${escapeAttr(cta)}"
              data-cta-url="${escapeAttr(ctaUrl)}"
+             data-deployment="${escapeAttr(plan.deployment === 'dedicated' ? 'dedicated' : 'cloud')}"
              data-description="${escapeAttr(plan.description || '')}"
              data-features="${escapeAttr((plan.features || []).join('|'))}">
           ${badge}
@@ -1597,12 +1598,18 @@ function generatePricingSlottedContent(config: BrandConfig): string {
     )
     .join('\n');
 
-  const comparisonBlock = generatePricingComparisonBlock(pricing, plans);
+  // The table compares cloud subscriptions only; a quoted dedicated plan has
+  // no fixed quota to put in a cell. Filtering here keeps the crawler-visible
+  // table identical to the hydrated one.
+  const comparisonBlock = generatePricingComparisonBlock(
+    pricing,
+    plans.filter((plan) => plan.deployment !== 'dedicated')
+  );
   const deploymentOptions = pricing.deployment_options || [];
   const deploymentBlock = deploymentOptions.length
     ? `
     <section slot="deployment-options" data-deployments="${escapeAttr(JSON.stringify(deploymentOptions))}" class="pricing-deployments">
-      <h2>Self-hosted options</h2>
+      <h2>Dedicated and self-hosted options</h2>
       ${deploymentOptions
         .map(
           (option: {

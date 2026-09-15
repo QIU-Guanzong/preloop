@@ -1,5 +1,6 @@
-import { LitElement, html, css } from 'lit';
+import { LitElement, html } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
+import { segmentedToggleStyles } from './segmented-toggle-styles';
 
 @customElement('billing-toggle')
 export class BillingToggle extends LitElement {
@@ -22,40 +23,12 @@ export class BillingToggle extends LitElement {
     }
   }
 
-  static styles = css`
-    .billing-toggle {
-      display: flex;
-      justify-content: center;
-      margin: 1.5rem 0 2rem 0;
-    }
-
-    .billing-toggle.dark sl-button[variant='default']::part(base) {
-      background-color: transparent;
-      border-color: #58a6ff;
-      color: #58a6ff;
-    }
-
-    .billing-toggle.dark sl-button[variant='default']::part(base):hover {
-      background-color: #58a6ff;
-      color: white;
-    }
-
-    .billing-toggle.dark sl-button[variant='primary']::part(base) {
-      background-color: #58a6ff;
-      border-color: #58a6ff;
-      color: white;
-    }
-
-    sl-button-group {
-      position: relative;
-      --sl-button-group-spacing: 0;
-    }
-  `;
+  static styles = segmentedToggleStyles;
 
   render() {
     return html`
-      <div class="billing-toggle ${this.dark ? 'dark' : ''}">
-        <sl-button-group>
+      <div class="segmented-toggle billing-toggle ${this.dark ? 'dark' : ''}">
+        <sl-button-group label="Billing period">
           <sl-button
             variant=${this.interval === 'month' ? 'primary' : 'default'}
             @click=${() => this._handleIntervalChange('month')}
