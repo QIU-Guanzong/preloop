@@ -853,6 +853,50 @@ class TestUpdateModelPriceOverlays:
         # Vision table must not leak into the overlay.
         assert "glm-5v-turbo" not in rows
 
+    def test_update_model_filter_keeps_token_priced_embedding_models(self) -> None:
+        """A refresh keeps embeddings (the gateway serves them) but not $0 rows.
+
+        Token-priced embedding entries must survive the filter or every
+        gateway vector call would record as unpriced. Multimodal embedding
+        rows priced per query/second have no per-token input price, so the
+        token ledger could only bill them as $0: they stay out.
+        """
+        script = _load_update_model_prices()
+        upstream = {
+            "text-embedding-fixture": {
+                "litellm_provider": "openai",
+                "mode": "embedding",
+                "input_cost_per_token": 2e-08,
+                "output_cost_per_token": 0.0,
+                "supports_vision": False,
+            },
+            "video-embedding-fixture": {
+                "litellm_provider": "bedrock",
+                "mode": "embedding",
+                "input_cost_per_query": 7e-05,
+                "input_cost_per_video_per_second": 0.0007,
+                "output_cost_per_token": 0.0,
+            },
+            "image-fixture": {
+                "litellm_provider": "openai",
+                "mode": "image_generation",
+                "input_cost_per_token": 1e-06,
+            },
+            "chat-fixture": {
+                "litellm_provider": "openai",
+                "mode": "chat",
+                "input_cost_per_token": 1e-06,
+                "output_cost_per_token": 4e-06,
+            },
+        }
+
+        filtered = script.filter_catalog(upstream)
+
+        assert set(filtered) == {"text-embedding-fixture", "chat-fixture"}
+        assert filtered["text-embedding-fixture"]["mode"] == "embedding"
+        # Capability flags are still stripped from the kept embedding row.
+        assert "supports_vision" not in filtered["text-embedding-fixture"]
+
     def test_update_model_moonshot_keys_survive_stub_litellm_merge(self) -> None:
         script = _load_update_model_prices()
         current = {

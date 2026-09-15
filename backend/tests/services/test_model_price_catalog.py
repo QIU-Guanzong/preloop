@@ -22,6 +22,31 @@ def test_vendored_catalog_exists_with_provenance() -> None:
     assert meta["model_count"] > 500
 
 
+def test_vendored_catalog_prices_embedding_models() -> None:
+    """The gateway serves embeddings, so the snapshot has to price them.
+
+    Without embedding rows every vector call the gateway meters would land as
+    ``cost_source='unpriced'``. The named model is the one the OpenAI-
+    compatible route is most often pointed at; the mode assertion keeps a
+    future refresh from silently filtering embeddings back out.
+    """
+    raw = json.loads(CATALOG_PATH.read_text())
+    entry = raw.get("text-embedding-3-small")
+    assert entry is not None
+    assert entry["mode"] == "embedding"
+    assert entry["input_cost_per_token"] > 0
+    embedding_entries = [
+        value
+        for key, value in raw.items()
+        if key != "_preloop_meta" and (value or {}).get("mode") == "embedding"
+    ]
+    assert len(embedding_entries) > 10
+    # Usage is metered in tokens, so an embedding row without a per-token
+    # input price could only ever be billed as $0.
+    for value in embedding_entries:
+        assert isinstance(value.get("input_cost_per_token"), (int, float))
+
+
 def test_load_catalog_registers_prices_with_litellm(tmp_path) -> None:
     """register_model merges catalog entries into litellm.model_cost."""
     snapshot = {
