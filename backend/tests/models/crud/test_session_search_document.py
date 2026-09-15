@@ -21,6 +21,18 @@ from preloop.models.models.session_search_document import (
 OCCURRED_AT = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
 
 
+def _chunks(*texts, role=None, status=None):
+    return [
+        SessionSearchChunk(
+            content=value,
+            chunk_index=index,
+            role=role,
+            status=status,
+        )
+        for index, value in enumerate(texts)
+    ]
+
+
 def _session(db_session, account_id, *, source_id="session-a"):
     return crud_runtime_session.upsert_by_source(
         db_session,
@@ -36,22 +48,32 @@ def _session(db_session, account_id, *, source_id="session-a"):
     )
 
 
-def _chunks(*texts):
-    return [
-        SessionSearchChunk(content=value, chunk_index=index)
-        for index, value in enumerate(texts)
-    ]
-
-
-def _write(db_session, account_id, session, *texts, source_id="message-1"):
+def _write(
+    db_session,
+    account_id,
+    session,
+    *texts,
+    source_id="message-1",
+    occurred_at=OCCURRED_AT,
+    role=None,
+    status=None,
+):
     return crud_session_search_document.replace_source_chunks(
         db_session,
         account_id=account_id,
         runtime_session_id=session.id,
         source_kind=SOURCE_KIND_TRANSCRIPT_MESSAGE,
         source_id=source_id,
-        occurred_at=OCCURRED_AT,
-        chunks=_chunks(*texts),
+        occurred_at=occurred_at,
+        chunks=[
+            SessionSearchChunk(
+                content=value,
+                chunk_index=index,
+                role=role,
+                status=status,
+            )
+            for index, value in enumerate(texts)
+        ],
     )
 
 
@@ -136,6 +158,22 @@ def test_unchanged_content_hash_is_a_no_op_and_a_change_replaces(db_session, tes
         )
         == 2
     )
+
+    later = OCCURRED_AT.replace(hour=13)
+    metadata_only = _write(
+        db_session,
+        test_user.account_id,
+        session,
+        "one",
+        "two",
+        occurred_at=later,
+        status="closed",
+    )
+
+    assert sorted(str(row.id) for row in metadata_only) != first_ids
+    assert [row.content for row in metadata_only] == ["one", "two"]
+    assert metadata_only[0].occurred_at == later
+    assert metadata_only[0].status == "closed"
 
     changed = _write(db_session, test_user.account_id, session, "one", "three")
 

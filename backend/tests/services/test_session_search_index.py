@@ -189,6 +189,53 @@ def test_free_text_credential_is_stored_redacted(db_session, test_user):
     assert stored[0].redaction_state == REDACTION_STATE_REDACTED
 
 
+def test_bare_provider_key_in_free_text_is_stored_redacted(db_session, test_user):
+    """A provider key pasted without a label is still masked."""
+    session = _session(db_session, test_user.account_id)
+    bare_key = "sk-abcdefghijklmnopqrstuvwxyz123456"
+
+    stored = index_transcript_message(
+        db_session,
+        account_id=test_user.account_id,
+        runtime_session_id=session.id,
+        source_id="message-bare-key",
+        text=f"paste {bare_key} into the client",
+        role="user",
+        occurred_at=OCCURRED_AT,
+    )
+
+    assert len(stored) == 1
+    assert bare_key not in stored[0].content
+    assert "[redacted]" in stored[0].content
+    assert stored[0].redaction_state == REDACTION_STATE_REDACTED
+
+
+def test_pem_private_key_in_free_text_is_stored_redacted(db_session, test_user):
+    """A PEM private key block in free text is not stored verbatim."""
+    session = _session(db_session, test_user.account_id)
+    pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIIEowIBAAKCAQEA0secretpayloadnotreal\n"
+        "-----END RSA PRIVATE KEY-----"
+    )
+
+    stored = index_transcript_message(
+        db_session,
+        account_id=test_user.account_id,
+        runtime_session_id=session.id,
+        source_id="message-pem",
+        text=f"rotate this key:\n{pem}",
+        role="user",
+        occurred_at=OCCURRED_AT,
+    )
+
+    assert len(stored) == 1
+    assert "MIIEowIBAAKCAQEA0secretpayloadnotreal" not in stored[0].content
+    assert "BEGIN RSA PRIVATE KEY" not in stored[0].content
+    assert "[redacted]" in stored[0].content
+    assert stored[0].redaction_state == REDACTION_STATE_REDACTED
+
+
 def test_writer_failure_never_fails_the_call_that_triggered_it(
     db_session, test_user, caplog
 ):
@@ -224,6 +271,39 @@ def test_writer_failure_never_fails_the_call_that_triggered_it(
         )
         == 0
     )
+
+
+def test_failed_corpus_commit_rolls_back_before_swallow(db_session, test_user, caplog):
+    """A failed outer commit recovers the session, then the writer swallows."""
+    session = _session(db_session, test_user.account_id)
+    usage = _gateway_usage(db_session, test_user, session)
+    rollback_calls: list[bool] = []
+    original_rollback = db_session.rollback
+
+    def _rollback() -> None:
+        rollback_calls.append(True)
+        original_rollback()
+
+    with patch.object(
+        db_session, "commit", side_effect=RuntimeError("corpus commit refused")
+    ):
+        with patch.object(db_session, "rollback", side_effect=_rollback):
+            with caplog.at_level(logging.WARNING):
+                stored = index_gateway_interaction(
+                    db_session,
+                    usage=usage,
+                    request_payload={"input": "a prompt"},
+                    response_payload={"output_text": "an answer"},
+                    commit=True,
+                )
+
+    assert stored == []
+    assert rollback_calls
+    assert any(
+        "Session search indexing failed" in record.message for record in caplog.records
+    )
+    # The next query must not raise PendingRollbackError.
+    assert crud_api_usage.get(db_session, id=str(usage.id)).id == usage.id
 
 
 def test_kill_switch_writes_nothing_and_logs_no_failure(db_session, test_user, caplog):
