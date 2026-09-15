@@ -117,6 +117,17 @@ export interface Flow {
   webhook_config?: FlowWebhookConfig;
   allowed_mcp_servers?: string[];
   allowed_mcp_tools?: Array<{ server_name: string; tool_name: string }>;
+  /**
+   * Delegation allowlist: the flows an execution of this flow may run, each
+   * with optional per child ceilings. Unset and `[]` are the same permission,
+   * "this flow may call nothing".
+   */
+  callable_flows?: Array<{
+    flow: string;
+    max_children?: number | null;
+    max_usd_per_child?: number | null;
+    allow_self?: boolean;
+  }> | null;
   git_clone_config?: GitCloneConfig;
   notifications?: FlowNotifications | null;
   custom_commands?: FlowCustomCommands;
