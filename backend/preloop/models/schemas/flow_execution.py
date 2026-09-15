@@ -235,6 +235,31 @@ class FlowExecutionBase(BaseModel):
         None,
         description="Shared ID linking executions created by one matrix/batch trigger",
     )
+    parent_execution_id: Optional[uuid.UUID] = Field(
+        None,
+        description=(
+            "Execution that directly started this one (the delegation tree "
+            "edge). Null for a root run and for executions created before "
+            "lineage was recorded."
+        ),
+    )
+    root_execution_id: Optional[uuid.UUID] = Field(
+        None,
+        description=(
+            "First execution of this lineage. Null on the root itself and "
+            "on executions created before lineage was recorded. The whole "
+            "tree is the root row matched by its own id plus rows whose "
+            "root_execution_id points at that root."
+        ),
+    )
+    delegation_depth: int = Field(
+        0,
+        description=(
+            "Distance from the root of the lineage: 0 for a root run, 1 for "
+            "a direct child, and so on. Existing rows backfilled by the "
+            "migration read back as 0."
+        ),
+    )
     tool_calls_count: Optional[int] = Field(
         0, description="Total number of tool/MCP calls made during execution"
     )

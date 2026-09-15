@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   asset-register` and `preloop export incident-candidates` in the CLI, and
   docs at `docs/guide/dora-agent-slice.md`.
 
+- Execution lineage fields on the flow-execution API response.
+  `GET /api/v1/flows/executions/{id}` now reports `parent_execution_id`,
+  `root_execution_id` and `delegation_depth` so a caller can tell a root run
+  from a delegated child without reading logs. Executions that predate the
+  columns, and every creation path that does not set lineage, read back as
+  roots (no parent, no root id, depth 0).
+
 ### Removed
 
 - Flow failure comments. `notifications.on_failure.comment_on_trigger_issue`
