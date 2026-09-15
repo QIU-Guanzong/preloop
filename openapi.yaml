@@ -15327,6 +15327,13 @@ components:
           description: Coarse machine-readable failure class for terminal executions
             (runner_conflict, model_transient, agent_error, ...). Null when the execution
             succeeded, is still running, or predates the field.
+        queued_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Queued Reason
+          description: Why a PENDING execution has not been admitted yet (account_concurrency_cap).
+            Null for every other row.
         retry_of_execution_id:
           anyOf:
           - type: string
@@ -15922,6 +15929,50 @@ components:
           title: Notification Emails
       type: object
       title: BudgetPolicyUpdate
+    CallableFlowEntry:
+      properties:
+        flow:
+          type: string
+          maxLength: 255
+          minLength: 1
+          title: Flow
+          description: Slug or name of the flow that may be called, resolved inside
+            the calling account. A reference that names no flow in the account is
+            rejected on write.
+        max_children:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Max Children
+          description: Maximum number of children one execution of the calling flow
+            may start through this entry. Unset means no per entry count ceiling.
+        max_usd_per_child:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Max Usd Per Child
+          description: Maximum spend in USD for each child started through this entry.
+            Unset means no per child cost ceiling.
+        allow_self:
+          type: boolean
+          title: Allow Self
+          description: Explicit opt in to a self reference. A flow calling itself
+            is a recursion risk, so it has to be asked for by name.
+          default: false
+      additionalProperties: false
+      type: object
+      required:
+      - flow
+      title: CallableFlowEntry
+      description: 'One delegation allowlist entry: a flow this flow may run, with
+        ceilings.
+
+
+        ``extra=''forbid''`` is deliberate. A misspelled key in an allowlist is a
+
+        ceiling that silently does not apply, so an unknown key is rejected on
+
+        write rather than stored and ignored.'
     ChainBreakRead:
       properties:
         kind:
@@ -17089,6 +17140,17 @@ components:
           type: array
           title: Allowed Mcp Tools
           default: []
+        callable_flows:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/CallableFlowEntry'
+            type: array
+          - type: 'null'
+          title: Callable Flows
+          description: 'Delegation allowlist: the flows an execution of this flow
+            is permitted to run, each with optional per child ceilings. Unset or an
+            empty list means no delegation, which is the default for every flow. Nothing
+            enforces the list yet.'
         git_clone_config:
           anyOf:
           - $ref: '#/components/schemas/GitCloneConfig-Input'
@@ -17276,6 +17338,13 @@ components:
           description: Coarse machine-readable failure class for terminal executions
             (runner_conflict, model_transient, agent_error, ...). Null when the execution
             succeeded, is still running, or predates the field.
+        queued_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Queued Reason
+          description: Why a PENDING execution has not been admitted yet (account_concurrency_cap).
+            Null for every other row.
         retry_of_execution_id:
           anyOf:
           - type: string
@@ -17561,6 +17630,14 @@ components:
             model_config, no_confirmation, setup_failed, tool_error, agent_error,
             timeout, cancelled, unknown. Null for successful or still-running executions,
             and for executions that predate this field.'
+        queued_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Queued Reason
+          description: 'Why a PENDING execution has not been admitted yet: account_concurrency_cap
+            when the account already has its maximum number of executions running.
+            Cleared when the execution is claimed; null for every other row.'
         retry_of_execution_id:
           anyOf:
           - type: string
@@ -17855,6 +17932,17 @@ components:
             type: array
           - type: 'null'
           title: Allowed Mcp Tools
+        callable_flows:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/CallableFlowEntry'
+            type: array
+          - type: 'null'
+          title: Callable Flows
+          description: 'Delegation allowlist: the flows an execution of this flow
+            is permitted to run, each with optional per child ceilings. Unset or an
+            empty list means no delegation, which is the default for every flow. Nothing
+            enforces the list yet.'
         git_clone_config:
           anyOf:
           - $ref: '#/components/schemas/GitCloneConfig-Output'
@@ -18102,6 +18190,17 @@ components:
             type: array
           - type: 'null'
           title: Allowed Mcp Tools
+        callable_flows:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/CallableFlowEntry'
+            type: array
+          - type: 'null'
+          title: Callable Flows
+          description: 'Delegation allowlist: the flows an execution of this flow
+            is permitted to run, each with optional per child ceilings. Unset or an
+            empty list means no delegation, which is the default for every flow. Nothing
+            enforces the list yet.'
         git_clone_config:
           anyOf:
           - $ref: '#/components/schemas/GitCloneConfig-Input'

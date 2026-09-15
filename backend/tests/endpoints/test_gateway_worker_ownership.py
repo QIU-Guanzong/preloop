@@ -206,8 +206,9 @@ async def test_three_streams_keep_two_slot_pool_and_worker_sessions_independent(
                 "preloop.services.openai_gateway.ModelGatewayEventEmitter.emit_for_usage"
             ),
             patch(
-                "preloop.services.openai_gateway.GatewayUsageSearchService.auto_index_interaction"
+                "preloop.services.openai_gateway.GatewayUsageSearchService.build_index_document"
             ),
+            patch("preloop.services.openai_gateway.get_gateway_usage_index_queue"),
         ):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=rig.app, raise_app_exceptions=False),
@@ -332,8 +333,9 @@ async def test_repeated_cancellation_drains_accounting_owned_session(
                 "preloop.services.openai_gateway.ModelGatewayEventEmitter.emit_for_usage"
             ),
             patch(
-                "preloop.services.openai_gateway.GatewayUsageSearchService.auto_index_interaction"
+                "preloop.services.openai_gateway.GatewayUsageSearchService.build_index_document"
             ),
+            patch("preloop.services.openai_gateway.get_gateway_usage_index_queue"),
         ):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=asgi_app), base_url="http://test"
@@ -461,8 +463,9 @@ async def test_http_failure_closes_every_owned_database_phase(
                 "preloop.services.openai_gateway.ModelGatewayEventEmitter.emit_for_usage"
             ),
             patch(
-                "preloop.services.openai_gateway.GatewayUsageSearchService.auto_index_interaction"
+                "preloop.services.openai_gateway.GatewayUsageSearchService.build_index_document"
             ),
+            patch("preloop.services.openai_gateway.get_gateway_usage_index_queue"),
         ):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=rig.app, raise_app_exceptions=False),
@@ -715,8 +718,9 @@ async def test_native_transports_keep_credential_orm_inside_worker(
                 "preloop.services.openai_gateway.ModelGatewayEventEmitter.emit_for_usage"
             ),
             patch(
-                "preloop.services.openai_gateway.GatewayUsageSearchService.auto_index_interaction"
+                "preloop.services.openai_gateway.GatewayUsageSearchService.build_index_document"
             ),
+            patch("preloop.services.openai_gateway.get_gateway_usage_index_queue"),
         ):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=rig.app, raise_app_exceptions=True),

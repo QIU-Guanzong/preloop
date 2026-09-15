@@ -1040,6 +1040,39 @@ describe('router', () => {
       ).to.equal('/console/agents/a%201');
     });
 
+    it('urlForPath stays absolute from a nested page', () => {
+      // preloop/preloop: the executions list built its row hrefs here while
+      // sitting on /console/flows/executions, and every link came back as
+      // /console/flows/console/flows/executions/<id>, a 404. Without a
+      // <base href> document.baseURI is the current page, so resolving an
+      // app path against it repeats the directory the page is already in.
+      window.history.replaceState(null, '', '/console/flows/executions');
+      expect(router.urlForPath('/console/flows/executions/exec-1')).to.equal(
+        '/console/flows/executions/exec-1'
+      );
+      window.history.replaceState(null, '', '/console/flows/flow-7');
+      expect(router.urlForPath('/console/flows/executions/exec-1')).to.equal(
+        '/console/flows/executions/exec-1'
+      );
+      expect(router.urlForPath('/console/flows/executions')).to.equal(
+        '/console/flows/executions'
+      );
+    });
+
+    it('urlForPath honours an explicit base href prefix', () => {
+      const base = document.createElement('base');
+      base.setAttribute('href', '/app/');
+      document.head.append(base);
+      try {
+        window.history.replaceState(null, '', '/app/console/flows/flow-7');
+        expect(router.urlForPath('/console/flows/executions/exec-1')).to.equal(
+          '/app/console/flows/executions/exec-1'
+        );
+      } finally {
+        base.remove();
+      }
+    });
+
     it('Router.go reports false when no router is listening', async () => {
       router.unsubscribe();
       expect(Router.go('/anywhere')).to.equal(false);

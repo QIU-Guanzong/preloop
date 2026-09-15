@@ -80,6 +80,10 @@ from preloop.models.models.audit_chain import (
 )
 from preloop.models.models.audit_log import AuditLog
 from preloop.services import record_signing
+from preloop.services.service_roles import (
+    background_passes_allowed,
+    current_service_role,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -892,6 +896,15 @@ class AuditChainSealer:
         """Start the sealing background task."""
         if self._running:
             logger.warning("Audit chain sealer is already running")
+            return
+        if not background_passes_allowed():
+            # A pass walks every account and competes for memory with the
+            # request bodies a gateway replica is already holding. See
+            # preloop.services.service_roles.
+            logger.info(
+                "Audit chain sealer not started for %s role.",
+                current_service_role(),
+            )
             return
         self._running = True
         self._task = asyncio.create_task(self._seal_loop())

@@ -11,7 +11,10 @@ from sqlalchemy.orm import Session
 
 from preloop.models.crud import crud_flow, crud_flow_execution
 from preloop.models.schemas.flow import FlowCreate
-from preloop.models.schemas.flow_execution import FlowExecutionCreate
+from preloop.models.schemas.flow_execution import (
+    FlowExecutionCreate,
+    FlowExecutionUpdate,
+)
 from preloop.services.execution_recovery import ExecutionRecoveryService
 from preloop.services.flow_execution_dispatcher import (
     EXECUTE_FLOW_TASK,
@@ -430,3 +433,37 @@ async def test_missing_flow_preflight_terminates_claimed_execution(
     assert execution.failure_category == "runner_error"
     assert execution.orchestrator_worker_id is None
     assert "Flow no longer exists" in execution.error_message
+
+
+def test_claim_refuses_a_queued_execution_stopped_from_the_console(
+    db_session: Session, flow_for_claim
+) -> None:
+    """A run stopped while queued is never picked up afterwards.
+
+    The console stop writes STOPPED on the row itself, but the dispatch
+    message for that run can still be sitting in a worker's queue. The claim
+    is what decides whether it starts, and it only claims a row in an active
+    orchestrator status, so the stop holds without a runtime ever existing.
+    """
+    execution = _create_pending_execution(db_session, flow_for_claim.id)
+
+    crud_flow_execution.update(
+        db_session,
+        db_obj=execution,
+        obj_in=FlowExecutionUpdate(
+            status="STOPPED",
+            error_message="Manually stopped by user",
+            end_time=datetime.now(timezone.utc),
+        ),
+    )
+    db_session.commit()
+
+    assert (
+        crud_flow_execution.claim_execution(
+            db_session,
+            execution_id=execution.id,
+            worker_id="worker-a",
+            stale_after_seconds=120,
+        )
+        is None
+    )

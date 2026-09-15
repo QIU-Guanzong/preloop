@@ -8,6 +8,7 @@ from unittest.mock import patch, AsyncMock
 import pytest
 
 from preloop.agents.opencode import OpenCodeAgent
+from preloop.utils.execve_limits import PROMPT_FILE_PATH
 
 _HAS_NODE = shutil.which("node") is not None
 _SKIP_WITHOUT_NODE = pytest.mark.skipif(
@@ -166,8 +167,13 @@ class TestOpenCodeModelResolution:
 class TestOpenCodeBuildScript:
     """Test _build_opencode_script method."""
 
-    def test_script_contains_prompt(self):
-        """Generated script contains the base64-encoded prompt."""
+    def test_script_carries_no_prompt_bytes_at_all(self):
+        """Neither the prompt nor its base64 appears in the script.
+
+        This is the exact shape that broke preloop/preloop#609: an opencode
+        script with an 83 KiB prompt base64'd into it came to 132,681 bytes,
+        1,609 bytes past the 128 KiB a single execve string may be.
+        """
         import base64
 
         agent = OpenCodeAgent({})
@@ -179,9 +185,9 @@ class TestOpenCodeBuildScript:
             "flow_name": "test-flow",
         }
         script = agent._build_opencode_script(context)
-        # Prompt is base64-encoded for shell safety
-        expected_b64 = base64.b64encode(prompt.encode()).decode()
-        assert expected_b64 in script
+        assert prompt not in script
+        assert base64.b64encode(prompt.encode()).decode() not in script
+        assert f'-- "$(cat {PROMPT_FILE_PATH})"' in script
 
     def test_script_contains_model(self):
         """Script logs the configured model."""

@@ -383,8 +383,14 @@ class RemoteRunnerExecutor(AgentExecutor):
             payload = {key: value for key, value in payload.items() if key in allowed}
             payload["agent_config"] = {"host_exec_profile": profile}
             payload["completion_protocol"] = "host_exec"
-        elif resume_from:
-            payload["resume_from"] = resume_from
+        else:
+            # Docker launch already carries the prompt as chunked launch env.
+            # Leaving it on the lease makes the runner CLI copy it into
+            # AGENT_PROMPT for `docker -e`, which can still hit MAX_ARG_STRLEN.
+            # hydrate_runner_job falls back to execution.resolved_input_prompt.
+            payload.pop("prompt", None)
+            if resume_from:
+                payload["resume_from"] = resume_from
         return payload
 
     def _flow_for_execution(self, execution: Any) -> Any:

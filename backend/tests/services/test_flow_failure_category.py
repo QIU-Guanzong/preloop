@@ -32,6 +32,29 @@ STAGING_MESSAGES = [
         "list too long",
         "runner_error",
     ),
+    # preloop/preloop#609, the review bot's verdict on a Dependabot PR whose
+    # body was 34,908 bytes of release notes.
+    (
+        "Preloop review failed: exec /bin/bash: argument list too long",
+        "runner_error",
+    ),
+    # The same failure caught by the pre-launch guard instead of by the
+    # kernel. It must not drift into its own bucket: it is a runner error,
+    # reported earlier and with the offending string named.
+    (
+        "Cannot start agent Job agent-a8844f7a: launch payload exceeds the "
+        "execve string limit. env[PRELOOP_INNER_SCRIPT_0] is 133000 bytes, "
+        "which exceeds the 126976 byte per-string launch budget by 6024 "
+        "bytes (Linux caps one execve string at MAX_ARG_STRLEN, 131072 "
+        "bytes).",
+        "runner_error",
+    ),
+    (
+        "Cannot start opencode container for a8844f7a: launch payload "
+        "exceeds the total argument budget. The launch would pass 2097152 "
+        "bytes of arguments and environment",
+        "runner_error",
+    ),
     (
         "stream error: Upstream provider disconnected mid-stream after 41s",
         "model_transient",

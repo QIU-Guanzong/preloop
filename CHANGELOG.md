@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server keeps the note deliverable for 24 hours. `--json` emits the note
   id and target only.
 
+- `{{name|truncate(N)}}` prompt-template filter. `N` is a byte cap, the
+  cut is on a UTF-8 boundary, and a marker names the full size so the
+  agent can fetch the rest. Bare `|truncate` is 16 KiB. Preset 002
+  (pull-request reviewer) caps the description at 16 KiB.
+- Chunked agent launch-payload environment:
+  `PRELOOP_AGENT_PROMPT_0..N` / `_CHUNKS` / `_BYTES` reassembled at
+  `AGENT_PROMPT_FILE` (`/tmp/preloop/prompt.txt`), and
+  `PRELOOP_INNER_SCRIPT_0..N` for the Kubernetes inner script.
+  `AGENT_PROMPT` (and OpenHands `PROMPT`) is set only when the prompt
+  is 64 KiB or less. Custom images must not require `AGENT_PROMPT`
+  above 64 KiB. Docs in `ARCHITECTURE.md` and
+  `docs/architecture/flows.md`.
 - Flow-execution workers run up to `FLOW_EXECUTION_MAX_INFLIGHT` hosted
   monitors per process (default 10). The monitor loop is wait-bound; other
   worker pools stay serial. Helm sets `flowExecution.maxInflight` and a
@@ -51,6 +63,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller can tell a root run from a delegated child without reading logs.
   Executions that predate the columns, and every creation path that does
   not set lineage, read back as roots (no parent, no root id, depth 0).
+- Per-account flow-execution admission cap
+  `FLOW_EXECUTION_MAX_RUNNING_PER_ACCOUNT` (default 3, Helm
+  `flowExecution.maxRunningPerAccount`). An account may override it through
+  `account.meta_data["flow_execution_max_running_per_account"]`. A refused
+  execution stays PENDING with `queued_reason=account_concurrency_cap`.
+  One flow also keeps at most one active run per tracker object.
 
 ### Removed
 
@@ -64,6 +82,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   treatment of `notifications.on_failure.attention_item`.
 
 ### Fixed
+
+- Agent launch no longer fails with `exec /bin/bash: argument list too
+  long` when a rendered prompt or Kubernetes inner script exceeds
+  Linux `MAX_ARG_STRLEN` (131072 bytes). The prompt and script travel
+  as base64 chunks. A pre-launch guard refuses a payload that reaches
+  or exceeds the per-string or total budget, with a named
+  `runner_error`. OpenHands (the default `agent_type`) uses the same
+  transport. Refs #609.
+- A labeled trigger matches the label the event carries, not the issue's
+  whole label list. A flow already active on that issue or pull request
+  coalesces further triggers instead of starting another run.
 
 - GitHub App trackers keep their installation binding when edited. The
   edit modal used to run the API-token path: `POST
@@ -95,7 +124,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a 90% memory target. Hosted idle RSS is ~650Mi; a 256Mi request
   made HPA report ~250% and pin at maxReplicas while CPU was idle. More
   replicas copy that idle RSS. Use maxReplicas for real CPU/traffic, not to
-  paper over an undersized request.
+  paper over an undersized request. Search-corpus indexing is queued off
+  the response path, bounded by `GATEWAY_USAGE_INDEX_QUEUE_MAX_PENDING`
+  (default 256) and `GATEWAY_USAGE_INDEX_QUEUE_ENABLED`. Dedicated gateway
+  pods still run no audit-seal, retention, or optimization passes, so at
+  least one `api` or `all` process must remain.
 - CodeQL advanced setup uploads SARIF so Scorecard SAST sees every push and
   pull request. Disable GitHub default CodeQL setup or the upload is
   rejected.

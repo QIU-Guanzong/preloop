@@ -1044,6 +1044,60 @@ describe('FlowExecutionsView', () => {
       ).to.be.true;
     });
 
+    it('stops a queued run and shows it as STOPPED without a reload', async () => {
+      // A run that never started: the stop command writes STOPPED itself and
+      // there is no runtime to publish a status update, so the row has to
+      // change on the strength of the accepted command. The follow-up list
+      // read is held open here, and still answers PENDING when it lands, the
+      // way a read that raced the write would.
+      const pending = [
+        {
+          id: 'exec-queued',
+          flow_id: 'flow-1',
+          flow_name: 'Automated runs',
+          status: 'PENDING',
+          start_time: '2026-09-15T15:25:00Z',
+        },
+      ];
+      let release: () => void = () => {};
+      const reload = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let listReads = 0;
+      let commands = 0;
+      fetchStub = sinon.stub(window, 'fetch').callsFake(async (input, init) => {
+        const url = String(input);
+        const method = (init?.method || 'GET').toUpperCase();
+        if (url.includes('/command') && method === 'POST') {
+          commands += 1;
+          return new Response(JSON.stringify({ status: 'stopped' }), {
+            status: 200,
+          });
+        }
+        listReads += 1;
+        if (listReads > 1) await reload;
+        return new Response(JSON.stringify(pending), { status: 200 });
+      });
+      const el = await render();
+
+      const statusText = () =>
+        (
+          el.shadowRoot?.querySelector('tbody tr td:nth-child(3)')
+            ?.textContent || ''
+        ).trim();
+      expect(statusText()).to.contain('Pending');
+
+      actionById(el, 'cancel').onClick?.();
+      await tick(20);
+      await clickDialogButton('Cancel run');
+
+      expect(commands, 'the stop was sent').to.equal(1);
+      expect(statusText(), 'the row still read Pending').to.contain('Stopped');
+
+      release();
+      await tick(20);
+    });
+
     it('says so when a retry comes back without a run to open', async () => {
       fetchStub = sinon.stub(window, 'fetch').callsFake(async (input) => {
         if (String(input).includes('/retry')) {
@@ -1091,6 +1145,67 @@ describe('FlowExecutionsView', () => {
       await tick(0);
 
       expect(unsubscribeState.calledOnce, 'state listener released').to.be.true;
+    });
+  });
+  describe('execution links', () => {
+    const startUrl = window.location.pathname + window.location.search;
+
+    afterEach(() => {
+      window.history.replaceState(null, '', startUrl);
+    });
+
+    /**
+     * Every link a run offers has to be an app-absolute path.
+     *
+     * The list is served at /console/flows/executions, so a link built
+     * relative to the page resolved to /console/flows/console/flows/... and
+     * 404ed. The assertion is deliberately blunt: any href this view hands
+     * out must start at the root.
+     */
+    it('keeps every execution link absolute from the executions page', async () => {
+      window.history.replaceState(null, '', '/console/flows/executions');
+      fetchStub = stub(EXECUTIONS);
+      const el = (await fixture(
+        html`<flow-executions-view></flow-executions-view>`
+      )) as FlowExecutionsView;
+      await tick();
+      await el.updateComplete;
+
+      const hrefs = Array.from(
+        el.shadowRoot?.querySelectorAll('a[href]') || []
+      ).map((anchor) => anchor.getAttribute('href') || '');
+      expect(hrefs.length, 'rows carry links').to.be.greaterThan(0);
+      for (const href of hrefs) {
+        expect(href, `${href} starts at the app root`).to.match(/^\//u);
+        expect(href, `${href} is not doubled`).to.not.contain(
+          '/console/flows/console/'
+        );
+      }
+
+      expect(hrefs).to.contain('/console/flows/executions/exec-aaaaaaaa-1');
+      expect(
+        (
+          el as unknown as { executionUrl: (e: unknown) => string }
+        ).executionUrl(EXECUTIONS[1])
+      ).to.equal('/console/flows/executions/exec-bbbbbbbb-2');
+
+      const actionHrefs = (
+        el as unknown as {
+          getRowActions: (e: unknown) => { href?: string }[];
+        }
+      )
+        .getRowActions(EXECUTIONS[0])
+        .map((action) => action.href)
+        .filter((href): href is string => typeof href === 'string');
+      expect(actionHrefs.length, 'row actions carry links').to.be.greaterThan(
+        0
+      );
+      for (const href of actionHrefs) {
+        expect(href, `${href} starts at the app root`).to.match(/^\//u);
+        expect(href, `${href} is not doubled`).to.not.contain(
+          '/console/flows/console/'
+        );
+      }
     });
   });
 });
