@@ -8,7 +8,7 @@ import {
   getAccountAgents,
   getAccountOrganization,
   getRunners,
-  getFlows,
+  getAllFlows,
   listOrganizations,
   listProjects,
   getFlowPresets,
@@ -355,6 +355,15 @@ export class PreloopFlowForm extends LitElement {
   @state()
   private accountFlows: any[] = [];
 
+  // True only after getAllFlows returned every page. The "not in this
+  // account" badge is a claim about the whole account, so it stays off
+  // while the list failed or stopped at the page cap.
+  @state()
+  private accountFlowsComplete = false;
+
+  @state()
+  private accountFlowsLoadError = false;
+
   @state()
   private longRunningAgents: any[] = [];
 
@@ -532,7 +541,7 @@ export class PreloopFlowForm extends LitElement {
         presets,
         runners,
         account,
-        flows,
+        flowsResult,
       ] = await Promise.all([
         getTrackers().catch(() => []),
         getAIModels().catch(() => []),
@@ -542,10 +551,26 @@ export class PreloopFlowForm extends LitElement {
         getFlowPresets().catch(() => []),
         getRunners().catch(() => []),
         getAccountOrganization().catch(() => null),
-        getFlows().catch(() => []),
+        getAllFlows()
+          .then((result) => ({ ok: true as const, ...result }))
+          .catch((error: unknown) => {
+            console.error(
+              'Failed to load account flows for the callable picker:',
+              error
+            );
+            return { ok: false as const };
+          }),
       ]);
 
-      this.accountFlows = Array.isArray(flows) ? flows : [];
+      if (flowsResult.ok) {
+        this.accountFlows = flowsResult.flows;
+        this.accountFlowsComplete = !flowsResult.truncated;
+        this.accountFlowsLoadError = false;
+      } else {
+        this.accountFlows = [];
+        this.accountFlowsComplete = false;
+        this.accountFlowsLoadError = true;
+      }
       this.trackers = trackers;
       this.models = models;
       this.availableTools = tools;
@@ -1924,7 +1949,7 @@ export class PreloopFlowForm extends LitElement {
         this.presetSnapshot.tools ||
       JSON.stringify(this.flow.trigger_event_types || []) !==
         this.presetSnapshot.trigger ||
-      this.hasCallableFlowEdits()
+      (this.delegationToolEnabled && this.hasCallableFlowEdits())
     );
   }
 
@@ -2227,17 +2252,44 @@ export class PreloopFlowForm extends LitElement {
           blank for no limit; the server is the authority on both.
         </p>
         ${
+          this.accountFlowsLoadError
+            ? html`<p
+                class="callable-flows-help"
+                data-callable-flows-load-error
+              >
+                The account's flows could not be loaded. Saved entries stay
+                listed; they are not marked as missing.
+              </p>`
+            : nothing
+        }
+        ${
+          !this.accountFlowsLoadError && !this.accountFlowsComplete
+            ? html`<p
+                class="callable-flows-help"
+                data-callable-flows-incomplete
+              >
+                This list may be incomplete. An entry is marked missing only
+                when the full account list has loaded.
+              </p>`
+            : nothing
+        }
+        ${
           others.length > 0
             ? others.map((candidate: any) =>
                 this.renderCallableFlowRow(candidate.name.trim(), { rejected })
               )
-            : html`<p class="callable-flows-empty" data-callable-flows-empty>
-                This account has no other flows yet, so there is nothing for
-                this flow to call. Create a second flow and it appears here.
-              </p>`
+            : this.accountFlowsLoadError
+              ? nothing
+              : html`<p class="callable-flows-empty" data-callable-flows-empty>
+                  This account has no other flows yet, so there is nothing for
+                  this flow to call. Create a second flow and it appears here.
+                </p>`
         }
         ${orphans.map((entry) =>
-          this.renderCallableFlowRow(entry.flow, { unknown: true, rejected })
+          this.renderCallableFlowRow(entry.flow, {
+            unknown: this.accountFlowsComplete && !this.accountFlowsLoadError,
+            rejected,
+          })
         )}
         ${
           selfName

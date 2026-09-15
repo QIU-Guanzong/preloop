@@ -2938,6 +2938,11 @@ export async function getAIModelGatewayUsageSearch(
 }
 
 // Flows
+/** Server default on `GET /api/v1/flows` (`limit: int = 100`). */
+export const FLOW_LIST_PAGE_SIZE = 100;
+/** Stop paging so a broken skip cannot loop forever. */
+export const FLOW_LIST_MAX_PAGES = 50;
+
 /**
  * The account's flows.
  *
@@ -2946,18 +2951,61 @@ export async function getAIModelGatewayUsageSearch(
  * list states a single period, and counting runs client-side from a sample
  * of recent executions while reading spend from a separate range endpoint is
  * how a row came to say "No run in the last 30d" beside $0.33.
+ *
+ * `skip` and `limit` map to the list endpoint. Omitting them keeps the
+ * server default of the first 100 rows.
  */
 export async function getFlows(
-  options: { statsSince?: string } = {}
+  options: { statsSince?: string; skip?: number; limit?: number } = {}
 ): Promise<any[]> {
-  const query = options.statsSince
-    ? `?stats_since=${encodeURIComponent(options.statsSince)}`
-    : '';
+  const params = new URLSearchParams();
+  if (options.statsSince) {
+    params.set('stats_since', options.statsSince);
+  }
+  if (options.skip !== undefined) {
+    params.set('skip', String(options.skip));
+  }
+  if (options.limit !== undefined) {
+    params.set('limit', String(options.limit));
+  }
+  const query = params.toString() ? `?${params.toString()}` : '';
   const response = await fetchWithAuth(`/api/v1/flows${query}`);
   if (!response.ok) {
     throw new Error('Failed to fetch flows');
   }
   return response.json();
+}
+
+/**
+ * Every flow in the account, paging past the server default of 100.
+ *
+ * The callable-flows picker names an entry "not in this account" from this
+ * list, so a truncated first page would invite the operator to clear a
+ * valid row. Failures throw; callers must not treat them as an empty
+ * account.
+ */
+export async function getAllFlows(
+  options: { statsSince?: string; pageSize?: number } = {}
+): Promise<{ flows: any[]; truncated: boolean }> {
+  const pageSize = options.pageSize ?? FLOW_LIST_PAGE_SIZE;
+  const flows: any[] = [];
+  let skip = 0;
+  for (let page = 0; page < FLOW_LIST_MAX_PAGES; page += 1) {
+    const batch = await getFlows({
+      statsSince: options.statsSince,
+      skip,
+      limit: pageSize,
+    });
+    if (!Array.isArray(batch)) {
+      throw new Error('Failed to fetch flows');
+    }
+    flows.push(...batch);
+    if (batch.length < pageSize) {
+      return { flows, truncated: false };
+    }
+    skip += pageSize;
+  }
+  return { flows, truncated: true };
 }
 
 export async function getFlow(flowId: string): Promise<any> {

@@ -6,6 +6,9 @@ import {
   invalidateApiCaches,
   AuthedElement,
   getFlowExecutions,
+  getFlows,
+  getAllFlows,
+  FLOW_LIST_MAX_PAGES,
   createFlow,
   updateFlow,
   listProjectsForOrg,
@@ -361,6 +364,95 @@ describe('api', () => {
         'RUNNING',
         'PENDING',
       ]);
+    });
+  });
+
+  describe('getFlows', () => {
+    const ok = (body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+    it('passes skip and limit for a paged list', async () => {
+      fetchStub.resolves(ok([]));
+
+      await getFlows({ skip: 100, limit: 100 });
+
+      const url = new URL(fetchStub.firstCall.args[0], window.location.origin);
+      expect(url.pathname).to.equal('/api/v1/flows');
+      expect(url.searchParams.get('skip')).to.equal('100');
+      expect(url.searchParams.get('limit')).to.equal('100');
+    });
+
+    it('throws when the list request fails', async () => {
+      fetchStub.resolves(new Response('error', { status: 500 }));
+      let message = '';
+      try {
+        await getFlows();
+      } catch (e: unknown) {
+        message = (e as Error).message;
+      }
+      expect(message).to.equal('Failed to fetch flows');
+    });
+  });
+
+  describe('getAllFlows', () => {
+    const ok = (body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+    it('pages until a short page', async () => {
+      fetchStub.onCall(0).resolves(
+        ok([
+          { id: '1', name: 'A' },
+          { id: '2', name: 'B' },
+        ])
+      );
+      fetchStub.onCall(1).resolves(ok([{ id: '3', name: 'C' }]));
+
+      const result = await getAllFlows({ pageSize: 2 });
+
+      expect(result.truncated).to.be.false;
+      expect(
+        result.flows.map((flow: { name: string }) => flow.name)
+      ).to.deep.equal(['A', 'B', 'C']);
+      expect(fetchStub.callCount).to.equal(2);
+      const first = new URL(
+        fetchStub.firstCall.args[0],
+        window.location.origin
+      );
+      const second = new URL(
+        fetchStub.secondCall.args[0],
+        window.location.origin
+      );
+      expect(first.searchParams.get('skip')).to.equal('0');
+      expect(first.searchParams.get('limit')).to.equal('2');
+      expect(second.searchParams.get('skip')).to.equal('2');
+      expect(second.searchParams.get('limit')).to.equal('2');
+    });
+
+    it('does not treat a failed page as an empty account', async () => {
+      fetchStub.resolves(new Response('error', { status: 500 }));
+      let message = '';
+      try {
+        await getAllFlows({ pageSize: 2 });
+      } catch (e: unknown) {
+        message = (e as Error).message;
+      }
+      expect(message).to.equal('Failed to fetch flows');
+    });
+
+    it('stops at the page cap and reports truncated', async () => {
+      fetchStub.callsFake(async () => ok([{ id: '1', name: 'A' }]));
+
+      const result = await getAllFlows({ pageSize: 1 });
+
+      expect(result.truncated).to.be.true;
+      expect(result.flows).to.have.lengthOf(FLOW_LIST_MAX_PAGES);
+      expect(fetchStub.callCount).to.equal(FLOW_LIST_MAX_PAGES);
     });
   });
 

@@ -27,14 +27,32 @@ const delegationTool = () => ({
   tool_name: DELEGATION_TOOL_NAME,
 });
 
+const isAccountFlowsList = (target: string): boolean => {
+  const path = target.split('?')[0];
+  return path.endsWith('/api/v1/flows');
+};
+
+const sliceAccountFlows = (
+  target: string,
+  rows: Array<Record<string, unknown>>
+): Array<Record<string, unknown>> => {
+  const url = new URL(target, 'http://local.test');
+  const skip = Number(url.searchParams.get('skip') || '0');
+  const limitParam = url.searchParams.get('limit');
+  if (limitParam === null) return rows.slice(skip);
+  return rows.slice(skip, skip + Number(limitParam));
+};
+
 describe('PreloopFlowForm callable flows picker', () => {
   let sandbox: SinonSandbox;
   let accountFlows: Array<Record<string, unknown>>;
+  let flowsListStatus: number;
 
   beforeEach(() => {
     localStorage.setItem('accessToken', 'test-access-token');
     localStorage.setItem('refreshToken', 'test-refresh-token');
     accountFlows = [...ACCOUNT_FLOWS];
+    flowsListStatus = 200;
     sandbox = sinon.createSandbox();
     sandbox.stub(window, 'fetch').callsFake(async (url) => {
       const target = String(url);
@@ -44,8 +62,13 @@ describe('PreloopFlowForm callable flows picker', () => {
       if (target.includes('/api/v1/tools')) {
         return new Response(JSON.stringify(TOOLS));
       }
-      if (target.endsWith('/api/v1/flows')) {
-        return new Response(JSON.stringify(accountFlows));
+      if (isAccountFlowsList(target)) {
+        if (flowsListStatus !== 200) {
+          return new Response('error', { status: flowsListStatus });
+        }
+        return new Response(
+          JSON.stringify(sliceAccountFlows(target, accountFlows))
+        );
       }
       return new Response(JSON.stringify([]));
     });
@@ -385,5 +408,65 @@ describe('PreloopFlowForm callable flows picker', () => {
     await toggleFlow(element, 'Retired flow', false);
     const payload = await submit(element);
     expect(payload.callable_flows).to.deep.equal([]);
+  });
+
+  it('pages past the 100-flow default so a later flow is not marked missing', async () => {
+    accountFlows = Array.from({ length: 101 }, (_, index) => ({
+      id: `flow-${index}`,
+      name: index === 100 ? 'Page two flow' : `Flow ${index}`,
+    }));
+    const element = await mountParent({
+      allowed_mcp_tools: [delegationTool()],
+      callable_flows: [{ flow: 'Page two flow' }],
+    });
+
+    const later = row(element, 'Page two flow');
+    expect(later).to.exist;
+    expect(later!.textContent).to.not.include('not in this account');
+    const checkbox = element.shadowRoot!.querySelector(
+      '[data-callable-flow-toggle="Page two flow"]'
+    ) as HTMLInputElement;
+    expect(checkbox.checked).to.be.true;
+  });
+
+  it('does not badge a saved entry missing when the flows list fails', async () => {
+    flowsListStatus = 500;
+    const element = await mountParent({
+      allowed_mcp_tools: [delegationTool()],
+      callable_flows: [{ flow: 'Child flow' }],
+    });
+
+    const saved = row(element, 'Child flow');
+    expect(saved).to.exist;
+    expect(saved!.textContent).to.not.include('not in this account');
+    expect(
+      element.shadowRoot!.querySelector('[data-callable-flows-load-error]')
+    ).to.exist;
+    expect(element.shadowRoot!.querySelector('[data-callable-flows-empty]')).to
+      .not.exist;
+  });
+
+  it('is not dirty from callable edits once the delegation tool is off', async () => {
+    const element = await mountParent({ allowed_mcp_tools: [] });
+    expect((element as any).hasPresetEdits()).to.be.false;
+
+    const toolCheckbox = element.shadowRoot!.querySelector(
+      `[data-builtin-tool="${DELEGATION_TOOL_NAME}"]`
+    ) as HTMLInputElement;
+    toolCheckbox.checked = true;
+    toolCheckbox.dispatchEvent(new CustomEvent('sl-change'));
+    await element.updateComplete;
+
+    await toggleFlow(element, 'Child flow', true);
+    expect((element as any).hasPresetEdits()).to.be.true;
+
+    toolCheckbox.checked = false;
+    toolCheckbox.dispatchEvent(new CustomEvent('sl-change'));
+    await element.updateComplete;
+
+    expect(section(element)).to.not.exist;
+    expect((element as any).hasPresetEdits()).to.be.false;
+    const payload = await submit(element);
+    expect('callable_flows' in payload).to.be.false;
   });
 });
