@@ -4,6 +4,11 @@ The delivery half of this shipped with operator notes, so these tests pin the
 half that is new: who the author is, which targets that author can reach, what
 happens when the call is malformed, and that the record and the ceiling are
 the same ones a human's note answers to.
+
+Every note that is expected to land is a note from a run to a run it started,
+because that is the whole of the default scope (#637): the ``delegated``
+fixture is the author's execution with the target running a child of it. The
+scope model itself is pinned in ``test_agent_note_scope.py``.
 """
 
 from __future__ import annotations
@@ -74,6 +79,67 @@ def _session_for(db_session, account, agent=None, *, source_id="workspace-1"):
     if agent is not None:
         agent.runtime_session_id = session.id
     db_session.flush()
+    return session
+
+
+def _execution(db_session, account, *, parent=None, session=None):
+    """One flow execution, optionally started by *parent* and on *session*.
+
+    The link to a session is the governed usage the run produced, which is
+    also how the note resolver finds a session for an execution.
+    """
+    from preloop.models import models
+
+    flow = models.Flow(
+        account_id=account.id,
+        name="Example flow",
+        prompt_template="Example",
+        agent_config={},
+    )
+    db_session.add(flow)
+    db_session.flush()
+    execution = models.FlowExecution(
+        flow_id=flow.id,
+        parent_execution_id=(parent.id if parent is not None else None),
+        root_execution_id=(
+            (parent.root_execution_id or parent.id) if parent is not None else None
+        ),
+        delegation_depth=((parent.delegation_depth or 0) + 1 if parent else 0),
+    )
+    db_session.add(execution)
+    db_session.flush()
+    if session is not None:
+        db_session.add(
+            ApiUsage(
+                account_id=account.id,
+                endpoint="/v1/chat/completions",
+                method="POST",
+                status_code=200,
+                duration=0.2,
+                flow_execution_id=execution.id,
+                runtime_session_id=session.id,
+                timestamp=datetime.now(UTC).replace(tzinfo=None),
+            )
+        )
+        db_session.flush()
+    return execution
+
+
+@pytest.fixture
+def author_run(db_session, account):
+    """The run the author is calling from. Notes are scoped to its descent."""
+    return _execution(db_session, account)
+
+
+@pytest.fixture
+def delegated(db_session, account, target, author_run):
+    """*target*, running a child of *author_run*: the default note scope.
+
+    Returns the target's runtime session, which is what the resolver hands
+    back and what delivery reads.
+    """
+    session = _session_for(db_session, account, target)
+    _execution(db_session, account, parent=author_run, session=session)
     return session
 
 
@@ -259,45 +325,18 @@ def test_a_malformed_target_id_is_refused_not_raised(db_session, account, author
 # --- targets ----------------------------------------------------------------
 
 
-def _execution_on_session(db_session, account, session):
-    """One flow execution whose newest governed call names *session*."""
-    from preloop.models import models
-
-    flow = models.Flow(
-        account_id=account.id,
-        name="Example flow",
-        prompt_template="Example",
-        agent_config={},
-    )
-    db_session.add(flow)
-    db_session.flush()
-    execution = models.FlowExecution(flow_id=flow.id)
-    db_session.add(execution)
-    db_session.flush()
-    db_session.add(
-        ApiUsage(
-            account_id=account.id,
-            endpoint="/v1/chat/completions",
-            method="POST",
-            status_code=200,
-            duration=0.2,
-            flow_execution_id=execution.id,
-            runtime_session_id=session.id,
-            timestamp=datetime.now(UTC).replace(tzinfo=None),
-        )
-    )
-    db_session.flush()
-    return execution
-
-
-def test_a_session_target_reaches_that_session_only(db_session, account, author):
+def test_a_session_target_reaches_that_session_only(
+    db_session, account, author, author_run
+):
     """A session with no agent behind it is still a target."""
     session = _session_for(db_session, account, source_id="credential-flow")
+    _execution(db_session, account, parent=author_run, session=session)
 
     result = send_note_from_agent(
         db_session,
         account_id=str(account.id),
         author_agent_id=author.id,
+        author_execution_id=str(author_run.id),
         text="Only you.",
         runtime_session_id=str(session.id),
     )
@@ -308,16 +347,17 @@ def test_a_session_target_reaches_that_session_only(db_session, account, author)
 
 
 def test_an_execution_target_resolves_to_the_session_it_runs_on(
-    db_session, account, author, target
+    db_session, account, author, target, author_run
 ):
     """The execution path is the same resolver the REST route uses."""
     session = _session_for(db_session, account, target)
-    execution = _execution_on_session(db_session, account, session)
+    execution = _execution(db_session, account, parent=author_run, session=session)
 
     result = send_note_from_agent(
         db_session,
         account_id=str(account.id),
         author_agent_id=author.id,
+        author_execution_id=str(author_run.id),
         text="Your base branch moved.",
         execution_id=str(execution.id),
     )
@@ -347,15 +387,16 @@ def test_an_execution_with_no_governed_call_yet_is_refused(db_session, account, 
 
 
 def test_the_stored_author_is_the_agent_with_an_agent_credential(
-    db_session, account, author, target
+    db_session, account, author, target, author_run, delegated
 ):
     """The row names the agent, and the credential kind is not a user's."""
-    session = _session_for(db_session, account, target)
+    session = delegated
 
     result = send_note_from_agent(
         db_session,
         account_id=str(account.id),
         author_agent_id=author.id,
+        author_execution_id=str(author_run.id),
         text="The migration needs a downgrade before you push.",
         agent_id=str(target.id),
     )
@@ -377,13 +418,14 @@ def test_the_stored_author_is_the_agent_with_an_agent_credential(
 
 
 def test_the_author_is_never_taken_from_the_arguments(
-    db_session, account, author, target
+    db_session, account, author, target, author_run, delegated
 ):
     """A note is signed by the identity that called, not by what it claimed."""
     result = send_note_from_agent(
         db_session,
         account_id=str(account.id),
         author_agent_id=author.id,
+        author_execution_id=str(author_run.id),
         text="Signed by whom?",
         agent_id=str(target.id),
     )
@@ -400,14 +442,15 @@ def test_the_author_is_never_taken_from_the_arguments(
 
 
 def test_the_note_is_delivered_to_the_targets_next_turn(
-    db_session, account, author, target
+    db_session, account, author, target, author_run, delegated
 ):
     """Agent authored notes ride the rail human notes already ride."""
-    session = _session_for(db_session, account, target)
+    session = delegated
     send_note_from_agent(
         db_session,
         account_id=str(account.id),
         author_agent_id=author.id,
+        author_execution_id=str(author_run.id),
         text="Rebase before you push.",
         agent_id=str(target.id),
     )
@@ -441,12 +484,15 @@ def test_the_note_is_delivered_to_the_targets_next_turn(
     assert stored.delivery_channel == operator_notes.CHANNEL_GATEWAY
 
 
-def test_the_stored_envelope_is_the_same_a2a_shape(db_session, account, author, target):
+def test_the_stored_envelope_is_the_same_a2a_shape(
+    db_session, account, author, target, author_run, delegated
+):
     """No second envelope for agent authors: the same one, different author."""
     result = send_note_from_agent(
         db_session,
         account_id=str(account.id),
         author_agent_id=author.id,
+        author_execution_id=str(author_run.id),
         text="Check the flaky test first.",
         agent_id=str(target.id),
     )
@@ -469,7 +515,7 @@ def test_the_stored_envelope_is_the_same_a2a_shape(db_session, account, author, 
 
 
 def test_the_per_author_rate_limit_applies_to_agent_authors(
-    db_session, account, author, target, monkeypatch
+    db_session, account, author, target, author_run, delegated, monkeypatch
 ):
     """The same ceiling, keyed on the agent that wrote the notes."""
     monkeypatch.setattr(operator_notes, "NOTE_RATE_LIMIT_PER_HOUR", 3)
@@ -479,6 +525,7 @@ def test_the_per_author_rate_limit_applies_to_agent_authors(
             db_session,
             account_id=str(account.id),
             author_agent_id=author.id,
+            author_execution_id=str(author_run.id),
             text=f"note {index}",
             agent_id=str(target.id),
         )
@@ -488,6 +535,7 @@ def test_the_per_author_rate_limit_applies_to_agent_authors(
         db_session,
         account_id=str(account.id),
         author_agent_id=author.id,
+        author_execution_id=str(author_run.id),
         text="one more",
         agent_id=str(target.id),
     )
@@ -499,7 +547,7 @@ def test_the_per_author_rate_limit_applies_to_agent_authors(
 
 
 def test_the_rate_limit_is_per_author_not_per_account(
-    db_session, account, author, target, monkeypatch
+    db_session, account, author, target, author_run, delegated, monkeypatch
 ):
     """One noisy agent does not spend another agent's budget."""
     monkeypatch.setattr(operator_notes, "NOTE_RATE_LIMIT_PER_HOUR", 2)
@@ -509,12 +557,17 @@ def test_the_rate_limit_is_per_author_not_per_account(
         display_name="Second Reviewer",
         commit=True,
     )
+    # The second author needs its own reach: the scope is per run, so a
+    # second run of its own that started the same target session.
+    second_run = _execution(db_session, account)
+    _execution(db_session, account, parent=second_run, session=delegated)
 
     for index in range(2):
         send_note_from_agent(
             db_session,
             account_id=str(account.id),
             author_agent_id=author.id,
+            author_execution_id=str(author_run.id),
             text=f"note {index}",
             agent_id=str(target.id),
         )
@@ -523,6 +576,7 @@ def test_the_rate_limit_is_per_author_not_per_account(
             db_session,
             account_id=str(account.id),
             author_agent_id=author.id,
+            author_execution_id=str(author_run.id),
             text="over",
             agent_id=str(target.id),
         )["ok"]
@@ -534,6 +588,7 @@ def test_the_rate_limit_is_per_author_not_per_account(
             db_session,
             account_id=str(account.id),
             author_agent_id=second_author.id,
+            author_execution_id=str(second_run.id),
             text="mine",
             agent_id=str(target.id),
         )["ok"]
@@ -545,7 +600,7 @@ def test_the_rate_limit_is_per_author_not_per_account(
 
 
 def test_one_audit_row_per_call_names_the_agent_as_actor(
-    db_session, account, author, target
+    db_session, account, author, target, author_run, delegated
 ):
     """The act is recorded before the caller is told it worked."""
     before = datetime.now(UTC) - timedelta(minutes=1)
@@ -554,6 +609,7 @@ def test_one_audit_row_per_call_names_the_agent_as_actor(
         db_session,
         account_id=str(account.id),
         author_agent_id=author.id,
+        author_execution_id=str(author_run.id),
         text="Hold the deploy.",
         agent_id=str(target.id),
     )

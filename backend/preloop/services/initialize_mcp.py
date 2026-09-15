@@ -902,6 +902,10 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
 
         # The author is the identity the call already carries, never an
         # argument: an agent must not be able to sign a note as another one.
+        # The same is true of the execution the call is made from, which is
+        # what the note scope is keyed on (#637): it is written by the
+        # platform when the run is created, so an agent cannot claim a
+        # lineage that would let it reach further.
         caller = attribution_from_user_context(user_context)
         db = next(get_db_session())
         try:
@@ -913,6 +917,7 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
                 agent_id=agent_id,
                 runtime_session_id=runtime_session_id,
                 execution_id=execution_id,
+                author_execution_id=caller.execution_id,
             )
         finally:
             db.close()

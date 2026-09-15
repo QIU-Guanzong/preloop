@@ -78,9 +78,12 @@ DELIVERY_CHANNELS = (
 )
 
 #: Audit actions. ``sent`` is written before the API answers the author,
-#: ``delivered`` before the request carrying the note leaves Preloop.
+#: ``delivered`` before the request carrying the note leaves Preloop, and
+#: ``scope_denied`` before an agent author is told its target is out of reach
+#: (see :mod:`preloop.services.agent_note_scope`).
 AUDIT_NOTE_SENT = "agent.note_sent"
 AUDIT_NOTE_DELIVERED = "agent.note_delivered"
+AUDIT_NOTE_SCOPE_DENIED = "agent.note_scope_denied"
 
 #: Wire protocols the gateway speaks. Gemini is absent on purpose: it
 #: translates to a Responses payload and delegates to the Responses path.

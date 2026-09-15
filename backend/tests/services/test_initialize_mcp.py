@@ -307,6 +307,50 @@ class TestRegisteredToolBehaviour:
         assert kwargs["agent_id"] == str(target_agent_id)
         assert kwargs["text"] == "Rebase first."
 
+    async def test_send_note_takes_its_lineage_from_the_context(self, mcp_server):
+        """The run the note is scoped to is the one the platform recorded.
+
+        An agent that could name its own execution could name any execution,
+        and the note scope (#637) is keyed on exactly that id, so it comes
+        off the authenticated context and never off an argument.
+        """
+        fn = await self._fn(mcp_server, "send_note")
+        calling_execution = str(uuid4())
+        user_ctx = SimpleNamespace(
+            account_id=str(uuid4()),
+            username="u",
+            managed_agent_id=str(uuid4()),
+            runtime_session_id=None,
+            api_key_id=None,
+            flow_execution_id=calling_execution,
+            runtime_principal_name="Reviewer",
+        )
+        target_execution_id = str(uuid4())
+        with (
+            patch(
+                "preloop.services.dynamic_fastmcp_http.get_current_user_context",
+                return_value=user_ctx,
+            ),
+            patch(
+                "preloop.services.initialize_mcp.require_approval",
+                new=AsyncMock(return_value=(True, None)),
+            ),
+            patch(
+                "preloop.models.db.session.get_db_session",
+                return_value=iter([MagicMock()]),
+            ),
+            patch(
+                "preloop.services.agent_send_note.send_note_from_agent",
+                return_value={"ok": True, "note": {"note_id": "abc123"}},
+            ) as mock_send,
+        ):
+            await fn(text="Rebase first.", execution_id=target_execution_id)
+
+        kwargs = mock_send.call_args.kwargs
+        assert kwargs["author_execution_id"] == calling_execution
+        # The execution the agent named is the target, not the author.
+        assert kwargs["execution_id"] == target_execution_id
+
     async def test_send_note_returns_a_refusal_as_json(self, mcp_server):
         """A refusal reaches the model as data it can act on, not a stack."""
         import json
