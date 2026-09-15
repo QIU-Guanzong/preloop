@@ -599,6 +599,58 @@ def test_failed_lookup_keeps_unresolved_notification(monkeypatch) -> None:
     assert notifications == ["unavailable"]
 
 
+def test_submit_failure_notifies_queued_rows(monkeypatch) -> None:
+    """Executor reject after queue ownership still alerts notify=True rows."""
+    from types import SimpleNamespace
+
+    model_price_catalog.reset_lookup_state_for_tests()
+    monkeypatch.setenv("TESTING", "false")
+    monkeypatch.setattr("preloop.config.settings.model_price_live_lookup_enabled", True)
+    monkeypatch.setattr(
+        model_price_catalog,
+        "_ai_model_price_lookup_session",
+        _yield_lookup_model(
+            SimpleNamespace(
+                provider_name="openai",
+                model_identifier="recovery-submit-failure",
+                meta_data=None,
+                model_parameters=None,
+            )
+        ),
+    )
+
+    def _fail_submit(_worker):
+        key = next(iter(model_price_catalog._pending_lookups))
+        model_price_catalog._pending_usage[key].append(("row-joined", True))
+        model_price_catalog._pending_usage[key].append(("row-silent", False))
+        raise RuntimeError("synthetic executor reject")
+
+    monkeypatch.setattr(model_price_catalog._LOOKUP_EXECUTOR, "submit", _fail_submit)
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "preloop.services.unpriced_model_alert.notify_unpriced_usage_row",
+        lambda row, **kwargs: events.append((kwargs["refresh_status"], row)),
+    )
+
+    raised: RuntimeError | None = None
+    try:
+        model_price_catalog.schedule_price_lookup(
+            ai_model_id="model-1",
+            api_usage_id="row-current",
+            notify_after_lookup=True,
+        )
+    except RuntimeError as exc:
+        raised = exc
+    assert raised is not None
+    assert "synthetic executor reject" in str(raised)
+    assert events == [
+        ("submit_failed", "row-current"),
+        ("submit_failed", "row-joined"),
+    ]
+    assert model_price_catalog._pending_usage == {}
+    assert model_price_catalog._pending_lookups == set()
+
+
 def test_repricing_failure_still_notifies_unresolved_usage(monkeypatch) -> None:
     from types import SimpleNamespace
 

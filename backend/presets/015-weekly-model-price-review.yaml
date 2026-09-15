@@ -114,8 +114,9 @@ prompt_template: |
      artifacts, before committing. Fresh clones may not have installed hooks.
      Inspect the final diff; no unrelated source or account data belongs in it.
      Commit locally. Write /workspace/result.json last, a JSON object with
-     status (success or failure), summary, tests, commits, and unresolved
-     providers/policies. Include evidence dates and runtime compatibility.
+     "status": "success" | "failure", plus summary, tests, commits, and
+     unresolved providers/policies. Include evidence dates and runtime
+     compatibility.
 
   The PR is for human review. Merging a reviewed feed into the configured
   trusted publication branch permits running processes to ingest it on their

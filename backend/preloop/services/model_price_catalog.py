@@ -675,8 +675,19 @@ def schedule_price_lookup(
         _LOOKUP_EXECUTOR.submit(_run)
     except Exception:
         with _lookup_lock:
-            _pending_usage.pop(dedupe_key, None)
+            queued = _pending_usage.pop(dedupe_key, [])
             _pending_lookups.discard(dedupe_key)
+        for usage_id, notify in queued:
+            if not notify:
+                continue
+            try:
+                from preloop.services.unpriced_model_alert import (
+                    notify_unpriced_usage_row,
+                )
+
+                notify_unpriced_usage_row(usage_id, refresh_status="submit_failed")
+            except Exception:  # noqa: BLE001 - one row must not block others
+                logger.exception("Submit-failure unresolved notification failed")
         raise
     return True
 
