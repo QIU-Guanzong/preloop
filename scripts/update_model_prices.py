@@ -10,8 +10,10 @@ The catalog (``preloop/services/data/model_prices.json``) is a filtered
 snapshot of litellm's ``model_prices_and_context_window.json``:
 
 - providers limited to the ones Preloop routes,
-- modes limited to chat/responses (no image/audio/video/embedding models:
-  the gateway never bills those),
+- modes limited to the ones the gateway serves: chat, responses and
+  embeddings (no image/audio/video models: the gateway never bills those),
+- embedding entries without a per-token input price dropped: the ledger
+  bills tokens, so a per-query multimodal row could only record $0,
 - entries past their ``deprecation_date`` dropped,
 - fields stripped to what pricing needs (cost fields + provider/mode/limits;
   capability flags are omitted. ``litellm.register_model`` merges per key,
@@ -76,8 +78,11 @@ PROVIDER_PREFIXES = ("vertex_ai",)
 OVERLAY_KEY_PREFIXES = ("moonshot/", "zai/")
 OVERLAY_PROVIDERS = frozenset({"moonshot", "zai"})
 
-# Only modes the gateway can actually bill (chat completions / responses).
-MODE_ALLOWLIST = {"chat", "responses"}
+# Only modes the gateway can actually bill (chat completions / responses /
+# embeddings). Embeddings joined the list when the gateway gained an
+# embeddings route: a mode the gateway serves but does not price would record
+# vector spend as unpriced.
+MODE_ALLOWLIST = {"chat", "responses", "embedding"}
 
 # Fields kept per entry: everything pricing-related plus routing/limit
 # metadata. Capability flags (supports_*), sources, and sample specs are
@@ -166,7 +171,17 @@ def _entry_relevant(entry: Any, today: str) -> bool:
     """True for billable, current models on providers Preloop routes."""
     if not _provider_allowed(entry):
         return False
-    if entry.get("mode") not in MODE_ALLOWLIST:
+    mode = entry.get("mode")
+    if mode not in MODE_ALLOWLIST:
+        return False
+    if mode == "embedding" and not isinstance(
+        entry.get("input_cost_per_token"), (int, float)
+    ):
+        # Multimodal embedding rows (video/image/query pricing) carry no
+        # per-token input price. Keeping them would let the token-based
+        # ledger read their explicit ``output_cost_per_token: 0`` as a real
+        # price and record a billed call as $0; without them the call is
+        # recorded as unpriced, which is the truthful state.
         return False
     deprecation_date = entry.get("deprecation_date")
     if isinstance(deprecation_date, str) and deprecation_date < today:

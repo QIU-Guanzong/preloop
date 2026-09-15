@@ -80,7 +80,9 @@ STATUS_TO_TASK_STATE: Final[Mapping[str, str]] = MappingProxyType(
 )
 
 #: Why a delegation was refused. Frozen so a parent can branch on the
-#: reason instead of matching on prose.
+#: reason instead of matching on prose. ``execution_not_found`` is the one
+#: reason a read is refused with (#632): everything a caller may not read is
+#: refused in the same words, so a refusal is never an existence oracle.
 REFUSAL_REASONS: Final[Tuple[str, ...]] = (
     "flow_not_found",
     "flow_not_callable",
@@ -90,6 +92,7 @@ REFUSAL_REASONS: Final[Tuple[str, ...]] = (
     "cycle_detected",
     "fanout_exceeded",
     "budget_exceeded",
+    "execution_not_found",
 )
 
 #: Every ``preloop.ai/`` metadata key these records may carry. The schemas

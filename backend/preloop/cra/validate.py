@@ -44,6 +44,7 @@ from preloop.cra.schemas import (
     FLOW_BY_SCHEMA,
     GATE_CVSS_MAX,
     GATE_CVSS_MIN,
+    HEALTHY_VERDICTS,
     HEURISTIC_SOURCES,
     INCOMPLETE_ALLOWED,
     INCOMPLETE_DRIFT_SCHEMAS,
@@ -64,6 +65,12 @@ from preloop.cra.schemas import (
     SCHEMA_SBOMAUDIT_V1,
     SCHEMA_VULNSCAN_V1,
     SCHEMAS_WITHOUT_STATUS,
+    SCOPE_COVERS,
+    SCOPE_FIELD,
+    SCOPE_NOT_CHECKABLE,
+    SCOPE_REQUIRED,
+    SCOPE_SCHEMAS,
+    SCOPE_STATUSES,
     SOURCE_KINDS,
     SOURCE_MATRIX_KEYS,
     UNSUPPORTED_ERROR,
@@ -408,6 +415,14 @@ def _check_incomplete_optional(
         elif obj.get("drift") is not None:
             failures.extend(_check_drift(obj.get("drift"), path=f"{path}.drift"))
     failures.extend(_check_drift_evidence(obj, path=path))
+    if SCOPE_FIELD in obj:
+        scope = obj.get(SCOPE_FIELD)
+        if not json_in(schema_id, SCOPE_SCHEMAS):
+            failures.append(f"{path}.{SCOPE_FIELD} is not part of {schema_id}")
+        elif scope is not None:
+            failures.extend(_check_scope(scope, path=f"{path}.{SCOPE_FIELD}"))
+            if isinstance(scope, Mapping):
+                failures.extend(_check_scope_verdict(obj, scope, path=path))
     git = obj.get("git")
     if git is not None and not isinstance(git, Mapping):
         failures.append(f"{path}.git must be an object or null")
@@ -2110,6 +2125,220 @@ def _check_drift(value: Any, *, path: str) -> list[str]:
     return failures
 
 
+def _normalize_rel(path: str) -> str:
+    """Normalize a repository-relative path for prefix comparison."""
+    text = path.strip().replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    return text.rstrip("/")
+
+
+def _is_safe_rel(path: str) -> bool:
+    """Return True for a repository-relative path with no escape hatch.
+
+    ``project_path`` is untrusted payload input. An absolute path, a home
+    reference, or a ``..`` segment would point the audit outside the
+    checkout it claims to cover, and the scope line would then be a lie.
+    """
+    text = _normalize_rel(path)
+    if not text or text.startswith("/") or text.startswith("~"):
+        return False
+    parts = [part for part in text.split("/") if part]
+    return bool(parts) and ".." not in parts
+
+
+def _within_scope(path: str, project_path: str) -> bool:
+    """Return True when ``path`` is the project path or inside it."""
+    target = _normalize_rel(path)
+    root = _normalize_rel(project_path)
+    if not root:
+        return True
+    return target == root or target.startswith(f"{root}/")
+
+
+_COMMIT_POINTER = re.compile(r"^[0-9a-fA-F]{7,40}$")
+_PATH_POINTER = re.compile(r"^[\w./@+-]+$")
+
+
+def _pointer_path(pointer: str) -> Optional[str]:
+    """Return the repository path an evidence pointer names, if any.
+
+    Evidence is ``path:line``, ``path:line-line`` or a commit SHA. Prose
+    ("no SECURITY.md at HEAD") is not a pointer and carries no path, so it
+    is left alone rather than guessed at: only a single token that parses
+    as a path is held to the audited scope.
+    """
+    text = pointer.strip()
+    if not text or any(ch.isspace() for ch in text):
+        return None
+    head = text.split(":", 1)[0]
+    if not head or not _PATH_POINTER.fullmatch(head):
+        return None
+    if "/" not in head and "." not in head and _COMMIT_POINTER.fullmatch(head):
+        return None
+    return _normalize_rel(head)
+
+
+def _check_scope(value: Any, *, path: str) -> list[str]:
+    """Validate the project-scope block of a release audit.
+
+    The block answers two questions a portfolio reader has to be able to
+    ask of one project inside a repository of many: which path did this
+    verdict cover, and was the lens checkable at all. ``not_checkable``
+    carries its reason; the word "skipped" is not used, because a skipped
+    check reads as a choice and this is an absence of evidence.
+    """
+    if not isinstance(value, Mapping):
+        return [f"{path} must be an object or null"]
+    failures = _require_keys(value, SCOPE_REQUIRED, path=path)
+
+    project_path = value.get("project_path")
+    normalized: Optional[str] = None
+    if project_path is not None:
+        if not isinstance(project_path, str) or not project_path.strip():
+            failures.append(f"{path}.project_path must be a non-empty string or null")
+        elif not _is_safe_rel(project_path):
+            failures.append(
+                f"{path}.project_path must be a repository-relative path with no "
+                f"'..' segment, got {project_path!r}"
+            )
+        else:
+            normalized = _normalize_rel(project_path)
+
+    covers = value.get("covers")
+    if not json_in(covers, SCOPE_COVERS):
+        failures.append(f"{path}.covers must be repository|project, got {covers!r}")
+    elif covers == "project" and normalized is None:
+        failures.append(
+            f"{path}.covers is project but {path}.project_path names no path"
+        )
+    elif covers == "repository" and normalized is not None:
+        failures.append(
+            f"{path}.covers is repository but {path}.project_path names "
+            f"{normalized!r}; a scoped run covers that path only"
+        )
+
+    status = value.get("status")
+    if not json_in(status, SCOPE_STATUSES):
+        failures.append(f"{path}.status must be audited|not_checkable, got {status!r}")
+
+    reason = value.get("reason")
+    if status == SCOPE_NOT_CHECKABLE:
+        if not isinstance(reason, str) or not reason.strip():
+            failures.append(
+                f"{path}.reason must say why the lens is not_checkable, for "
+                "example 'no SBOM available'"
+            )
+    elif reason is not None and not isinstance(reason, str):
+        failures.append(f"{path}.reason must be a string or null")
+
+    sbom_paths = value.get("sbom_paths")
+    if sbom_paths is not None:
+        failures.extend(_check_string_list(sbom_paths, path=f"{path}.sbom_paths"))
+        if isinstance(sbom_paths, list):
+            if status == SCOPE_NOT_CHECKABLE and sbom_paths:
+                failures.append(
+                    f"{path}.status is not_checkable but {path}.sbom_paths names "
+                    "an SBOM; a lens with an SBOM is checkable"
+                )
+            if normalized:
+                for idx, item in enumerate(sbom_paths):
+                    if not isinstance(item, str) or not item.strip():
+                        continue
+                    if not _within_scope(item, normalized):
+                        failures.append(
+                            f"{path}.sbom_paths[{idx}] {item!r} is outside the "
+                            f"audited scope {normalized!r}; another project's "
+                            "SBOM is not this project's evidence"
+                        )
+    return failures
+
+
+def _check_scope_verdict(
+    obj: Mapping[str, Any], scope: Mapping[str, Any], *, path: str
+) -> list[str]:
+    """A not_checkable lens can never read as a clean bill of health."""
+    if scope.get("status") != SCOPE_NOT_CHECKABLE:
+        return []
+    verdict = obj.get("verdict")
+    if not json_in(verdict, HEALTHY_VERDICTS):
+        return []
+    return [
+        f"{path}.verdict is {verdict!r} but {path}.{SCOPE_FIELD}.status is "
+        "not_checkable; a lens that screened nothing cannot pass"
+    ]
+
+
+def _check_scope_pointers(
+    obj: Mapping[str, Any], *, project_path: str, path: str
+) -> list[str]:
+    """Every evidence pointer of a scoped run stays inside the project.
+
+    A pointer outside the audited path belongs to a different project in
+    the same repository, and citing it would attach one project's evidence
+    to another project's verdict.
+    """
+    failures: list[str] = []
+    gap = obj.get("gap_register")
+    if not isinstance(gap, Mapping):
+        return failures
+    items = gap.get("items")
+    if isinstance(items, list):
+        for idx, item in enumerate(items):
+            if not isinstance(item, Mapping):
+                continue
+            pointer = item.get("evidence")
+            if not isinstance(pointer, str):
+                continue
+            target = _pointer_path(pointer)
+            if target and not _within_scope(target, project_path):
+                failures.append(
+                    f"{path}.gap_register.items[{idx}].evidence {pointer!r} is "
+                    f"outside the audited scope {project_path!r}"
+                )
+    rows = gap.get("secrets_findings")
+    if isinstance(rows, list):
+        for idx, row in enumerate(rows):
+            if not isinstance(row, Mapping):
+                continue
+            row_path = row.get("path")
+            if not isinstance(row_path, str) or not row_path.strip():
+                continue
+            if not _within_scope(row_path, project_path):
+                failures.append(
+                    f"{path}.gap_register.secrets_findings[{idx}].path "
+                    f"{row_path!r} is outside the audited scope {project_path!r}"
+                )
+    return failures
+
+
+def _check_release_scope(obj: Mapping[str, Any], *, path: str) -> list[str]:
+    """Validate the scope block of a completed release audit."""
+    scope = obj.get(SCOPE_FIELD)
+    if scope is None:
+        # Absent or null: the whole repository was the unit of audit, which
+        # is what every run before this field did.
+        return []
+    failures = _check_scope(scope, path=f"{path}.{SCOPE_FIELD}")
+    if not isinstance(scope, Mapping):
+        return failures
+    failures.extend(_check_scope_verdict(obj, scope, path=path))
+    if scope.get("status") == SCOPE_NOT_CHECKABLE:
+        failures.append(
+            f"{path}.{SCOPE_FIELD}.status is not_checkable but this document "
+            "carries an audit body; a project with no SBOM writes the "
+            "incompletion envelope with verdict error"
+        )
+    project_path = scope.get("project_path")
+    if isinstance(project_path, str) and _is_safe_rel(project_path):
+        failures.extend(
+            _check_scope_pointers(
+                obj, project_path=_normalize_rel(project_path), path=path
+            )
+        )
+    return failures
+
+
 def _validate_releaseaudit(
     obj: Mapping[str, Any],
     *,
@@ -2152,6 +2381,7 @@ def _validate_releaseaudit(
     if drift is not None:
         failures.extend(_check_drift(drift, path="result.drift"))
     failures.extend(_check_drift_evidence(obj, path="result"))
+    failures.extend(_check_release_scope(obj, path="result"))
     gap = obj.get("gap_register")
     if gap is not None:
         try:

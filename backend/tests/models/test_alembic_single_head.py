@@ -204,6 +204,8 @@ def test_flow_runners_revision_chains_onto_approval_rule_context() -> None:
     }
     callable_flows = script.get_revision("20260915_flow_callable_flows")
     assert callable_flows.down_revision == "20260915_queued_lineage_merge"
+    session_hold = script.get_revision("20260915_session_hold")
+    assert session_hold.down_revision == "20260915_flow_callable_flows"
     redispatch_backoff = script.get_revision("20260915_redispatch_backoff")
-    assert redispatch_backoff.down_revision == "20260915_flow_callable_flows"
+    assert redispatch_backoff.down_revision == "20260915_session_hold"
     assert script.get_heads() == ["20260915_redispatch_backoff"]

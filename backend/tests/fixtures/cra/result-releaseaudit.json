@@ -18,6 +18,7 @@
     "id": null
   },
   "regime_profile": "cra",
+  "scope": null,
   "sbom_audit": {
     "source": {
       "format": "spdx",

@@ -100,6 +100,8 @@ class TestListAllTools:
             "resolve_sbom_upstreams",
             "get_issue_triage_context",
             "apply_issue_triage",
+            "run_flow",
+            "get_execution",
         }
         for tool in result:
             expected = tool["name"] not in default_disabled
