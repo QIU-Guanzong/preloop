@@ -5000,7 +5000,7 @@ paths:
       tags:
       - Retention
       summary: Create Legal Hold
-      description: Freeze one execution, approval or evidence pack until released.
+      description: Freeze one execution, approval, evidence pack or runtime session.
       operationId: create_legal_hold_api_v1_retention_holds_post
       security:
       - bearerAuth: []
@@ -15929,6 +15929,50 @@ components:
           title: Notification Emails
       type: object
       title: BudgetPolicyUpdate
+    CallableFlowEntry:
+      properties:
+        flow:
+          type: string
+          maxLength: 255
+          minLength: 1
+          title: Flow
+          description: Slug or name of the flow that may be called, resolved inside
+            the calling account. A reference that names no flow in the account is
+            rejected on write.
+        max_children:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Max Children
+          description: Maximum number of children one execution of the calling flow
+            may start through this entry. Unset means no per entry count ceiling.
+        max_usd_per_child:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Max Usd Per Child
+          description: Maximum spend in USD for each child started through this entry.
+            Unset means no per child cost ceiling.
+        allow_self:
+          type: boolean
+          title: Allow Self
+          description: Explicit opt in to a self reference. A flow calling itself
+            is a recursion risk, so it has to be asked for by name.
+          default: false
+      additionalProperties: false
+      type: object
+      required:
+      - flow
+      title: CallableFlowEntry
+      description: 'One delegation allowlist entry: a flow this flow may run, with
+        ceilings.
+
+
+        ``extra=''forbid''`` is deliberate. A misspelled key in an allowlist is a
+
+        ceiling that silently does not apply, so an unknown key is rejected on
+
+        write rather than stored and ignored.'
     ChainBreakRead:
       properties:
         kind:
@@ -17096,6 +17140,17 @@ components:
           type: array
           title: Allowed Mcp Tools
           default: []
+        callable_flows:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/CallableFlowEntry'
+            type: array
+          - type: 'null'
+          title: Callable Flows
+          description: 'Delegation allowlist: the flows an execution of this flow
+            is permitted to run, each with optional per child ceilings. Unset or an
+            empty list means no delegation, which is the default for every flow. Nothing
+            enforces the list yet.'
         git_clone_config:
           anyOf:
           - $ref: '#/components/schemas/GitCloneConfig-Input'
@@ -17877,6 +17932,17 @@ components:
             type: array
           - type: 'null'
           title: Allowed Mcp Tools
+        callable_flows:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/CallableFlowEntry'
+            type: array
+          - type: 'null'
+          title: Callable Flows
+          description: 'Delegation allowlist: the flows an execution of this flow
+            is permitted to run, each with optional per child ceilings. Unset or an
+            empty list means no delegation, which is the default for every flow. Nothing
+            enforces the list yet.'
         git_clone_config:
           anyOf:
           - $ref: '#/components/schemas/GitCloneConfig-Output'
@@ -18124,6 +18190,17 @@ components:
             type: array
           - type: 'null'
           title: Allowed Mcp Tools
+        callable_flows:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/CallableFlowEntry'
+            type: array
+          - type: 'null'
+          title: Callable Flows
+          description: 'Delegation allowlist: the flows an execution of this flow
+            is permitted to run, each with optional per child ceilings. Unset or an
+            empty list means no delegation, which is the default for every flow. Nothing
+            enforces the list yet.'
         git_clone_config:
           anyOf:
           - $ref: '#/components/schemas/GitCloneConfig-Input'
@@ -19907,7 +19984,7 @@ components:
         resource_type:
           type: string
           title: Resource Type
-          description: One of execution, approval, evidence_pack
+          description: One of execution, approval, evidence_pack, runtime_session
         resource_id:
           type: string
           maxLength: 255
@@ -19924,7 +20001,7 @@ components:
       - resource_id
       - reason
       title: LegalHoldCreate
-      description: Place a hold on one execution, approval or evidence pack.
+      description: Place a hold on one execution, approval, evidence pack or session.
     LegalHoldRead:
       properties:
         id:
@@ -24691,6 +24768,12 @@ components:
           - type: number
           - type: 'null'
           title: Optimization Potential Savings Usd
+        legal_hold:
+          type: boolean
+          title: Legal Hold
+          description: 'True while a legal hold freezes this session: the retention
+            purge leaves it and its activity alone until the hold is released'
+          default: false
       type: object
       required:
       - id

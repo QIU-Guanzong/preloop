@@ -221,6 +221,36 @@ Both flags default to `ask`. With `--yes` alone, the CLI skips the main offboard
 
 `preloop agents refresh` (alias `sync`) re-fetches the authorized model list and rewrites only the managed model sections of onboarded agent configs. Selection, credentials, MCP config, and local backups are preserved.
 
+### Operator notes
+
+```bash
+preloop notes send --agent <agent-id> "Deploy to eu-west-1, not us-east-1."
+preloop notes send --session <session-id> "Stop refactoring the tests, ship the fix."
+preloop notes send --execution <execution-id> "The deadline moved to Friday."
+echo "Use the staging cluster in eu-west-1." | preloop notes send --agent <agent-id>
+preloop notes send --agent <agent-id> --expires-in 2h "Skip the staging rollout."
+preloop notes send --agent <agent-id> --json "Use eu-west-1."
+```
+
+`preloop notes send` posts one note to `POST /api/v1/operator-notes`, which
+delivers it at the agent's next turn boundary. Name exactly one target:
+`--agent` steers the agent's current session, or the next one it opens when
+none is live, `--session` steers that conversation only, and `--execution`
+is resolved server side to the session the flow execution runs on. Naming
+none or naming two is refused locally, before any request.
+
+The body is the argument. With no argument it is read from standard input,
+so a note can be piped or written in a heredoc, and a multi line body is
+sent as written. `--expires-in` takes a Go duration and overrides the
+server's 24 hour default. `--json` emits the note id and the target and
+nothing else. A refusal prints the server's own reason, including the
+"target not found" and rate limit cases, and exits non-zero.
+
+Sending a note needs the `control_managed_agent` permission, the same one
+that lets you stop the agent, and every note is written to the audit trail
+with its author. Reading and cancelling notes stays in the console and the
+API for now. See [docs/guide/operator-notes.md](../docs/guide/operator-notes.md).
+
 ### Models
 
 ```bash

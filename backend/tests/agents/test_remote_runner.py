@@ -180,7 +180,7 @@ async def test_fresh_queued_executor_reconstructs_complete_payload(
     assert len(leased_payloads) == 1
     delayed_payload = leased_payloads[0]
     assert delayed_payload["agent_config"] == flow.agent_config
-    assert delayed_payload["prompt"] == execution.resolved_input_prompt
+    assert "prompt" not in delayed_payload
     assert delayed_payload["model_identifier"] == flow.ai_model.model_identifier
     assert delayed_payload["model_provider"] == flow.ai_model.provider_name
     assert delayed_payload["allowed_mcp_servers"] == flow.allowed_mcp_servers
@@ -223,6 +223,27 @@ def test_lease_payload_injects_default_image() -> None:
     image = default_agent_image("opencode")
     assert image
     assert payload["agent_config"]["image"] == image
+    assert "prompt" not in payload
+
+
+def test_docker_lease_omits_unbounded_prompt() -> None:
+    executor = RemoteRunnerExecutor(
+        "codex", {}, db=MagicMock(), pool="local", account_id=uuid4()
+    )
+    huge = "x" * (128 * 1024)
+    payload = executor._lease_payload(
+        execution_id=uuid4(),
+        flow_id=uuid4(),
+        prompt=huge,
+        execution_context={
+            "agent_type": "codex",
+            "agent_config": {"image": "preloop/codex:latest"},
+        },
+    )
+    assert "prompt" not in payload
+    assert payload["launch_version"] == 1
+    dumped = str(payload)
+    assert huge not in dumped
 
 
 def test_lease_payload_keeps_explicit_image() -> None:
@@ -258,6 +279,7 @@ def test_lease_payload_includes_resume_from() -> None:
         },
     )
     assert payload["resume_from"] == str(prior)
+    assert "prompt" not in payload
 
 
 def test_payload_for_log_omits_credentials() -> None:
@@ -306,6 +328,7 @@ def test_lease_payload_skips_image_for_host_exec() -> None:
     )
     assert payload["host_exec_profile"] == "cursor-ask"
     assert payload["agent_type"] == "cursor"
+    assert payload["prompt"] == "summarize"
     assert "image" not in payload["agent_config"]
     assert payload["timeout_seconds"] == 120
     assert payload_for_log(payload)["host_exec_profile"] == "cursor-ask"
@@ -386,6 +409,7 @@ def test_lease_payload_keeps_custom_image_without_host_profile() -> None:
     )
     assert payload["agent_config"]["docker_image"] == "custom/codex:dev"
     assert "host_exec_profile" not in payload
+    assert "prompt" not in payload
 
 
 @pytest.mark.asyncio

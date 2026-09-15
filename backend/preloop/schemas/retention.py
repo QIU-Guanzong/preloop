@@ -89,7 +89,7 @@ class RetentionSettingsUpdate(BaseModel):
 
 
 class LegalHoldCreate(BaseModel):
-    """Place a hold on one execution, approval or evidence pack."""
+    """Place a hold on one execution, approval, evidence pack or session."""
 
     resource_type: str = Field(
         ..., description=f"One of {', '.join(HOLD_RESOURCE_TYPES)}"

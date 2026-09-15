@@ -753,6 +753,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
                 self.model.started_at,
                 self.model.last_activity_at,
                 self.model.ended_at,
+                self.model.legal_hold,
                 func.max(cast(usage_model.flow_id, String)).label("flow_id"),
                 func.max(Flow.name).label("flow_name"),
                 func.max(cast(usage_model.flow_execution_id, String)).label(
@@ -798,6 +799,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
                 self.model.started_at,
                 self.model.last_activity_at,
                 self.model.ended_at,
+                self.model.legal_hold,
             )
         )
 
@@ -1022,6 +1024,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
                 self.model.started_at,
                 self.model.last_activity_at,
                 self.model.ended_at,
+                self.model.legal_hold,
                 func.max(cast(ApiUsage.flow_id, String)).label("flow_id"),
                 func.max(Flow.name).label("flow_name"),
                 func.max(cast(ApiUsage.flow_execution_id, String)).label(
@@ -1070,6 +1073,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
                 self.model.started_at,
                 self.model.last_activity_at,
                 self.model.ended_at,
+                self.model.legal_hold,
             )
             .first()
         )
@@ -1212,6 +1216,7 @@ class CRUDRuntimeSession(CRUDBase[RuntimeSession]):
             **cache_split_from_row(row),
             "estimated_cost": float(row.estimated_cost or 0.0),
             "last_request_at": row.last_request_at,
+            "legal_hold": bool(getattr(row, "legal_hold", False)),
         }
 
 

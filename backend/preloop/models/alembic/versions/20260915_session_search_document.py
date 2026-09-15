@@ -37,7 +37,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision: str = "20260915_session_search"
-down_revision: Union[str, None] = "20260915_queued_lineage_merge"
+down_revision: Union[str, None] = "20260915_session_hold"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 # Alembic reads these module globals by name; keep a local reference so static

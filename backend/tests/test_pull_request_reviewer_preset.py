@@ -18,6 +18,7 @@ from preloop.services.issue_references import (
     extract_issue_references,
 )
 from preloop.services.prompt_resolvers.base import ResolverContext
+from preloop.utils.prompt_filters import parse_placeholders, truncate_value
 from preloop.services.prompt_resolvers.trigger_event import TriggerEventResolver
 
 PRESET_FILE = "002-pull-request-reviewer.yaml"
@@ -280,11 +281,17 @@ def _render_preset_prompt(template: str, trigger_event_data: dict) -> str:
         execution_id="exec-1",
     )
     rendered = template
-    for placeholder in set(re.findall(r"\{\{(trigger_event[^}]*)\}\}", template)):
-        path = placeholder[len("trigger_event") :].lstrip(".")
+    seen: set[str] = set()
+    for placeholder in parse_placeholders(template):
+        if placeholder.raw in seen or not placeholder.name.startswith("trigger_event"):
+            continue
+        seen.add(placeholder.raw)
+        path = placeholder.name[len("trigger_event") :].lstrip(".")
         value = asyncio.run(resolver.resolve(path, context))
         if value is not None:
-            rendered = rendered.replace("{{" + placeholder + "}}", value)
+            rendered = rendered.replace(
+                placeholder.raw, truncate_value(value, placeholder.limit)
+            )
     return rendered
 
 
