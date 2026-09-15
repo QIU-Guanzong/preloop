@@ -4,7 +4,16 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    false,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -61,6 +70,19 @@ class RuntimeSession(Base):
     started_at: Mapped[datetime] = mapped_column(nullable=False)
     last_activity_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     ended_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    #: Derived enforcement state for a legal hold, the same column shape the
+    #: other held classes carry. The retention purge tests this boolean, so a
+    #: held session and its activity rows survive a pass whose cutoff would
+    #: otherwise take them. The account-visible record of who froze it and why
+    #: is the ``legal_hold`` row, not this flag.
+    legal_hold: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+        index=True,
+        comment="True while a legal hold blocks this session from purge",
+    )
 
     account: Mapped["Account"] = relationship(
         "Account", back_populates="runtime_sessions"

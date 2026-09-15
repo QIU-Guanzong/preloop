@@ -7,7 +7,7 @@ key on the agent with an indexed query, and what keeps the record honest when
 the agent is later renamed or removed.
 
 Revision ID: 20260915_agent_note_author
-Revises: 20260915_flow_callable_flows
+Revises: 20260915_session_hold
 """
 
 from typing import Sequence, Union
@@ -17,7 +17,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "20260915_agent_note_author"
-down_revision: Union[str, None] = "20260915_flow_callable_flows"
+down_revision: Union[str, None] = "20260915_session_hold"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

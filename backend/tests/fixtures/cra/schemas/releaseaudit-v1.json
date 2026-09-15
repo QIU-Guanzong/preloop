@@ -12,6 +12,7 @@
     "inputs_declared",
     "runner",
     "regime_profile",
+    "scope",
     "sbom_audit",
     "vuln_scan",
     "drift",
@@ -38,6 +39,7 @@
     "regime_profile": {
       "const": "cra"
     },
+    "scope": {},
     "sbom_audit": {},
     "vuln_scan": {},
     "drift": {},

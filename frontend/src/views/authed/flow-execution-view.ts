@@ -59,6 +59,7 @@ import {
 } from '../../components/token-figures';
 import '../../components/preloop-gateway-event.ts';
 import '../../components/preloop-execution-continuation';
+import '../../components/preloop-execution-tree';
 import '../../components/view-header.ts';
 import '../../components/json-tree.ts';
 import '../../components/session-chat-view';
@@ -3193,6 +3194,12 @@ ${execution.resolved_input_prompt}</pre>
       <div class="column-layout wide">
         <div class="main-column">
           ${this.renderSummaryStrip(execution)}
+          <!-- What this run delegated, and what that cost. Renders one quiet
+               line for the overwhelming majority of runs, which delegate
+               nothing. -->
+          <preloop-execution-tree
+            execution-id=${execution.id}
+          ></preloop-execution-tree>
           <preloop-execution-continuation
             .execution=${execution}
           ></preloop-execution-continuation>

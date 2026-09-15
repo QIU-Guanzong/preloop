@@ -103,6 +103,8 @@ EXPECTED_TOOLS = {
     "get_approval_status",
     "resolve_sbom_upstreams",
     "send_note",
+    "run_flow",
+    "get_execution",
 }
 
 
