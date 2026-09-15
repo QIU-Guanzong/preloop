@@ -232,12 +232,16 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
     def held_runtime_session_ids(self, db: Session, *, account_id: Any) -> set[str]:
         """Sessions frozen by an active legal hold, for this account.
 
-        ``runtime_session`` carries no hold flag of its own yet (that is
-        issue #650), so a session is treated as held when any of its metered
-        gateway rows belongs to a flow execution under hold. Evaluated as a
-        set rather than a join in the claim query because the common case is
-        an empty set, and an empty set costs one cheap index lookup instead
-        of a correlated subquery per candidate chunk.
+        The base this branch is stacked on has no hold flag on
+        ``runtime_session``, so a session is treated as held when any of its
+        metered gateway rows belongs to a flow execution under hold.
+        Issue #650 has since added ``runtime_session.legal_hold`` on main:
+        when this stack lands, that column belongs in the union here, and
+        this comment is the pointer to do it.
+
+        Evaluated as a set rather than a join in the claim query because the
+        common case is an empty set, and an empty set costs one cheap index
+        lookup instead of a correlated subquery per candidate chunk.
         """
         held_executions = select(FlowExecution.id).where(
             FlowExecution.legal_hold.is_(True),
