@@ -1,5 +1,6 @@
 """Tests for the full-repo review preset family (architecture-strategy
-review / repo code health review / standards compliance walk).
+review / repo code health review / standards compliance walk / docs
+currency review).
 
 Validates the shipped preset YAMLs against the shared review skeleton
 invariants: strictly read-only toolset with empty MCP allowlists,
@@ -8,6 +9,11 @@ sampling with declared coverage, freeze-floor drift, and the
 verdict-honesty rules (the register can never upgrade a verdict; 010
 refuses to run without a named standard). Pins the same style of
 invariants that test_security_audit_presets.py pins for 004-006.
+
+Lens-specific behaviour of 016 (claim extraction, verification against
+recorded searches, the prose-quality ban) lives in
+test_docs_currency_review_preset.py; only the shared skeleton is pinned
+here.
 """
 
 from pathlib import Path
@@ -25,18 +31,21 @@ PRESET_FILES = {
     ),
     "Full Repo Code Health Review": "009-repo-code-health-review.yaml",
     "Standards Compliance Walk": "010-standards-compliance-walk.yaml",
+    "Docs Currency Review": "016-docs-currency-review.yaml",
 }
 
 SCHEMA_IDS = {
     "Architecture and Strategy Conformance Review": "preloop.review.arch/v1",
     "Full Repo Code Health Review": "preloop.review.codehealth/v1",
     "Standards Compliance Walk": "preloop.review.standards/v1",
+    "Docs Currency Review": "preloop.review.docscurrency/v1",
 }
 
 FLOW_SLUGS = {
     "Architecture and Strategy Conformance Review": ("architecture-strategy-review"),
     "Full Repo Code Health Review": "repo-code-health-review",
     "Standards Compliance Walk": "standards-compliance-walk",
+    "Docs Currency Review": "docs-currency-review",
 }
 
 
@@ -261,6 +270,7 @@ class TestRepoReviewPresetInvariants:
             "Architecture and Strategy Conformance Review": ("architecture-review.md"),
             "Full Repo Code Health Review": "code-health-report.md",
             "Standards Compliance Walk": "standards-report.md",
+            "Docs Currency Review": "docs-currency-report.md",
         }[name]
         assert report_file in prompt
         assert "MUST OPEN" in prompt
@@ -464,7 +474,7 @@ class TestStandardsComplianceWalkPreset:
 
 
 class TestPresetsLoadThroughLoader:
-    def test_loader_picks_up_all_three(self):
+    def test_loader_picks_up_every_lens(self):
         from unittest.mock import patch
 
         from preloop.flow_presets import load_flow_presets
@@ -484,6 +494,10 @@ class TestPresetsLoadThroughLoader:
             )
             assert names.index("Standards Compliance Walk") > names.index(
                 "Full Repo Code Health Review"
+            )
+            # 016 is the newest lens and lands last in the gallery.
+            assert names.index("Docs Currency Review") > names.index(
+                "Standards Compliance Walk"
             )
         finally:
             load_flow_presets.cache_clear()

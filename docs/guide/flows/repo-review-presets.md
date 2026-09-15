@@ -1,4 +1,4 @@
-# Full-repo review presets (architecture-strategy, code health, standards walk)
+# Full-repo review presets (architecture-strategy, code health, standards walk, docs currency)
 
 These flow presets review a **whole repository** rather than a diff. They
 complement the diff-scoped [Pull Request Reviewer preset](pull-request-review.md): PR review runs
@@ -15,9 +15,10 @@ human-readable evidence pack under `/workspace/evidence/`.
 | Architecture and Strategy Conformance Review | Declared intent vs observed structure: conformance register over the repo's own architecture/mission/ADR declarations, drift findings (responsibility drift, dependency direction violations, undeclared load-bearing components, dead declared components, technology drift, non-goal violations) | `preloop.review.arch/v1` |
 | Full Repo Code Health Review | Correctness risk, quality, performance hotspots, dead code, and test coverage **shape** over a sampled whole-repo pass, with a per-module health register | `preloop.review.codehealth/v1` |
 | Standards Compliance Walk | Payload-named standards normalized into a requirement register (`met | gap | partial | declared` plus mandatory `not_checkable`) | `preloop.review.standards/v1` |
+| Docs Currency Review | Is the README still true: five checkable claim types (entry points, services, dependencies, environment variables, build or run commands) extracted from the documentation and verified against the code, emitted as a drift list of (claim, where the doc says it, what the code shows) | `preloop.review.docscurrency/v1` |
 
 They are a **family sharing one skeleton**, not one parameterized preset:
-the three lenses have different required inputs, different failure modes
+the four lenses have different required inputs, different failure modes
 when inputs are missing, different result schemas, and different run
 cadences — and the layered preset loader lets an installation override or
 disable one lens without touching the others.
@@ -36,7 +37,8 @@ one-page cover every [audit preset](security-audit-presets.md) requires
 on its human-readable report (`audit-report.md`, `vuln-report.md`,
 `dossier.md`), so nobody has to write a verdict summary by hand. The
 cover sits at the top of `architecture-review.md`,
-`code-health-report.md`, or `standards-report.md`: a verdict sentence
+`code-health-report.md`, `standards-report.md`, or
+`docs-currency-report.md`: a verdict sentence
 first, then three labelled boxes (What we checked / What we did not
 check / What you should do next week). Strictly one page. The cover may
 only summarize findings already present in the body; the "What we did
@@ -47,7 +49,7 @@ unchanged.
 
 ## The shared skeleton
 
-All three presets follow the same guarantees:
+All four presets follow the same guarantees:
 
 - **Strictly read-only.** No issue creation, no comments, no commits, no
   pushes, no external mutation. `allowed_mcp_servers` and
@@ -169,19 +171,57 @@ search pattern, and requirements a repository cannot evidence
 infrastructure) land in `not_checkable`, never faked. Any `mandatory`
 gap fails the run.
 
+### Docs Currency Review
+
+Needs nothing beyond the checkout, and takes `project_path` when the
+project under review is one directory of a larger repository (everything
+read, searched, and claimed is scoped to that subtree; `docs_paths`
+overrides document discovery). It extracts claims from the project's
+documentation and checks each one against the code. **Five checkable
+claim types only** — `entry_point`, `service`, `dependency`, `env_var`,
+`command` — because a sixth would turn the lens into a prose critic.
+Everything else a document says is out of scope: no finding about
+writing quality, tone, structure, or completeness is ever emitted, and
+missing documentation is not drift (a claim that was never made cannot
+be wrong). Statements skipped for being an unsupported claim type are
+counted in `coverage.unsupported_statements_skipped`, never reported as
+findings.
+
+Each claim carries a `<path>:<line>` pointer into the document and the
+**recorded search** that classified it (the exact pattern, the scope it
+ran in, and the matches it returned), then lands in one of three
+statuses:
+
+| status | meaning | family grammar |
+| --- | --- | --- |
+| `holds` | the search found what the document says | `met` |
+| `drifted` | the search was complete over its scope and the documented thing is absent, renamed, moved, or contradicted | `gap` |
+| `not_checkable` | the checkout cannot decide it (hosted infrastructure, an operator-held credential, a tool installed elsewhere, a budget exhaustion), recorded with its reason | `not_checkable` |
+
+`partial` and `declared` are not used by this lens, and a
+`not_checkable` claim is never counted as holding. Severity applies to
+drifted claims only: `high` when a reader following the document fails
+immediately (a build or run command or an entry point that does not
+exist), `medium` for a service, dependency, or environment variable the
+code does not show, `low` when the documented thing still exists but
+moved. Any high-severity drift fails the run; `pass` needs a completed
+plan with nothing drifted and nothing `not_checkable`.
+
 ## Evidence pack layout
 
 ```
 /workspace/evidence/
-  inventory.json               # phase-1 command-only inventory (all three)
-  findings.json                # machine-readable findings/register ledger (all three)
-  drift-report.md              # only when a baseline was delivered (all three)
+  inventory.json               # phase-1 command-only inventory (all four)
+  findings.json                # machine-readable findings/register ledger (all four)
+  drift-report.md              # only when a baseline was delivered (all four)
   architecture-review.md       # human-readable review; opens with the one-minute cover
   conformance-register.md      # declaration register (architecture-strategy)
   code-health-report.md        # human-readable review; opens with the one-minute cover
   health-register.md           # per-module register (code health)
   standards-report.md          # human-readable walk; opens with the one-minute cover
   requirements-register.md     # requirement register (standards walk)
+  docs-currency-report.md      # human-readable review; opens with the one-minute cover
+  claims-register.md           # claims register (docs currency)
 ```
 
 `result.json` stays under 200 KB; long listings live in the pack and are
@@ -195,5 +235,9 @@ referenced from `artifacts`.
 - These are engineering reviews, not conformity assessments: no
   regime profile, no certification, and the standards walk checks only
   what a repository can show.
+- The docs currency lens checks whether documentation is **true**, never
+  whether it is well written, and it never edits a document: a clumsy
+  but accurate README passes with zero findings, and documentation that
+  simply says nothing about an area produces no claim at all.
 - Freeze-floor enforcement is reported by the run and owned by
   downstream validation; the agent never self-grades the floor.

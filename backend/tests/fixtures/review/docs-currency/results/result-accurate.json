@@ -1,0 +1,186 @@
+{
+  "schema": "preloop.review.docscurrency/v1",
+  "flow": "docs-currency-review",
+  "status": "success",
+  "run_at": "2026-09-15T09:00:00Z",
+  "git": {
+    "remote": "https://example.com/example/sample-repo.git",
+    "commit": "0000000000000000000000000000000000000000",
+    "branch": "main",
+    "dirty": false
+  },
+  "tool_versions": {
+    "git": "2.43.0"
+  },
+  "inputs_declared": {
+    "target_repo_path": "/workspace/sample-repo",
+    "project_path": "accurate",
+    "previous_result_path": "not delivered"
+  },
+  "runner": {
+    "kind": null,
+    "id": null
+  },
+  "project": {
+    "path": "accurate",
+    "documents": [
+      {
+        "path": "README.md",
+        "lines": 17,
+        "read": true
+      }
+    ]
+  },
+  "claims": [
+    {
+      "id": "docs:command:README.md:make-test",
+      "type": "command",
+      "claim": "make test",
+      "doc": "README.md:16",
+      "status": "holds",
+      "code_shows": "the Makefile defines a test target",
+      "evidence": "Makefile:1",
+      "search": {
+        "pattern": "^test:",
+        "scope": "Makefile",
+        "matches": [
+          "Makefile:1"
+        ]
+      },
+      "severity": null,
+      "reason": null
+    },
+    {
+      "id": "docs:entry_point:README.md:ledger-cli",
+      "type": "entry_point",
+      "claim": "python -m ledger.cli",
+      "doc": "README.md:17",
+      "status": "holds",
+      "code_shows": "ledger/cli.py exists and defines a __main__ entry point",
+      "evidence": "ledger/cli.py:1",
+      "search": {
+        "pattern": "filename:ledger/cli.py",
+        "scope": ".",
+        "matches": [
+          "ledger/cli.py:0"
+        ]
+      },
+      "severity": null,
+      "reason": null
+    },
+    {
+      "id": "docs:dependency:README.md:click",
+      "type": "dependency",
+      "claim": "click as the command line framework",
+      "doc": "README.md:7",
+      "status": "holds",
+      "code_shows": "click is declared in the pyproject dependencies",
+      "evidence": "pyproject.toml:4",
+      "search": {
+        "pattern": "click",
+        "scope": "pyproject.toml",
+        "matches": [
+          "pyproject.toml:4"
+        ]
+      },
+      "severity": null,
+      "reason": null
+    },
+    {
+      "id": "docs:service:README.md:redis",
+      "type": "service",
+      "claim": "Redis for the shared queue",
+      "doc": "README.md:8",
+      "status": "holds",
+      "code_shows": "a redis service is defined in docker-compose.yml",
+      "evidence": "docker-compose.yml:2",
+      "search": {
+        "pattern": "redis",
+        "scope": "docker-compose.yml",
+        "matches": [
+          "docker-compose.yml:2",
+          "docker-compose.yml:3",
+          "docker-compose.yml:7"
+        ]
+      },
+      "severity": null,
+      "reason": null
+    },
+    {
+      "id": "docs:env_var:README.md:ledger-home",
+      "type": "env_var",
+      "claim": "LEDGER_HOME",
+      "doc": "README.md:12",
+      "status": "holds",
+      "code_shows": "read by ledger/settings.py",
+      "evidence": "ledger/settings.py:3",
+      "search": {
+        "pattern": "LEDGER_HOME",
+        "scope": "ledger/",
+        "matches": [
+          "ledger/cli.py:1",
+          "ledger/cli.py:5",
+          "ledger/settings.py:3"
+        ]
+      },
+      "severity": null,
+      "reason": null
+    }
+  ],
+  "counts": {
+    "holds": 5,
+    "drifted": 0,
+    "not_checkable": 0,
+    "by_severity": {
+      "high": 0,
+      "medium": 0,
+      "low": 0
+    },
+    "by_type": {
+      "entry_point": 1,
+      "service": 1,
+      "dependency": 1,
+      "env_var": 1,
+      "command": 1
+    }
+  },
+  "coverage": {
+    "documents_total": 1,
+    "documents_read": 1,
+    "plan_completed": true,
+    "claims_extracted": 5,
+    "unsupported_statements_skipped": 1,
+    "not_reviewed": []
+  },
+  "drift": null,
+  "verdict": "pass",
+  "checks": [
+    {
+      "name": "documents_planned_all_read",
+      "passed": true,
+      "skipped": false,
+      "details": "1 of 1 documents read"
+    },
+    {
+      "name": "every_claim_has_a_recorded_search",
+      "passed": true,
+      "skipped": false,
+      "details": "5 claims, 5 recorded searches"
+    }
+  ],
+  "assessments": [
+    {
+      "topic": "documentation currency",
+      "judgment": "Agent judgment: the drift list is the whole finding set; readability is out of scope for this lens."
+    }
+  ],
+  "artifacts": {
+    "report": "evidence/docs-currency-report.md",
+    "register": "evidence/claims-register.md",
+    "findings": "evidence/findings.json",
+    "inventory": "evidence/inventory.json",
+    "drift_report": null
+  },
+  "note": "synthetic fixture",
+  "disclaimer": "Machine-generated review evidence. Not a certification, audit opinion, or legal advice."
+}

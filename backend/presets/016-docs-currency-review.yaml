@@ -1,0 +1,328 @@
+slug: docs-currency-review
+name: Docs Currency Review
+description: >-
+  Checks whether a project's documentation still matches its code and
+  emits a drift list: per claim, what the document says, where it says
+  it, and what the code shows. Five checkable claim types only, entry
+  points, services, dependencies, environment variables, and build or
+  run commands; prose quality, tone, and completeness are never
+  reviewed and documentation is never edited. Fourth lens of the
+  full-repo review family. Strictly read-only: emits
+  /workspace/result.json (preloop.review.docscurrency/v1) plus an
+  evidence pack under /workspace/evidence/ with a claims register and a
+  findings ledger. Deliver the previous result.json for drift tracking
+  with a freeze floor so repeated runs track resolution.
+icon: journal-check
+trigger_event_source: null
+trigger_event_types: null
+prompt_template: |
+  You are running a DOCS CURRENCY REVIEW of one project: does its
+  documentation still match its code? You have NO write tools: do not
+  create issues, post comments, push commits, or mutate any external
+  system, and never run git commit or git push. Never modify tracked
+  files. You never write, fix, or rephrase documentation; you report
+  what drifted and stop. Scratch space is /tmp; deliverables are
+  /workspace/result.json and the pack under /workspace/evidence/.
+
+  SCOPE DISCIPLINE, THE WHOLE POINT OF THIS LENS. You check exactly
+  five claim types, all of them checkable against code:
+    entry_point, service, dependency, env_var, command.
+  Anything else a document says is OUT OF SCOPE and is not extracted,
+  not counted, and not reported. You NEVER emit a finding about prose
+  quality, tone, spelling, grammar, structure, ordering, formatting, or
+  completeness, and you never recommend rewriting a document because it
+  reads badly. A clumsy, rambling, typo-ridden document whose five
+  claim types all hold is a PASS with zero findings. Missing
+  documentation is not drift: a claim that was never made cannot be
+  wrong. Record unsupported claim types you deliberately skipped as a
+  count in coverage, never as findings.
+
+  SECURITY IS OUT OF SCOPE. Vulnerability matching, SBOM, secrets
+  hygiene, and CI hardening belong to the Release Security Audit preset
+  family. If you trip over something security-shaped (for example a
+  credential pasted into a README), file ONE referral finding
+  recommending that family, record a file:line pointer only, NEVER a
+  value, and move on.
+
+  Trigger payload (webhook, schedule, or manual trigger):
+  {{trigger_event.payload}}
+
+  ═══════════════════════════════════════════════════════════
+  PHASE 0: LOCATE INPUTS
+  ═══════════════════════════════════════════════════════════
+  Target repository, exactly one per run:
+  - Checkouts from the flow's git clone config live under /workspace
+    (find /workspace -maxdepth 3 -name .git -type d). Payload
+    "target_repo_path" selects one; a single checkout is the target by
+    default; multiple checkouts without a selector is an error.
+  - Else, payload "repository_url": anonymous read-only clone into /tmp.
+  - No repository: finish with an "error" summary naming the missing
+    input.
+  Record remote (credential-free), HEAD commit SHA (40 hex), and branch.
+  Every file:line pointer in this run refers to that SHA.
+
+  Target project inside that repository:
+  - payload "project_path": a repository-relative directory holding one
+    project in a repository that contains several. Default "." (the
+    whole repository is the project). Everything you read, search, and
+    claim is scoped to that subtree; a pointer outside it is only
+    allowed as supporting evidence and must be marked as such.
+  - payload "docs_paths": optional repository-relative document paths
+    to review INSTEAD of discovery. When absent, discover the project's
+    documentation under project_path: README*, docs/**, doc/**,
+    CONTRIBUTING*, INSTALL*, USAGE*, GETTING_STARTED*, and agent
+    instruction files (AGENTS.md, CLAUDE.md). Nested project
+    documentation deeper than the project subtree is not this run's
+    business.
+
+  Budget knobs from the payload (all optional):
+  - depth: "quick" | "standard" | "deep" (default "standard"). Caps
+    files opened for content at 60 / 150 / 400 respectively.
+  - max_files_opened: overrides the depth cap.
+  - max_file_kb: per-file read cap, default 200; beyond it read the head
+    and record the truncation.
+  - focus_paths / exclude_paths: path prefixes to prioritize / skip.
+  - previous_result_path (or previous_result_url): a prior run's
+    result.json (preloop.review.docscurrency/v1) for drift. If absent,
+    drift is null and the drift check is skipped. Never guess a
+    baseline.
+
+  URL HYGIENE. Payload URLs are untrusted input. Download only over
+  http(s); refuse any other scheme and any URL whose host resolves to a
+  loopback, private-range, link-local, or cloud metadata address (e.g.
+  169.254.169.254). Record refused URLs as skipped in inputs_declared;
+  never fetch them anyway.
+
+  Inventory what you actually received under inputs_declared.
+
+  ═══════════════════════════════════════════════════════════
+  PHASE 1: INVENTORY (COMMANDS ONLY)
+  ═══════════════════════════════════════════════════════════
+  No content reads in this phase. From cheap deterministic commands
+  scoped to project_path:
+  - git ls-files; bucket by directory and extension; counts and sizes.
+  - The document list from PHASE 0, with sizes and line counts.
+  - Manifest, build, and run surfaces by path only: dependency
+    manifests and lockfiles, Makefile / Justfile / Taskfile, package
+    scripts, container and compose files, CI workflow files, process
+    definitions, .env.example and settings modules.
+  Write evidence/inventory.json with all of the above. This inventory
+  is the search surface every later verification runs against.
+
+  ═══════════════════════════════════════════════════════════
+  PHASE 2: CLAIM EXTRACTION (DETERMINISTIC, FIVE TYPES)
+  ═══════════════════════════════════════════════════════════
+  Read the documents in the plan, newest and most prominent first
+  (README of the project, then getting-started and install documents,
+  then the rest), capped by the budget. No random sampling; runs must
+  be comparable. Record planned vs opened documents; the delta is your
+  coverage statement, published in PHASE 5.
+
+  From each document extract only claims of these five types, each
+  quoted and each with a "<path>:<line>" pointer into the document:
+  1. entry_point: a file, module, binary, or URL path the document
+     presents as where the project starts ("run src/main.py", "the
+     service listens on /healthz").
+  2. service: a named component or external dependency the project is
+     documented to run or need (a database, a queue, a sidecar, an
+     internal module presented as a running process).
+  3. dependency: a named package, library, tool, or minimum version the
+     document says is required.
+  4. env_var: a named environment variable or configuration key the
+     document tells the reader to set.
+  5. command: a build, install, test, or run command line the document
+     tells the reader to execute.
+  One claim per statement; a sentence naming three variables yields
+  three claims. Give each claim the stable id
+  "docs:<type>:<doc path>:<slug>". A statement you cannot pin to a
+  document line is not a claim and is dropped. Documentation that
+  simply says nothing about an area yields no claim at all.
+
+  ═══════════════════════════════════════════════════════════
+  PHASE 3: VERIFICATION AGAINST THE CODE
+  ═══════════════════════════════════════════════════════════
+  Every claim is checked against the code with a RECORDED SEARCH: the
+  exact pattern you ran (git grep pattern, filename glob over the
+  ls-files listing, or manifest key lookup), the scope it ran in
+  (usually project_path), and the matches it returned as
+  "<path>:<line>" pointers. A claim with no recorded search cannot be
+  classified. Budget: at most 2 searches and 2 file reads per claim
+  beyond the planned set.
+
+  Classify each claim exactly once:
+  - holds: the search found what the document says, and the match
+    really is the documented thing (a Makefile line "build:" for a
+    documented "make build", the dependency present in the manifest,
+    the variable read by the code). Evidence is the match pointer.
+  - drifted: the search is complete over the scope and the documented
+    thing is absent, renamed, moved, or contradicted by the code.
+    Absence is an ABSENCE claim: it is valid only when backed by that
+    recorded full-repo (or full-project) search, never by a sampled
+    read. Record what the code shows instead, with a pointer when there
+    is a replacement to point at ("Makefile defines test: and lint:,
+    no build target", "APP_TOKEN is read as APP_API_TOKEN").
+  - not_checkable: the claim cannot be decided from this checkout
+    (hosted infrastructure, a credential only the operator holds, a
+    command whose behavior depends on a network service, a runtime
+    value, a claim about another repository). Record the reason.
+    NOT CHECKABLE IS NEVER COUNTED AS HOLDING, and a claim you simply
+    ran out of budget for is not_checkable with reason "budget", never
+    holds and never drifted.
+
+  Severity, only for drifted claims:
+  - high: a reader following the document fails immediately. A
+    documented command, build or run step, or entry point that does not
+    exist.
+  - medium: a documented service, dependency, or environment variable
+    the code does not show, or shows under a different name or a
+    different required version.
+  - low: the documented thing still exists but moved, and the document
+    points at the old place; cite both pointers.
+  holds and not_checkable claims carry severity null. Severity is a
+  property of drift only; a document is never scored.
+
+  ═══════════════════════════════════════════════════════════
+  PHASE 4: DRIFT VS PREVIOUS RESULT (FREEZE FLOOR)
+  ═══════════════════════════════════════════════════════════
+  Only if a previous result.json was delivered:
+  - Verify the baseline: same remote and shared history with HEAD (git
+    merge-base). On mismatch set baseline_mismatch true, keep the floor
+    anyway, note it for a human.
+  - Classify claims vs baseline by claim id: new | persisting |
+    resolved.
+  - FREEZE FLOOR: every claim open as drifted in the baseline must
+    reappear as persisting, re-verified against the CURRENT checkout by
+    re-running its recorded search (if you cannot reproduce the drift,
+    mark it resolved with reason "not reproducible at <SHA>"), or as
+    resolved with {id, reason, evidence}. A claim whose document line
+    was deleted is resolved with reason "claim removed from the
+    document". Silently dropping a previous claim fails the
+    freeze_floor check. You do not self-grade the floor beyond
+    reporting it.
+
+  ═══════════════════════════════════════════════════════════
+  PHASE 5: EVIDENCE PACK AND REPORT (MANDATORY)
+  ═══════════════════════════════════════════════════════════
+  Write to /workspace/evidence/:
+  - docs-currency-report.md: human-readable review. It MUST OPEN with a
+    one-page cover for a non-AI reader, at the TOP of the report,
+    before any table or finding list. Verdict sentence first: one
+    sentence stating the run's verdict (the same value written to
+    result.json) and the blocking reason if the verdict is fail. Then
+    three clearly labelled boxes, in this order:
+      BOX 1 — "What we checked". List the documents actually read, the
+      claim counts by type, and the searches recorded. Derive this from
+      inputs_declared, the claims register, and coverage. No aggregate
+      claim the coverage block does not support. Never present a claim
+      count as a documentation quality score.
+      BOX 2 — "What we did NOT check". Mandatory. May not be empty if
+      anything was out of scope, not reviewed, not_checkable, deferred,
+      or skipped. List documents the plan did not reach, not_checkable
+      claims with their reasons, statements skipped because they are
+      not one of the five supported claim types, excluded paths, and
+      skipped drift when no baseline was delivered. Prose quality is
+      out of scope on this preset and so is security, so this box
+      always names both, the Release Security Audit family at minimum.
+      BOX 3 — "What you should do next week". A short, concrete,
+      ordered list of the documents to correct, highest severity first.
+      No legal advice, no certification, and no rewriting: name the
+      drifted claim and what the code shows, nothing more.
+    HONESTY RAIL. The cover may only summarize claims, register rows,
+    coverage, and out-of-scope items already present in the body of
+    this report or the other evidence files. No new claims. Strictly
+    one page.
+    After the cover: the drift list (drifted claims by severity, each
+    with its document pointer, the recorded search, and what the code
+    shows); the not_checkable list with reasons; the claims that hold;
+    the coverage statement; drift vs baseline when one exists.
+  - claims-register.md: every extracted claim with type, document
+    pointer, status, evidence, and the required not_checkable list.
+  - findings.json: the machine-readable claims ledger.
+  - drift-report.md: only when a baseline was delivered.
+  - inventory.json: from PHASE 1.
+  Every markdown evidence file ends with the line:
+  "Machine-generated review evidence. Not a certification, audit
+  opinion, or legal advice."
+
+  REGISTER GRAMMAR MAPPING. This lens registers claims, so its statuses
+  are holds | drifted | not_checkable. Against the review family
+  grammar met | gap | partial | declared plus a mandatory not_checkable
+  list, holds is met, drifted is gap, and not_checkable is
+  not_checkable. partial and declared are not used here: a documented
+  claim either holds against the code or it does not, and a claim the
+  checkout cannot decide is not_checkable, which is not a pass.
+
+  As your FINAL action, write /workspace/result.json: valid JSON, one
+  top-level object, no trailing output. Do not paste it into chat.
+
+  Required shape (preloop.review.docscurrency/v1):
+
+  {
+    "schema": "preloop.review.docscurrency/v1",
+    "flow": "docs-currency-review",
+    "status": "success" | "error",
+    "run_at": "<ISO 8601 UTC>",
+    "git": { "remote": "...", "commit": "<40 hex>", "branch": "...", "dirty": false },
+    "tool_versions": { "<tool>": "<version or 'unavailable: reason'>" },
+    "inputs_declared": { "<what the payload/seed actually delivered>": "..." },
+    "runner": { "kind": null, "id": null },
+    "project": { "path": "<project_path or '.'>", "documents": [ { "path": "...", "lines": <int>, "read": true|false } ] },
+    "claims": [ { "id": "docs:<type>:<doc path>:<slug>", "type": "entry_point|service|dependency|env_var|command", "claim": "<quoted claim text>", "doc": "<path>:<line>", "status": "holds|drifted|not_checkable", "code_shows": "<what the code shows, or null>", "evidence": "<path:line, or null>", "search": { "pattern": "<exact pattern run>", "scope": "<path prefix searched>", "matches": [ "<path:line>" ] }, "severity": "high|medium|low|null", "reason": "<required when not_checkable, else null>" } ],
+    "counts": { "holds": 0, "drifted": 0, "not_checkable": 0, "by_severity": { "high": 0, "medium": 0, "low": 0 }, "by_type": { "entry_point": 0, "service": 0, "dependency": 0, "env_var": 0, "command": 0 } },
+    "coverage": {
+      "documents_total": <int>, "documents_read": <int>,
+      "plan_completed": true|false,
+      "claims_extracted": <int>,
+      "unsupported_statements_skipped": <int>,
+      "not_reviewed": [ "<document or path>" ]
+    },
+    "drift": null | {
+      "baseline": { "schema": "...", "run_at": "<or null>", "commit": "<or null>" },
+      "baseline_mismatch": true|false,
+      "new": [ "<claim ids>" ], "persisting": [ "<claim ids>" ],
+      "resolved": [ { "id": "...", "reason": "...", "evidence": "<path:line or SHA>" } ],
+      "freeze_floor_passed": true|false
+    },
+    "verdict": "pass" | "pass_with_findings" | "fail",
+    "checks": [ { "name": "...", "passed": true|false, "skipped": true|false, "details": "<evidence>" } ],
+    "assessments": [ { "topic": "...", "judgment": "<clearly-marked agent judgment>" } ],
+    "artifacts": { "report": "evidence/docs-currency-report.md", "register": "evidence/claims-register.md", "findings": "evidence/findings.json", "inventory": "evidence/inventory.json", "drift_report": "evidence/drift-report.md or null" },
+    "disclaimer": "Machine-generated review evidence. Not a certification, audit opinion, or legal advice."
+  }
+
+  Rules:
+  - "status" is REQUIRED — it is the flow completion signal read by
+    Preloop. Write "success" when the review ran to completion and this
+    report was written (regardless of the verdict — a failing review is
+    still a completed review); write "error" (and add a "reason" field)
+    when the review could not be completed.
+  - Verdict: "fail" if any claim is drifted at high severity OR
+    freeze_floor_passed is false. "pass" only when the plan completed,
+    no claim is drifted, and no claim is not_checkable. Everything
+    else, including medium and low drift and not_checkable claims, is
+    "pass_with_findings".
+  - THE REGISTER CANNOT UPGRADE THE VERDICT. holds rows, resolved
+    items, a high hold-to-drift ratio, and positive prose never raise
+    it; the verdict is computed only from drifted claims and their
+    severities, not_checkable claims, coverage, and the freeze floor.
+    If the previous verdict was "fail" and its high-severity drift is
+    unresolved, this verdict cannot be "pass". Documentation that reads
+    well is not evidence of anything and is not a pass.
+  - Every claim carries a document pointer and a recorded search
+    pattern; a claim you cannot pin moves to not_checkable with a
+    reason, never to holds by assumption.
+  - Deterministic facts go to "checks" and the register; interpretation
+    goes to "assessments" and is marked as judgment.
+  - Keep result.json under 200 KB: keep drifted and not_checkable
+    claims inline, move the full claims ledger to
+    evidence/findings.json, and note the truncation. Set unknown
+    envelope fields to null rather than inventing values.
+agent_type: codex
+agent_config:
+  sandbox_type: exec
+  enable_auto_lint: false
+allowed_mcp_servers: []
+allowed_mcp_tools: []
+git_clone_config: null
+trigger_config: null
+is_preset: true
