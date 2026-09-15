@@ -428,6 +428,35 @@ class AIModelCatalogSyncResponse(BaseModel):
     dry_run: bool = False
 
 
+class AIModelAliasFailure(BaseModel):
+    """One alias-group of failures, matching how the inbox keys a model."""
+
+    alias: str = Field(
+        ...,
+        description=(
+            "Alias the failing calls carried (the provider name when they "
+            "carried none), which is how the console groups gateway failures."
+        ),
+    )
+    last_failure_at: datetime = Field(
+        ...,
+        description=(
+            "Newest failed request for this alias in the window. The "
+            "console fingerprints a dismissed attention item with it."
+        ),
+    )
+    failed_requests: int = Field(
+        0, description="Failed requests for this alias in the window"
+    )
+    failed_requests_since: Optional[int] = Field(
+        None,
+        description=(
+            "Failures for this alias newer than this model's failed_since "
+            "query parameter. Null when the caller asked for no such moment."
+        ),
+    )
+
+
 class AIModelOverviewItem(BaseModel):
     """One row of the Models page: what this model did in the window."""
 
@@ -474,6 +503,13 @@ class AIModelOverviewItem(BaseModel):
         description=(
             "Failures newer than this model's failed_since query parameter. "
             "Null when the caller asked for no such moment."
+        ),
+    )
+    alias_failures: List[AIModelAliasFailure] = Field(
+        default_factory=list,
+        description=(
+            "Per-alias failure groups for this model, one item per inbox "
+            "key. The row is Attention if any group is unacknowledged."
         ),
     )
     pricing_source: Literal["override", "model_config", "catalog", "none"] = Field(

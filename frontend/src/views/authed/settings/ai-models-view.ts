@@ -585,6 +585,12 @@ export class AIModelsView extends LitElement {
         failedRequests: item?.failed_requests || 0,
         lastFailureAt: item?.last_failure_at,
         failedRequestsSince: item?.failed_requests_since,
+        aliasFailures: (item?.alias_failures || []).map((group) => ({
+          failureAlias: group.alias,
+          lastFailureAt: group.last_failure_at,
+          failedRequests: group.failed_requests,
+          failedRequestsSince: group.failed_requests_since,
+        })),
       },
       this.dismissals
     );

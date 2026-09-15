@@ -5,7 +5,7 @@ import {
   markerSinceLabel,
   modelAttentionState,
 } from './model-attention';
-import { modelAttentionItemId } from './attention';
+import { deriveAttentionItems, modelAttentionItemId } from './attention';
 import type { AttentionDismissal } from '../api';
 
 /**
@@ -128,5 +128,79 @@ describe('modelAttentionState', () => {
     expect(markerSinceLabel('snoozed')).to.equal('since snooze');
     expect(markerSinceLabel('expected')).to.equal('since marked expected');
     expect(markerSinceLabel(undefined)).to.equal('since fix');
+  });
+
+  it('keeps a two-alias row flagged until every alias item is dismissed', () => {
+    const newestAt = FAILED_AT;
+    const olderAt = '2026-09-13T08:00:00Z';
+    const twoAliases = summary({
+      aliasFailures: [
+        {
+          failureAlias: 'example/reviewer',
+          lastFailureAt: newestAt,
+          failedRequests: 2,
+        },
+        {
+          failureAlias: 'example/reviewer-old',
+          lastFailureAt: olderAt,
+          failedRequests: 3,
+        },
+      ],
+    });
+    const newestDismissal = dismissal();
+    const olderDismissal = dismissal({
+      id: 'dismissal-2',
+      item_id: 'model:example/reviewer-old',
+      fingerprint: `last:${olderAt}`,
+    });
+    const failures = [
+      {
+        api_usage_id: 'u-new',
+        timestamp: newestAt,
+        status_code: 500,
+        outcome: 'error',
+        model_alias: 'example/reviewer',
+        provider_name: 'example-provider',
+      },
+      {
+        api_usage_id: 'u-old',
+        timestamp: olderAt,
+        status_code: 502,
+        outcome: 'error',
+        model_alias: 'example/reviewer-old',
+        provider_name: 'example-provider',
+      },
+    ];
+
+    const newestOnly = modelAttentionState(twoAliases, [newestDismissal], NOW);
+    expect(newestOnly.status).to.equal('failing');
+    expect(newestOnly.itemId).to.equal('model:example/reviewer-old');
+    const inboxNewestOnly = deriveAttentionItems({
+      now: NOW,
+      gatewayFailures: failures as any,
+      dismissals: [newestDismissal],
+    });
+    expect(inboxNewestOnly.items.map((item) => item.id)).to.include(
+      'model:example/reviewer-old'
+    );
+    expect(inboxNewestOnly.items.map((item) => item.id)).to.not.include(
+      'model:example/reviewer'
+    );
+
+    const both = modelAttentionState(
+      twoAliases,
+      [newestDismissal, olderDismissal],
+      NOW
+    );
+    expect(both.status).to.equal('marked');
+    expect(both.dismissable).to.equal(false);
+    const inboxBoth = deriveAttentionItems({
+      now: NOW,
+      gatewayFailures: failures as any,
+      dismissals: [newestDismissal, olderDismissal],
+    });
+    expect(
+      inboxBoth.items.filter((item) => item.kind === 'model')
+    ).to.have.length(0);
   });
 });

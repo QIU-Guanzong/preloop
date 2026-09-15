@@ -602,6 +602,12 @@ describe('AIModelsView attention dismissals', () => {
   let overviewRequests: string[];
   let lastFailureAt: string;
   let failedRequestsSince: number;
+  let extraAliasFailures: {
+    alias: string;
+    last_failure_at: string;
+    failed_requests: number;
+    failed_requests_since: number | null;
+  }[];
 
   const json = (data: unknown) =>
     new Response(JSON.stringify(data), {
@@ -631,6 +637,15 @@ describe('AIModelsView attention dismissals', () => {
     last_failure_at: lastFailureAt,
     last_failure_alias: 'example/reviewer',
     failed_requests_since: failedSinceAsked ? failedRequestsSince : null,
+    alias_failures: [
+      {
+        alias: 'example/reviewer',
+        last_failure_at: lastFailureAt,
+        failed_requests: 9,
+        failed_requests_since: failedSinceAsked ? failedRequestsSince : null,
+      },
+      ...extraAliasFailures,
+    ],
     pricing_source: 'catalog',
   });
 
@@ -643,6 +658,7 @@ describe('AIModelsView attention dismissals', () => {
     overviewRequests = [];
     lastFailureAt = '2026-09-14T09:00:00Z';
     failedRequestsSince = 2;
+    extraAliasFailures = [];
 
     fetchStub = sinon
       .stub(window, 'fetch')
@@ -840,6 +856,34 @@ describe('AIModelsView attention dismissals', () => {
     expect(decodeURIComponent(splitRequest)).to.contain(
       'failed_since=model-1:2026-09-13T08:00:00Z'
     );
+  });
+
+  it('keeps a two-alias row flagged after only the newest alias is dismissed', async () => {
+    extraAliasFailures = [
+      {
+        alias: 'example/reviewer-old',
+        last_failure_at: '2026-09-13T08:00:00Z',
+        failed_requests: 4,
+        failed_requests_since: null,
+      },
+    ];
+    dismissalsResponse = [
+      {
+        id: 'dismissal-1',
+        item_id: 'model:example/reviewer',
+        fingerprint: `last:${lastFailureAt}`,
+        reason: 'fixed',
+        snooze_until: null,
+        dismissed_by_user_id: 'user-1',
+        dismissed_by_username: 'Jane Doe',
+        created_at: '2026-09-14T09:30:00Z',
+      },
+    ];
+
+    const element = await mount();
+
+    expect((element as any).modelsNeedingAttentionCount).to.equal(1);
+    expect(healthBadge(element).textContent!.trim()).to.equal('Attention');
   });
 
   it('dismisses a row with the item id and fingerprint the inbox uses', async () => {

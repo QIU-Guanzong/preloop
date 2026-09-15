@@ -11712,6 +11712,37 @@ paths:
       - bearerAuth: []
 components:
   schemas:
+    AIModelAliasFailure:
+      properties:
+        alias:
+          type: string
+          title: Alias
+          description: Alias the failing calls carried (the provider name when they
+            carried none), which is how the console groups gateway failures.
+        last_failure_at:
+          type: string
+          format: date-time
+          title: Last Failure At
+          description: Newest failed request for this alias in the window. The console
+            fingerprints a dismissed attention item with it.
+        failed_requests:
+          type: integer
+          title: Failed Requests
+          description: Failed requests for this alias in the window
+          default: 0
+        failed_requests_since:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Failed Requests Since
+          description: Failures for this alias newer than this model's failed_since
+            query parameter. Null when the caller asked for no such moment.
+      type: object
+      required:
+      - alias
+      - last_failure_at
+      title: AIModelAliasFailure
+      description: One alias-group of failures, matching how the inbox keys a model.
     AIModelCatalogSyncProviderResult:
       properties:
         provider:
@@ -12106,6 +12137,13 @@ components:
           title: Failed Requests Since
           description: Failures newer than this model's failed_since query parameter.
             Null when the caller asked for no such moment.
+        alias_failures:
+          items:
+            $ref: '#/components/schemas/AIModelAliasFailure'
+          type: array
+          title: Alias Failures
+          description: Per-alias failure groups for this model, one item per inbox
+            key. The row is Attention if any group is unacknowledged.
         pricing_source:
           type: string
           enum:

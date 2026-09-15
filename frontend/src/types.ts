@@ -1382,6 +1382,16 @@ export interface AIModelGatewayUsageSummaryResponse {
   usage_by_session: GatewayUsageBySession[];
 }
 
+export interface AIModelAliasFailure {
+  /** Alias the failing calls carried, which is how the console groups failures. */
+  alias: string;
+  /** Newest failed request for this alias; a dismissal is fingerprinted with it. */
+  last_failure_at: string;
+  failed_requests: number;
+  /** Failures newer than this model's `failed_since` pair, null when unasked. */
+  failed_requests_since?: number | null;
+}
+
 export interface AIModelOverviewItem {
   ai_model_id: string;
   model_name: string;
@@ -1403,6 +1413,11 @@ export interface AIModelOverviewItem {
   last_failure_alias?: string | null;
   /** Failures newer than this model's `failed_since` pair, null when unasked. */
   failed_requests_since?: number | null;
+  /**
+   * Per-alias failure groups, one inbox item each. The Models row is
+   * Attention if any of these is still unacknowledged.
+   */
+  alias_failures?: AIModelAliasFailure[];
   pricing_source: 'override' | 'model_config' | 'catalog' | 'none';
 }
 

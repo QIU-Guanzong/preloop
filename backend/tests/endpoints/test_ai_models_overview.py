@@ -316,6 +316,11 @@ def test_overview_reports_the_newest_failure_and_its_alias(
     assert row["last_failure_alias"] == "failing-model-renamed"
     # Nothing was asked for, so nothing is counted since.
     assert row["failed_requests_since"] is None
+    aliases = {group["alias"]: group for group in row["alias_failures"]}
+    assert set(aliases) == {"failing-model", "failing-model-renamed"}
+    assert aliases["failing-model"]["failed_requests"] == 1
+    assert aliases["failing-model-renamed"]["failed_requests"] == 1
+    assert aliases["failing-model-renamed"]["failed_requests_since"] is None
 
 
 def test_overview_counts_failures_after_the_moment_a_model_was_marked_fixed(
@@ -378,3 +383,56 @@ def test_overview_rejects_a_malformed_failed_since_pair(
     )
 
     assert response.status_code == 422, response.text
+
+
+def test_overview_rejects_too_many_failed_since_pairs(
+    client, db_session: Session, test_user: User
+) -> None:
+    """The OR list on the aggregate cannot grow without bound."""
+    from preloop.api.endpoints.ai_models import MAX_FAILED_SINCE_PAIRS
+
+    _make_model(db_session, test_user, "any-model")
+    db_session.commit()
+    pairs = [
+        f"{uuid4()}:{WINDOW_START.isoformat()}"
+        for _ in range(MAX_FAILED_SINCE_PAIRS + 1)
+    ]
+
+    response = client.get(
+        "/api/v1/ai-models/overview",
+        params={
+            "start_date": WINDOW_START.isoformat(),
+            "failed_since": pairs,
+        },
+    )
+
+    assert response.status_code == 422, response.text
+
+
+def test_overview_ignores_failed_since_pairs_for_other_accounts(
+    client, db_session: Session, test_user: User
+) -> None:
+    """A pair for a model this account does not own is dropped, not rejected."""
+    from preloop.models.crud import crud_account
+
+    _make_model(db_session, test_user, "own-model")
+    other_account = crud_account.create(
+        db_session,
+        obj_in={"organization_name": "Other Organization", "is_active": True},
+    )
+    other_model = AIModel(
+        name="other-account-model",
+        provider_name="openai",
+        model_identifier="gpt-4o",
+        account_id=other_account.id,
+    )
+    db_session.add(other_model)
+    db_session.commit()
+
+    rows = _overview(
+        client,
+        1,
+        failed_since=[f"{other_model.id}:{WINDOW_START.isoformat()}"],
+    )
+
+    assert all(row["failed_requests_since"] is None for row in rows)
