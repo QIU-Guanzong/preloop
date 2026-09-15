@@ -314,6 +314,29 @@ the chunks along with the records, exactly as it reintroduces everything else,
 and an operator with database access can write to the corpus directly. Both
 are the same limit as the rest of this section, for the same reason.
 
+### Session search backfill
+
+Sessions written before the corpus existed are indexed by a bounded sweeper,
+not on a request. It is **off by default**: set
+`SESSION_SEARCH_BACKFILL_ENABLED=true` to turn it on. An upgrade must not
+silently start walking every account's retained history. The corpus kill
+switch still wins: `SESSION_SEARCH_INDEX_ENABLED=false` makes the pass a
+no-op.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SESSION_SEARCH_BACKFILL_ENABLED` | `false` | Nothing is walked while this is false |
+| `SESSION_SEARCH_BACKFILL_INTERVAL_SECONDS` | `900` | Time between passes (minimum 60) |
+| `SESSION_SEARCH_BACKFILL_MAX_ROWS_PER_PASS` | `2000` | Corpus rows one pass may write in total |
+| `SESSION_SEARCH_BACKFILL_MAX_ROWS_PER_ACCOUNT` | `500` | Rows one pass may write for a single account |
+| `SESSION_SEARCH_BACKFILL_MAX_SECONDS` | `120` | Wall-clock budget per pass |
+| `SESSION_SEARCH_BACKFILL_MAX_AGE_DAYS` | `183` | How far back the walk goes; `0` means no age bound |
+
+A pass that hits a bound stops and resumes from its per-account watermark
+rather than starting over. The watermark only moves past sessions that were
+indexed in full, so a stop mid-session re-walks that session (reads, writes
+nothing for sources already stored).
+
 ### Period export
 
 `POST /api/v1/retention/exports?start=YYYY-MM-DD&end=YYYY-MM-DD` returns a

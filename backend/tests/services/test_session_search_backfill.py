@@ -176,6 +176,88 @@ def test_a_pass_stops_at_its_row_budget_mid_account(db_session, test_user):
     assert state.rows_written == 2
 
 
+def test_backfill_session_stops_mid_session_and_rewalks_without_rewriting(
+    db_session, test_user
+):
+    """The budget can stop between sources of one session.
+
+    ``backfill_session`` returns finished=False. The next call re-reads the
+    already stored source, writes nothing for it, and indexes the next one.
+    """
+    with _history_written_before_search_existed():
+        session = _session(
+            db_session,
+            test_user.account_id,
+            source_id="session-partial",
+            started_at=NOW - timedelta(days=2),
+        )
+        _gateway_interaction(
+            db_session,
+            account_id=test_user.account_id,
+            user_id=test_user.id,
+            session=session,
+            timestamp=NOW - timedelta(days=2),
+        )
+        _gateway_interaction(
+            db_session,
+            account_id=test_user.account_id,
+            user_id=test_user.id,
+            session=session,
+            timestamp=NOW - timedelta(days=2) + timedelta(minutes=1),
+        )
+        _tool_call(
+            db_session,
+            account_id=test_user.account_id,
+            session=session,
+            timestamp=NOW - timedelta(days=2) + timedelta(minutes=2),
+        )
+    db_session.commit()
+    db_session.refresh(session)
+
+    sources, rows, finished = backfill.backfill_session(
+        db_session, session=session, row_budget=1
+    )
+    assert finished is False
+    assert sources == 1
+    assert rows == 1
+    first_ids = {
+        str(row.id)
+        for row in crud_session_search_document.search_account_chunks(
+            db_session, account_id=test_user.account_id, limit=1000
+        )
+    }
+    assert len(first_ids) == 1
+
+    sources, rows, finished = backfill.backfill_session(
+        db_session, session=session, row_budget=1
+    )
+    assert finished is False
+    assert sources == 2
+    assert rows == 1
+    second_ids = {
+        str(row.id)
+        for row in crud_session_search_document.search_account_chunks(
+            db_session, account_id=test_user.account_id, limit=1000
+        )
+    }
+    assert first_ids < second_ids
+    assert len(second_ids) == 2
+
+    sources, rows, finished = backfill.backfill_session(
+        db_session, session=session, row_budget=1
+    )
+    assert finished is True
+    assert sources == 3
+    assert rows == 1
+    assert _corpus_count(db_session, test_user.account_id) == 3
+    assert first_ids < {
+        str(row.id)
+        for row in crud_session_search_document.search_account_chunks(
+            db_session, account_id=test_user.account_id, limit=1000
+        )
+    }
+
+
 def test_the_account_row_budget_bounds_one_account(db_session, test_user):
     """One large account cannot consume the whole pass."""
     _history(db_session, test_user, sessions=3)

@@ -488,14 +488,18 @@ class Settings(BaseSettings):
     session_search_backfill_interval_seconds: int = Field(
         900,
         ge=60,
-        description="Seconds between session search backfill passes.",
+        description=(
+            "Seconds between session search backfill passes "
+            "(SESSION_SEARCH_BACKFILL_INTERVAL_SECONDS)."
+        ),
     )
     session_search_backfill_max_rows_per_pass: int = Field(
         2000,
         ge=1,
         description=(
             "Corpus rows one backfill pass may write in total. The backlog is "
-            "drained across passes rather than in one long transaction."
+            "drained across passes rather than in one long transaction "
+            "(SESSION_SEARCH_BACKFILL_MAX_ROWS_PER_PASS)."
         ),
     )
     session_search_backfill_max_rows_per_account: int = Field(
@@ -503,7 +507,8 @@ class Settings(BaseSettings):
         ge=1,
         description=(
             "Corpus rows one backfill pass may write for a single account, so "
-            "one large account cannot consume the whole pass budget."
+            "one large account cannot consume the whole pass budget "
+            "(SESSION_SEARCH_BACKFILL_MAX_ROWS_PER_ACCOUNT)."
         ),
     )
     session_search_backfill_max_seconds: int = Field(
@@ -511,7 +516,8 @@ class Settings(BaseSettings):
         ge=1,
         description=(
             "Wall-clock budget for one backfill pass. The pass stops cleanly "
-            "at the budget and resumes from its watermark on the next tick."
+            "at the budget and resumes from its watermark on the next tick "
+            "(SESSION_SEARCH_BACKFILL_MAX_SECONDS)."
         ),
     )
     session_search_backfill_max_age_days: int = Field(
