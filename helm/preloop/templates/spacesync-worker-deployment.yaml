@@ -140,6 +140,8 @@ spec:
               value: {{ $.Values.flowExecution.claimStaleSeconds | default 120 | quote }}
             - name: FLOW_EXECUTION_RECLAIM_INTERVAL_SECONDS
               value: {{ $.Values.flowExecution.reclaimIntervalSeconds | default 30 | quote }}
+            - name: FLOW_EXECUTION_REDISPATCH_BACKOFF_MAX_SECONDS
+              value: {{ $.Values.flowExecution.redispatchBackoffMaxSeconds | default 900 | quote }}
             {{- if eq .name "flow-execution" }}
             - name: FLOW_EXECUTION_MAX_INFLIGHT
               value: {{ $.Values.flowExecution.maxInflight | default 10 | quote }}

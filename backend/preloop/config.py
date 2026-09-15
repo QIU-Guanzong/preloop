@@ -1030,6 +1030,16 @@ class Settings(BaseSettings):
             "account.meta_data['flow_execution_max_running_per_account']."
         ),
     )
+    flow_execution_redispatch_backoff_max_seconds: int = Field(
+        900,
+        description=(
+            "Longest gap the stale-claim reaper leaves between two "
+            "re-dispatches of the same execution. The gap doubles from the "
+            "reclaim interval (30s, 60s, 2m, ...) up to this cap, so an "
+            "execution nothing can claim is republished a handful of times "
+            "an hour instead of on every pass."
+        ),
+    )
     flow_delegation_max_depth: int = Field(
         2,
         description=(
@@ -1460,6 +1470,9 @@ class Settings(BaseSettings):
             ),
             flow_execution_max_running_per_account=int(
                 os.getenv("FLOW_EXECUTION_MAX_RUNNING_PER_ACCOUNT", "3")
+            ),
+            flow_execution_redispatch_backoff_max_seconds=int(
+                os.getenv("FLOW_EXECUTION_REDISPATCH_BACKOFF_MAX_SECONDS", "900")
             ),
             flow_delegation_max_depth=int(os.getenv("FLOW_DELEGATION_MAX_DEPTH", "2")),
             flow_delegation_max_children=int(

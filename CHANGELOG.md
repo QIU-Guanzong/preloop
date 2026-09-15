@@ -177,6 +177,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The stale-claim reaper no longer re-publishes every unclaimed execution
+  from every worker on every pass. One replica runs the pass per interval
+  (a database lease), an execution nobody claims is re-dispatched on a
+  doubling delay recorded on the row (30s, 60s, 2m, ... up to
+  `FLOW_EXECUTION_REDISPATCH_BACKOFF_MAX_SECONDS`, default 900), and a pass
+  that finds flow tasks already queued undelivered publishes nothing.
+  Recovery of an execution whose owner died is unchanged: a claim clears
+  the backoff, so it is adopted inside one stale window. Each pass logs one
+  summary line with its counts instead of a line per candidate.
 - Agent launch no longer fails with `exec /bin/bash: argument list too
   long` when a rendered prompt or Kubernetes inner script exceeds
   Linux `MAX_ARG_STRLEN` (131072 bytes). The prompt and script travel

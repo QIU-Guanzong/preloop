@@ -247,6 +247,16 @@ class FlowExecution(Base):
     # revisits every unclaimed execution every 30 seconds.
     queued_reason = Column(String(200), nullable=True)
 
+    # Stale-claim reaper backoff. How many times the reaper has re-published
+    # a task for this execution without it ever being claimed, and when it
+    # last did so. Shared state on purpose: every replica reads the same two
+    # numbers, so an execution nothing can claim is republished on a growing
+    # delay instead of once per replica per interval. Both are reset the
+    # moment a worker claims the execution, so a run whose owner dies is
+    # recovered promptly however many times it was queued before.
+    redispatch_count = Column(Integer, nullable=False, server_default="0", default=0)
+    last_redispatch_at = Column(DateTime(timezone=True), nullable=True)
+
     # Retry tracking
     retry_of_execution_id = Column(
         UUID(as_uuid=True),

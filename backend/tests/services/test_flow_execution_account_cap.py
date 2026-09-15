@@ -538,12 +538,30 @@ class TestReaperDoesNotStorm:
         assert published == [str(orphaned.id)]
 
     @pytest.mark.asyncio
-    async def test_backoff_memory_is_pruned(self):
-        """The per-execution backoff map cannot grow without bound."""
+    async def test_the_backoff_is_recorded_on_the_execution(self, db_session: Session):
+        """The backoff lives on the row, not in one process's memory.
+
+        It used to be a per-process dict, which bounded one worker and
+        nothing else. On the row, every replica reads the same counter.
+        """
+        account = _make_account(db_session, "Recorded Backoff Tenant")
+        flow = _make_flow(db_session, account.id)
+        execution = _pending(db_session, flow.id)
+
         service = ExecutionRecoveryService()
-        service._last_redispatch = {"old": 0.0, "fresh": 10_000_000.0}
+        published: list = []
+        dispatch = self._fake_dispatch(published)
 
-        service._prune_redispatch_memory(now=10_000_000.0, window=120)
+        from preloop.services import flow_execution_dispatcher
 
-        assert "old" not in service._last_redispatch
-        assert "fresh" in service._last_redispatch
+        with (
+            patch.object(flow_execution_dispatcher, "dispatch_execute", dispatch),
+            patch.object(flow_execution_dispatcher, "dispatch_resume", dispatch),
+        ):
+            await service._redispatch_stale_executions(
+                db_session, stale_after_seconds=120
+            )
+
+        db_session.refresh(execution)
+        assert execution.redispatch_count == 1
+        assert execution.last_redispatch_at is not None
