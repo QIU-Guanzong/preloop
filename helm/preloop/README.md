@@ -266,6 +266,14 @@ through the generic worker 2+4 pool. `flowExecution.maxRunningPerAccount`
 (default 3) is the instance-wide fairness cap injected as
 `FLOW_EXECUTION_MAX_RUNNING_PER_ACCOUNT` on that same worker.
 
+The stale-claim reaper (`flowExecution.reclaimIntervalSeconds`, default 30)
+runs on one replica per interval: the pass is held under a database lease,
+so replica count no longer multiplies the number of re-dispatches. An
+execution nobody claims is republished on a doubling delay up to
+`flowExecution.redispatchBackoffMaxSeconds` (default 900), and a pass that
+finds flow tasks already queued undelivered publishes nothing. Each pass
+logs one summary line with its counts.
+
 ## Uninstalling the Chart
 
 To uninstall/delete the `preloop` deployment:

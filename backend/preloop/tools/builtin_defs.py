@@ -374,19 +374,20 @@ RUN_FLOW_TOOL: Dict[str, Any] = {
     "name": "run_flow",
     "description": (
         "Run another flow of this account as a child of the current "
+        "Run another flow of this account as a child of the current "
         "execution. Asynchronous by default: the call returns as soon as the "
         "child execution row exists. Pass wait=true on the last call of a fan "
         "out to wait for every child this execution started; if they are not "
         "all done within a short window this execution is parked, holds no "
         "container while they run, and resumes with one completion record per "
         "child. The target must be named on the calling flow's callable flows "
-        "allowlist; depth, cycles and the number of direct children are "
-        "capped server side. Returns one A2A shaped task record as JSON. A "
-        "refusal is a record too: state TASK_STATE_REJECTED with "
-        "'preloop.ai/refusalReason' naming the rule that declined the call "
-        "(flow_not_found, flow_not_callable, tool_not_allowed, "
-        "depth_exceeded, cycle_detected, fanout_exceeded), not an error to "
-        "parse out of prose."
+        "allowlist; depth, cycles, the number of direct children and what "
+        "the delegation tree may spend are capped server side. Returns one "
+        "A2A shaped task record as JSON. A refusal is a record too: state "
+        "TASK_STATE_REJECTED with 'preloop.ai/refusalReason' naming the rule "
+        "that declined the call (flow_not_found, flow_not_callable, "
+        "tool_not_allowed, depth_exceeded, cycle_detected, fanout_exceeded, "
+        "budget_exceeded), not an error to parse out of prose."
     ),
     "source": "builtin",
     # Default-off: delegation spends an account's budget from inside an
@@ -444,6 +445,20 @@ RUN_FLOW_TOOL: Dict[str, Any] = {
                     "marked expired). The results arrive as the next turn of "
                     "this run, not as the return value of this call. Defaults "
                     "to false."
+                ),
+            },
+            "max_cost_usd": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": (
+                    "Most this child, and anything it delegates in turn, may "
+                    "cost in USD. Lowered to the calling flow's per child "
+                    "ceiling when that is smaller. A child that does not fit "
+                    "in what the delegation tree has left is refused with "
+                    "budget_exceeded before it starts, and the refusal says "
+                    "how much is left; children already running are never "
+                    "killed to make room. Omit it to take the instance "
+                    "default."
                 ),
             },
         },
