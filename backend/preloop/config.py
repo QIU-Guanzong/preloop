@@ -1050,6 +1050,29 @@ class Settings(BaseSettings):
             "account the same at most."
         ),
     )
+    flow_delegation_max_tree_usd: float = Field(
+        50.0,
+        description=(
+            "How much one delegation tree may commit, in USD: the spend of "
+            "the run that started it plus the ceilings of everything it "
+            "delegated. A child that does not fit is refused before it "
+            "starts rather than killed mid run. Defaults to the default per "
+            "child ceiling times the fan out ceiling, so a full fan out of "
+            "default sized children is exactly affordable. Set 0 for no "
+            "instance ceiling, leaving only the per entry ceilings on each "
+            "flow's callable_flows allowlist."
+        ),
+    )
+    flow_delegation_default_child_usd: float = Field(
+        2.0,
+        description=(
+            "Cost ceiling in USD for a delegated child whose call named no "
+            "max_cost_usd and whose allowlist entry sets no "
+            "max_usd_per_child. Without it a silent child would reserve "
+            "nothing and a fan out could commit the tree allowance many "
+            "times over. Set 0 to let an unnamed ceiling mean unbounded."
+        ),
+    )
     flow_delegation_wait_seconds: int = Field(
         90,
         description=(
@@ -1441,6 +1464,12 @@ class Settings(BaseSettings):
             flow_delegation_max_depth=int(os.getenv("FLOW_DELEGATION_MAX_DEPTH", "2")),
             flow_delegation_max_children=int(
                 os.getenv("FLOW_DELEGATION_MAX_CHILDREN", "25")
+            ),
+            flow_delegation_max_tree_usd=float(
+                os.getenv("FLOW_DELEGATION_MAX_TREE_USD", "50.0")
+            ),
+            flow_delegation_default_child_usd=float(
+                os.getenv("FLOW_DELEGATION_DEFAULT_CHILD_USD", "2.0")
             ),
             flow_delegation_wait_seconds=int(
                 os.getenv("FLOW_DELEGATION_WAIT_SECONDS", "90")

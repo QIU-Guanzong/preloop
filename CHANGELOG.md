@@ -94,6 +94,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by `FLOW_DELEGATION_MAX_DEPTH` (default 2) and
   `FLOW_DELEGATION_MAX_CHILDREN` (default 25, the matrix fan out ceiling).
   Docs at `docs/guide/flows/flow-delegation.md`.
+- Cost ceilings for delegated children. `run_flow` takes an optional
+  `max_cost_usd`, lowered to the calling flow's `max_usd_per_child` on the
+  matching `callable_flows` entry and refused with `budget_exceeded` when
+  the delegation tree cannot afford it. A ceiling covers a subtree, so it
+  cannot be avoided by delegating one level deeper, and a refusal happens
+  before the child row exists: children already running are never killed to
+  make room. What a tree may commit is bounded by
+  `FLOW_DELEGATION_MAX_TREE_USD` (default 50) and a child nobody named a
+  ceiling for takes `FLOW_DELEGATION_DEFAULT_CHILD_USD` (default 2); either
+  set to 0 removes that ceiling. Children of one execution now share a
+  `batch_id`, so `GET /api/v1/flows/batches/{batch_id}/executions` rolls up
+  a fan out's cost, tokens and tool calls with no new endpoint. Existing
+  budget policies are unchanged: this is an admission rule layered on them.
 - Execution tree on the execution page. A delegating run lists what it
   started: one row per child with the flow, the label the caller passed, the
   state, the duration and the cost, expandable to grandchildren and linked to
