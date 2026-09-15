@@ -366,6 +366,25 @@ class PreloopSyncNatsWorker:
                             task_name,
                         )
 
+                async def delayed_nak(delay: float = 0) -> None:
+                    """Return the message to the stream instead of acking it.
+
+                    A handler that refused the work on purpose (an account is
+                    at its concurrency cap) must not drop the message: the
+                    execution still has to run, just not now and not
+                    necessarily here.
+                    """
+                    nonlocal acked
+                    if acked:
+                        return
+                    await msg.nak(delay=delay)
+                    acked = True
+                    logger.info(
+                        "Task '%s' returned to the stream for redelivery in %ss",
+                        task_name,
+                        delay,
+                    )
+
                 call_kwargs = dict(payload.get("kwargs", {}) or {})
                 # ack-after-claim (flow orchestration) and ack-after-commit
                 # (webhook fan-out) both hand the handler an ack callable so
@@ -374,6 +393,8 @@ class PreloopSyncNatsWorker:
                     tasks, "ACK_AFTER_CLAIM_TASKS", ()
                 ) or task_name in getattr(tasks, "ACK_AFTER_COMMIT_TASKS", ()):
                     call_kwargs["_ack"] = early_ack
+                if task_name in getattr(tasks, "ACK_AFTER_CLAIM_TASKS", ()):
+                    call_kwargs["_nak"] = delayed_nak
 
                 if task_name == "process_webhook_event" and call_kwargs.get(
                     "embedding_requests"

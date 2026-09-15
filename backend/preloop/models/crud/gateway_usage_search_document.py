@@ -40,9 +40,30 @@ class CRUDGatewayUsageSearchDocument(CRUDBase[GatewayUsageSearchDocument]):
         meta_data: Optional[Dict[str, Any]] = None,
     ) -> GatewayUsageSearchDocument:
         """Create or update the search corpus row for one gateway interaction."""
+        return self.upsert_for_api_usage_id(
+            db,
+            api_usage_id=str(api_usage.id),
+            searchable_text=searchable_text,
+            meta_data=meta_data,
+        )
+
+    def upsert_for_api_usage_id(
+        self,
+        db: Session,
+        *,
+        api_usage_id: str,
+        searchable_text: str,
+        meta_data: Optional[Dict[str, Any]] = None,
+    ) -> GatewayUsageSearchDocument:
+        """Upsert a corpus row from an id, without loading the usage row.
+
+        The writer may be a background worker that only carries the id and a
+        prepared document, so nothing here needs the ORM object or the
+        payloads it was built from.
+        """
         normalized_text = searchable_text.strip()
         content_hash = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
-        existing = self.get_by_api_usage_id(db, api_usage_id=str(api_usage.id))
+        existing = self.get_by_api_usage_id(db, api_usage_id=api_usage_id)
 
         if existing:
             existing.searchable_text = normalized_text
@@ -54,7 +75,7 @@ class CRUDGatewayUsageSearchDocument(CRUDBase[GatewayUsageSearchDocument]):
             return existing
 
         db_obj = GatewayUsageSearchDocument(
-            api_usage_id=api_usage.id,
+            api_usage_id=api_usage_id,
             searchable_text=normalized_text,
             content_hash=content_hash,
             meta_data=meta_data,

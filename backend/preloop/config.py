@@ -391,6 +391,25 @@ class Settings(BaseSettings):
             "when automatic gateway indexing is enabled"
         ),
     )
+    gateway_usage_index_queue_max_pending: int = Field(
+        256,
+        ge=1,
+        description=(
+            "Pending search-index documents a process may hold before new "
+            "ones are dropped. The corpus is opt-in; dropping is the correct "
+            "failure under memory pressure "
+            "(GATEWAY_USAGE_INDEX_QUEUE_MAX_PENDING)."
+        ),
+    )
+    gateway_usage_index_queue_enabled: bool = Field(
+        True,
+        description=(
+            "Whether a process may start a background thread that writes "
+            "queued search documents "
+            "(GATEWAY_USAGE_INDEX_QUEUE_ENABLED). TESTING=true always "
+            "disables the thread even when this is true."
+        ),
+    )
     model_gateway_upstream_backend: str = Field(
         "litellm",
         description=(
@@ -487,7 +506,11 @@ class Settings(BaseSettings):
     )
     model_price_refresh_allowed_models: list[str] = Field(
         default_factory=list,
-        description="Exact catalog keys the reviewed feed may update; required when enabled.",
+        description=(
+            "Exact catalog keys or supported Alibaba regional scopes "
+            "(alibaba/singapore-international/*, alibaba/united-states/*) "
+            "the reviewed feed may update; required when enabled."
+        ),
     )
     model_price_refresh_interval_seconds: int = Field(
         21600,
@@ -997,6 +1020,16 @@ class Settings(BaseSettings):
             "wait-bound; the cap is a semaphore, not one NATS fetch."
         ),
     )
+    flow_execution_max_running_per_account: int = Field(
+        3,
+        description=(
+            "How many flow executions one account may have admitted at once "
+            "across the whole instance. Enforced at claim time, so retries "
+            "and resumes respect it too. Further executions stay PENDING "
+            "with queued_reason set. An account may override this through "
+            "account.meta_data['flow_execution_max_running_per_account']."
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -1240,6 +1273,14 @@ class Settings(BaseSettings):
             sampler_ratio=otlp_sampler_ratio,
         )
 
+        try:
+            gateway_usage_index_queue_max_pending = max(
+                1,
+                int(os.getenv("GATEWAY_USAGE_INDEX_QUEUE_MAX_PENDING", "256")),
+            )
+        except ValueError:
+            gateway_usage_index_queue_max_pending = 256
+
         return cls(
             app_name=os.getenv("APP_NAME", "Preloop"),
             environment=env,
@@ -1335,6 +1376,9 @@ class Settings(BaseSettings):
             flow_execution_max_inflight=int(
                 os.getenv("FLOW_EXECUTION_MAX_INFLIGHT", "10")
             ),
+            flow_execution_max_running_per_account=int(
+                os.getenv("FLOW_EXECUTION_MAX_RUNNING_PER_ACCOUNT", "3")
+            ),
             stripe_secret_key=stripe_secret_key,
             stripe_webhook_secret=stripe_webhook_secret,
             billing_trial_days=int(os.getenv("BILLING_TRIAL_DAYS", "14")),
@@ -1381,6 +1425,11 @@ class Settings(BaseSettings):
             billing_budget_chars_per_token=float(
                 os.getenv("BILLING_BUDGET_CHARS_PER_TOKEN", "4.0")
             ),
+            gateway_usage_index_queue_max_pending=gateway_usage_index_queue_max_pending,
+            gateway_usage_index_queue_enabled=os.getenv(
+                "GATEWAY_USAGE_INDEX_QUEUE_ENABLED", "true"
+            ).lower()
+            in ("true", "1", "t", "yes"),
         )
 
 

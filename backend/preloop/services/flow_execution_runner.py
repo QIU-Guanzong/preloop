@@ -26,6 +26,8 @@ from preloop.sync.services.event_bus import get_nats_client
 logger = logging.getLogger(__name__)
 
 AckCallback = Callable[[], Awaitable[None]]
+#: Return the message to the stream for redelivery after ``delay`` seconds.
+NakCallback = Callable[[float], Awaitable[None]]
 
 # Executions this process currently holds a claim for (deploy drain).
 _active_claimed_execution_ids: Set[str] = set()
@@ -217,6 +219,7 @@ async def claim_and_run_execution(
     *,
     resume: bool = False,
     ack: Optional[AckCallback] = None,
+    nak: Optional[NakCallback] = None,
 ) -> dict[str, Any]:
     """Claim a flow execution, ack JetStream, then run or resume orchestration.
 
@@ -227,14 +230,26 @@ async def claim_and_run_execution(
     On cancellation (deploy SIGTERM), releases the claim and immediately
     re-dispatches so a peer worker can adopt without waiting for lease expiry.
 
+    When the claim is refused because the account is already at its
+    concurrency cap, the message is nacked with a delay instead of acked: the
+    work is not lost, and the worker is free to pick up another account's
+    execution in the meantime.
+
     Args:
         execution_id: Flow execution UUID string.
         resume: When True, resume monitoring an existing agent session.
         ack: Optional callback invoked after a successful claim (ack-after-claim).
+        nak: Optional callback that returns the message to the stream after a
+            delay, used when the account cap held this execution back.
 
     Returns:
         Status dict for worker logging.
     """
+    from preloop.services.execution_concurrency import (
+        ACCOUNT_CAP_NAK_DELAY_SECONDS,
+        QUEUED_REASON_ACCOUNT_CAP,
+    )
+
     worker_id = get_orchestrator_worker_id()
     stale_after = claim_stale_after_seconds()
     db = next(get_db_session())
@@ -250,6 +265,25 @@ async def claim_and_run_execution(
             stale_after_seconds=stale_after,
         )
         if execution is None:
+            queued_reason = crud_flow_execution.get_queued_reason(
+                db, execution_id=execution_id
+            )
+            # A lost-claim race also returns None. If a leftover
+            # account_concurrency_cap is still on the row, nack anyway:
+            # redelivery is safer than dropping still-PENDING work.
+            if queued_reason == QUEUED_REASON_ACCOUNT_CAP:
+                logger.info(
+                    "Execution %s held back by the account concurrency cap; "
+                    "returning it to the stream for redelivery in %ss",
+                    execution_id_str,
+                    ACCOUNT_CAP_NAK_DELAY_SECONDS,
+                )
+                if nak is not None:
+                    await nak(ACCOUNT_CAP_NAK_DELAY_SECONDS)
+                return {
+                    "status": "account_cap_queued",
+                    "execution_id": execution_id_str,
+                }
             logger.info(
                 "Could not claim execution %s (already owned or not active); skipping",
                 execution_id_str,

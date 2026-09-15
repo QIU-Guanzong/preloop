@@ -2,7 +2,8 @@
 
 import asyncio
 import logging
-from typing import List
+import time
+from typing import Any, List
 
 from sqlalchemy.orm import Session
 
@@ -62,6 +63,13 @@ class ExecutionRecoveryService:
     def __init__(self):
         self.recovery_tasks: List[asyncio.Task] = []
         self.shutdown_event = asyncio.Event()
+        # execution id -> monotonic clock of the last re-dispatch by THIS
+        # process. Every worker runs this loop every 30 seconds against every
+        # unclaimed execution, so without a per-execution backoff a queue of
+        # sixteen held-back executions is republished by every worker on
+        # every tick forever. Process-local on purpose: a cross-worker
+        # guarantee needs leader election, which is out of scope here.
+        self._last_redispatch: dict[str, float] = {}
 
     async def recover_orphaned_executions(self, db: Session) -> int:
         """
@@ -133,6 +141,90 @@ class ExecutionRecoveryService:
         )
         return recovered_count
 
+    def _admissible_candidates(
+        self,
+        db: Session,
+        candidates: List[models.FlowExecution],
+        *,
+        stale_after_seconds: int,
+    ) -> List[models.FlowExecution]:
+        """Drop the candidates republishing would only churn.
+
+        Two filters, in this order:
+
+        * per-execution backoff: this process does not republish the same id
+          more than once per stale window, so a run that nothing can claim
+          does not get a fresh message every 30 seconds from every worker;
+        * per-account admission: an execution whose account is already at its
+          concurrency cap is left alone. Publishing it would have a worker
+          fetch it, refuse the claim and nak it, which is exactly the storm
+          the cap is supposed to end. Only unstarted PENDING rows are
+          filtered this way: anything with a live agent session must be
+          re-dispatched whatever the cap says, or its container goes
+          unmonitored.
+
+        The backoff is process-local. A cross-worker guarantee would need
+        leader election over the recovery loop; that is deliberately out of
+        scope here and the per-account filter is what bounds the fan-out in
+        the meantime.
+        """
+        from preloop.services.execution_concurrency import account_running_cap
+
+        now = time.monotonic()
+        window = max(1, stale_after_seconds)
+        admitted = crud_flow_execution.count_admitted_by_account(
+            db, stale_after_seconds=stale_after_seconds
+        )
+        planned: dict[Any, int] = {}
+        caps: dict[Any, int] = {}
+        keep: List[models.FlowExecution] = []
+
+        for execution in candidates:
+            execution_id = str(execution.id)
+            last = self._last_redispatch.get(execution_id)
+            if last is not None and now - last < window:
+                logger.debug(
+                    "Not re-dispatching %s: published %.0fs ago, backoff is %ss",
+                    execution_id,
+                    now - last,
+                    window,
+                )
+                continue
+
+            needs_admission = (
+                execution.status == "PENDING" and not execution.agent_session_reference
+            )
+            account_id = getattr(getattr(execution, "flow", None), "account_id", None)
+            if needs_admission and account_id is not None:
+                if account_id not in caps:
+                    account = db.get(models.Account, account_id)
+                    caps[account_id] = account_running_cap(account)
+                in_flight = admitted.get(account_id, 0) + planned.get(account_id, 0)
+                if in_flight >= caps[account_id]:
+                    logger.info(
+                        "Not re-dispatching %s: account %s is at its "
+                        "concurrency cap (%s/%s); it stays PENDING",
+                        execution_id,
+                        account_id,
+                        in_flight,
+                        caps[account_id],
+                    )
+                    continue
+                planned[account_id] = planned.get(account_id, 0) + 1
+
+            self._last_redispatch[execution_id] = now
+            keep.append(execution)
+
+        self._prune_redispatch_memory(now, window)
+        return keep
+
+    def _prune_redispatch_memory(self, now: float, window: int) -> None:
+        """Keep the backoff map from growing with every execution ever seen."""
+        cutoff = now - (window * 10)
+        stale = [key for key, seen in self._last_redispatch.items() if seen < cutoff]
+        for key in stale:
+            del self._last_redispatch[key]
+
     async def _redispatch_stale_executions(
         self,
         db: Session,
@@ -157,6 +249,16 @@ class ExecutionRecoveryService:
         )
         if not candidates:
             logger.info("No stale/unclaimed executions to re-dispatch")
+            return 0
+
+        candidates = self._admissible_candidates(
+            db, candidates, stale_after_seconds=stale_after_seconds
+        )
+        if not candidates:
+            logger.info(
+                "Every stale/unclaimed execution is held back (account cap or "
+                "re-dispatch backoff); nothing to publish this tick"
+            )
             return 0
 
         semaphore = asyncio.Semaphore(20)

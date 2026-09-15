@@ -7,10 +7,10 @@ can trigger a live LiteLLM/OpenRouter lookup, but that path does not periodicall
 update existing prices. Most providers' model-list endpoints do not return prices.
 Alibaba Cloud Model Studio is an exception: native `GET /api/v1/models` includes
 USD list tariffs. Preloop seeds Singapore International chat SKUs from the public
-pricing page and refreshes that overlay when Fetch Models, Fetch price, or an
-unpriced Alibaba usage row looks up the native catalog. The weekly review should
-re-check the public pricing page and, when a native catalog dump is attached as
-evidence, regenerate `services/data/alibaba_international_prices.json`.
+pricing page. Fetch Models, Fetch price, and an unpriced usage lookup can fetch
+native prices into a process-local cache with a 24-hour freshness limit. The
+reviewed feed below distributes verified regional prices to every serving process,
+including already-priced models. Model discovery alone does not do this.
 
 ## Reviewed prices without an application deployment
 
@@ -27,8 +27,12 @@ MODEL_PRICE_REFRESH_ALLOWED_MODELS='["example/model"]'
 MODEL_PRICE_REFRESH_INTERVAL_SECONDS=21600
 ```
 
-An empty URL (the default) disables polling. The allowlist contains exact existing
-LiteLLM catalog keys, not provider or account IDs. Restrict write access to the
+An empty URL (the default) disables polling. The allowlist contains exact existing LiteLLM catalog keys or exact Alibaba keys
+`alibaba/<region>/<model_identifier>`, not account IDs. An operator can opt into
+new Alibaba SKUs within a supported region using
+`alibaba/singapore-international/*` or `alibaba/united-states/*`. These are the
+only accepted wildcards and only authorize `alibaba_regional_tokens` policies;
+they cannot authorize generic prices, another provider, CNY, or another region. Restrict write access to the
 publication branch/bucket: this URL is a pricing trust boundary. Redirects are not
 followed. An approved PR can publish the artifact through the organization's
 existing branch or static-artifact hosting; no extra application deployment is
@@ -39,7 +43,7 @@ warning omits the configured URL and exception details, which may contain secret
 
 Each feed must declare USD, a revision, publication and expiry timestamps, and
 per-model source URL, verification time, effective date, and either flat input/output rates per token (with optional cache rates) or
-a supported native DeepSeek UTC-band policy. Invalid, expired, future,
+a supported native DeepSeek UTC-band policy, or region-scoped Alibaba token tiers. Invalid, expired, future,
 out-of-scope, unknown-model, or unsupported-policy feeds leave the last good prices
 in place and log a refresh failure. Publication timestamps cannot move backwards
 within a process. Feed validity is at most 31 days and evidence must be verified
@@ -154,16 +158,108 @@ from the reviewed catalog. Include catalog changes, manifest, generated artifact
 and relevant tests in the PR. Renew evidence and feed expiry even when prices have
 not changed; do not relabel failed retrievals as fresh verification.
 
-The enterprise factory template `factory/loops/model-price-review.yaml` prepares a
-Monday 06:00 UTC audit and isolated PR publication. It is disabled and has explicit
-repository/model binding placeholders. Configure those bindings, inspect its
-verification profile, and review a manual run before enabling the schedule. It
-checks official provider pricing, uses public APIs where they expose prices,
-reports unsupported policies, and generates the artifact above. PR review/merge
-controls publishing; the agent has no permission to merge or deploy.
+The public preset `backend/presets/015-weekly-model-price-review.yaml` prepares a
+Monday 06:00 UTC audit and isolated PR publication using Preloop's existing model
+and repository credentials. It inventories the generic and dedicated regional
+catalogs, records unresolved providers and cache policies, and verifies the exact
+candidate before publication. Human PR merge controls feed publication. No
+additional AI service key or private factory configuration is required.
 
 The template's isolated pricing gate runs unit coverage without an account
-database. It explicitly excludes the two native gateway/repricing integration
-test functions requiring `db_session` and `test_user`; repository integration CI
-must still run those with its configured test database. This does not disable
-them in pytest or remove their coverage requirement.
+database. It excludes six named gateway/repricing integration functions that
+require `db_session` and `test_user`; repository integration CI must still run
+those with its test database. The Alibaba pricing, native catalog, discovery,
+gateway unit tests and publication tooling all run in the isolated gate.
+
+
+## Alibaba regional reviewed prices
+
+An Alibaba manifest entry has policy `alibaba_regional_tokens` and the usual
+`source_url`, `verified_at`, and `effective_from`; its key is
+`alibaba/singapore-international/qwen3.8-flash`, for example. The builder copies
+rates from the dedicated seed, including each input-length tier and optional
+`implicit_read`, `explicit_read`, and `creation` rates in USD per million tokens:
+
+```shell
+PRELOOP_DISABLE_TELEMETRY=true PYTHONPATH=backend python scripts/build_reviewed_model_prices.py \
+  --catalog backend/preloop/services/data/model_prices.json \
+  --manifest docs/pricing/reviewed-price-manifest.json \
+  --alibaba-catalog singapore-international=backend/preloop/services/data/alibaba_international_prices.json \
+  --output backend/preloop/services/data/reviewed_model_prices.json
+```
+
+The feed installs these rates atomically into the dedicated estimator's regional
+store. It does not insert unscoped Alibaba prices into LiteLLM. Every configured
+API, gateway and worker reads the same publication independently; no deployment
+is required for new rates or newly reviewed SKUs within an opted-in region.
+The approved reviewed publication takes precedence until its expiry, so a native
+refresh cannot silently replace reviewed prices. Expired native/reviewed data is not treated as
+fresh. Historical requests cannot consume a tariff before its effective date.
+Unsupported currencies, time-band policies and unknown cache rates stay unpriced.
+The public Flash cache-hit table points to the console. The current Flash entry
+uses an operator-confirmed Singapore console snapshot, identified by
+`evidence_kind: operator_confirmed_console`; its source URL points to the official
+exception guidance, and the review document records the supplied rates. A generic
+Qwen discount must never replace model-specific console evidence.
+
+To regenerate the Singapore seed from an explicitly supplied native dump, combine
+all pages under `output.models` with `output.total`, and attach `_meta` containing
+`currency: USD`, `region: singapore`, `service_site: international`, `complete: true`,
+`source_url: https://dashscope-intl.aliyuncs.com/api/v1/models`, and the original
+UTC `retrieved_at` timestamp. Then run:
+
+```shell
+PRELOOP_DISABLE_TELEMETRY=true PYTHONPATH=backend python scripts/update_alibaba_prices.py --from-native verified-dump.json
+```
+
+The builder rejects incomplete pages, duplicate identifiers, wrong regions,
+empty supported catalogs, and evidence older than fourteen days or in the future.
+It preserves the original retrieval date. Running the builder does not verify
+an old dump again. The scheduled agent does not fetch authenticated catalogs;
+public evidence, an explicitly attached verified dump, or a dated operator-confirmed
+console quote for the exact regional tariff is required. Old console quotes must
+not be marked freshly verified merely because the weekly review runs again.
+
+## Install the recurring review
+
+Obtain the AI model, tracker and project IDs from your own Preloop account. Bind
+the repository containing these scripts. This command renders the complete
+validated flow locally and does not contact the API:
+
+```shell
+PRELOOP_DISABLE_TELEMETRY=true PYTHONPATH=backend python scripts/install_model_price_review.py \
+  --ai-model-id "$REVIEW_MODEL_ID" --tracker-id "$REVIEW_TRACKER_ID" \
+  --project-id "$REVIEW_PROJECT_ID" --repository-url "$REVIEW_REPOSITORY_URL"
+```
+
+Set `PRELOOP_API_TOKEN` and supply `--api-url https://your-preloop-host` plus
+`--apply` to create a disabled bound flow. Repeat the same command to update it;
+the script identifies its managed flow by repository binding, refuses duplicate
+or unmanaged collisions, and never triggers a run. Review one manual run in
+Preloop and then repeat with `--apply --enable` to arm Monday 06:00 UTC. Omitting
+`--enable` when applying sets the managed flow back to disabled.
+
+The review agent needs an execution environment with the repository's development
+dependencies and pre-commit installed. Its isolated publication uses the bound
+tracker's existing repository credentials; only the control plane publishes the
+verified PR. Enable the platform scheduler/worker normally. Model discovery's
+`MODEL_CATALOG_SYNC_SCHEDULED_ENABLED` flag is independent of this schedule.
+
+The initial checked-in manifest and feed contain two Singapore entries reviewed
+on 2026-09-15: `qwen3.7-flash` and `qwen3.8-flash`. Flash uses the operator-confirmed
+Singapore console rates per million tokens: $0.15 input, $0.47 output, $0.016
+implicit read, $0.016 explicit read, and $0.20 cache creation. These token tariffs
+do not include separate provider tool charges.
+See `docs/pricing/reviews/2026-09-15-alibaba.md` for evidence and limits. Effective
+dates conservatively start at each evidence confirmation because no earlier
+effective date was established. Flash uses its console confirmation at
+2026-09-15T16:26:50Z; the public Qwen3.7 review retains its original date. This is not a fresh audit of all 92 seed models.
+The initial feed expires 2026-09-29; renew the review before activation if expired.
+Host the approved branch's `backend/preloop/services/data/reviewed_model_prices.json`
+artifact on trusted HTTPS, configure `MODEL_PRICE_REFRESH_URL` and the same
+`MODEL_PRICE_REFRESH_ALLOWED_MODELS` on every serving process, and merge a reviewed
+publication. The default poll interval is six hours. For automatic new Singapore
+SKUs use `["alibaba/singapore-international/*"]`.
+A regional publication should retain all reviewed keys in that configured scope;
+removed entries leave the reviewed store. Monitor audit failure/coverage and feed
+expiry rather than treating a partially verified provider as complete support.

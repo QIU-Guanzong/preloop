@@ -20,6 +20,16 @@ from preloop.services.reviewed_model_price_refresh import (
 )
 
 
+@pytest.fixture(autouse=True)
+def capture_refresh_logs(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Capture this service even when gateway imports configure parent logging."""
+    from preloop.services.reviewed_model_price_refresh import logger
+
+    monkeypatch.setattr(logger, "handlers", [*logger.handlers, caplog.handler])
+
+
 @pytest.fixture
 def payload() -> dict:
     now = datetime.now(timezone.utc)
@@ -585,3 +595,284 @@ async def test_actual_worker_starts_once_and_stops_refresh(
     start.assert_called_once()
     await worker.stop()
     refresher.stop.assert_awaited_once()
+
+
+def _alibaba_entry(payload: dict) -> dict:
+    evidence = payload["models"]["example/model"]
+    return {
+        **{
+            key: evidence[key]
+            for key in ("source_url", "verified_at", "effective_from")
+        },
+        "policy": "alibaba_regional_tokens",
+        "alibaba_policy": {
+            "region": "singapore-international",
+            "currency": "USD",
+            "model_identifier": "example-chat",
+            "tiers": [
+                {
+                    "input": 0.2,
+                    "output": 0.8,
+                    "implicit_read": 0.04,
+                    "max_input": 100000,
+                }
+            ],
+        },
+    }
+
+
+def test_alibaba_feed_prices_dedicated_estimator_and_survives_restart(
+    payload: dict,
+) -> None:
+    from types import SimpleNamespace
+    from preloop.services.alibaba_price_catalog import reset_live_state_for_tests
+    from preloop.services.alibaba_pricing import estimate
+
+    reset_live_state_for_tests()
+    key = "alibaba/singapore-international/example-chat"
+    payload["models"] = {key: _alibaba_entry(payload)}
+    model = SimpleNamespace(
+        provider_name="qwen",
+        model_identifier="example-chat",
+        api_endpoint="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    )
+    try:
+        for _ in range(2):
+            reset_live_state_for_tests()
+            updater = ReviewedPriceRefresher(
+                url="https://example.com/feed",
+                allowed_models=[key],
+                interval_seconds=60,
+            )
+            assert updater.apply(payload) == 1
+            assert estimate(
+                model, prompt_tokens=1000, completion_tokens=1000, usage_details=None
+            ) == pytest.approx(0.001)
+            assert updater.apply(payload) == 0
+    finally:
+        reset_live_state_for_tests()
+
+
+def test_alibaba_mixed_feed_rejects_bad_generic_before_regional_change(
+    payload: dict, refresher: ReviewedPriceRefresher
+) -> None:
+    from types import SimpleNamespace
+    from preloop.services.alibaba_price_catalog import (
+        live_tariff,
+        reset_live_state_for_tests,
+    )
+
+    reset_live_state_for_tests()
+    key = "alibaba/singapore-international/example-chat"
+    payload["models"][key] = _alibaba_entry(payload)
+    payload["models"]["unknown/model"] = payload["models"]["example/model"]
+    refresher.allowed_models = frozenset(payload["models"])
+    before = litellm.model_cost
+    with pytest.raises(ValueError, match="existing catalog"):
+        refresher.apply(payload)
+    assert litellm.model_cost is before
+    model = SimpleNamespace(
+        provider_name="qwen",
+        model_identifier="example-chat",
+        api_endpoint="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    )
+    assert live_tariff(model) is None
+    reset_live_state_for_tests()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"region": "beijing"},
+        {"currency": "CNY"},
+        {"model_identifier": "other-model"},
+        {"tiers": [{"input": float("inf"), "output": 1.0}]},
+        {
+            "tiers": [
+                {"input": 1.0, "output": 1.0, "max_input": 100},
+                {"input": 2.0, "output": 2.0, "max_input": 50},
+            ]
+        },
+        {"tiers": [{"input": 1.0, "output": 1.0, "time_band": "night"}]},
+    ],
+)
+def test_alibaba_feed_rejects_unsupported_or_ambiguous_tariffs(
+    payload: dict, change: dict
+) -> None:
+    entry = _alibaba_entry(payload)
+    entry["alibaba_policy"].update(change)
+    payload["models"] = {"alibaba/singapore-international/example-chat": entry}
+    with pytest.raises(ValueError):
+        validate_feed(payload)
+
+
+def test_alibaba_region_scope_accepts_new_sku_but_not_generic_prices(
+    payload: dict,
+) -> None:
+    from preloop.services.alibaba_price_catalog import reset_live_state_for_tests
+
+    reset_live_state_for_tests()
+    entry = _alibaba_entry(payload)
+    updater = ReviewedPriceRefresher(
+        url="https://example.com/feed",
+        allowed_models=["alibaba/singapore-international/*"],
+        interval_seconds=60,
+    )
+    generic = copy.deepcopy(payload)
+    payload["models"] = {"alibaba/singapore-international/example-chat": entry}
+    try:
+        assert updater.apply(payload) == 1
+        other = ReviewedPriceRefresher(
+            url="https://example.com/feed",
+            allowed_models=["alibaba/united-states/*"],
+            interval_seconds=60,
+        )
+        with pytest.raises(ValueError, match="allowlist"):
+            other.apply(payload)
+        generic_updater = ReviewedPriceRefresher(
+            url="https://example.com/feed",
+            allowed_models=["alibaba/singapore-international/*"],
+            interval_seconds=60,
+        )
+        with pytest.raises(ValueError, match="allowlist"):
+            generic_updater.apply(generic)
+    finally:
+        reset_live_state_for_tests()
+
+
+@pytest.mark.parametrize("scope", ["*", "deepseek/*", "alibaba/*", "alibaba/beijing/*"])
+def test_wildcards_only_allow_supported_alibaba_regions(scope: str) -> None:
+    with pytest.raises(ValueError, match="regional scopes"):
+        ReviewedPriceRefresher(
+            url="https://example.com/feed", allowed_models=[scope], interval_seconds=60
+        )
+
+
+def test_mixed_feed_rolls_back_generic_map_if_regional_install_fails(
+    payload: dict, refresher: ReviewedPriceRefresher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from preloop.services import alibaba_price_catalog
+
+    payload["models"]["alibaba/singapore-international/example-chat"] = _alibaba_entry(
+        payload
+    )
+    refresher.allowed_models = frozenset(payload["models"])
+    previous = litellm.model_cost
+
+    def reject(*args: object, **kwargs: object) -> None:
+        raise ValueError("Rejected publication")
+
+    monkeypatch.setattr(alibaba_price_catalog, "install_reviewed_catalogs", reject)
+    with pytest.raises(ValueError, match="Rejected publication"):
+        refresher.apply(payload)
+    assert litellm.model_cost is previous
+    assert refresher.digest is None
+
+
+def test_alibaba_publication_reaches_independent_processes(payload: dict) -> None:
+    """Each fresh serving process derives its tariff from the shared artifact."""
+    import os
+    import subprocess
+    import sys
+
+    key = "alibaba/singapore-international/example-chat"
+    payload["models"] = {key: _alibaba_entry(payload)}
+    code = """
+import json, sys
+from types import SimpleNamespace
+from preloop.services.reviewed_model_price_refresh import ReviewedPriceRefresher
+from preloop.services.alibaba_pricing import estimate
+refresher = ReviewedPriceRefresher(url="https://example.com/feed", allowed_models=["alibaba/singapore-international/*"], interval_seconds=60)
+refresher.apply(json.load(sys.stdin))
+model = SimpleNamespace(provider_name="qwen", model_identifier="example-chat", api_endpoint="https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+print(json.dumps(estimate(model, prompt_tokens=1000, completion_tokens=1000, usage_details=None)))
+"""
+    for _ in range(2):
+        process = subprocess.run(
+            [sys.executable, "-c", code],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=30,
+            env={
+                "PATH": os.environ.get("PATH", ""),
+                "PYTHONPATH": os.environ.get("PYTHONPATH", "backend"),
+                "PRELOOP_DISABLE_TELEMETRY": "true",
+                "TESTING": "true",
+            },
+        )
+        assert json.loads(process.stdout) == pytest.approx(0.001)
+
+
+def test_alibaba_review_preserves_native_provider_prefixed_sku(payload: dict) -> None:
+    entry = _alibaba_entry(payload)
+    entry["alibaba_policy"]["model_identifier"] = "EXAMPLE/model-name"
+    key = "alibaba/singapore-international/EXAMPLE/model-name"
+    payload["models"] = {key: entry}
+    validated = validate_feed(payload)
+    assert validated.models[key].alibaba_policy.model_identifier == "EXAMPLE/model-name"
+
+
+@pytest.mark.parametrize("mode", ["implicit", "explicit"])
+def test_published_flash_workspace_feed_uses_confirmed_console_cache_rates(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """The real publication prices cached workspace calls at the quoted tariff."""
+    from types import SimpleNamespace
+
+    from preloop.services import alibaba_price_catalog, reviewed_model_price_refresh
+    from preloop.services.alibaba_pricing import estimate
+
+    feed = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "preloop/services/data/reviewed_model_prices.json"
+        ).read_text()
+    )
+    asof = datetime.fromisoformat(feed["published_at"]) + timedelta(seconds=1)
+    checked_validate = validate_feed
+    monkeypatch.setattr(
+        reviewed_model_price_refresh,
+        "validate_feed",
+        lambda value: checked_validate(value, now=asof),
+    )
+    monkeypatch.setattr(alibaba_price_catalog, "_utcnow", lambda: asof)
+    entry = feed["models"]["alibaba/singapore-international/qwen3.8-flash"]
+    assert entry["evidence_kind"] == "operator_confirmed_console"
+    assert entry["verified_at"] == entry["effective_from"]
+    alibaba_price_catalog.reset_live_state_for_tests()
+    try:
+        updater = ReviewedPriceRefresher(
+            url="https://example.com/feed",
+            allowed_models=["alibaba/singapore-international/*"],
+            interval_seconds=60,
+        )
+        updater.apply(feed)
+        model = SimpleNamespace(
+            provider_name="openai-compatible",
+            model_identifier="qwen3.8-flash",
+            api_endpoint="https://workspace-example.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        )
+        assert estimate(
+            model,
+            prompt_tokens=1_000_000,
+            completion_tokens=0,
+            usage_details={
+                "prompt_tokens_details": {"cached_tokens": 1_000_000},
+                "_preloop_cache_mode": mode,
+            },
+            observed_at=asof,
+        ) == pytest.approx(0.016)
+        assert estimate(
+            model,
+            prompt_tokens=1_000_000,
+            completion_tokens=0,
+            usage_details={
+                "prompt_tokens_details": {"cache_creation_input_tokens": 1_000_000},
+                "_preloop_cache_mode": "explicit",
+            },
+            observed_at=asof,
+        ) == pytest.approx(0.2)
+    finally:
+        alibaba_price_catalog.reset_live_state_for_tests()

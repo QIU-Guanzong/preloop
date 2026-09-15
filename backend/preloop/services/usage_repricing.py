@@ -21,6 +21,7 @@ not even on a full ``only_unpriced=False`` recompute.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -207,6 +208,96 @@ def sync_execution_rollups(
     return synced
 
 
+def hydrate_alibaba_prices_for_repricing(
+    *,
+    account_id: Union[uuid.UUID, str],
+    start: datetime,
+    end: datetime,
+    max_catalogs: int = 4,
+    max_duration_seconds: float = 30,
+    progress: Optional[Callable[[], None]] = None,
+) -> dict[str, int]:
+    """Prepare bounded native catalog reads, then close DB before network I/O.
+
+    Reviewed regional tariffs are read by the estimator automatically. Native
+    recovery is only a fallback for missing billing dimensions, once per
+    account/host/service-site, never once per usage row. Unknown historical
+    cache modes remain unknown: hydration must not manufacture request context.
+    """
+    from preloop.config import settings
+    from preloop.models.db.session import get_db_session
+    from preloop.services.alibaba_price_catalog import (
+        CatalogRefreshStatus,
+        native_catalog_target,
+        prepare_refresh,
+        refresh_prepared,
+    )
+    from preloop.services.alibaba_pricing import is_alibaba, tariff_for
+
+    if (
+        max_catalogs <= 0
+        or max_duration_seconds <= 0
+        or not getattr(settings, "model_price_live_lookup_enabled", True)
+    ):
+        return {}
+    prepared_catalogs = []
+    seen: set[tuple[str, str]] = set()
+    summary: dict[str, int] = {}
+    session_generator = get_db_session()
+    db = next(session_generator)
+    try:
+        ai_models = crud_api_usage.list_models_for_repricing(
+            db,
+            account_id=account_id,
+            start=start,
+            end=end,
+        )
+        for ai_model in ai_models:
+            if not is_alibaba(ai_model):
+                continue
+            tariff = tariff_for(ai_model)
+            tariffs = tariff.tiers or (tariff,) if tariff is not None else ()
+            if tariffs and all(
+                item.implicit_read is not None
+                and item.explicit_read is not None
+                and item.creation is not None
+                for item in tariffs
+            ):
+                continue
+            target = native_catalog_target(ai_model)
+            if target is not None and target in seen:
+                continue
+            prepared = prepare_refresh(ai_model)
+            if isinstance(prepared, CatalogRefreshStatus):
+                summary[prepared.value] = summary.get(prepared.value, 0) + 1
+                continue
+            key = (prepared.url, prepared.service_site)
+            if key in seen:
+                continue
+            seen.add(key)
+            prepared_catalogs.append(prepared)
+            if len(prepared_catalogs) >= max_catalogs:
+                break
+    finally:
+        db.close()
+        session_generator.close()
+    deadline = time.monotonic() + max_duration_seconds
+    for prepared in prepared_catalogs:
+        # Each paginated download is bounded below the durable job's lease;
+        # renew between catalogs without retaining the preparation session.
+        if progress:
+            progress()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            summary["time_budget_exhausted"] = 1
+            break
+        status = refresh_prepared(prepared, max_duration_seconds=remaining)
+        summary[status.value] = summary.get(status.value, 0) + 1
+        if progress:
+            progress()
+    return summary
+
+
 def reprice_gateway_usage(
     db: Session,
     *,
@@ -249,6 +340,14 @@ def reprice_gateway_usage(
     Returns:
         Aggregate counts and the before/after cost totals for examined rows.
     """
+    try:
+        hydrate_alibaba_prices_for_repricing(
+            account_id=account_id, start=start, end=end, progress=progress
+        )
+    except Exception:  # noqa: BLE001 - failed recovery must not prevent local repricing
+        logger.exception("Alibaba catalog preflight failed")
+    if progress:
+        progress()
     result = RepriceResult(dry_run=dry_run)
     generation_lookup = OpenRouterGenerationCostLookup(db, account_id=str(account_id))
     model_cache: Dict[str, Optional[models.AIModel]] = {}
@@ -325,7 +424,13 @@ def reprice_gateway_usage(
         # synchronously because the operator is waiting on the result.
         # Registration is process-wide, so retrying the estimate afterwards
         # prices this row and every later row on the same model.
-        if estimate.cost is None and model_id not in lookup_attempted:
+        from preloop.services.alibaba_pricing import is_alibaba
+
+        if (
+            estimate.cost is None
+            and model_id not in lookup_attempted
+            and not is_alibaba(ai_model)
+        ):
             lookup_attempted.add(model_id)
             try:
                 if lookup_model_price_now(
