@@ -15333,6 +15333,25 @@ components:
             format: uuid
           - type: 'null'
           title: Retry Of Execution Id
+        parent_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Parent Execution Id
+          description: Execution that directly started this run; null for a root.
+        root_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Root Execution Id
+          description: First execution of this lineage; null on the root itself.
+        delegation_depth:
+          type: integer
+          title: Delegation Depth
+          description: Distance from the lineage root; 0 for roots and existing rows.
+          default: 0
         batch_id:
           anyOf:
           - type: string
@@ -17263,6 +17282,25 @@ components:
             format: uuid
           - type: 'null'
           title: Retry Of Execution Id
+        parent_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Parent Execution Id
+          description: Execution that directly started this run; null for a root.
+        root_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Root Execution Id
+          description: First execution of this lineage; null on the root itself.
+        delegation_depth:
+          type: integer
+          title: Delegation Depth
+          description: Distance from the lineage root; 0 for roots and existing rows.
+          default: 0
         batch_id:
           anyOf:
           - type: string
