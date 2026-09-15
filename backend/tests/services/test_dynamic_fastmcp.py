@@ -1569,6 +1569,133 @@ class TestCreateProxiedToolWrapper:
         assert captured["arguments"]["next"] == "cursor"
         assert captured["arguments"]["safe_param"] == "ok"
 
+    def _aliased_type_wrapper(self, dynamic_mcp, user_context):
+        """Create a registered wrapper whose schema has a ``type`` property."""
+        wrapper = dynamic_mcp._create_proxied_tool_wrapper(
+            tool_name="safe_tool",
+            server_id="server-123",
+            account_id=user_context.account_id,
+            description="Safe tool",
+            input_schema={
+                "properties": {"type": {"type": "string"}},
+                "required": ["type"],
+            },
+        )
+        assert callable(wrapper)
+        safe_account_id = user_context.account_id.replace("-", "_")
+        internal_name = f"account_{safe_account_id}_safe_tool"
+        return wrapper, internal_name
+
+    def test_remap_wrapper_arguments_is_idempotent(self, dynamic_mcp, user_context):
+        """Translated-path remap then re-entry remap must keep alias keys."""
+        _wrapper, internal_name = self._aliased_type_wrapper(dynamic_mcp, user_context)
+        once = dynamic_mcp._remap_wrapper_arguments(internal_name, {"type": "issue"})
+        twice = dynamic_mcp._remap_wrapper_arguments(internal_name, once)
+        assert once == {"type_": "issue"}
+        assert twice == once
+
+    def test_remap_prefers_original_key_over_alias(self, dynamic_mcp, user_context):
+        """A stray alias key must not replace the in-spec original value."""
+        _wrapper, internal_name = self._aliased_type_wrapper(dynamic_mcp, user_context)
+        original_first = dynamic_mcp._remap_wrapper_arguments(
+            internal_name, {"type": "real", "type_": "stray"}
+        )
+        alias_first = dynamic_mcp._remap_wrapper_arguments(
+            internal_name, {"type_": "stray", "type": "real"}
+        )
+        assert original_first == {"type_": "real"}
+        assert alias_first == {"type_": "real"}
+
+    async def test_call_tool_forwards_original_type_key(
+        self, dynamic_mcp, user_context, monkeypatch
+    ):
+        """Client key ``type`` reaches upstream as ``type`` via call_tool."""
+        from fastmcp.tools.tool import ToolResult
+
+        dynamic_mcp.set_user_context_provider(lambda: user_context)
+        captured_upstream = {}
+
+        async def fake_upstream_call(name, arguments):
+            captured_upstream["name"] = name
+            captured_upstream["arguments"] = arguments
+            return [types.TextContent(type="text", text="ok")]
+
+        client = MagicMock()
+        client.call_tool = AsyncMock(side_effect=fake_upstream_call)
+        pool = MagicMock(get_client=AsyncMock(return_value=client))
+        mock_db = MagicMock()
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=MagicMock())
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        monkeypatch.setattr(
+            "preloop.services.dynamic_fastmcp.get_db",
+            lambda: iter([mock_db]),
+        )
+        monkeypatch.setattr(
+            "preloop.services.dynamic_fastmcp.kill_switch_service.tools_halted",
+            lambda db, account_id: False,
+        )
+        monkeypatch.setattr(
+            "preloop.services.dynamic_fastmcp.crud_tool_configuration.get_multi_by_account",
+            lambda *args, **kwargs: [],
+        )
+        monkeypatch.setattr(
+            "preloop.models.db.session.get_async_db_session",
+            lambda: mock_session,
+        )
+        monkeypatch.setattr(
+            "preloop.services.policy_evaluator.evaluate_policy_async",
+            AsyncMock(return_value=("allow", None, None)),
+        )
+        monkeypatch.setattr(
+            dynamic_mcp,
+            "list_tools",
+            AsyncMock(
+                return_value=[Tool(name="safe_tool", description="Safe", parameters={})]
+            ),
+        )
+        monkeypatch.setattr(
+            "preloop.services.approval_helper.require_approval",
+            AsyncMock(return_value=(True, None)),
+        )
+        monkeypatch.setattr(
+            "preloop.services.dynamic_fastmcp.crud_mcp_server.get",
+            MagicMock(
+                return_value=MagicMock(
+                    name="upstream",
+                    url="http://example.test",
+                    auth_type="none",
+                    auth_config={},
+                    transport="http",
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            "preloop.services.dynamic_fastmcp.get_mcp_client_pool",
+            lambda: pool,
+        )
+        monkeypatch.setattr(
+            dynamic_mcp,
+            "_halt_dispatch_denial",
+            AsyncMock(return_value=None),
+        )
+
+        # Bind the wrapper after get_db / pool patches so exec namespace sees them.
+        wrapper, internal_name = self._aliased_type_wrapper(dynamic_mcp, user_context)
+        dynamic_mcp.tool()(wrapper)
+        dynamic_mcp._registered_proxied_tools.add(internal_name)
+        dynamic_mcp._proxied_tool_servers["safe_tool"] = "server-123"
+
+        result = await dynamic_mcp.call_tool("safe_tool", {"type": "issue"})
+
+        assert captured_upstream["name"] == "safe_tool"
+        assert captured_upstream["arguments"] == {"type": "issue"}
+        assert isinstance(result, ToolResult)
+        assert "ok" in result.content[0].text
+        assert "missing" not in result.content[0].text.lower()
+        assert "validation" not in result.content[0].text.lower()
+
     @pytest.mark.parametrize(
         "reserved_tool_name",
         ["self", "logger", "ctx", "value"],

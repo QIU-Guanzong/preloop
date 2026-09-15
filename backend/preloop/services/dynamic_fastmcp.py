@@ -1171,7 +1171,6 @@ async def {internal_name}({params_str}) -> str:
         wrapper._display_name = tool_name  # type: ignore
         wrapper._account_id = account_id  # type: ignore
         original_to_alias = {original: alias for alias, original in param_names}
-        wrapper._original_to_alias = original_to_alias  # type: ignore
         self._proxied_param_aliases[internal_name] = original_to_alias
 
         logger.info(
@@ -1187,6 +1186,10 @@ async def {internal_name}({params_str}) -> str:
     ) -> Optional[Dict[str, Any]]:
         """Rewrite client keys to generated aliases before FastMCP dispatch.
 
+        When both an original key and its alias are present, the original
+        key's value wins so a stray alias cannot replace the in-spec value.
+        Remapping an already-aliased dict is a no-op (idempotent).
+
         Args:
             internal_name: Registered wrapper name (``account_<id>_<tool>``).
             arguments: Client-facing ``tools/call`` arguments.
@@ -1198,7 +1201,18 @@ async def {internal_name}({params_str}) -> str:
         aliases = self._proxied_param_aliases.get(internal_name)
         if not arguments or not aliases:
             return arguments
-        return {aliases.get(key, key): value for key, value in arguments.items()}
+        mapped: Dict[str, Any] = {}
+        originals_applied: set[str] = set()
+        for key, value in arguments.items():
+            target = aliases.get(key, key)
+            if target != key:
+                mapped[target] = value
+                originals_applied.add(target)
+                continue
+            if target in originals_applied:
+                continue
+            mapped[target] = value
+        return mapped
 
     async def call_tool(
         self,
