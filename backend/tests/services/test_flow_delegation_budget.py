@@ -7,9 +7,11 @@ is already running is never killed to pay for a later one.
 
 import uuid
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import text
 
 from preloop.a2a.delegation import REFUSAL_REASONS, validate_delegation_task
 from preloop.models.crud import crud_flow, crud_flow_execution
@@ -183,12 +185,26 @@ def test_an_unnamed_ceiling_falls_back_to_the_entry_then_the_default(monkeypatch
 
 
 def test_a_nonsense_ceiling_is_read_as_no_ceiling(monkeypatch):
-    """Zero, negative and non numeric are not budgets; the default applies."""
+    """Zero, negative, non numeric and non finite are not budgets."""
     monkeypatch.setattr(
         budget.settings, "flow_delegation_default_child_usd", 2.0, raising=False
     )
-    for asked in (0, -1, "free", None):
+    for asked in (0, -1, "free", None, float("nan"), float("inf"), float("-inf")):
         assert budget.resolve_child_ceiling(requested=asked, entry_ceiling=None) == 2.0
+
+
+def test_positive_usd_rejects_nan_and_infinity():
+    """NaN is not a ceiling: recording it would poison every later comparison."""
+    assert budget._positive(float("nan")) is None
+    assert budget._positive(float("inf")) is None
+    assert budget._positive(float("-inf")) is None
+    assert budget._positive(1.5) == 1.5
+    nan_row = SimpleNamespace(
+        trigger_event_details={
+            budget.DELEGATION_DETAILS_KEY: {budget.COST_CEILING_KEY: float("nan")}
+        }
+    )
+    assert budget.recorded_ceiling(nan_row) is None
 
 
 def test_zero_means_no_default_child_ceiling(monkeypatch):
@@ -460,7 +476,7 @@ async def test_a_grandchild_must_fit_inside_its_parents_ceiling(
     grandchild_flow = _flow(
         db_session, name="Grandchild Flow", account_id=test_user.account_id
     )
-    child_flow.callable_flows = [{"flow": "Grandchild Flow"}]
+    child_flow.callable_flows = [{"flow": grandchild_flow.name}]
     db_session.flush()
 
     root = _execution(db_session, parent_flow)
@@ -744,3 +760,21 @@ async def test_the_tree_read_does_not_cross_accounts(
         account_id=uuid.uuid4(),
     )
     assert rows == []
+
+
+async def test_a_tree_snapshot_holds_an_advisory_lock(
+    db_session, test_user, parent_execution
+):
+    """Concurrent admissions serialize on the root, not on a best-effort read."""
+    budget.tree_budgets(
+        db_session,
+        parent_execution=parent_execution,
+        account_id=test_user.account_id,
+    )
+    held = db_session.execute(
+        text(
+            "SELECT COUNT(*) FROM pg_locks "
+            "WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid()"
+        )
+    ).scalar()
+    assert held >= 1

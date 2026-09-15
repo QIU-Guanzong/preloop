@@ -111,7 +111,10 @@ A child that does not fit is refused **before it starts**, with
 `budget_exceeded` and a message naming what is left, so an agent can split
 its remaining work instead of guessing. Children already running are never
 killed to make room: a run killed halfway has been paid for and has
-produced nothing.
+produced nothing. On PostgreSQL, admissions against one tree take a
+transaction-scoped advisory lock on the root execution before reading the
+snapshot, and hold it through the child insert, so two concurrent
+`run_flow` calls cannot both admit against the same remaining allowance.
 
 This is an admission rule layered on the existing budget policies, not a
 replacement for them. `BudgetPolicy` (account, flow, api key, managed

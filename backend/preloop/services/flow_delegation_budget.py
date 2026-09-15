@@ -27,6 +27,12 @@ counts at its actual ``estimated_cost`` (what it did cost). Counting a
 running child at its current spend would admit a second fan out on the
 strength of work that has not been paid for yet.
 
+Admissions of one tree are serialized on PostgreSQL with a transaction
+scoped advisory lock on the root execution id, taken before the snapshot is
+read and released when the child insert commits. Two concurrent
+``run_flow`` calls then cannot both admit against the same remaining
+allowance.
+
 Not a budget policy: ``BudgetPolicy`` (account, flow, api key, managed
 agent) is untouched, and every existing budget rule still applies to every
 execution in a tree exactly as it applies to a run nobody delegated. This is
@@ -38,10 +44,12 @@ See ``docs/guide/flows/flow-delegation.md``.
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from preloop.config import settings
@@ -150,14 +158,14 @@ def default_child_ceiling() -> Optional[float]:
 
 
 def _positive(value: Any) -> Optional[float]:
-    """Read a positive USD amount, or None. Never raises."""
+    """Read a positive finite USD amount, or None. Never raises."""
     if value is None:
         return None
     try:
         amount = float(value)
     except (TypeError, ValueError):
         return None
-    if amount <= 0:
+    if amount <= 0 or not math.isfinite(amount):
         return None
     return amount
 
@@ -313,6 +321,23 @@ def _ancestor_chain(
     return chain
 
 
+def _lock_delegation_tree(db: Session, *, root_execution_id: Any) -> None:
+    """Hold a tree-wide admission lock until this transaction ends.
+
+    The affordability snapshot and the child-row insert share this session;
+    ``trigger_flow`` commits the child, which releases the lock. Postgres
+    only; other dialects keep the previous best-effort snapshot.
+    """
+    bind = getattr(db, "bind", None)
+    dialect = getattr(getattr(bind, "dialect", None), "name", None)
+    if dialect != "postgresql":
+        return
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"flow_delegation_tree:{root_execution_id}"},
+    )
+
+
 def tree_budgets(
     db: Session, *, parent_execution: FlowExecution, account_id: Any
 ) -> List[TreeBudget]:
@@ -325,11 +350,14 @@ def tree_budgets(
 
     Reads the tree in one indexed query on ``root_execution_id`` and walks it
     in memory. The tree is bounded by the depth and fan out caps, so this is
-    a few hundred rows at the very most.
+    a few hundred rows at the very most. On PostgreSQL the read is taken
+    under a transaction scoped advisory lock on the root, held through the
+    later child insert.
     """
     root_execution_id = (
         getattr(parent_execution, "root_execution_id", None) or parent_execution.id
     )
+    _lock_delegation_tree(db, root_execution_id=root_execution_id)
     rows = _subtree_rows(db, root_execution_id=root_execution_id, account_id=account_id)
     by_id = {str(row.id): row for row in rows}
     by_id.setdefault(str(parent_execution.id), parent_execution)
