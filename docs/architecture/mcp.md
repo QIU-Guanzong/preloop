@@ -21,8 +21,10 @@ custom subclass of FastMCP:
 - **`DynamicFastMCP`** (`preloop/services/dynamic_fastmcp.py`): Extends FastMCP and
 overrides `_list_tools()` and `_mcp_call_tool()` methods
 - **Tool Visibility:** Default tools (get_issue, create_issue, update_issue, search,
-estimate_compliance, improve_compliance) are only visible when the authenticated
-account has one or more trackers configured
+add_comment, estimate_compliance, improve_compliance) are only visible when the
+authenticated account has one or more trackers configured. A tool whose definition
+sets `default_enabled: false`, such as the two compliance tools, additionally needs
+an explicit enable on the Tools page or a flow allow-list entry
 - **User Context Propagation:** Uses Python's `ContextVar` for async-safe user context
 storage across request boundaries
 - **Authentication:** `PreloopBearerAuthBackend` validates JWT tokens and injects user
@@ -36,6 +38,38 @@ it in a ContextVar for access during tool listing and execution
 **Tool Registration:**
 All built-in tools are registered in `preloop/services/initialize_mcp.py` using
 FastMCP's `@mcp.tool()` decorator, then filtered at runtime based on user context.
+Tools whose advertised schema must match the REST catalogue exactly take their
+description and JSON schema from `preloop/tools/builtin_defs.py` and are added with
+`FunctionTool.from_function`, so `preloop/api/endpoints/tools.py`,
+`initialize_mcp.py` and `dynamic_mcp_server.py` cannot drift apart.
+
+### Issue tools
+
+`get_issue` and `update_issue` carry the issue triage surface. There are no separate
+triage tools: triage is an option on the standard pair.
+
+`get_issue(issue, include=None)` returns the synchronized issue. `include` accepts:
+
+| Value | Added to the response |
+| --- | --- |
+| `label_catalog` | `label_catalog`, `complexity_scheme` |
+| `revision` | `expected_revision`, `provider_issue` |
+
+Any `include` entry also sets `triage_limitations` and `concurrency`, and makes the
+call read the tracker live rather than only the local snapshot. An unknown entry is
+a 422. Without `include`, `get_issue` performs no provider read and the triage fields
+stay `None`.
+
+`update_issue` keeps its metadata parameters and adds `expected_revision`,
+`assessment` and `complexity_label`. A triage write needs both `expected_revision`
+and `assessment`, returns the triage receipt instead of the plain update response,
+and may not be combined with `description`, `status`, `priority`, `assignee`,
+`labels`, `add_reaction` or `remove_reaction`; `title` is allowed. The triage write
+requires the `edit_issues` permission and is GitHub and GitLab only.
+
+Triage writes record a server-written receipt on the issue. Flow trigger suppression
+keys on that receipt, not on which tools a flow selected, so any flow that produces a
+matching write is suppressed and a lookalike event without a receipt is not.
 
 **Benefits:**
 - Zero performance overhead for tool registration (happens once at startup)

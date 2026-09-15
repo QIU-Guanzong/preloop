@@ -506,69 +506,103 @@ def builtin_tools_with_ask_user(tools: List[Dict[str, Any]]) -> List[Dict[str, A
     return result
 
 
-GET_ISSUE_TRIAGE_CONTEXT_TOOL: Dict[str, Any] = {
-    "name": "get_issue_triage_context",
-    "description": (
-        "Read the authorized GitHub or GitLab issue and complete project label "
-        "catalogue directly from its tracker. Returns the current revision, "
-        "recognized complexity scheme, and limitations for safe issue triage."
-    ),
-    "source": "builtin",
-    # Default-off: only issue triage flows need this read, so every agent on
-    # an account with a GitHub or GitLab tracker should not pay its
-    # tools/list context tax (cf. issue #128). Flow executions opt in via
-    # their allowed_mcp_tools allow-list, which bypasses this filter.
-    "default_enabled": False,
-    "requires_tracker": True,
-    "required_tracker_types": ["github", "gitlab"],
-    "schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "issue": {"type": "string", "description": "Issue URL, key, or ID"},
+# ``get_issue`` and ``update_issue`` carry the triage surface that
+# ``get_issue_triage_context`` and ``apply_issue_triage`` used to own (issue
+# #661). The description and schema live here so the REST catalogue
+# (tools.py), the FastMCP registration (initialize_mcp.py) and the dynamic
+# server (dynamic_mcp_server.py) cannot drift apart.
+
+GET_ISSUE_DESCRIPTION = (
+    "Get detailed information about an issue by its identifier (URL, key, or "
+    "ID). Returns the synchronized snapshot. Pass include to add blocks read "
+    "live from the tracker: label_catalog for the complete project label "
+    "catalogue and the recognized complexity scheme, revision for the "
+    "authoritative provider content and the expected_revision that a triage "
+    "update_issue call must quote."
+)
+
+GET_ISSUE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "issue": {
+            "type": "string",
+            "description": "Issue identifier (URL, key like 'PROJECT#123', or UUID)",
         },
-        "required": ["issue"],
+        "include": {
+            "type": "array",
+            "description": (
+                "Optional extra blocks, each read live from the tracker at "
+                "the cost of one round trip. GitHub and GitLab only."
+            ),
+            "items": {"type": "string", "enum": ["label_catalog", "revision"]},
+        },
     },
+    "required": ["issue"],
 }
 
-APPLY_ISSUE_TRIAGE_TOOL: Dict[str, Any] = {
-    "name": "apply_issue_triage",
-    "description": (
-        "Improve an authorized GitHub or GitLab issue with a managed triage "
-        "assessment, optional title, and one recognized complexity label. "
-        "Use the revision from get_issue_triage_context. Preserves original "
-        "issue content and unrelated labels; returns truthful conflict or "
-        "partial-write receipts. Creates standard complexity labels only "
-        "when no existing scheme is present."
-    ),
-    "source": "builtin",
-    # Default-off for the same reason as get_issue_triage_context: the write
-    # half of the triage pair is only useful to flows that selected it.
-    "default_enabled": False,
-    "requires_tracker": True,
-    "required_tracker_types": ["github", "gitlab"],
-    "schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "issue": {"type": "string", "description": "Issue URL, key, or ID"},
-            "expected_revision": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "assessment": {"type": "string", "minLength": 1, "maxLength": 16000},
-            "complexity_label": {
-                "anyOf": [
-                    {"type": "string", "minLength": 1, "maxLength": 255},
-                    {"type": "null"},
-                ],
-                "default": None,
-            },
-            "title": {
-                "anyOf": [
-                    {"type": "string", "minLength": 1, "maxLength": 256},
-                    {"type": "null"},
-                ],
-                "default": None,
-            },
+UPDATE_ISSUE_DESCRIPTION = (
+    "Update an existing issue's metadata, write a managed triage assessment, "
+    "and/or manage GitHub issue reactions. To add or remove a reaction only, "
+    "pass add_reaction or remove_reaction without other fields. To record a "
+    "triage assessment, pass expected_revision (from get_issue with "
+    'include=["revision"]) and assessment, optionally complexity_label and '
+    "title: that path preserves issue content outside the managed section, "
+    "moves only labels in the recognized complexity family, creates standard "
+    "complexity labels only when the project has no scheme, and returns a "
+    "truthful conflict or partial-write receipt instead of the plain update "
+    "response. It cannot be combined with the other metadata fields."
+)
+
+UPDATE_ISSUE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "issue": {"type": "string", "description": "Issue identifier"},
+        "title": {"type": "string", "description": "New title"},
+        "description": {"type": "string", "description": "New description"},
+        "status": {"type": "string", "description": "New status"},
+        "priority": {"type": "string", "description": "New priority"},
+        "assignee": {"type": "string", "description": "New assignee"},
+        "labels": {"type": "array", "items": {"type": "string"}},
+        "add_reaction": {
+            "type": "string",
+            "description": (
+                "Reaction to add (GitHub: eyes, +1, heart, hooray, rocket, "
+                "laugh, confused, -1). GitLab issues do not support reactions."
+            ),
         },
-        "required": ["issue", "expected_revision", "assessment"],
+        "remove_reaction": {
+            "type": "string",
+            "description": "Reaction to remove (same names as add_reaction)",
+        },
+        "expected_revision": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": (
+                "Revision from get_issue include=revision. Required with "
+                "assessment; a stale value returns a conflict receipt and "
+                "writes nothing."
+            ),
+        },
+        "assessment": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16000,
+            "description": (
+                "Markdown for the managed triage section. Replaces only that "
+                "section; human text around it is preserved."
+            ),
+        },
+        "complexity_label": {
+            "anyOf": [
+                {"type": "string", "minLength": 1, "maxLength": 255},
+                {"type": "null"},
+            ],
+            "default": None,
+            "description": (
+                "Exact name from the complexity scheme returned by get_issue "
+                "include=label_catalog. Null leaves complexity unset."
+            ),
+        },
     },
+    "required": ["issue"],
 }

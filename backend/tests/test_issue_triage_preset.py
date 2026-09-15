@@ -12,13 +12,14 @@ EXPECTED_TOOLS = [
     "search_issues",
     "get_issue",
     "get_pull_request",
-    "get_issue_triage_context",
-    "apply_issue_triage",
+    "update_issue",
 ]
+
+# Folded into get_issue/update_issue in #661; a preset must never ask for them.
+REMOVED_TOOLS = {"get_issue_triage_context", "apply_issue_triage"}
 
 FORBIDDEN_TOOLS = {
     "create_issue": "follow-up issues belong to a human",
-    "update_issue": "triage uses the bounded context/apply contract",
     "add_comment": "the assessment belongs on the issue itself",
     "create_pull_request": "triage does not open pull requests",
     "update_pull_request": "triage does not edit pull requests",
@@ -73,6 +74,11 @@ class TestToolAllowlist:
         names = {entry["name"] for entry in preset["allowed_mcp_tools"]}
         assert tool not in names, f"{tool} must stay out of the allowlist: {reason}"
 
+    def test_removed_triage_tools_absent(self, preset: dict) -> None:
+        names = {entry["name"] for entry in preset["allowed_mcp_tools"]}
+        assert REMOVED_TOOLS.isdisjoint(names)
+        assert REMOVED_TOOLS.isdisjoint(preset["prompt_template"].split())
+
 
 class TestPromptContract:
     def test_issue_text_is_data(self, prompt: str) -> None:
@@ -96,7 +102,8 @@ class TestPromptContract:
         assert "use null for complexity_label" in prompt
 
     def test_issue_update_is_the_deliverable(self, prompt: str) -> None:
-        assert "Call `apply_issue_triage`" in prompt
+        assert "Call `update_issue`" in prompt
+        assert 'include: ["label_catalog", "revision"]' in prompt
         assert "exact expected_revision" in prompt
         assert "developer who will never read the execution output" in prompt
         assert "diagnostic receipt, not the sole triage deliverable" in prompt
@@ -146,6 +153,25 @@ class TestPromptContract:
 
     def test_no_em_dashes(self, preset: dict) -> None:
         assert "—" not in yaml.dump(preset, allow_unicode=True)
+
+
+class TestPromptEnforcedWriteBound:
+    def test_guide_documents_prompt_enforced_write_bound(self) -> None:
+        guide = (
+            Path(__file__).resolve().parents[2]
+            / "docs"
+            / "guide"
+            / "flows"
+            / "issue-triage.md"
+        )
+        text = guide.read_text()
+        assert "triage-only restriction is prompt-enforced" in text
+        assert "approval policy to `update_issue`" in text
+        assert "approval gates are deployment-specific" in text
+        assert (
+            "approval gates are deployment-specific.\n\n"
+            "The first provider adapters support GitHub and GitLab."
+        ) in text
 
 
 class TestLoaderIntegration:
