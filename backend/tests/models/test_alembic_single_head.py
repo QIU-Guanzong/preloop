@@ -195,4 +195,6 @@ def test_flow_runners_revision_chains_onto_approval_rule_context() -> None:
     }
     lineage = script.get_revision("20260915_execution_lineage")
     assert lineage.down_revision == "20260914_pricing_merge"
-    assert script.get_heads() == ["20260915_execution_lineage"]
+    callable_flows = script.get_revision("20260915_flow_callable_flows")
+    assert callable_flows.down_revision == "20260915_execution_lineage"
+    assert script.get_heads() == ["20260915_flow_callable_flows"]

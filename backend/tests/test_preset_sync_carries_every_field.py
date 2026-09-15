@@ -66,6 +66,7 @@ FULLY_LOADED_PRESET = {
     "allowed_mcp_tools": [{"server": "preloop", "name": "ask_user"}],
     "git_clone_config": {"enabled": False},
     "custom_commands": {"enabled": True, "commands": ["echo hi"]},
+    "callable_flows": [{"flow": "child-preset", "max_children": 2}],
     "runner_pool": "server",
     "timeout_seconds": 7200,
     "approval_window_seconds": 259200,
@@ -83,6 +84,12 @@ def _covers(written, declared):
     if isinstance(declared, dict):
         return isinstance(written, dict) and all(
             k in written and _covers(written[k], v) for k, v in declared.items()
+        )
+    if isinstance(declared, list):
+        return (
+            isinstance(written, list)
+            and len(written) == len(declared)
+            and all(_covers(w, d) for w, d in zip(written, declared, strict=False))
         )
     return written == declared
 

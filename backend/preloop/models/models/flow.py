@@ -62,6 +62,24 @@ class Flow(Base):
         default=[],  # Changed from JSONB
     )  # Assuming JSON Array of objects
 
+    # Delegation allowlist: which flows an execution of this flow is permitted
+    # to run, with a per entry ceiling. NULL or [] means no delegation, so a
+    # flow that has the delegation tool enabled but no allowlist can call
+    # nothing at all. Nothing enforces this yet (issue #627 is the column).
+    # It is a column rather than a field on the api key context an execution
+    # carries because that context is minted at launch: an allowlist read from
+    # it could not be revoked by an operator while a run is in flight.
+    # Structure (see schemas.flow.CallableFlowEntry):
+    # [
+    #     {
+    #         "flow": str - slug or name of a flow in this account,
+    #         "max_children": int > 0 (optional) - children per execution,
+    #         "max_usd_per_child": float > 0 (optional) - USD ceiling per child,
+    #         "allow_self": bool - explicit opt in to a self reference
+    #     }
+    # ]
+    callable_flows = Column(JSON, nullable=True, default=None)
+
     # Git clone configuration for flows that need source code
     # Structure: {
     #     "enabled": bool,
