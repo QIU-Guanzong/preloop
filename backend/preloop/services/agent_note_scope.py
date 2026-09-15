@@ -47,9 +47,12 @@ The account boundary is not part of this model and cannot be granted away:
 targets are resolved inside the calling agent's account before scope is even
 considered, so ``account`` is the widest scope that exists.
 
-Every refusal returns a distinct reason code and writes one audit row
-(``agent.note_scope_denied``), so "my agent cannot reach that run" has an
-answer in the record rather than in a log line.
+Every refusal returns a distinct reason code. The first of a given
+author, target and reason in a short window writes an
+``agent.note_scope_denied`` audit row, so "my agent cannot reach that run"
+has an answer in the record rather than in a log line. Repeats of the same
+refusal, and a small per-author ceiling, do not spend the note budget and
+do not fill the audit log.
 """
 
 from __future__ import annotations
@@ -57,6 +60,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -101,6 +105,13 @@ MAX_ANCESTOR_WALK = 32
 #: has carried more runs than this is not a delegation hand off.
 MAX_TARGET_EXECUTIONS = 25
 
+#: Scope refusals do not spend the note budget, so a looping agent would
+#: otherwise append an unbounded number of ``agent.note_scope_denied`` rows.
+#: Skip a duplicate author+target+reason inside this window, and cap how
+#: many distinct refusals one author can record in the same window.
+NOTE_SCOPE_DENIED_WINDOW = timedelta(minutes=15)
+NOTE_SCOPE_DENIED_CEILING = 25
+
 
 @dataclass
 class NoteScopeDecision:
@@ -142,7 +153,11 @@ def _as_uuid(value: Any) -> Optional[uuid.UUID]:
 
 
 def ancestor_chain(
-    db: Session, *, account_id: str, execution_id: Any
+    db: Session,
+    *,
+    account_id: str,
+    execution_id: Any,
+    cache: Optional[Dict[uuid.UUID, List[uuid.UUID]]] = None,
 ) -> List[uuid.UUID]:
     """The execution and its parents, nearest first, inside one account.
 
@@ -151,10 +166,15 @@ def ancestor_chain(
     :data:`MAX_ANCESTOR_WALK` and by a seen-set, because a cycle in the data
     must not become a loop in an enforcement path.
 
+    *cache*, when given, reuses already-walked suffixes inside one call so
+    overlapping trees (the common case on a session with many runs) do not
+    repeat the same parent hops. The bound is unchanged.
+
     Args:
         db: Database session.
         account_id: Account the whole chain must live in.
         execution_id: Where to start. Included in the result.
+        cache: Optional per-call map of execution id to remaining chain.
 
     Returns:
         Execution ids, starting with *execution_id*. Empty when it does not
@@ -165,6 +185,8 @@ def ancestor_chain(
     start = _as_uuid(execution_id)
     if start is None:
         return []
+    if cache is not None and start in cache:
+        return list(cache[start])
     chain: List[uuid.UUID] = []
     seen: set[uuid.UUID] = set()
     current: Optional[uuid.UUID] = start
@@ -172,12 +194,24 @@ def ancestor_chain(
         if current in seen:
             logger.warning("Execution lineage cycle at %s; stopping walk", current)
             break
+        if cache is not None and current in cache:
+            for exec_id in cache[current]:
+                if len(chain) >= MAX_ANCESTOR_WALK or exec_id in seen:
+                    break
+                seen.add(exec_id)
+                chain.append(exec_id)
+            break
         execution = crud_flow_execution.get(db, current, account_id=str(account_id))
         if execution is None:
             break
         seen.add(current)
         chain.append(current)
         current = _as_uuid(execution.parent_execution_id)
+    if cache is not None:
+        for index, exec_id in enumerate(chain):
+            cache.setdefault(exec_id, list(chain[index:]))
+        if start not in cache:
+            cache[start] = list(chain)
     return chain
 
 
@@ -240,8 +274,12 @@ def _relation(
     if author_execution_id is None:
         return RELATION_UNRELATED, target_ids[0]
 
+    walked: Dict[uuid.UUID, List[uuid.UUID]] = {}
     author_chain = ancestor_chain(
-        db, account_id=account_id, execution_id=author_execution_id
+        db,
+        account_id=account_id,
+        execution_id=author_execution_id,
+        cache=walked,
     )
     author_ancestors = set(author_chain)
     best = RELATION_UNRELATED
@@ -254,7 +292,9 @@ def _relation(
         RELATION_DESCENDANT: 4,
     }
     for target_id in target_ids:
-        chain = ancestor_chain(db, account_id=account_id, execution_id=target_id)
+        chain = ancestor_chain(
+            db, account_id=account_id, execution_id=target_id, cache=walked
+        )
         if not chain:
             continue
         if target_id == author_execution_id:
@@ -322,6 +362,44 @@ def _grant_facts(
     }
 
 
+def caller_subject_context(
+    *,
+    subject_context: Optional[Dict[str, Any]] = None,
+    author_agent_id: Any = None,
+) -> Dict[str, Any]:
+    """The same subject chain the preceding ``send_note`` evaluation used.
+
+    Target identity belongs in the ``note_*`` facts, not here. Putting the
+    target's session on ``runtime_session_id`` would make a rule against that
+    key mean two different things across the two evaluations of the same
+    rule, and omitting ``api_key_id`` would skip API-key-scoped governance
+    that the plain call already applied.
+
+    Args:
+        subject_context: Caller attributes from the authenticated context.
+        author_agent_id: Fallback managed-agent id when the context omitted it.
+
+    Returns:
+        The keys ``evaluate_policy`` walks for subject-scoped tool rules.
+    """
+    context: Dict[str, Any] = {}
+    if subject_context:
+        for key in (
+            "api_key_id",
+            "managed_agent_id",
+            "runtime_session_id",
+            "runtime_principal_type",
+            "runtime_principal_id",
+            "runtime_principal_name",
+        ):
+            value = subject_context.get(key)
+            if value is not None and value != "":
+                context[key] = str(value)
+    if "managed_agent_id" not in context and author_agent_id:
+        context["managed_agent_id"] = str(author_agent_id)
+    return context
+
+
 def _explain(relation: str) -> str:
     """One clause saying what the target is, for the refusal message."""
     return {
@@ -348,6 +426,7 @@ def evaluate_note_scope(
     target_session_id: Any = None,
     named_execution_id: Any = None,
     text: str = "",
+    subject_context: Optional[Dict[str, Any]] = None,
 ) -> NoteScopeDecision:
     """Decide whether this agent may note this target.
 
@@ -369,6 +448,10 @@ def evaluate_note_scope(
         named_execution_id: The execution the caller named, when it addressed
             one directly.
         text: The note body, passed through to a rule unchanged.
+        subject_context: The same caller attributes the preceding ``send_note``
+            policy evaluation used (``api_key_id``, the caller's
+            ``runtime_session_id``, and the rest of that chain). Target
+            identity stays in the ``note_*`` facts.
 
     Returns:
         A :class:`NoteScopeDecision`. Never raises for a policy failure: an
@@ -413,8 +496,8 @@ def evaluate_note_scope(
         account_id=account_id,
         author_agent_id=author_agent_id,
         author_execution_id=author_execution,
-        target_session_id=target_session_id,
         facts=facts,
+        subject_context=subject_context,
     )
     action, rule_description, from_rule = grant
 
@@ -485,14 +568,15 @@ def _consult_policy(
     account_id: str,
     author_agent_id: Any,
     author_execution_id: Optional[uuid.UUID],
-    target_session_id: Any,
     facts: Dict[str, Any],
+    subject_context: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, Optional[str], bool]:
     """Ask the tool policy path whether a rule widens the scope.
 
-    The same evaluator, the same ``ToolAccessRule`` rows and the same priority
-    order the ``send_note`` call itself went through; only the bindings differ,
-    because only here are the lineage facts known.
+    The same evaluator, the same ``ToolAccessRule`` rows, the same subject
+    chain and the same priority order the ``send_note`` call itself went
+    through; only the bindings differ, because only here are the lineage
+    facts known.
 
     Returns:
         ``(action, rule_description, from_rule)``. ``action`` is ``allow``,
@@ -514,12 +598,10 @@ def _consult_policy(
             tool_args=facts,
             account_id=uuid.UUID(str(account_id)),
             execution_id=author_execution_id,
-            subject_context={
-                "managed_agent_id": str(author_agent_id) if author_agent_id else None,
-                "runtime_session_id": (
-                    str(target_session_id) if target_session_id else None
-                ),
-            },
+            subject_context=caller_subject_context(
+                subject_context=subject_context,
+                author_agent_id=author_agent_id,
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - a broken read must not widen scope
         logger.error("send_note scope grant evaluation failed: %s", exc, exc_info=True)
@@ -539,6 +621,47 @@ def _consult_policy(
     return "allow", rule_description if from_rule else None, from_rule
 
 
+def _should_record_refusal(
+    db: Session,
+    *,
+    account_id: str,
+    author_agent_id: Any,
+    decision: NoteScopeDecision,
+) -> bool:
+    """Whether this refusal still deserves an audit row.
+
+    Scope refusals spend no note budget, so the only bound on a looping
+    agent is this record. A duplicate author+target+reason inside the
+    window is skipped; a small per-author ceiling covers distinct targets.
+    """
+    facts = decision.facts or {}
+    author = str(author_agent_id) if author_agent_id else None
+    target_agent = facts.get("note_target_managed_agent_id")
+    target_session = facts.get("note_target_runtime_session_id")
+    reason = decision.reason_code
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - NOTE_SCOPE_DENIED_WINDOW
+    rows = crud_audit_log.get_by_account(
+        db,
+        account_id=account_id,
+        action=operator_notes.AUDIT_NOTE_SCOPE_DENIED,
+        start_date=since,
+        limit=max(NOTE_SCOPE_DENIED_CEILING * 8, 50),
+    )
+    from_author = 0
+    for row in rows:
+        details = row.details or {}
+        if details.get("actor_managed_agent_id") != author:
+            continue
+        from_author += 1
+        same_target = (
+            details.get("managed_agent_id") == target_agent
+            and details.get("runtime_session_id") == target_session
+        )
+        if details.get("reason_code") == reason and same_target:
+            return False
+    return from_author < NOTE_SCOPE_DENIED_CEILING
+
+
 def audit_refusal(
     db: Session,
     *,
@@ -551,8 +674,18 @@ def audit_refusal(
 
     Written whether or not anything else in the transaction survives: a note
     that was not written leaves no other trace, and "my agent says it cannot
-    reach that run" has to be answerable from the record.
+    reach that run" has to be answerable from the record. Repeats of the
+    same author, target and reason inside :data:`NOTE_SCOPE_DENIED_WINDOW`
+    are skipped, as are further rows once the author has hit
+    :data:`NOTE_SCOPE_DENIED_CEILING` in that window.
     """
+    if not _should_record_refusal(
+        db,
+        account_id=account_id,
+        author_agent_id=author_agent_id,
+        decision=decision,
+    ):
+        return
     facts = decision.facts or {}
     try:
         crud_audit_log.log_action(

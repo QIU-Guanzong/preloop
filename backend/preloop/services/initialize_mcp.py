@@ -918,6 +918,22 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
                 runtime_session_id=runtime_session_id,
                 execution_id=execution_id,
                 author_execution_id=caller.execution_id,
+                subject_context={
+                    "api_key_id": getattr(user_context, "api_key_id", None),
+                    "managed_agent_id": getattr(user_context, "managed_agent_id", None),
+                    "runtime_session_id": getattr(
+                        user_context, "runtime_session_id", None
+                    ),
+                    "runtime_principal_type": getattr(
+                        user_context, "runtime_principal_type", None
+                    ),
+                    "runtime_principal_id": getattr(
+                        user_context, "runtime_principal_id", None
+                    ),
+                    "runtime_principal_name": getattr(
+                        user_context, "runtime_principal_name", None
+                    ),
+                },
             )
         finally:
             db.close()

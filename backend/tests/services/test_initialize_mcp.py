@@ -320,9 +320,11 @@ class TestRegisteredToolBehaviour:
             account_id=str(uuid4()),
             username="u",
             managed_agent_id=str(uuid4()),
-            runtime_session_id=None,
-            api_key_id=None,
+            runtime_session_id=str(uuid4()),
+            api_key_id=str(uuid4()),
             flow_execution_id=calling_execution,
+            runtime_principal_type="managed_agent",
+            runtime_principal_id=str(uuid4()),
             runtime_principal_name="Reviewer",
         )
         target_execution_id = str(uuid4())
@@ -350,6 +352,13 @@ class TestRegisteredToolBehaviour:
         assert kwargs["author_execution_id"] == calling_execution
         # The execution the agent named is the target, not the author.
         assert kwargs["execution_id"] == target_execution_id
+        assert kwargs["subject_context"]["api_key_id"] == user_ctx.api_key_id
+        assert kwargs["subject_context"]["runtime_session_id"] == (
+            user_ctx.runtime_session_id
+        )
+        assert kwargs["subject_context"]["managed_agent_id"] == (
+            user_ctx.managed_agent_id
+        )
 
     async def test_send_note_returns_a_refusal_as_json(self, mcp_server):
         """A refusal reaches the model as data it can act on, not a stack."""

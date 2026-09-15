@@ -106,6 +106,7 @@ def send_note_from_agent(
     runtime_session_id: Optional[Any] = None,
     execution_id: Optional[Any] = None,
     author_execution_id: Optional[Any] = None,
+    subject_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Write one note authored by a managed agent, or refuse and write none.
 
@@ -123,6 +124,10 @@ def send_note_from_agent(
             platform recorded it on the caller's identity. It is what the
             note scope is keyed on, and it is never read from an argument:
             an agent that could name its own lineage could name any.
+        subject_context: The same caller attributes the preceding ``send_note``
+            policy evaluation used, so a grant consults API-key-scoped
+            rules under the same subject chain. Target identity is not
+            copied here.
 
     Returns:
         ``{"ok": True, "note": {...}}`` on success, or a structured refusal.
@@ -220,6 +225,7 @@ def send_note_from_agent(
         target_session_id=target_session_id,
         named_execution_id=execution_id,
         text=body,
+        subject_context=subject_context,
     )
     if not scope.allowed:
         agent_note_scope.audit_refusal(

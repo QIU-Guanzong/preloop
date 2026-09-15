@@ -4,8 +4,9 @@ The default is descent, keyed on execution lineage, because lineage is the one
 relationship the platform writes rather than accepts from the caller. These
 tests pin the rule that is documented in ``docs/guide/operator-notes.md``:
 a run reaches the runs it started at any depth and nothing else, a wider reach
-is an explicit tool access rule, a deny above that rule wins, and every refusal
-leaves one audit row carrying its own reason code.
+is an explicit tool access rule, a deny above that rule wins, and a refusal
+leaves an audit row carrying its own reason code (duplicates in a short window
+do not).
 """
 
 from __future__ import annotations
@@ -26,6 +27,10 @@ from preloop.models.models.api_usage import ApiUsage
 from preloop.models.models.runtime_session import RuntimeSession
 from preloop.services import agent_note_scope, operator_notes
 from preloop.services.agent_send_note import send_note_from_agent
+from preloop.services.subject_governance import (
+    SUBJECT_TYPE_API_KEYS,
+    set_subject_governance,
+)
 from preloop.tools.builtin_defs import SEND_NOTE_TOOL
 
 #: The grant expression the guide recommends. The ``has()`` guard is not
@@ -684,3 +689,130 @@ def test_the_lineage_walk_is_bounded(db_session, account, author, tree, monkeypa
     )
 
     assert chain == [a.id, b.id]
+
+
+def test_shared_ancestor_segments_are_walked_once(
+    db_session, account, author, tree, monkeypatch
+):
+    """Overlapping chains in one relation check reuse already-walked ids."""
+    from preloop.models.crud import crud_flow_execution
+
+    calls: list = []
+    original = crud_flow_execution.get
+
+    def counting_get(db, id, **kwargs):
+        calls.append(id)
+        return original(db, id, **kwargs)
+
+    monkeypatch.setattr(crud_flow_execution, "get", counting_get)
+
+    agent_note_scope._relation(
+        db_session,
+        account_id=str(account.id),
+        author_execution_id=tree["author_run"].id,
+        target_ids=[
+            tree["grandchild_run"].id,
+            tree["child_run"].id,
+            tree["sibling_run"].id,
+        ],
+    )
+
+    assert calls
+    assert len(calls) == len(set(calls))
+
+
+def test_an_api_key_scoped_grant_is_seen_on_the_grant_path(
+    db_session, account, author, tree
+):
+    """The grant consults the same subject chain as the preceding send_note.
+
+    Flow-runtime send_note governance often lives on the API-key subject.
+    Omitting api_key_id would make this evaluation miss that grant.
+    """
+    api_key_id = str(uuid4())
+    caller_session_id = str(uuid4())
+    account.meta_data = set_subject_governance(
+        account.meta_data or {},
+        subject_type=SUBJECT_TYPE_API_KEYS,
+        subject_id=api_key_id,
+        config={
+            "tool_rules": {
+                SEND_NOTE_TOOL["name"]: [
+                    {
+                        "action": "allow",
+                        "description": "Flow key may note anyone in the account",
+                    }
+                ]
+            }
+        },
+    )
+    db_session.flush()
+
+    caller = {
+        "api_key_id": api_key_id,
+        "managed_agent_id": str(author.id),
+        "runtime_session_id": caller_session_id,
+    }
+    granted = send_note_from_agent(
+        db_session,
+        account_id=str(account.id),
+        author_agent_id=author.id,
+        author_execution_id=str(tree["author_run"].id),
+        text="The base branch moved; rebase before you push.",
+        agent_id=str(tree["sibling"].id),
+        subject_context=caller,
+    )
+    assert granted["ok"] is True
+
+    missed = send_note_from_agent(
+        db_session,
+        account_id=str(account.id),
+        author_agent_id=author.id,
+        author_execution_id=str(tree["author_run"].id),
+        text="The base branch moved; rebase before you push.",
+        agent_id=str(tree["stranger"].id),
+    )
+    assert missed["ok"] is False
+    assert missed["error"]["code"] == agent_note_scope.REASON_OUT_OF_SCOPE
+
+
+def test_the_grant_subject_context_keeps_the_caller_session():
+    """Target identity is not copied onto the caller's subject chain."""
+    context = agent_note_scope.caller_subject_context(
+        subject_context={
+            "api_key_id": "key-1",
+            "managed_agent_id": "agent-1",
+            "runtime_session_id": "caller-session",
+        },
+        author_agent_id="other-agent",
+    )
+    assert context["api_key_id"] == "key-1"
+    assert context["managed_agent_id"] == "agent-1"
+    assert context["runtime_session_id"] == "caller-session"
+
+
+def test_a_repeated_scope_refusal_does_not_write_another_audit_row(
+    db_session, account, author, tree
+):
+    """A looping agent does not fill the audit log or spend the note budget."""
+    first = _send(db_session, account, author, tree, tree["sibling"])
+    second = _send(db_session, account, author, tree, tree["sibling"])
+
+    assert first["ok"] is False
+    assert second["ok"] is False
+    assert first["error"]["code"] == agent_note_scope.REASON_OUT_OF_SCOPE
+    assert len(_scope_refusals(db_session, account)) == 1
+    assert _notes_written(db_session, account) == 0
+
+
+def test_scope_refusal_audit_rows_have_a_per_author_ceiling(
+    db_session, account, author, tree, monkeypatch
+):
+    """Distinct targets still cannot append unbounded refusal rows."""
+    monkeypatch.setattr(agent_note_scope, "NOTE_SCOPE_DENIED_CEILING", 1)
+
+    _send(db_session, account, author, tree, tree["sibling"])
+    _send(db_session, account, author, tree, tree["stranger"])
+
+    assert len(_scope_refusals(db_session, account)) == 1
+    assert _notes_written(db_session, account) == 0

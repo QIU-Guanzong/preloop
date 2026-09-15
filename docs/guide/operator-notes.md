@@ -204,6 +204,12 @@ worked out, never anything the calling agent asserted:
 | `args.note_target_managed_agent_id`, `args.note_target_runtime_session_id`, `args.note_target_execution_id` | What it wants to reach |
 | `args.text`, `args.agent_id`, `args.runtime_session_id`, `args.execution_id` | The call's own arguments, under the names the tool uses |
 
+The grant evaluation uses the same subject context as the preceding `send_note`
+call: the caller's `api_key_id`, the caller's `runtime_session_id`, and the rest
+of that chain. Target identity lives only in the `note_*` facts, so an
+API-key-scoped rule is not skipped on the grant path and a rule against
+`runtime_session_id` still means the caller.
+
 So a grant can be narrower than "anyone". `args.note_target_relation ==
 "same_tree"` lets runs in one delegation tree note each other and nothing
 outside it; `args.note_author_managed_agent_id == "..."` grants one coordinator
