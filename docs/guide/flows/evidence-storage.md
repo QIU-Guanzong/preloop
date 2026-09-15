@@ -238,10 +238,11 @@ cutoff and the count, so the deletion of records is itself a record.
 
 ### Legal hold
 
-A hold freezes one execution, approval request or evidence pack. While it is
-in force the purge skips the row and the janitor leaves the ciphertext alone
-past `expires_at`, so a held pack stays downloadable. A reason is mandatory,
-the actor is recorded, and both placing and releasing write audit rows.
+A hold freezes one execution, approval request, evidence pack or runtime
+session. While it is in force the purge skips the row and the janitor leaves
+the ciphertext alone past `expires_at`, so a held pack stays downloadable. A
+reason is mandatory, the actor is recorded, and both placing and releasing
+write audit rows.
 
 ```
 GET  /api/v1/retention/holds
@@ -251,7 +252,10 @@ POST /api/v1/retention/holds/{id}/release     # {"reason": "..."}
 
 A hold on an execution also covers that execution's evidence packs. Holds
 overlap safely: releasing an execution hold does not unfreeze a pack that
-carries its own hold.
+carries its own hold. A hold on a runtime session covers that session's
+activity rows, which the purge only ever removes with the session itself, and
+the session reads back with `legal_hold: true` so a frozen session looks
+frozen wherever it is listed.
 
 **What a legal hold is not.** It is a Preloop control, enforced by Preloop
 code against the Preloop database. It is not WORM, and it is not S3 Object
