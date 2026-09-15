@@ -166,6 +166,32 @@ def _build_chunks(
     ]
 
 
+def _request_embedding(account_id: Any, stored: List[SessionSearchDocument]) -> None:
+    """Nudge the embedding worker after new chunks land.
+
+    Only a hand-off: the submission is deduplicated and dropped when the
+    queue is full, and embedding runs on the worker's own session. Whether
+    anything is actually embedded is the worker's decision, made against the
+    deployment kill switch and the account's opt in.
+    """
+    if not stored:
+        return
+    if not any(row.embedding_state == EMBEDDING_STATE_PENDING for row in stored):
+        return
+    try:
+        from preloop.services.session_embedding_queue import (
+            submit_account_for_embedding,
+        )
+
+        submit_account_for_embedding(account_id)
+    except Exception:  # noqa: BLE001 - indexing never fails over embedding
+        logger.warning(
+            "Session embedding hand-off failed for account %s",
+            account_id,
+            exc_info=True,
+        )
+
+
 def write_source_chunks(
     db: Session,
     *,
@@ -245,6 +271,7 @@ def write_source_chunks(
                 savepoint.commit()
         if commit:
             db.commit()
+        _request_embedding(account_id, stored)
         return stored
     except Exception:  # noqa: BLE001 - indexing never fails its caller
         logger.warning(
