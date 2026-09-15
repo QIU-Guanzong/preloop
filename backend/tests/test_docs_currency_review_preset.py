@@ -145,6 +145,19 @@ def _project_files(project: str) -> list[tuple[str, Path]]:
     )
 
 
+def _in_scope(rel: str, scope: str) -> bool:
+    """Whether a project-relative path belongs to a recorded search scope.
+
+    ``.`` is the whole project. A scope that ends in ``/`` is a directory
+    prefix. Any other scope is an exact file path, so ``widget`` does not
+    match ``widget-plus/...`` and ``pyproject.toml`` does not match
+    ``pyproject.toml.bak``.
+    """
+    if scope == ".":
+        return True
+    return rel.startswith(scope) if scope.endswith("/") else rel == scope
+
+
 def _run_search(project: str, search: dict) -> list[str]:
     """Re-run a recorded search over a fixture project.
 
@@ -153,17 +166,16 @@ def _run_search(project: str, search: dict) -> list[str]:
     regular expression matched line by line inside ``scope``.
     """
     pattern, scope = search["pattern"], search["scope"]
-    prefix = "" if scope == "." else scope
     files = [(rel, path) for rel, path in _project_files(project)]
     if pattern.startswith("filename:"):
         wanted = pattern.split(":", 1)[1]
         return [
-            f"{rel}:0" for rel, _ in files if rel == wanted and rel.startswith(prefix)
+            f"{rel}:0" for rel, _ in files if rel == wanted and _in_scope(rel, scope)
         ]
     regex = re.compile(pattern)
     hits: list[str] = []
     for rel, path in files:
-        if not rel.startswith(prefix):
+        if not _in_scope(rel, scope):
             continue
         for number, line in enumerate(path.read_text().splitlines(), start=1):
             if regex.search(line):
@@ -288,6 +300,9 @@ class TestPresetDefinition:
         assert "docs_paths" in prompt
         assert '"quick" | "standard" | "deep"' in prompt
         assert "previous_result_path" in prompt
+        assert "previous_result_execution_id" in prompt
+        assert "previous/result.json" in prompt
+        assert "previous/baseline-mismatch.json" in prompt
 
     def test_register_grammar_maps_onto_the_family(self):
         norm = _norm(_prompt())
@@ -564,3 +579,35 @@ class TestVerdictHonesty:
         result["coverage"]["plan_completed"] = False
         result["coverage"]["not_reviewed"] = ["docs/operations.md"]
         assert _verdict(result) == "pass_with_findings"
+
+
+class TestSearchScope:
+    """Directory scopes need a trailing slash; file scopes are exact."""
+
+    def test_dot_matches_every_path(self) -> None:
+        assert _in_scope("widget/server.py", ".")
+        assert _in_scope("pyproject.toml", ".")
+
+    def test_directory_prefix_requires_a_trailing_slash(self) -> None:
+        assert _in_scope("widget/server.py", "widget/")
+        assert not _in_scope("widget/server.py", "widget")
+        assert not _in_scope("widget-plus/cli.py", "widget/")
+        assert not _in_scope("widget-plus/cli.py", "widget")
+
+    def test_file_scope_is_exact(self) -> None:
+        assert _in_scope("pyproject.toml", "pyproject.toml")
+        assert not _in_scope("pyproject.toml.bak", "pyproject.toml")
+
+    def test_run_search_directory_scope_does_not_bleed_into_siblings(self) -> None:
+        hits = _run_search(
+            "drifted-build-command",
+            {"pattern": "filename:widget/server.py", "scope": "widget/"},
+        )
+        assert hits == ["widget/server.py:0"]
+        assert (
+            _run_search(
+                "drifted-build-command",
+                {"pattern": "filename:widget/server.py", "scope": "widget"},
+            )
+            == []
+        )

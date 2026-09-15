@@ -29,8 +29,11 @@ search kinds, both cheap and deterministic:
   listing. A hit is recorded as `<path>:0`, because a file's existence
   is not a line.
 - anything else is a regular expression matched line by line against
-  every file whose project-relative path starts with `scope` (`.` means
-  the whole project). A hit is recorded as `<path>:<line>`.
+  every file in `scope`. `scope` `.` is the whole project. A scope that
+  ends in `/` is a directory prefix. Any other scope is an exact file
+  path, so `widget` does not match `widget-plus/...` and
+  `pyproject.toml` does not match `pyproject.toml.bak`. A hit is
+  recorded as `<path>:<line>`.
 
 A drifted claim is an absence claim: its recorded search is expected to
 return no match in the scope it declares.

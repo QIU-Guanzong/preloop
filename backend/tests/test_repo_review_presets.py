@@ -68,7 +68,7 @@ def preset(request):
 
 
 class TestRepoReviewPresetInvariants:
-    """Shared review-skeleton invariants pinned for all three presets."""
+    """Shared review-skeleton invariants pinned for all four presets."""
 
     def test_name_and_slug_match_file(self, preset):
         name, data = preset
