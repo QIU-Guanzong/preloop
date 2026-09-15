@@ -412,32 +412,83 @@ _RESERVED_WRAPPER_BODY_LOCALS = frozenset(
     {"ctx", "arguments", "user_context", "param_name", "value"}
 )
 
-_RESERVED_WRAPPER_LOCALS = (
-    frozenset(_WRAPPER_NAMESPACE_KEYS) | _RESERVED_WRAPPER_BODY_LOCALS
+#: Builtins the generated wrapper body calls. An upstream property with one
+#: of these names would become a parameter and shadow the builtin (``type(ctx)``
+#: becomes ``TypeError``). They must not be interpolated raw; alias instead.
+_WRAPPER_BODY_BUILTINS = (
+    "type",
+    "next",
+    "list",
+    "str",
+    "isinstance",
+    "getattr",
+    "hasattr",
+    "locals",
+    "Exception",
 )
+
+_RESERVED_WRAPPER_LOCALS = (
+    frozenset(_WRAPPER_NAMESPACE_KEYS)
+    | _RESERVED_WRAPPER_BODY_LOCALS
+    | frozenset(_WRAPPER_BODY_BUILTINS)
+)
+
+_WRAPPER_BODY_BUILTIN_SET = frozenset(_WRAPPER_BODY_BUILTINS)
+
+
+def _is_safe_tool_identifier(name: str) -> bool:
+    """Return whether *name* is safe as a proxied tool name in ``internal_name``.
+
+    Tool names are interpolated only inside the ``account_<id>_`` prefix, so
+    they cannot shadow wrapper locals, namespace globals, or builtins. Only
+    identifier syntax and keywords matter here.
+
+    Args:
+        name: Candidate tool name from an upstream MCP server.
+
+    Returns:
+        True if *name* may be used in a generated wrapper function name.
+    """
+    return isinstance(name, str) and name.isidentifier() and not keyword.iskeyword(name)
 
 
 def _is_safe_generated_identifier(name: str) -> bool:
-    """Return whether *name* is safe to interpolate into generated wrapper source.
+    """Return whether *name* is safe to interpolate raw as a parameter name.
 
     Upstream ``tools/list`` names are attacker-controlled. Generated wrappers
     ``exec()`` a function whose signature interpolates those names, so anything
     that is not a non-keyword identifier, that collides with locals in the
-    generated body, or that shadows an exec-namespace global the body reads,
-    must be rejected.
+    generated body, that shadows an exec-namespace global, or that shadows a
+    builtin the body calls, must not be interpolated raw.
 
     Args:
-        name: Candidate parameter or tool name from an upstream MCP server.
+        name: Candidate parameter name from an upstream MCP server.
 
     Returns:
         True if *name* may be interpolated into generated Python source.
     """
-    return (
-        isinstance(name, str)
-        and name.isidentifier()
-        and not keyword.iskeyword(name)
-        and name not in _RESERVED_WRAPPER_LOCALS
-    )
+    return _is_safe_tool_identifier(name) and name not in _RESERVED_WRAPPER_LOCALS
+
+
+def _unused_wrapper_alias(base: str, taken: set[str]) -> str:
+    """Return a unique identifier derived from *base* that is safe to interpolate.
+
+    Args:
+        base: Original upstream parameter name (a wrapper-body builtin).
+        taken: Names already used by the schema or earlier aliases.
+
+    Returns:
+        A unique alias such as ``type_`` or ``type__``.
+    """
+    candidate = f"{base}_"
+    while (
+        candidate in taken
+        or candidate in _RESERVED_WRAPPER_LOCALS
+        or keyword.iskeyword(candidate)
+        or not candidate.isidentifier()
+    ):
+        candidate = f"{candidate}_"
+    return candidate
 
 
 class DynamicFastMCP(FastMCP):
@@ -459,6 +510,8 @@ class DynamicFastMCP(FastMCP):
         self._proxied_tool_server_names: Dict[str, str] = {}
         # Track registered proxied tools to avoid re-registration
         self._registered_proxied_tools: set = set()
+        # original schema key -> generated wrapper parameter name
+        self._proxied_param_aliases: Dict[str, Dict[str, str]] = {}
         logger.info("DynamicFastMCP initialized")
 
     def set_user_context_provider(self, provider: Callable[[], Optional[UserContext]]):
@@ -611,7 +664,7 @@ class DynamicFastMCP(FastMCP):
             proxied_tool_map = {}  # Track original_name -> internal_name mapping
 
             for mcp_server, mcp_tool in proxied_tools_data:
-                if not _is_safe_generated_identifier(mcp_tool.name):
+                if not _is_safe_tool_identifier(mcp_tool.name):
                     logger.warning(
                         "Skipping proxied tool with unsafe name %r; "
                         "not interpolating into generated wrapper source",
@@ -875,11 +928,11 @@ class DynamicFastMCP(FastMCP):
 
         Returns:
             Async wrapper function with Context support and explicit parameters,
-            or ``None`` if *tool_name* is not a safe generated identifier.
+            or ``None`` if *tool_name* is not a safe tool identifier.
         """
         from fastmcp import Context
 
-        if not _is_safe_generated_identifier(tool_name):
+        if not _is_safe_tool_identifier(tool_name):
             logger.warning(
                 "Skipping proxied tool wrapper for unsafe tool name %r",
                 tool_name,
@@ -895,20 +948,41 @@ class DynamicFastMCP(FastMCP):
         properties = input_schema.get("properties", {})
         required_params = set(input_schema.get("required", []))
 
-        # Build parameter list dynamically
+        # Build parameter list dynamically. ``param_names`` stores
+        # ``(alias, original)`` so builtins can be interpolated as aliases
+        # while ``arguments[original]`` still forwards the upstream key.
         req_params = []
         opt_params = []
         param_names = []
+        taken_names = set(properties) if isinstance(properties, dict) else set()
 
         for param_name, param_def in properties.items():
-            if not _is_safe_generated_identifier(param_name):
+            if not _is_safe_tool_identifier(param_name):
                 logger.warning(
                     "Skipping unsafe parameter name %r on proxied tool %r",
                     param_name,
                     tool_name,
                 )
                 continue
-            param_names.append(param_name)
+            if param_name in _WRAPPER_BODY_BUILTIN_SET:
+                alias = _unused_wrapper_alias(param_name, taken_names)
+                taken_names.add(alias)
+                logger.info(
+                    "Aliasing builtin-colliding parameter %r to %r on tool %r",
+                    param_name,
+                    alias,
+                    tool_name,
+                )
+            elif not _is_safe_generated_identifier(param_name):
+                logger.warning(
+                    "Skipping unsafe parameter name %r on proxied tool %r",
+                    param_name,
+                    tool_name,
+                )
+                continue
+            else:
+                alias = param_name
+            param_names.append((alias, param_name))
             if not isinstance(param_def, dict):
                 param_def = {}
 
@@ -918,11 +992,9 @@ class DynamicFastMCP(FastMCP):
 
             # Add Optional if not required
             if param_name not in required_params:
-                opt_params.append(
-                    f"{param_name}: {_optional_annotation(type_str)} = None"
-                )
+                opt_params.append(f"{alias}: {_optional_annotation(type_str)} = None")
             else:
-                req_params.append(f"{param_name}: {type_str}")
+                req_params.append(f"{alias}: {type_str}")
 
         # Add Context parameter at the end
         opt_params.append("ctx: Optional[Context] = None")
@@ -948,12 +1020,12 @@ async def {internal_name}({params_str}) -> str:
         )
         return "Access denied: Tool not available"
 
-    # Collect all arguments
+    # Collect all arguments. ``param_names`` is ``(alias, original)``.
     arguments = {{}}
     for param_name in param_names:
-        value = locals().get(param_name)
+        value = locals().get(param_name[0])
         if value is not None:
-            arguments[param_name] = value
+            arguments[param_name[1]] = value
 
     # Read justification from context var — _call_tool() already stripped it
     # from arguments and stored it in _justification_var.
@@ -1098,12 +1170,35 @@ async def {internal_name}({params_str}) -> str:
         # Store original name and owner for reference
         wrapper._display_name = tool_name  # type: ignore
         wrapper._account_id = account_id  # type: ignore
+        original_to_alias = {original: alias for alias, original in param_names}
+        wrapper._original_to_alias = original_to_alias  # type: ignore
+        self._proxied_param_aliases[internal_name] = original_to_alias
 
         logger.info(
-            f"Created wrapper function for {tool_name} with parameters: {param_names}"
+            "Created wrapper function for %s with parameters: %s",
+            tool_name,
+            [original for _, original in param_names],
         )
 
         return wrapper
+
+    def _remap_wrapper_arguments(
+        self, internal_name: str, arguments: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """Rewrite client keys to generated aliases before FastMCP dispatch.
+
+        Args:
+            internal_name: Registered wrapper name (``account_<id>_<tool>``).
+            arguments: Client-facing ``tools/call`` arguments.
+
+        Returns:
+            Arguments keyed by wrapper parameter names, or *arguments* when
+            no alias map exists.
+        """
+        aliases = self._proxied_param_aliases.get(internal_name)
+        if not arguments or not aliases:
+            return arguments
+        return {aliases.get(key, key): value for key, value in arguments.items()}
 
     async def call_tool(
         self,
@@ -1178,7 +1273,7 @@ async def {internal_name}({params_str}) -> str:
             )
             return await super().call_tool(
                 name,
-                arguments,
+                self._remap_wrapper_arguments(name, arguments),
                 version=version,
                 run_middleware=run_middleware,
                 task_meta=task_meta,
@@ -1536,12 +1631,14 @@ async def {internal_name}({params_str}) -> str:
         # Client calls "calculate_fibonacci", we translate to "account_123_calculate_fibonacci"
         client_tool_name = name
         translation_token = None
+        dispatch_arguments = arguments
         if name in self._proxied_tool_servers:
             safe_account_id = user_context.account_id.replace("-", "_")
             internal_name = f"account_{safe_account_id}_{name}"
             logger.info(f"Translating proxied tool name: {name} -> {internal_name}")
             # Modify target name for the FastMCP router
             name = internal_name
+            dispatch_arguments = self._remap_wrapper_arguments(internal_name, arguments)
             translation_token = _is_proxy_translation_var.set(True)
         else:
             # Builtin tool - call with original name
@@ -1556,7 +1653,7 @@ async def {internal_name}({params_str}) -> str:
         try:
             result = await super().call_tool(
                 name,
-                arguments,
+                dispatch_arguments,
                 version=version,
                 run_middleware=run_middleware,
                 task_meta=task_meta,
@@ -1821,7 +1918,9 @@ async def {internal_name}({params_str}) -> str:
         if name in self._registered_proxied_tools:
             translation_token = _is_proxy_translation_var.set(True)
         try:
-            return await super().call_tool(name, arguments or {})
+            return await super().call_tool(
+                name, self._remap_wrapper_arguments(name, arguments or {})
+            )
         finally:
             if translation_token is not None:
                 _is_proxy_translation_var.reset(translation_token)

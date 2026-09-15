@@ -1518,13 +1518,81 @@ class TestCreateProxiedToolWrapper:
         assert "tool_name" not in captured["arguments"]
         assert "param_names" not in captured["arguments"]
 
+    async def test_wrapper_aliases_builtin_colliding_param_names(
+        self, dynamic_mcp, user_context, monkeypatch
+    ):
+        """A type or next property is aliased and still forwarded as itself."""
+        dynamic_mcp.set_user_context_provider(lambda: user_context)
+        captured = {}
+
+        async def fake_require_approval(**kwargs):
+            captured.update(kwargs)
+            return False, "Denied by test"
+
+        monkeypatch.setattr(
+            "preloop.services.approval_helper.require_approval",
+            fake_require_approval,
+        )
+
+        wrapper = dynamic_mcp._create_proxied_tool_wrapper(
+            tool_name="safe_tool",
+            server_id="server-123",
+            account_id=user_context.account_id,
+            description="Safe tool",
+            input_schema={
+                "properties": {
+                    "type": {"type": "string"},
+                    "next": {"type": "string"},
+                    "safe_param": {"type": "string"},
+                },
+                "required": ["type", "next", "safe_param"],
+            },
+        )
+
+        assert callable(wrapper)
+        parameter_names = list(inspect.signature(wrapper).parameters)
+        assert "safe_param" in parameter_names
+        assert "type" not in parameter_names
+        assert "next" not in parameter_names
+        assert "type_" in parameter_names
+        assert "next_" in parameter_names
+
+        result = await wrapper(
+            type_="issue",
+            next_="cursor",
+            safe_param="ok",
+            ctx=object(),
+        )
+        assert isinstance(result, str)
+        assert captured["tool_name"] == "safe_tool"
+        assert captured["arguments"]["type"] == "issue"
+        assert captured["arguments"]["next"] == "cursor"
+        assert captured["arguments"]["safe_param"] == "ok"
+
+    @pytest.mark.parametrize(
+        "reserved_tool_name",
+        ["self", "logger", "ctx", "value"],
+    )
+    def test_wrapper_accepts_reserved_locals_as_tool_names(
+        self, dynamic_mcp, user_context, reserved_tool_name
+    ):
+        """Reserved wrapper locals are valid tool names; they cannot shadow."""
+        wrapper = dynamic_mcp._create_proxied_tool_wrapper(
+            tool_name=reserved_tool_name,
+            server_id="server-123",
+            account_id=user_context.account_id,
+            description="Reserved-looking tool name",
+            input_schema={"properties": {"ok": {"type": "string"}}},
+        )
+        assert callable(wrapper)
+        assert "ok" in inspect.signature(wrapper).parameters
+
     @pytest.mark.parametrize(
         "unsafe_name",
         [
             "user-keys",
             "foo bar",
             "class",
-            "ctx",
             (
                 "t():\n    pass\nraise RuntimeError('injected-wrapper')\n"
                 "async def ignored"
@@ -1534,7 +1602,7 @@ class TestCreateProxiedToolWrapper:
     def test_wrapper_rejects_unsafe_tool_name_without_exec(
         self, dynamic_mcp, user_context, unsafe_name
     ):
-        """Hostile or reserved tool names are skipped and do not exec source."""
+        """Hostile or non-identifier tool names are skipped and do not exec."""
         assert (
             dynamic_mcp._create_proxied_tool_wrapper(
                 tool_name=unsafe_name,
