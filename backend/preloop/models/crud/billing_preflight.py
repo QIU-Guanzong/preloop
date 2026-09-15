@@ -21,8 +21,7 @@ from sqlalchemy.orm import Session
 
 from preloop.models import models
 
-#: Subscription statuses that entitle an account to its plan.
-ENTITLED_STATUSES = ("active", "trialing", "past_due")
+from .entitlement import entitlement_clause
 
 #: Plan id assumed for an account without an entitled subscription.
 DEFAULT_PLAN_ID = "free"
@@ -41,7 +40,7 @@ def _entitled_plan_subquery() -> Any:
             )
             .label("rank"),
         )
-        .where(models.Subscription.status.in_(ENTITLED_STATUSES))
+        .where(entitlement_clause(models.Subscription))
         .subquery()
     )
     return select(ranked.c.account_id, ranked.c.plan_id).where(ranked.c.rank == 1)
@@ -116,7 +115,7 @@ def entitled_without_revision(db: Session) -> int:
     return int(
         db.execute(
             select(func.count(models.Subscription.id)).where(
-                models.Subscription.status.in_(ENTITLED_STATUSES),
+                entitlement_clause(models.Subscription),
                 models.Subscription.stripe_subscription_id.isnot(None),
                 (revision.is_(None)) | (revision == ""),
             )

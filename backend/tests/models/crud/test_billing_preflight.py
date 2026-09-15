@@ -195,6 +195,34 @@ class TestFreeCapOverages:
         assert after["over_agent_cap"] == before["over_agent_cap"] + 1
         assert after["over_any_cap"] == before["over_any_cap"] + 1
 
+    def test_an_expired_trial_over_the_free_cap_is_counted(self, db_session):
+        """A trialing row past current_period_end is not entitled, so Free caps apply."""
+        before = billing_preflight.free_cap_overages(
+            db_session, max_users=1, max_agents=3
+        )
+
+        account = _account(db_session)
+        _user(db_session, account)
+        _user(db_session, account)
+        plan_id = f"preflight-expired-{uuid.uuid4().hex[:8]}"
+        _plan(db_session, plan_id)
+        now = datetime.now(timezone.utc)
+        _subscription(
+            db_session,
+            account,
+            plan_id,
+            status="trialing",
+            current_period_start=now - timedelta(days=30),
+            current_period_end=now - timedelta(days=1),
+        )
+
+        after = billing_preflight.free_cap_overages(
+            db_session, max_users=1, max_agents=3
+        )
+
+        assert after["over_user_cap"] == before["over_user_cap"] + 1
+        assert after["over_any_cap"] == before["over_any_cap"] + 1
+
 
 class TestSubscriptionHealth:
     def test_an_entitled_subscription_without_a_revision_is_counted(self, db_session):
