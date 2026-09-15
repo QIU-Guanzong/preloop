@@ -1142,6 +1142,27 @@ class Settings(BaseSettings):
             "account the same at most."
         ),
     )
+    flow_delegation_wait_seconds: int = Field(
+        90,
+        description=(
+            "How long run_flow(wait) waits in process before the calling "
+            "execution is parked (WAITING_FOR_CHILDREN), the container "
+            "released and the run resumed when its children finish. Below "
+            "this, waiting in place is cheaper than a park/resume round "
+            "trip; the same threshold and the same reasoning as "
+            "approval_park_after_seconds. Set 0 to park immediately."
+        ),
+    )
+    flow_delegation_child_wait_seconds: int = Field(
+        21600,
+        description=(
+            "How long a parked parent waits for its children before it is "
+            "resumed anyway, with an expired record for each child that has "
+            "not finished (6 hours by default). A parent that waits forever "
+            "is a run nobody ever gets a report from; a parent resumed early "
+            "still writes one, naming the coverage it reached."
+        ),
+    )
     flow_delegation_result_max_bytes: int = Field(
         16384,
         description=(
@@ -1567,6 +1588,12 @@ class Settings(BaseSettings):
             flow_delegation_max_depth=int(os.getenv("FLOW_DELEGATION_MAX_DEPTH", "2")),
             flow_delegation_max_children=int(
                 os.getenv("FLOW_DELEGATION_MAX_CHILDREN", "25")
+            ),
+            flow_delegation_wait_seconds=int(
+                os.getenv("FLOW_DELEGATION_WAIT_SECONDS", "90")
+            ),
+            flow_delegation_child_wait_seconds=int(
+                os.getenv("FLOW_DELEGATION_CHILD_WAIT_SECONDS", "21600")
             ),
             flow_delegation_result_max_bytes=int(
                 os.getenv("FLOW_DELEGATION_RESULT_MAX_BYTES", "16384")

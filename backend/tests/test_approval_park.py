@@ -329,6 +329,14 @@ class TestResumeDetails:
         assert approval_park.consumed_seconds_from_details(None) == 0
         assert approval_park.consumed_seconds_from_details({"payload": {}}) == 0
 
+    def test_consumed_seconds_take_the_max_across_chain_keys(self):
+        """A human park then a children park leaves a stale smaller _answers value."""
+        details = {
+            "_answers": {"consumed_seconds": 120},
+            "_children": {"consumed_seconds": 400},
+        }
+        assert approval_park.consumed_seconds_from_details(details) == 400
+
 
 class TestWindowReminders:
     """Re-notify at half and nine tenths of the window, once each."""

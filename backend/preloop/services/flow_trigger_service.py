@@ -54,14 +54,16 @@ MATRIX_MAX_ENTRIES = 25
 TRACKER_OBJECT_KINDS: frozenset = frozenset({"issue", "pr", "merge_request"})
 
 # An execution in any of these holds, or is about to hold, the object. A
-# terminal run does not, and a parked run (WAITING_FOR_HUMAN) does: it owns
-# the issue until a human answers, and its resume continues the same work.
+# terminal run does not, and a parked run does: WAITING_FOR_HUMAN owns the
+# issue until a human answers, WAITING_FOR_CHILDREN owns it until the flows
+# it started finish, and in both cases the resume continues the same work.
 TRACKER_OBJECT_ACTIVE_STATUSES = (
     "PENDING",
     "INITIALIZING",
     "STARTING",
     "RUNNING",
     "WAITING_FOR_HUMAN",
+    "WAITING_FOR_CHILDREN",
 )
 
 # Event types whose whole purpose is to reach an execution that is already

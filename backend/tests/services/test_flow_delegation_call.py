@@ -658,3 +658,36 @@ async def test_evaluate_delegation_raises_rather_than_returning_a_reason(
             reference="No Such Flow",
         )
     assert refusal.value.reason == "flow_not_found"
+
+
+async def test_a_refusal_is_kept_on_the_callers_timeline(
+    db_session, test_user, parent_flow, parent_execution
+):
+    """A refused call creates no row, so the parent's log is its only trace.
+
+    A parent that parks on its children (#633) reports one row per call it
+    made, refusals included, and reads them back from here.
+    """
+    from preloop.models.crud import crud_flow_execution_log
+    from preloop.services.flow_delegation_call import DELEGATION_REFUSAL_LOG_TYPE
+
+    record = await delegate_flow(
+        db_session,
+        account_id=str(test_user.account_id),
+        parent_execution_id=parent_execution.id,
+        reference="No Such Flow",
+        label="the one that never ran",
+    )
+
+    assert record["metadata"]["preloop.ai/refusalReason"] == "flow_not_found"
+    rows = crud_flow_execution_log.list_by_type(
+        db_session,
+        execution_id=parent_execution.id,
+        log_type=DELEGATION_REFUSAL_LOG_TYPE,
+    )
+    assert len(rows) == 1
+    assert rows[0].metadata_["label"] == "the one that never ran"
+    assert rows[0].metadata_["task"]["metadata"]["preloop.ai/refusalReason"] == (
+        "flow_not_found"
+    )
+    validate_delegation_task(rows[0].metadata_["task"])
