@@ -1,5 +1,6 @@
 """Tests for model gateway budget enforcement."""
 
+import math
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
@@ -15,7 +16,10 @@ from preloop.models.crud import (
 from preloop.models.crud.plan import plan as crud_plan
 from preloop.models.crud.plan import subscription as crud_subscription
 from preloop.services.model_gateway_auth import ModelGatewayAuthContext
-from preloop.services.model_gateway_budget import ModelGatewayBudgetService
+from preloop.services.model_gateway_budget import (
+    ModelGatewayBudgetService,
+    _chars_per_token,
+)
 from preloop.services.subject_governance import (
     SUBJECT_TYPE_API_KEYS,
     set_subject_governance,
@@ -680,3 +684,55 @@ def test_enforcer_estimator_type_error_is_not_retried_without_override() -> None
     service._estimate_request_cost.assert_called_once_with(
         model, payload, pricing_override=override
     )
+
+
+def test_estimate_input_tokens_counts_embedding_string_batches() -> None:
+    """OpenAI embeddings batches are a list of strings, not content dicts."""
+    chunks = ["first chunk", "second chunk"]
+    tokens = ModelGatewayBudgetService._estimate_input_tokens({"input": chunks})
+    expected = math.ceil(sum(len(chunk) for chunk in chunks) / _chars_per_token())
+    assert tokens == expected
+    assert tokens > 0
+
+
+def test_estimate_input_tokens_still_counts_responses_dict_items() -> None:
+    """Responses-style list input is still counted via content dicts."""
+    tokens = ModelGatewayBudgetService._estimate_input_tokens(
+        {"input": [{"role": "user", "content": "hello world"}]}
+    )
+    assert tokens == math.ceil(len("hello world") / _chars_per_token())
+
+
+def test_preflight_embedding_string_batch_is_priced_from_input_tokens(
+    db_session, test_user
+):
+    """A list-of-strings embeddings payload must not preflight at $0."""
+    ai_model = crud_ai_model.create_with_account(
+        db=db_session,
+        obj_in={
+            "name": "Embedding Batch",
+            "provider_name": "openai",
+            "model_identifier": "text-embedding-fixture",
+            "meta_data": {
+                "gateway": {"model_alias": "openai/text-embedding-fixture"},
+                "pricing": {
+                    "input_price_per_1k": 1.0,
+                    "output_price_per_1k": 0.0,
+                },
+            },
+        },
+        account_id=test_user.account_id,
+    )
+    service = ModelGatewayBudgetService(
+        db_session,
+        ModelGatewayAuthContext(token="embed-token", user=test_user),
+    )
+    payload = {
+        "model": "openai/text-embedding-fixture",
+        "input": ["first chunk", "second chunk"],
+    }
+    result = service.preflight_check(ai_model, payload)
+    tokens = ModelGatewayBudgetService._estimate_input_tokens(payload)
+    assert tokens > 0
+    assert result.pricing_available is True
+    assert result.estimated_request_cost_usd == pytest.approx(tokens / 1000.0)

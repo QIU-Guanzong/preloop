@@ -524,6 +524,10 @@ class ModelGatewayBudgetService:
                             item.get("content", "")
                         )
                     )
+                elif isinstance(item, str):
+                    # OpenAI embeddings batches are a list of strings. Without
+                    # this branch those calls preflight at 0 input tokens.
+                    text_parts.append(item)
         total_chars = sum(len(part) for part in text_parts if part)
         chars_per_token = _chars_per_token()
         return max(1, math.ceil(total_chars / chars_per_token)) if total_chars else 0

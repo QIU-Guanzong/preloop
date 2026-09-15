@@ -16,9 +16,16 @@ import pytest
 from litellm import model_cost, register_model
 
 from preloop.api.endpoints.openai_gateway import get_model_gateway_auth_context
-from preloop.models.crud import crud_account, crud_ai_model, crud_api_key
+from preloop.models.crud import (
+    crud_account,
+    crud_account_halt,
+    crud_ai_model,
+    crud_api_key,
+)
 from preloop.models.models.api_usage import ApiUsage
+from preloop.services.kill_switch import invalidate_kill_switch_cache
 from preloop.services.model_gateway_auth import ModelGatewayAuthContext
+from preloop.services.model_gateway_budget import BudgetCheckResult
 from preloop.services.openai_gateway import OpenAIGatewayService
 
 LITELLM_EMBEDDING = "preloop.services.openai_gateway.litellm.embedding"
@@ -312,3 +319,169 @@ def test_gateway_routes_do_not_serve_another_accounts_model(
     mock_embedding.assert_not_called()
     mock_completion.assert_not_called()
     assert _usage_rows(db_session, other_account.id) == []
+
+
+def test_embeddings_reject_stream_true(app, client, db_session, test_user):
+    """Embeddings have no SSE counterpart, so stream=true is a 400."""
+    _create_embedding_model(db_session, test_user.account_id)
+    _runtime_key_auth(app, db_session, test_user)
+
+    with patch(LITELLM_EMBEDDING) as mock_embedding:
+        response = client.post(
+            EMBEDDINGS_URL,
+            headers={"Authorization": "Bearer ignored"},
+            json={
+                "model": f"openai/{FIXTURE_MODEL}",
+                "input": "hello",
+                "stream": True,
+            },
+        )
+
+    assert response.status_code == 400
+    assert "does not support stream=true" in response.json()["error"]["message"]
+    mock_embedding.assert_not_called()
+    assert _usage_rows(db_session, test_user.account_id) == []
+
+
+@pytest.mark.parametrize("empty_input", ["", []])
+def test_embeddings_reject_empty_input(app, client, db_session, test_user, empty_input):
+    """A missing or empty embeddings input is a 400 before any upstream call."""
+    _create_embedding_model(db_session, test_user.account_id)
+    _runtime_key_auth(app, db_session, test_user)
+
+    with patch(LITELLM_EMBEDDING) as mock_embedding:
+        response = client.post(
+            EMBEDDINGS_URL,
+            headers={"Authorization": "Bearer ignored"},
+            json={"model": f"openai/{FIXTURE_MODEL}", "input": empty_input},
+        )
+
+    assert response.status_code == 400
+    assert "non-empty string or list" in response.json()["error"]["message"]
+    mock_embedding.assert_not_called()
+    assert _usage_rows(db_session, test_user.account_id) == []
+
+
+def test_embeddings_rejected_while_gateway_halted(app, client, db_session, test_user):
+    """The embeddings route honours the same kill switch as completions."""
+    _create_embedding_model(db_session, test_user.account_id)
+    _runtime_key_auth(app, db_session, test_user)
+    crud_account_halt.set_scopes(
+        db_session,
+        account_id=test_user.account_id,
+        scopes=["gateway"],
+        active=True,
+        user_id=None,
+        reason="runaway agent",
+    )
+    invalidate_kill_switch_cache(test_user.account_id)
+    try:
+        with patch(LITELLM_EMBEDDING) as mock_embedding:
+            response = client.post(
+                EMBEDDINGS_URL,
+                headers={"Authorization": "Bearer ignored"},
+                json={"model": f"openai/{FIXTURE_MODEL}", "input": "hello"},
+            )
+    finally:
+        crud_account_halt.set_scopes(
+            db_session,
+            account_id=test_user.account_id,
+            scopes=["gateway"],
+            active=False,
+            user_id=None,
+        )
+        invalidate_kill_switch_cache(test_user.account_id)
+
+    assert response.status_code == 403
+    error = response.json()["error"]
+    assert error["code"] == "preloop_account_halted"
+    assert "kill switch" in error["message"].lower()
+    mock_embedding.assert_not_called()
+    rows = _usage_rows(db_session, test_user.account_id)
+    assert len(rows) == 1
+    assert rows[0].status_code == 403
+    assert rows[0].error_class == "kill_switch"
+    assert rows[0].meta_data["endpoint_kind"] == "embeddings"
+
+
+def _denied_budget_result() -> BudgetCheckResult:
+    return BudgetCheckResult(
+        account_limit_usd=0.00001,
+        account_soft_limit_usd=None,
+        account_current_spend_usd=0.0,
+        account_estimated_total_usd=1.0,
+        flow_limit_usd=None,
+        flow_soft_limit_usd=None,
+        flow_current_spend_usd=0.0,
+        flow_estimated_total_usd=None,
+        estimated_request_cost_usd=1.0,
+        trial_hosted_model_limit_usd=None,
+        trial_hosted_model_current_spend_usd=None,
+        trial_hosted_model_estimated_total_usd=None,
+        hard_limit_exceeded=True,
+        soft_limit_exceeded=False,
+        enforcement_reason="account_budget_exceeded",
+        pricing_available=True,
+    )
+
+
+def test_embeddings_budget_denial_records_embeddings_kind(
+    app, client, db_session, test_user
+):
+    """A 403 budget denial on embeddings is stamped embeddings, not chat."""
+    _create_embedding_model(db_session, test_user.account_id)
+    _runtime_key_auth(app, db_session, test_user)
+
+    with (
+        patch(LITELLM_EMBEDDING) as mock_embedding,
+        patch.object(
+            OpenAIGatewayService,
+            "_check_budget",
+            return_value=_denied_budget_result(),
+        ),
+    ):
+        response = client.post(
+            EMBEDDINGS_URL,
+            headers={"Authorization": "Bearer ignored"},
+            json={
+                "model": f"openai/{FIXTURE_MODEL}",
+                "input": ["first chunk", "second chunk"],
+            },
+        )
+
+    assert response.status_code == 403
+    body = response.json()
+    assert "account monthly limit reached" in body["error"]["message"]
+    mock_embedding.assert_not_called()
+    rows = _usage_rows(db_session, test_user.account_id)
+    assert len(rows) == 1
+    assert rows[0].status_code == 403
+    assert rows[0].meta_data["endpoint_kind"] == "embeddings"
+
+
+def test_embeddings_upstream_failure_records_error_row(
+    app, client, db_session, test_user
+):
+    """An upstream embeddings failure is recorded, then re-raised to the client."""
+    _create_embedding_model(db_session, test_user.account_id)
+    _runtime_key_auth(app, db_session, test_user)
+
+    with patch(
+        LITELLM_EMBEDDING,
+        side_effect=Exception("upstream exploded"),
+    ):
+        response = client.post(
+            EMBEDDINGS_URL,
+            headers={"Authorization": "Bearer ignored"},
+            json={"model": f"openai/{FIXTURE_MODEL}", "input": "hello"},
+        )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["message"] == (
+        "Gateway upstream error: upstream exploded"
+    )
+    rows = _usage_rows(db_session, test_user.account_id)
+    assert len(rows) == 1
+    assert rows[0].status_code == 502
+    assert rows[0].meta_data["endpoint_kind"] == "embeddings"
+    assert rows[0].error_class == "upstream_error"
