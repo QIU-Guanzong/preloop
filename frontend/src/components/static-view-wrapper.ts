@@ -20,10 +20,15 @@ export class StaticViewWrapper extends LitElement {
         width: 100%;
       }
 
+      /* The padding is part of the 100% width: as a content-box the column
+         measured viewport + 2 * padding and clipped the right edge of every
+         line on a phone. The max-width includes the same padding so the
+         reading column stays 760px on a desktop. */
       main {
         flex: 1;
+        box-sizing: border-box;
         padding: 3.5rem 1.5rem 5rem;
-        max-width: 760px;
+        max-width: calc(760px + 2 * 1.5rem);
         margin: 0 auto;
         width: 100%;
       }
