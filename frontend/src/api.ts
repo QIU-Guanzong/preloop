@@ -2968,6 +2968,39 @@ export async function getFlow(flowId: string): Promise<any> {
   return response.json();
 }
 
+/**
+ * The reason a flow write was refused, as a sentence.
+ *
+ * The API refuses a write in two shapes: `detail` as a string (an explicit
+ * refusal, such as a `callable_flows` entry that names no flow in the
+ * account) and `detail` as a list of field errors from schema validation.
+ * Stringifying the list yields "[object Object]", which turns a refusal that
+ * names the offending entry into a generic failure on the form, so the list
+ * is flattened into the messages it carries.
+ */
+export function flowWriteErrorMessage(
+  errorData: unknown,
+  fallback: string
+): string {
+  const detail = (errorData as { detail?: unknown } | null)?.detail;
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        const record = (item || {}) as { msg?: unknown; loc?: unknown };
+        const msg = typeof record.msg === 'string' ? record.msg : '';
+        const loc = Array.isArray(record.loc)
+          ? record.loc.filter((part) => part !== 'body').join('.')
+          : '';
+        return loc && msg ? `${loc}: ${msg}` : msg;
+      })
+      .filter((message) => Boolean(message));
+    if (messages.length > 0) return messages.join('; ');
+  }
+  return fallback;
+}
+
 export async function createFlow(flow: any): Promise<any> {
   const response = await fetchWithAuth('/api/v1/flows', {
     method: 'POST',
@@ -2976,7 +3009,7 @@ export async function createFlow(flow: any): Promise<any> {
   });
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.detail || 'Failed to create flow');
+    throw new Error(flowWriteErrorMessage(errorData, 'Failed to create flow'));
   }
   return response.json();
 }
@@ -2989,7 +3022,7 @@ export async function updateFlow(flowId: string, flow: any): Promise<any> {
   });
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.detail || 'Failed to update flow');
+    throw new Error(flowWriteErrorMessage(errorData, 'Failed to update flow'));
   }
   return response.json();
 }

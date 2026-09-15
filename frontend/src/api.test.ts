@@ -6,6 +6,8 @@ import {
   invalidateApiCaches,
   AuthedElement,
   getFlowExecutions,
+  createFlow,
+  updateFlow,
   listProjectsForOrg,
   uploadAvatar,
   validateTrackerToken,
@@ -566,6 +568,64 @@ describe('api', () => {
       expect(
         await messageOf(listProjectsForOrg('github', 'unchanged', '9001'))
       ).to.equal('Failed to list projects for organization');
+    });
+  });
+  describe('flow write refusals', () => {
+    const refusal = (body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status: 422,
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+    const messageOf = async (call: Promise<unknown>) => {
+      try {
+        await call;
+      } catch (e: unknown) {
+        return (e as Error).message;
+      }
+      return '';
+    };
+
+    it('surfaces the detail string, which names the entry refused', async () => {
+      fetchStub.resolves(
+        refusal({
+          detail:
+            "callable_flows entry 'Child flow' does not name a flow in this account",
+        })
+      );
+
+      expect(await messageOf(updateFlow('flow-1', {}))).to.equal(
+        "callable_flows entry 'Child flow' does not name a flow in this account"
+      );
+    });
+
+    it('flattens a field error list instead of printing [object Object]', async () => {
+      fetchStub.resolves(
+        refusal({
+          detail: [
+            {
+              loc: ['body', 'callable_flows'],
+              msg: "Value error, callable_flows has a duplicate entry for 'Child flow'",
+              type: 'value_error',
+            },
+          ],
+        })
+      );
+
+      const message = await messageOf(createFlow({}));
+      expect(message).to.include("'Child flow'");
+      expect(message).to.include('callable_flows');
+      expect(message).to.not.include('object Object');
+    });
+
+    it('falls back when the body carries no reason', async () => {
+      fetchStub.resolves(refusal({}));
+      expect(await messageOf(createFlow({}))).to.equal('Failed to create flow');
+
+      fetchStub.resolves(refusal({ detail: [] }));
+      expect(await messageOf(updateFlow('flow-1', {}))).to.equal(
+        'Failed to update flow'
+      );
     });
   });
 });

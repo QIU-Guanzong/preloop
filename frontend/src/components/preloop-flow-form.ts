@@ -8,6 +8,7 @@ import {
   getAccountAgents,
   getAccountOrganization,
   getRunners,
+  getFlows,
   listOrganizations,
   listProjects,
   getFlowPresets,
@@ -16,6 +17,17 @@ import {
 import type { Flow } from '../types';
 import { defaultFlowNotifications } from '../types';
 import { getAgentControlState } from '../utils/agent-control';
+import {
+  DELEGATION_TOOL_NAME,
+  callableFlowsErrorEntry,
+  callableFlowsFingerprint,
+  findCallableEntry,
+  isDelegationToolEnabled,
+  parseCallableFlows,
+  serialiseCallableFlows,
+  validateCallableFlows,
+  type CallableFlowEntry,
+} from '../utils/callable-flows';
 import { getTrackerEventOptions } from '../constants/tracker-event-types';
 import { triggerIsAboutIssue } from '../utils/flow-trigger-subject';
 import {
@@ -45,6 +57,11 @@ import '@shoelace-style/shoelace/dist/components/icon/icon.js';
 import '@shoelace-style/shoelace/dist/components/badge/badge.js';
 import '@shoelace-style/shoelace/dist/components/alert/alert.js';
 import '@shoelace-style/shoelace/dist/components/dialog/dialog.js';
+
+/** A ceiling in a text field: unset is blank, not the string "null". */
+function ceilingValue(value: number | null | undefined): string {
+  return value === null || value === undefined ? '' : String(value);
+}
 
 /** Matches the API `timeout_seconds` constraint `ge=60, le=86400`. */
 export const FLOW_TIMEOUT_MIN_SECONDS = 60;
@@ -248,6 +265,57 @@ export class PreloopFlowForm extends LitElement {
         color: var(--sl-color-neutral-600);
         font-size: var(--sl-font-size-small);
       }
+
+      .callable-flows {
+        margin-top: var(--sl-spacing-large);
+        border-top: 1px solid var(--sl-color-neutral-200);
+        padding-top: var(--sl-spacing-medium);
+      }
+
+      .callable-flows h5 {
+        font-weight: 600;
+        color: var(--sl-color-neutral-600);
+        text-transform: uppercase;
+        font-size: 0.8rem;
+        margin: 0 0 0.5rem 0;
+      }
+
+      .callable-flows-help,
+      .callable-flows-empty {
+        margin: 0 0 var(--sl-spacing-medium) 0;
+        color: var(--sl-color-neutral-600);
+        font-size: var(--sl-font-size-small);
+      }
+
+      .callable-flow-row {
+        border: 1px solid var(--sl-color-neutral-200);
+        border-radius: var(--sl-border-radius-medium);
+        padding: var(--sl-spacing-small) var(--sl-spacing-medium);
+        margin-bottom: var(--sl-spacing-small);
+      }
+
+      /* The row the server refused, so the message is not just a sentence
+         above a list the operator then has to search. */
+      .callable-flow-row.rejected {
+        border-color: var(--sl-color-danger-500);
+      }
+
+      .callable-flow-ceilings {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: var(--sl-spacing-small);
+        margin-top: var(--sl-spacing-small);
+      }
+
+      .callable-flow-ceilings sl-input {
+        margin-bottom: 0;
+      }
+
+      .callable-flow-note {
+        margin: var(--sl-spacing-2x-small) 0 0 0;
+        color: var(--sl-color-danger-600);
+        font-size: var(--sl-font-size-small);
+      }
     `,
   ];
 
@@ -282,6 +350,10 @@ export class PreloopFlowForm extends LitElement {
 
   @state()
   private mcpServers: any[] = [];
+
+  // The account's other flows, the candidates for the delegation allowlist.
+  @state()
+  private accountFlows: any[] = [];
 
   @state()
   private longRunningAgents: any[] = [];
@@ -347,6 +419,7 @@ export class PreloopFlowForm extends LitElement {
     prompt_template: string;
     tools: string;
     trigger: string;
+    callable_flows: string;
   } | null = null;
 
   @state()
@@ -459,6 +532,7 @@ export class PreloopFlowForm extends LitElement {
         presets,
         runners,
         account,
+        flows,
       ] = await Promise.all([
         getTrackers().catch(() => []),
         getAIModels().catch(() => []),
@@ -468,8 +542,10 @@ export class PreloopFlowForm extends LitElement {
         getFlowPresets().catch(() => []),
         getRunners().catch(() => []),
         getAccountOrganization().catch(() => null),
+        getFlows().catch(() => []),
       ]);
 
+      this.accountFlows = Array.isArray(flows) ? flows : [];
       this.trackers = trackers;
       this.models = models;
       this.availableTools = tools;
@@ -841,6 +917,84 @@ export class PreloopFlowForm extends LitElement {
     this.requestUpdate();
   }
 
+  /**
+   * True when this flow may delegate at all.
+   *
+   * The allowlist is spent by the delegation tool and by nothing else, so the
+   * section that edits it only appears once that tool is on the flow's tool
+   * allowlist. A flow that cannot call another flow gets the form it had.
+   */
+  private get delegationToolEnabled(): boolean {
+    return isDelegationToolEnabled(this.flow?.allowed_mcp_tools);
+  }
+
+  /** The allowlist as editable rows. Unset and empty are the same list. */
+  private get callableFlows(): CallableFlowEntry[] {
+    return parseCallableFlows(this.flow?.callable_flows);
+  }
+
+  private setCallableFlows(entries: CallableFlowEntry[]) {
+    this.flow.callable_flows = serialiseCallableFlows(entries);
+    this.requestUpdate();
+  }
+
+  /**
+   * Select or clear one flow in the allowlist.
+   *
+   * A row is the only way to add an entry, so the same flow cannot be listed
+   * twice: selecting an already selected flow is a no-op. `allow_self` is set
+   * here rather than offered as a third control, because the only entry that
+   * can carry it is the row for the flow being edited.
+   */
+  private handleCallableFlowToggle(name: string, checked: boolean) {
+    const entries = this.callableFlows;
+    const existing = findCallableEntry(entries, name);
+    if (checked) {
+      if (existing) return;
+      const isSelf =
+        (this.flow?.name || '').trim().toLowerCase() ===
+        name.trim().toLowerCase();
+      entries.push({
+        flow: name,
+        max_children: null,
+        max_usd_per_child: null,
+        ...(isSelf ? { allow_self: true } : {}),
+      });
+    } else if (existing) {
+      const key = name.trim().toLowerCase();
+      this.setCallableFlows(
+        entries.filter((entry) => entry.flow.trim().toLowerCase() !== key)
+      );
+      return;
+    }
+    this.setCallableFlows(entries);
+  }
+
+  /**
+   * Set one ceiling on one entry. A blank field means no ceiling.
+   *
+   * The typed value is kept as typed, including a zero the server would
+   * refuse, so the operator sees their own input with the reason next to it
+   * on save rather than a silently corrected number.
+   */
+  private handleCallableCeilingChange(
+    name: string,
+    field: 'max_children' | 'max_usd_per_child',
+    raw: string
+  ) {
+    const entries = this.callableFlows;
+    const entry = findCallableEntry(entries, name);
+    if (!entry) return;
+    const trimmed = (raw || '').trim();
+    if (!trimmed) {
+      entry[field] = null;
+    } else {
+      const parsed = Number(trimmed);
+      entry[field] = Number.isFinite(parsed) ? parsed : null;
+    }
+    this.setCallableFlows(entries);
+  }
+
   private handleGitCloneToggle(checked: boolean) {
     this.flow.git_clone_config = {
       ...this.flow.git_clone_config,
@@ -945,6 +1099,17 @@ export class PreloopFlowForm extends LitElement {
       return;
     }
 
+    if (this.delegationToolEnabled) {
+      const callableFlowsError = validateCallableFlows(
+        this.callableFlows,
+        this.flow.name
+      );
+      if (callableFlowsError) {
+        this.formError = callableFlowsError;
+        return;
+      }
+    }
+
     this.isSaving = true;
     try {
       const payload: any = {
@@ -980,6 +1145,17 @@ export class PreloopFlowForm extends LitElement {
         // clearEventFilters) is forwarded so the backend clears saved filters.
         ...(this.flow.trigger_config !== undefined
           ? { trigger_config: this.flow.trigger_config }
+          : {}),
+        // The delegation allowlist is sent only when this form edits it: the
+        // section is hidden while the delegation tool is off, and an update
+        // that does not mention the field leaves the stored list alone. That
+        // is what keeps an unrelated save off the list, including the save
+        // that would otherwise resend an entry the account no longer has and
+        // be refused for a field the operator never touched. A new flow is
+        // always sent one, because there is nothing behind it to preserve.
+        ...(this.delegationToolEnabled &&
+        (!this.flow.id || this.hasCallableFlowEdits())
+          ? { callable_flows: serialiseCallableFlows(this.callableFlows) }
           : {}),
       };
 
@@ -1733,6 +1909,7 @@ export class PreloopFlowForm extends LitElement {
       prompt_template: this.flow.prompt_template || '',
       tools: JSON.stringify(this.flow.allowed_mcp_tools || []),
       trigger: JSON.stringify(this.flow.trigger_event_types || []),
+      callable_flows: callableFlowsFingerprint(this.callableFlows),
     };
   }
 
@@ -1746,7 +1923,23 @@ export class PreloopFlowForm extends LitElement {
       JSON.stringify(this.flow.allowed_mcp_tools || []) !==
         this.presetSnapshot.tools ||
       JSON.stringify(this.flow.trigger_event_types || []) !==
-        this.presetSnapshot.trigger
+        this.presetSnapshot.trigger ||
+      this.hasCallableFlowEdits()
+    );
+  }
+
+  /**
+   * True when the allowlist differs from the one this form was opened with.
+   *
+   * Selecting a flow, clearing one and editing a ceiling all count, which is
+   * what keeps the field inside the form's existing dirty tracking and out of
+   * the payload when nothing about it changed.
+   */
+  private hasCallableFlowEdits(): boolean {
+    if (!this.presetSnapshot) return false;
+    return (
+      callableFlowsFingerprint(this.callableFlows) !==
+      this.presetSnapshot.callable_flows
     );
   }
 
@@ -1909,6 +2102,150 @@ export class PreloopFlowForm extends LitElement {
     }
 
     this.requestUpdate();
+  }
+
+  /** One picker row: the flow, and its two ceilings once it is selected. */
+  private renderCallableFlowRow(
+    name: string,
+    options: { isSelf?: boolean; unknown?: boolean; rejected?: string | null }
+  ) {
+    const entry = findCallableEntry(this.callableFlows, name);
+    const selected = Boolean(entry);
+    const isRejected =
+      Boolean(options.rejected) &&
+      (options.rejected || '').trim().toLowerCase() ===
+        name.trim().toLowerCase();
+    return html`
+      <div
+        class="callable-flow-row ${isRejected ? 'rejected' : ''}"
+        data-callable-flow=${name}
+      >
+        <sl-checkbox
+          .checked=${selected}
+          data-callable-flow-toggle=${name}
+          @sl-change=${(e: any) =>
+            this.handleCallableFlowToggle(name, e.target.checked)}
+        >
+          ${name}
+          ${
+            options.isSelf
+              ? html`<sl-badge variant="warning" size="small"
+                  >this flow</sl-badge
+                >`
+              : nothing
+          }
+          ${
+            options.unknown
+              ? html`<sl-badge variant="danger" size="small"
+                  >not in this account</sl-badge
+                >`
+              : nothing
+          }
+        </sl-checkbox>
+        ${
+          selected
+            ? html`
+                <div class="callable-flow-ceilings">
+                  <sl-input
+                    type="number"
+                    min="1"
+                    step="1"
+                    label="Maximum children"
+                    placeholder="No limit"
+                    data-callable-max-children=${name}
+                    .value=${ceilingValue(entry?.max_children)}
+                    @sl-input=${(e: any) =>
+                      this.handleCallableCeilingChange(
+                        name,
+                        'max_children',
+                        e.target.value
+                      )}
+                  ></sl-input>
+                  <sl-input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    label="Maximum USD per child"
+                    placeholder="No limit"
+                    data-callable-max-usd=${name}
+                    .value=${ceilingValue(entry?.max_usd_per_child)}
+                    @sl-input=${(e: any) =>
+                      this.handleCallableCeilingChange(
+                        name,
+                        'max_usd_per_child',
+                        e.target.value
+                      )}
+                  ></sl-input>
+                </div>
+              `
+            : nothing
+        }
+        ${
+          isRejected
+            ? html`<p class="callable-flow-note">
+                The server refused this entry: ${this.formError}
+              </p>`
+            : nothing
+        }
+      </div>
+    `;
+  }
+
+  /**
+   * The delegation allowlist section: the flows this flow may call.
+   *
+   * Rendered only while the delegation tool is enabled. Entries are stored by
+   * name, which is how the API resolves a reference inside the account, so an
+   * entry naming a flow this account no longer has still gets a row: it can
+   * be cleared here instead of sitting invisible in the saved list.
+   */
+  private renderCallableFlows() {
+    const selfName = (this.flow?.name || '').trim();
+    const selfKey = selfName.toLowerCase();
+    const others = this.accountFlows.filter((candidate: any) => {
+      const name =
+        typeof candidate?.name === 'string' ? candidate.name.trim() : '';
+      if (!name) return false;
+      if (candidate.is_preset === true) return false;
+      if (this.flow?.id && candidate.id === this.flow.id) return false;
+      return name.toLowerCase() !== selfKey;
+    });
+    const known = new Set(
+      others.map((candidate: any) => candidate.name.trim().toLowerCase())
+    );
+    const orphans = this.callableFlows.filter((entry) => {
+      const key = entry.flow.trim().toLowerCase();
+      return !known.has(key) && key !== selfKey;
+    });
+    const rejected = callableFlowsErrorEntry(this.formError);
+
+    return html`
+      <div class="callable-flows" data-callable-flows>
+        <h5>Flows this flow may call</h5>
+        <p class="callable-flows-help">
+          Delegation is refused unless the flow is listed here. Leave a ceiling
+          blank for no limit; the server is the authority on both.
+        </p>
+        ${
+          others.length > 0
+            ? others.map((candidate: any) =>
+                this.renderCallableFlowRow(candidate.name.trim(), { rejected })
+              )
+            : html`<p class="callable-flows-empty" data-callable-flows-empty>
+                This account has no other flows yet, so there is nothing for
+                this flow to call. Create a second flow and it appears here.
+              </p>`
+        }
+        ${orphans.map((entry) =>
+          this.renderCallableFlowRow(entry.flow, { unknown: true, rejected })
+        )}
+        ${
+          selfName
+            ? this.renderCallableFlowRow(selfName, { isSelf: true, rejected })
+            : nothing
+        }
+      </div>
+    `;
   }
 
   private renderEventFilters() {
@@ -2735,21 +3072,36 @@ export class PreloopFlowForm extends LitElement {
                       >
                         ${builtinTools.map(
                           (t) => html`
-                            <sl-checkbox
-                              .checked=${this.isToolSelected(
-                                'preloop-mcp',
-                                t.name
-                              )}
-                              @sl-change=${(e: any) =>
-                                this.handleToolToggle(
+                            <div>
+                              <sl-checkbox
+                                data-builtin-tool=${t.name}
+                                .checked=${this.isToolSelected(
                                   'preloop-mcp',
-                                  t.name,
-                                  e.target.checked
+                                  t.name
                                 )}
-                              ?disabled=${t.is_supported === false}
-                            >
-                              ${t.name}
-                            </sl-checkbox>
+                                @sl-change=${(e: any) =>
+                                  this.handleToolToggle(
+                                    'preloop-mcp',
+                                    t.name,
+                                    e.target.checked
+                                  )}
+                                ?disabled=${t.is_supported === false}
+                              >
+                                ${t.name}
+                              </sl-checkbox>
+                              ${
+                                t.name === DELEGATION_TOOL_NAME
+                                  ? html`<p
+                                      class="checkbox-help"
+                                      data-delegation-tool-help
+                                    >
+                                      Lets this flow run another flow. It may
+                                      call only the flows listed below, and an
+                                      empty list means it may call nothing.
+                                    </p>`
+                                  : nothing
+                              }
+                            </div>
                           `
                         )}
                       </div>
@@ -2796,6 +3148,7 @@ export class PreloopFlowForm extends LitElement {
                   `
                 : nothing
             }
+            ${this.delegationToolEnabled ? this.renderCallableFlows() : nothing}
           </div>
         </sl-card>
 
