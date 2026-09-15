@@ -604,6 +604,34 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             query = query.join(Flow).filter(Flow.account_id == account_id)
         return query.all()
 
+    def get_children(
+        self,
+        db: Session,
+        parent_execution_id: uuid.UUID,
+        account_id: Optional[str] = None,
+    ) -> List[FlowExecution]:
+        """Get the executions started directly by one execution.
+
+        Direct children only: a grandchild carries its own parent id, so a
+        caller that wants the whole tree filters on ``root_execution_id``
+        instead. Ordered deterministically (``start_time``, with ``id`` as the
+        tiebreak for rows that share a timestamp) so a tree renders in a
+        stable order across calls. Returns an empty list for a leaf, which is
+        the common case: most executions start nothing.
+
+        The account filter joins through ``flow`` for the same reason every
+        other read does: an execution id alone must not cross accounts.
+        """
+        query = (
+            db.query(FlowExecution)
+            .options(joinedload(FlowExecution.flow))
+            .filter(FlowExecution.parent_execution_id == parent_execution_id)
+            .order_by(FlowExecution.start_time.asc(), FlowExecution.id.asc())
+        )
+        if account_id:
+            query = query.join(Flow).filter(Flow.account_id == account_id)
+        return query.all()
+
     def get_running_by_flow(
         self,
         db: Session,
