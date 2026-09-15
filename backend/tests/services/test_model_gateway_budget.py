@@ -703,6 +703,13 @@ def test_estimate_input_tokens_still_counts_responses_dict_items() -> None:
     assert tokens == math.ceil(len("hello world") / _chars_per_token())
 
 
+def test_estimate_input_tokens_counts_embedding_token_arrays() -> None:
+    """OpenAI embeddings token arrays are a list of ints, one token each."""
+    token_ids = [101, 102, 103, 104]
+    tokens = ModelGatewayBudgetService._estimate_input_tokens({"input": token_ids})
+    assert tokens == len(token_ids)
+
+
 def test_preflight_embedding_string_batch_is_priced_from_input_tokens(
     db_session, test_user
 ):
@@ -734,5 +741,40 @@ def test_preflight_embedding_string_batch_is_priced_from_input_tokens(
     result = service.preflight_check(ai_model, payload)
     tokens = ModelGatewayBudgetService._estimate_input_tokens(payload)
     assert tokens > 0
+    assert result.pricing_available is True
+    assert result.estimated_request_cost_usd == pytest.approx(tokens / 1000.0)
+
+
+def test_preflight_embedding_token_array_is_priced_from_input_tokens(
+    db_session, test_user
+):
+    """A token-array embeddings payload must not preflight at $0."""
+    ai_model = crud_ai_model.create_with_account(
+        db=db_session,
+        obj_in={
+            "name": "Embedding Token Array",
+            "provider_name": "openai",
+            "model_identifier": "text-embedding-token-array",
+            "meta_data": {
+                "gateway": {"model_alias": "openai/text-embedding-token-array"},
+                "pricing": {
+                    "input_price_per_1k": 1.0,
+                    "output_price_per_1k": 0.0,
+                },
+            },
+        },
+        account_id=test_user.account_id,
+    )
+    service = ModelGatewayBudgetService(
+        db_session,
+        ModelGatewayAuthContext(token="embed-token-ids", user=test_user),
+    )
+    payload = {
+        "model": "openai/text-embedding-token-array",
+        "input": [101, 102, 103, 104],
+    }
+    result = service.preflight_check(ai_model, payload)
+    tokens = ModelGatewayBudgetService._estimate_input_tokens(payload)
+    assert tokens == 4
     assert result.pricing_available is True
     assert result.estimated_request_cost_usd == pytest.approx(tokens / 1000.0)
