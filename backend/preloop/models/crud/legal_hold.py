@@ -19,13 +19,7 @@ from preloop.models.models.approval_request import ApprovalRequest
 from preloop.models.models.flow_artifact import FlowArtifact
 from preloop.models.models.flow import Flow
 from preloop.models.models.flow_execution import FlowExecution
-from preloop.models.models.legal_hold import (
-    HOLD_RESOURCE_APPROVAL,
-    HOLD_RESOURCE_EVIDENCE_PACK,
-    HOLD_RESOURCE_EXECUTION,
-    HOLD_RESOURCE_RUNTIME_SESSION,
-    LegalHold,
-)
+from preloop.models.models.legal_hold import LegalHold
 from preloop.models.models.runtime_session import RuntimeSession
 
 
@@ -258,11 +252,3 @@ def execution_artifact_ids(
         .scalars()
         .all()
     )
-
-
-RESOURCE_FLAG_SETTERS = {
-    HOLD_RESOURCE_EXECUTION: set_execution_flag,
-    HOLD_RESOURCE_APPROVAL: set_approval_flag,
-    HOLD_RESOURCE_EVIDENCE_PACK: set_artifact_flag,
-    HOLD_RESOURCE_RUNTIME_SESSION: set_runtime_session_flag,
-}

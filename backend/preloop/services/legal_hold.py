@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 
 from preloop.models.crud import crud_audit_log
 from preloop.models.crud import legal_hold as crud
+from preloop.models.crud.history_policy import lock_account_for_retention
 from preloop.models.models.approval_request import ApprovalRequest
 from preloop.models.models.flow_artifact import FlowArtifact
 from preloop.models.models.flow_execution import FlowExecution
@@ -250,6 +251,18 @@ def _apply_flags(
     return flagged
 
 
+def _lock_account_for_hold(db: Session, *, account_id: Any) -> None:
+    """Serialize this write with the purge on the same account row.
+
+    Account-first FOR UPDATE, the lock :func:`lock_account_for_retention`
+    already documents. Hold writes wait (``skip_locked=False``). The purge
+    uses skip_locked, so a concurrent place does not block the job: that
+    account is skipped for the batch rather than deleting a row the hold
+    has just frozen, or recording a hold over a row the purge is deleting.
+    """
+    lock_account_for_retention(db, account_id=account_id, skip_locked=False)
+
+
 def place_hold(
     db: Session,
     *,
@@ -263,6 +276,7 @@ def place_hold(
 ) -> HoldOutcome:
     """Freeze one resource. Record, flags and audit row in one transaction."""
     cleaned_reason = _clean_reason(reason)
+    _lock_account_for_hold(db, account_id=account_id)
     identifier = _require_resource(
         db,
         account_id=account_id,
@@ -336,6 +350,7 @@ def release_hold(
 ) -> HoldOutcome:
     """Lift one hold, recording who lifted it and why."""
     cleaned_reason = _clean_reason(reason)
+    _lock_account_for_hold(db, account_id=account_id)
     hold = crud.get(db, account_id=account_id, hold_id=hold_id)
     if hold is None:
         raise LegalHoldError("hold_not_found", f"no legal hold {hold_id}")

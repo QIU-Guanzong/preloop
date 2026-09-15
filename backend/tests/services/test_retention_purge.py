@@ -398,6 +398,17 @@ def test_every_purgeable_class_carries_a_hold_predicate():
         ), f"{record_class} is purged without a legal hold predicate"
 
 
+def test_hold_filters_always_returns_a_list_of_clauses():
+    """Exempt and held classes both yield a sequence, never mixed tuple lengths."""
+    for record_class in RECORD_CLASSES:
+        clauses = purge._hold_filters(record_class)
+        assert isinstance(clauses, list)
+        if record_class in purge.HOLD_EXEMPT_CLASSES:
+            assert clauses == []
+        else:
+            assert len(clauses) == 1
+
+
 def test_a_class_purged_without_a_hold_check_has_to_say_why():
     """An exemption is a written decision, not a forgotten predicate."""
     assert set(purge.HOLD_EXEMPT_CLASSES) <= set(RECORD_CLASSES)

@@ -240,17 +240,20 @@ HOLD_EXEMPT_CLASSES: dict[str, str] = {
 }
 
 
-def _hold_filters(record_class: str):
+def _hold_filters(record_class: str) -> list[Any]:
     """The legal hold predicate for one class, empty when it is exempt.
 
-    Read off the model rather than repeated per class: the predicate cannot
-    then be present on three classes and silently missing on the fourth, which
-    is exactly how a held runtime session was purgeable.
+    Always a sequence of clauses so callers unpack the same type whether the
+    class is held or exempt. Read off the model rather than repeated per
+    class: the predicate cannot then be present on three classes and silently
+    missing on the fourth, which is exactly how a held runtime session was
+    purgeable.
     """
+    clauses: list[Any] = []
     flag = getattr(_CLASS_MODELS[record_class], "legal_hold", None)
-    if flag is None:
-        return ()
-    return (flag.is_(False),)
+    if flag is not None:
+        clauses.append(flag.is_(False))
+    return clauses
 
 
 def class_filters(record_class: str, cutoff: datetime):
