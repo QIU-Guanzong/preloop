@@ -63,6 +63,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller can tell a root run from a delegated child without reading logs.
   Executions that predate the columns, and every creation path that does
   not set lineage, read back as roots (no parent, no root id, depth 0).
+- `run_flow` builtin tool: a flow execution can start another flow of the
+  same account as a child of itself. Default off, so a flow opts in through
+  `allowed_mcp_tools`, and the target must also be named on the flow's
+  `callable_flows` allowlist. The call is asynchronous: it returns the
+  delegation task record as soon as the child row exists and never blocks
+  the calling turn. The child carries `parent_execution_id`,
+  `root_execution_id` and `delegation_depth`. Refusals come back as rejected
+  task records with a reason (`tool_not_allowed`, `flow_not_found`,
+  `flow_not_callable`, `depth_exceeded`, `cycle_detected`,
+  `fanout_exceeded`), each audited with the calling correlation id. Bounded
+  by `FLOW_DELEGATION_MAX_DEPTH` (default 2) and
+  `FLOW_DELEGATION_MAX_CHILDREN` (default 25, the matrix fan out ceiling).
+  Docs at `docs/guide/flows/flow-delegation.md`.
+- `get_execution` builtin tool: a flow execution can read the state, cost,
+  tokens and result of an execution it started, or of itself. Default off,
+  like `run_flow`. Scope is enforced on the server and is exactly the caller
+  and its descendants; a sibling, an unrelated execution of the same
+  account, an execution of another account and an id that names nothing are
+  all refused with the same reason (`execution_not_found`) and the same
+  message, so a refusal cannot be used to learn what exists. The answer is
+  the same task record `run_flow` returns: a failed execution carries its
+  failure category on the status message, and the result comes back as an
+  artifact only when the execution is terminal and `include_result` is set.
+  A result larger than `FLOW_DELEGATION_RESULT_MAX_BYTES` (default 16384) is
+  truncated, flagged and pointed at `GET /flows/executions/{id}/result`. One
+  audit row per call, permitted or refused.
 - Per-account flow-execution admission cap
   `FLOW_EXECUTION_MAX_RUNNING_PER_ACCOUNT` (default 3, Helm
   `flowExecution.maxRunningPerAccount`). An account may override it through
