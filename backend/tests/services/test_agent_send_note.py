@@ -430,6 +430,9 @@ def test_the_note_is_delivered_to_the_targets_next_turn(
     assert "Rebase before you push." in block
     assert 'from="Reviewer (agent)"' in block
     assert f'auth="{operator_notes.AUTH_METHOD_AGENT}"' in block
+    assert operator_notes._FRAMING_AGENT in block
+    assert "instruction from the human operating this agent" not in block
+    assert "named person" not in block
 
     stored = crud_agent_control_command.get_note(
         db_session, account_id=account.id, note_id=delivered[0].command_id

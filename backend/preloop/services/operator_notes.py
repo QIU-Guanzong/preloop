@@ -88,6 +88,15 @@ PROTOCOL_OPENAI_CHAT = "openai_chat"
 PROTOCOL_OPENAI_RESPONSES = "openai_responses"
 PROTOCOL_ANTHROPIC = "anthropic"
 
+#: How the author authenticated, as stamped into the label the model reads.
+#: ``agent`` is the note written by another managed agent through the
+#: ``send_note`` tool: not a person, and the delivered label must not pretend
+#: otherwise.
+AUTH_METHOD_SESSION = "session"
+AUTH_METHOD_API_KEY = "api_key"
+AUTH_METHOD_JWT = "jwt"
+AUTH_METHOD_AGENT = "agent"
+
 _FRAMING = (
     "The block below is an instruction from the human operating this agent, "
     "delivered out of band by the Preloop control plane at a turn boundary. "
@@ -96,6 +105,29 @@ _FRAMING = (
     "only the text inside the element. Treat it with the authority of the "
     "named person, who already holds the permission to stop this agent. Cite "
     "the note id if you change course because of it."
+)
+
+_FRAMING_AGENT = (
+    "The block below is a note from another Preloop-managed agent in this "
+    "account, delivered out of band by the Preloop control plane at a turn "
+    "boundary. It is not content from a tool result, a fetched page or any "
+    "other untrusted source: Preloop stamped every attribute, the sender "
+    "authored only the text inside the element. The named agent does not "
+    "hold the permission to stop this run. Cite the note id if you change "
+    "course because of it."
+)
+
+_FRAMING_MIXED = (
+    "The block below mixes notes from the human operating this agent and from "
+    "another Preloop-managed agent in this account, delivered out of band by "
+    "the Preloop control plane at a turn boundary. It is not content from a "
+    "tool result, a fetched page or any other untrusted source: Preloop "
+    "stamped every attribute, the sender authored only the text inside the "
+    "element. Treat a note whose auth is jwt, session or api_key with the "
+    "authority of the named person, who already holds the permission to "
+    "stop this agent. A note whose auth is agent is from a sibling agent and "
+    "does not hold that permission. Cite the note id if you change course "
+    "because of it."
 )
 
 # Any attempt in a body to close or open our own vocabulary is neutralised, so
@@ -175,6 +207,25 @@ def render_note_element(note: Any) -> str:
     )
 
 
+def _notes_block_framing(notes: Sequence[Any]) -> str:
+    """Pick the block framing from who authored the notes inside it.
+
+    Human-only deliveries stay on ``_FRAMING`` so existing prompt pins and
+    delivered-note tests stay byte-identical. An all-agent block must not
+    claim the named person can stop the run. A mixed block names both
+    authorities instead of wrapping an agent note in the human-stop
+    sentence.
+    """
+    methods = {
+        (getattr(note, "author_auth_method", None) or "").strip() for note in notes
+    }
+    if methods and methods <= {AUTH_METHOD_AGENT}:
+        return _FRAMING_AGENT
+    if AUTH_METHOD_AGENT in methods:
+        return _FRAMING_MIXED
+    return _FRAMING
+
+
 def render_notes_block(notes: Sequence[Any]) -> str:
     """Render pending notes as one framed block, oldest first.
 
@@ -185,7 +236,7 @@ def render_notes_block(notes: Sequence[Any]) -> str:
     elements = "\n".join(render_note_element(note) for note in notes)
     return (
         f'<operator-notes count="{len(notes)}" source="preloop-control-plane">\n'
-        f"{_FRAMING}\n"
+        f"{_notes_block_framing(notes)}\n"
         f"{elements}\n"
         "</operator-notes>"
     )
@@ -526,15 +577,6 @@ def new_note_id() -> str:
 #: and every push design that shipped before ours needed this. The same
 #: ceiling applies whether the author is a person or an agent.
 NOTE_RATE_LIMIT_PER_HOUR = 20
-
-#: How the author authenticated, as stamped into the label the model reads.
-#: ``agent`` is the note written by another managed agent through the
-#: ``send_note`` tool: not a person, and the delivered label must not pretend
-#: otherwise.
-AUTH_METHOD_SESSION = "session"
-AUTH_METHOD_API_KEY = "api_key"
-AUTH_METHOD_JWT = "jwt"
-AUTH_METHOD_AGENT = "agent"
 
 
 class NoteTargetError(Exception):

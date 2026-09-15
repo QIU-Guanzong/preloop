@@ -10,8 +10,11 @@ carries an operator's note into the target's next turn
 (:mod:`preloop.services.operator_notes`). The only new fact is who the author
 is: a managed agent identity rather than a person, recorded as such on the row
 (``created_by_managed_agent_id``) and in the label the model reads
-(``auth_method="agent"``), so nothing downstream can mistake a note from a
-sibling agent for an instruction from the human who can stop the run.
+(``auth_method="agent"``). The delivery block uses agent framing when every
+note in it is agent-authored, and mixed framing when a human and an agent
+share a delivery, so the prompt does not grant the sibling the operator's
+stop-authority. Per-note ``from`` and ``auth`` attributes still name the
+author either way.
 
 Three properties this module owes the caller, all of them enforced here and
 tested directly:

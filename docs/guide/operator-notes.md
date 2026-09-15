@@ -110,8 +110,11 @@ next turn, not an exception, and no note row is written.
 What differs is only the author. The row records the calling managed agent
 rather than a user, the envelope carries `"authMethod": "agent"` and a display
 name suffixed `(agent)`, and the audit row for the send names the agent as the
-actor. A reader of the delivered block can therefore always tell a sibling
-agent's hand off from an instruction by the human who can stop the run, and the
+actor. The delivered block's framing sentence follows the authors inside it:
+an all-agent delivery says the named agent does not hold the permission to
+stop this run, and a mixed human-plus-agent delivery names both authorities
+instead of wrapping the sibling's text in the human-stop sentence. The
+per-note `from` and `auth` attributes still name the author either way. The
 note still grants nothing: every action taken because of it goes through the
 firewall, the gateway and the approval policy as before.
 
@@ -199,6 +202,14 @@ Deploy to eu-west-1, not us-east-1.
 </operator-note>
 </operator-notes>
 ```
+
+That framing is for a human-authored delivery and stays byte-identical to
+what shipped before `send_note`. A block whose every note is `auth="agent"`
+uses a different sentence: the named agent does not hold the permission to
+stop this run. A mixed block (human and agent notes in one delivery) says
+so, and still treats only the human-authored elements with the operator's
+stop-authority. The per-note `from` and `auth` attributes are unchanged in
+every case.
 
 Preloop stamps every attribute. The sender authors only the text inside the
 element, and a body containing the literal characters of one of these tags is
