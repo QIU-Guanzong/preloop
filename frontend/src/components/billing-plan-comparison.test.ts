@@ -189,7 +189,7 @@ describe('Billing plan comparison', () => {
       .stub(window, 'fetch')
       .callsFake(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.endsWith('/plan-change-options')) return json(data);
+        if (url.includes('/plan-change-options')) return json(data);
         if (url.endsWith('/plan-change-preview'))
           return previewResponse ? previewResponse() : json(quote);
         if (url.endsWith('/plan-change-confirm'))
@@ -562,6 +562,20 @@ describe('Billing plan comparison', () => {
     await el.refresh();
     await el.updateComplete;
     expect(button(el, 'preview').disabled).to.equal(false);
+  });
+  it('reads on load but asks the server to reconcile when refresh is clicked', async () => {
+    const el = await mount();
+    expect(calls('/plan-change-options')).to.have.length(1);
+    expect(calls('/plan-change-options?reconcile=true')).to.have.length(0);
+    button(el, 'refresh').click();
+    await waitUntil(() => !(el as any).loading);
+    await el.updateComplete;
+    expect(calls('/plan-change-options?reconcile=true')).to.have.length(1);
+    expect(
+      stub
+        .getCalls()
+        .every((c) => !c.args[1]?.method || c.args[1]?.method === 'GET')
+    ).to.equal(true);
   });
   it('treats a lost confirmation response as uncertain, not a failed subscription', async () => {
     confirmResponse = async () => {
