@@ -260,6 +260,37 @@ describe('Billing plan comparison', () => {
     await open(el);
     expect(text(el)).to.include('Pro: $10.00 / month');
   });
+  it('treats an expired trial as Free on the collapsed line and picker default', async () => {
+    data.current_subscription = {
+      ...data.current_subscription!,
+      plan_id: 'pro',
+      status: 'trialing',
+      current_period_end: '2025-07-27T00:00:00Z',
+      legacy: false,
+    };
+    data.current_plan = plan('pro');
+    data.plans.unshift(
+      plan('free', { name: 'Free', price_monthly: 0, price_annually: 0 })
+    );
+    const el = await mount();
+    const current = el.shadowRoot!.querySelector(
+      '[data-testid="current-plan"]'
+    )?.textContent;
+    expect(current).to.include('Free');
+    expect(current).to.not.include('Pro');
+    expect((el as any).selectedPlan).to.equal('pro');
+  });
+  it('does not default the picker to Free when it is the only other catalog plan', async () => {
+    data.current_subscription!.plan_id = 'pro';
+    data.current_subscription!.legacy = false;
+    data.current_plan = plan('pro');
+    data.plans = [
+      plan('free', { name: 'Free', price_monthly: 0, price_annually: 0 }),
+      plan('pro'),
+    ];
+    const el = await mount();
+    expect((el as any).selectedPlan).to.not.equal('free');
+  });
   it('shows the account warnings beside the action, not as the headline', async () => {
     data.warnings = [
       { code: 'subscription_not_reconciled', message: 'Not yet verified.' },
@@ -404,6 +435,11 @@ describe('Billing plan comparison', () => {
     expect(text(el)).to.include(
       'Plan changes from the console are not available yet. Manage in Stripe or contact support.'
     );
+    expect(
+      el
+        .shadowRoot!.querySelector('[data-testid="switching-disabled"] a')
+        ?.getAttribute('href')
+    ).to.equal('mailto:sales@preloop.ai');
     expect(el.shadowRoot!.querySelector('.warning')).to.not.exist;
     expect(el.shadowRoot!.querySelector('[data-testid="preview"]')).to.not
       .exist;

@@ -32,6 +32,10 @@ const COVERAGE_REASONS: Record<string, string> = {
   unpriced_hosted_usage: 'Some built-in model requests have no verified cost.',
 };
 
+const SWITCHING_DISABLED = html`Plan changes from the console are not available
+  yet. Manage in Stripe or
+  <a href="mailto:sales@preloop.ai">contact support</a>.`;
+
 /**
  * Authenticated plan selection. Loading this component never changes a
  * subscription.
@@ -183,6 +187,33 @@ export class BillingPlanComparison extends LitElement {
   }
 
   /**
+   * Same fallback as account-view: a trialing row whose period has ended is
+   * Free. plan-change-options still reports the subscription row until the
+   * entitlement demotion lands.
+   */
+  private trialExpired(options: PlanChangeOptions): boolean {
+    const subscription = options.current_subscription;
+    if (subscription?.status !== 'trialing') return false;
+    if (!subscription.current_period_end) return false;
+    const date = new Date(subscription.current_period_end);
+    return !Number.isNaN(date.getTime()) && date.getTime() < Date.now();
+  }
+
+  /** Entitled plan for the collapsed line and the picker ladder floor. */
+  private effectiveCurrentPlan(options: PlanChangeOptions): BillingPlan | null {
+    if (this.trialExpired(options)) {
+      return (
+        options.plans.find((p) => p.id === 'free') ?? {
+          id: 'free',
+          name: 'Free',
+          features: {},
+        }
+      );
+    }
+    return options.current_plan;
+  }
+
+  /**
    * The plan the picker opens on: the cheapest plan above what the account is
    * entitled to today. Opening on Free would offer a downgrade to someone who
    * clicked "Change plan", and would offer an expired trial the plan it is
@@ -194,20 +225,26 @@ export class BillingPlanComparison extends LitElement {
         ? plan.price_monthly
         : Number.POSITIVE_INFINITY;
     const selectable = options.plans.filter((p) => !this.isLegacy(p));
+    const currentPlan = this.effectiveCurrentPlan(options);
+    const currentId = currentPlan?.id;
     const ladder = selectable
       .filter(
         (p) =>
           p.id !== 'free' &&
-          p.id !== options.current_plan?.id &&
+          p.id !== currentId &&
           Number.isFinite(price(p)) &&
           p.purchasable !== false
       )
       .sort((a, b) => price(a) - price(b));
-    const current = options.current_plan ? price(options.current_plan) : 0;
+    const current = this.trialExpired(options)
+      ? 0
+      : currentPlan
+        ? price(currentPlan)
+        : 0;
     return (
       ladder.find((p) => price(p) > current)?.id ??
       ladder[0]?.id ??
-      selectable.find((p) => p.id !== options.current_plan?.id)?.id ??
+      selectable.find((p) => p.id !== currentId && p.id !== 'free')?.id ??
       ''
     );
   }
@@ -965,11 +1002,12 @@ export class BillingPlanComparison extends LitElement {
   private renderCollapsed() {
     const o = this.options!;
     const blocked = !o.switching_enabled;
+    const current = this.effectiveCurrentPlan(o);
     return html`
       <p data-testid="current-plan">
-        <strong>${o.current_plan?.name ?? 'Free'}</strong
-        >${this.isLegacy(o.current_plan) ? ' (grandfathered)' : ''}.
-        ${this.tagline(o.current_plan)}
+        <strong>${current?.name ?? 'Free'}</strong
+        >${this.isLegacy(current) ? ' (grandfathered)' : ''}.
+        ${this.tagline(current)}
       </p>
       <button
         data-testid="change-plan"
@@ -981,7 +1019,13 @@ export class BillingPlanComparison extends LitElement {
       >
         Change plan
       </button>
-      ${blocked ? html`<p class="muted" data-testid="switching-disabled">Plan changes from the console are not available yet. Manage in Stripe or contact support.</p>` : nothing}
+      ${
+        blocked
+          ? html`<p class="muted" data-testid="switching-disabled">
+              ${SWITCHING_DISABLED}
+            </p>`
+          : nothing
+      }
     `;
   }
 
@@ -1081,7 +1125,13 @@ export class BillingPlanComparison extends LitElement {
     const o = this.options!;
     return html`
       ${!o.can_manage_billing ? html`<p class="warning">Only a billing owner or account administrator can change this subscription. You can review the comparison.</p>` : nothing}
-      ${!o.switching_enabled ? html`<p class="warning" data-testid="switching-disabled">Plan changes from the console are not available yet. Manage in Stripe or contact support.</p>` : nothing}
+      ${
+        !o.switching_enabled
+          ? html`<p class="warning" data-testid="switching-disabled">
+              ${SWITCHING_DISABLED}
+            </p>`
+          : nothing
+      }
       ${o.current_subscription?.pending_change || o.current_subscription?.cancel_at_period_end ? html`<p class="warning">A subscription change is already scheduled. Review it before choosing another change.</p>` : nothing}
       ${
         o.warnings?.length

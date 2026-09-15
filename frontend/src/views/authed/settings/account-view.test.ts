@@ -394,6 +394,31 @@ describe('AccountView', () => {
     expect(text).to.contain('Allowances from the ended trial are not shown');
   });
 
+  it('omits the date clause when an expired trial has no ended date', async () => {
+    fetchStub = createFetchStub({
+      billing: true,
+      subscription: null,
+      trial: {
+        is_trialing: false,
+        is_expired: true,
+        days: 0,
+        requires_payment_method: false,
+        hosted_model_hard_cap_usd: 2,
+      },
+    });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const text = copy(element);
+    expect(text).to.contain('trial ended. You are on the Free plan');
+    expect(text).to.not.contain('Unknown');
+    expect(text).to.not.contain('ended on');
+  });
+
   it('still says "Renews on" for a future period end', async () => {
     fetchStub = createFetchStub({ billing: true });
     const element = (await fixture(

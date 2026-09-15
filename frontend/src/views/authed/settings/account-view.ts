@@ -347,6 +347,15 @@ export class AccountView extends LitElement {
     });
   }
 
+  /** A confirmed date, or null when the value would print as "Unknown". */
+  private _knownDate(value: string | null | undefined) {
+    if (!value) {
+      return null;
+    }
+    const formatted = this._formatDate(value);
+    return formatted === 'Unknown' ? null : formatted;
+  }
+
   private _isPast(value: string | null | undefined) {
     if (!value) {
       return false;
@@ -804,7 +813,7 @@ export class AccountView extends LitElement {
       (summaryPlan && summaryPlan.id !== effectivePlanId
         ? summaryPlan.name
         : null);
-    const trialEndedOn = this._formatDate(
+    const trialEndedOn = this._knownDate(
       trialSummary?.ended_at ?? this.subscription?.current_period_end
     );
     // Trial figures describe a trial that is over. Without the Free fields
@@ -1043,7 +1052,8 @@ export class AccountView extends LitElement {
                         ? html`<div class="date" data-testid="trial-ended">
                             Your
                             ${trialedPlanName ? `${trialedPlanName} ` : ''}trial
-                            ended on ${trialEndedOn}. You are on the Free plan.
+                            ended${trialEndedOn ? ` on ${trialEndedOn}` : ''}.
+                            You are on the Free plan.
                           </div>`
                         : this.subscription
                           ? html`
