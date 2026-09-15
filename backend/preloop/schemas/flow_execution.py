@@ -96,6 +96,15 @@ class FlowExecutionListResponse(BaseModel):
     status: str
     start_time: datetime
     end_time: Optional[datetime] = None
+    parent_execution_id: Optional[uuid.UUID] = Field(
+        None, description="Execution that directly started this run; null for a root."
+    )
+    root_execution_id: Optional[uuid.UUID] = Field(
+        None, description="First execution of this lineage; null on the root itself."
+    )
+    delegation_depth: int = Field(
+        0, description="Distance from the lineage root; 0 for roots and existing rows."
+    )
     created_at: datetime
 
     @field_serializer("id", "flow_id")

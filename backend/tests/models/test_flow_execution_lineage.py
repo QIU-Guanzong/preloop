@@ -16,6 +16,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from preloop.models import models
 from preloop.models.crud import crud_flow_execution
@@ -140,12 +141,21 @@ def test_migration_backfills_existing_rows_as_roots(db_session, test_user, flow)
 
 def test_migration_reverses_cleanly(db_session):
     """Downgrade removes exactly what upgrade added, indexes and FK included."""
+    original_columns = _table_columns(db_session)
     _downgrade(db_session)
-    assert not LINEAGE_COLUMNS & _table_columns(db_session)
+    assert _table_columns(db_session) == original_columns - LINEAGE_COLUMNS
+    downgraded = inspect(db_session.connection())
+    assert not {
+        "ix_flow_execution_parent_execution_id",
+        "ix_flow_execution_root_execution_id",
+    }.intersection(index["name"] for index in downgraded.get_indexes("flow_execution"))
+    assert "fk_flow_execution_parent_execution_id" not in {
+        fk["name"] for fk in downgraded.get_foreign_keys("flow_execution")
+    }
 
     _upgrade(db_session)
 
-    assert LINEAGE_COLUMNS <= _table_columns(db_session)
+    assert _table_columns(db_session) == original_columns
     inspector = inspect(db_session.connection())
     index_names = {index["name"] for index in inspector.get_indexes("flow_execution")}
     assert "ix_flow_execution_parent_execution_id" in index_names
@@ -159,6 +169,7 @@ def test_migration_reverses_cleanly(db_session):
     assert len(parent_fk) == 1
     assert parent_fk[0]["referred_table"] == "flow_execution"
     assert parent_fk[0]["referred_columns"] == ["id"]
+    assert parent_fk[0]["options"].get("ondelete") == "SET NULL"
 
     depth = {
         column["name"]: column for column in inspector.get_columns("flow_execution")
@@ -256,6 +267,7 @@ def test_deleting_a_parent_leaves_its_child_readable(db_session, flow):
     )
     db_session.flush()
     child_id = child.id
+    root_id = root.id
 
     db_session.delete(root)
     db_session.flush()
@@ -264,6 +276,7 @@ def test_deleting_a_parent_leaves_its_child_readable(db_session, flow):
     detached = db_session.get(models.FlowExecution, child_id)
     assert detached is not None
     assert detached.parent_execution_id is None
+    assert detached.root_execution_id == root_id
     assert detached.delegation_depth == 1
 
 
@@ -360,3 +373,34 @@ def test_get_children_does_not_cross_accounts(db_session, flow, test_user):
             db_session, root.id, account_id=other_account.id
         )
     ] == [theirs.id]
+
+
+def test_parent_fk_metadata_matches_migrated_delete_policy() -> None:
+    """Metadata-created schemas must detach children like the shipped migration."""
+    parent = models.FlowExecution.__table__.c.parent_execution_id
+    assert len(parent.foreign_keys) == 1
+    assert next(iter(parent.foreign_keys)).ondelete == "SET NULL"
+
+
+def test_get_children_uses_id_to_break_equal_start_time_ties(
+    db_session: Session, flow: models.Flow
+) -> None:
+    """Equal timestamps preserve stable ordering without weakening account scope."""
+    root = crud_flow_execution.create(
+        db_session, FlowExecutionCreate(flow_id=flow.id, status="SUCCEEDED")
+    )
+    start = datetime.now(UTC)
+    children = [
+        _execution(flow, start_time=start, parent=root, root_id=root.id, depth=1)
+        for _ in range(3)
+    ]
+    db_session.add_all(reversed(children))
+    db_session.flush()
+    expected = sorted(child.id for child in children)
+    for _ in range(2):
+        assert [
+            row.id
+            for row in crud_flow_execution.get_children(
+                db_session, root.id, account_id=flow.account_id
+            )
+        ] == expected
