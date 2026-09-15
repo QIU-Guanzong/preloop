@@ -48,12 +48,16 @@ export class PricingCard extends LitElement {
    * an exact amount.
    */
   private formatPrice(plan: Plan) {
+    // The highlighted card paints a saturated gradient behind this text, so
+    // the secondary line cannot keep the neutral grey it uses on a flat card:
+    // grey on purple failed contrast and was unreadable in review.
+    const subClass = this._isPopular() ? 'price-sub on-highlight' : 'price-sub';
     if (plan.price_label) {
       return html`
         <div class="price-main">${plan.price_label}</div>
         ${
           plan.price_note
-            ? html`<div class="price-sub">${plan.price_note}</div>`
+            ? html`<div class=${subClass}>${plan.price_note}</div>`
             : null
         }
       `;
@@ -75,7 +79,7 @@ export class PricingCard extends LitElement {
       return html`<div class="price-main">$0</div>
         ${
           plan.price_note
-            ? html`<div class="price-sub">${plan.price_note}</div>`
+            ? html`<div class=${subClass}>${plan.price_note}</div>`
             : null
         }`;
     }
@@ -88,8 +92,23 @@ export class PricingCard extends LitElement {
     return html`
       <div class="price-main">$${amount.toLocaleString('en-US')}</div>
       <div class="unit">${unit}</div>
-      ${note ? html`<div class="price-sub">${note}</div>` : null}
+      ${note ? html`<div class=${subClass}>${note}</div>` : null}
     `;
+  }
+
+  /**
+   * The highlighted card. Config wins first so a brand can move the emphasis
+   * without a code change; 'pro' is the recommended plan in the 2026 ladder,
+   * and 'teams'/'ultra' keep their highlight only where a config still lists
+   * them.
+   */
+  private _isPopular(): boolean {
+    return (
+      (this.plan as any)?.highlight === true ||
+      this.plan?.id === 'pro' ||
+      this.plan?.id === 'teams' ||
+      this.plan?.id === 'ultra'
+    );
   }
 
   private _formatNumber(num: number): string {
@@ -258,8 +277,12 @@ export class PricingCard extends LitElement {
       flex: 1 1 auto;
     }
 
+    /* On the gradient card the secondary line is the card's own foreground at
+       85% opacity. The old neutral grey token resolved to a mid grey that sat
+       on a saturated blue-purple background and failed contrast. */
+    .price-sub.on-highlight,
     .plan-card.popular .price-sub {
-      color: var(--sl-color-neutral-300);
+      color: rgba(255, 255, 255, 0.85);
     }
 
     .divider {
@@ -349,15 +372,7 @@ export class PricingCard extends LitElement {
   }
 
   render() {
-    // 'pro' is the recommended plan in the 2026 ladder; 'teams' is the
-    // grandfathered legacy plan and keeps its highlight only when a config
-    // still lists it. Highlight is config-driven first so a brand can move
-    // the emphasis without a code change.
-    const isPopular =
-      (this.plan as any).highlight === true ||
-      this.plan.id === 'pro' ||
-      this.plan.id === 'teams' ||
-      this.plan.id === 'ultra';
+    const isPopular = this._isPopular();
     const hasArrayFeatures = Array.isArray(this.plan.features);
     // The approved card shape is one number plus one line. When a plan
     // carries a tagline we print exactly that and nothing else: the quota,

@@ -228,6 +228,15 @@ class FlowExecutionBase(BaseModel):
             "for executions that predate this field."
         ),
     )
+    queued_reason: Optional[str] = Field(
+        None,
+        description=(
+            "Why a PENDING execution has not been admitted yet: "
+            "account_concurrency_cap when the account already has its "
+            "maximum number of executions running. Cleared when the "
+            "execution is claimed; null for every other row."
+        ),
+    )
     retry_of_execution_id: Optional[uuid.UUID] = Field(
         None, description="ID of the original execution if this is a retry"
     )
@@ -339,7 +348,23 @@ class FlowExecutionListResponse(ExecutionModelProjection):
             "the execution succeeded, is still running, or predates the field."
         ),
     )
+    queued_reason: Optional[str] = Field(
+        None,
+        description=(
+            "Why a PENDING execution has not been admitted yet "
+            "(account_concurrency_cap). Null for every other row."
+        ),
+    )
     retry_of_execution_id: Optional[uuid.UUID] = None
+    parent_execution_id: Optional[uuid.UUID] = Field(
+        None, description="Execution that directly started this run; null for a root."
+    )
+    root_execution_id: Optional[uuid.UUID] = Field(
+        None, description="First execution of this lineage; null on the root itself."
+    )
+    delegation_depth: int = Field(
+        0, description="Distance from the lineage root; 0 for roots and existing rows."
+    )
     batch_id: Optional[uuid.UUID] = None
     tool_calls_count: Optional[int] = 0
     total_tokens: Optional[int] = 0

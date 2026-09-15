@@ -15327,12 +15327,38 @@ components:
           description: Coarse machine-readable failure class for terminal executions
             (runner_conflict, model_transient, agent_error, ...). Null when the execution
             succeeded, is still running, or predates the field.
+        queued_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Queued Reason
+          description: Why a PENDING execution has not been admitted yet (account_concurrency_cap).
+            Null for every other row.
         retry_of_execution_id:
           anyOf:
           - type: string
             format: uuid
           - type: 'null'
           title: Retry Of Execution Id
+        parent_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Parent Execution Id
+          description: Execution that directly started this run; null for a root.
+        root_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Root Execution Id
+          description: First execution of this lineage; null on the root itself.
+        delegation_depth:
+          type: integer
+          title: Delegation Depth
+          description: Distance from the lineage root; 0 for roots and existing rows.
+          default: 0
         batch_id:
           anyOf:
           - type: string
@@ -17312,12 +17338,38 @@ components:
           description: Coarse machine-readable failure class for terminal executions
             (runner_conflict, model_transient, agent_error, ...). Null when the execution
             succeeded, is still running, or predates the field.
+        queued_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Queued Reason
+          description: Why a PENDING execution has not been admitted yet (account_concurrency_cap).
+            Null for every other row.
         retry_of_execution_id:
           anyOf:
           - type: string
             format: uuid
           - type: 'null'
           title: Retry Of Execution Id
+        parent_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Parent Execution Id
+          description: Execution that directly started this run; null for a root.
+        root_execution_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Root Execution Id
+          description: First execution of this lineage; null on the root itself.
+        delegation_depth:
+          type: integer
+          title: Delegation Depth
+          description: Distance from the lineage root; 0 for roots and existing rows.
+          default: 0
         batch_id:
           anyOf:
           - type: string
@@ -17578,6 +17630,14 @@ components:
             model_config, no_confirmation, setup_failed, tool_error, agent_error,
             timeout, cancelled, unknown. Null for successful or still-running executions,
             and for executions that predate this field.'
+        queued_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Queued Reason
+          description: 'Why a PENDING execution has not been admitted yet: account_concurrency_cap
+            when the account already has its maximum number of executions running.
+            Cleared when the execution is claimed; null for every other row.'
         retry_of_execution_id:
           anyOf:
           - type: string

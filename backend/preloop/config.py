@@ -997,6 +997,16 @@ class Settings(BaseSettings):
             "wait-bound; the cap is a semaphore, not one NATS fetch."
         ),
     )
+    flow_execution_max_running_per_account: int = Field(
+        3,
+        description=(
+            "How many flow executions one account may have admitted at once "
+            "across the whole instance. Enforced at claim time, so retries "
+            "and resumes respect it too. Further executions stay PENDING "
+            "with queued_reason set. An account may override this through "
+            "account.meta_data['flow_execution_max_running_per_account']."
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -1334,6 +1344,9 @@ class Settings(BaseSettings):
             ),
             flow_execution_max_inflight=int(
                 os.getenv("FLOW_EXECUTION_MAX_INFLIGHT", "10")
+            ),
+            flow_execution_max_running_per_account=int(
+                os.getenv("FLOW_EXECUTION_MAX_RUNNING_PER_ACCOUNT", "3")
             ),
             stripe_secret_key=stripe_secret_key,
             stripe_webhook_secret=stripe_webhook_secret,

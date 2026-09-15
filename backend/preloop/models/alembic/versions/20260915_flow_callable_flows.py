@@ -14,7 +14,7 @@ carries, because that context is minted at launch: an allowlist read from it
 could not be revoked while a run is in flight.
 
 Revision ID: 20260915_flow_callable_flows
-Revises: 20260915_execution_lineage
+Revises: 20260915_queued_lineage_merge
 Create Date: 2026-09-15
 """
 
@@ -24,7 +24,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision: str = "20260915_flow_callable_flows"
-down_revision: Union[str, None] = "20260915_execution_lineage"
+down_revision: Union[str, None] = "20260915_queued_lineage_merge"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 # Alembic reads these module globals by name; keep a local reference so static
