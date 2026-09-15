@@ -767,6 +767,7 @@ def _register_control_plane_routes(
         security_maintenance,
         security_screen,
         session_optimization,
+        session_search,
         tools,
         trackers,
         usage_import,
@@ -1045,6 +1046,14 @@ def _register_control_plane_routes(
         operator_notes.router,
         prefix="/api/v1",
         tags=["Operator Notes"],
+    )
+    # Ranked search over session content. POST only, so the query text stays
+    # out of access logs; see the module docstring.
+    app.include_router(
+        session_search.router,
+        prefix="/api/v1",
+        tags=["Runtime Sessions"],
+        dependencies=[Depends(get_current_active_user)],
     )
 
     # Impersonation router - Enterprise feature (loaded via admin plugin)

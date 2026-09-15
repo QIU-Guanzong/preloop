@@ -264,7 +264,11 @@ SEND_NOTE_TOOL: Dict[str, Any] = {
         "agents leaves a record instead of a file nobody sweeps. Name exactly "
         "one of agent_id, runtime_session_id or execution_id; naming none or "
         "two is refused and writes nothing. Targets outside your account do "
-        "not exist. Rate limited per author, per target, per hour."
+        "not exist. You can reach the runs you started, at any depth, and "
+        "nothing else unless an access rule grants more: a sibling run, the "
+        "run that started you, and an agent running nothing of yours are all "
+        "refused, naming the scope required. Rate limited per author, per "
+        "target, per hour."
     ),
     "source": "builtin",
     # Default-off: most agents never need to talk to a sibling, and every

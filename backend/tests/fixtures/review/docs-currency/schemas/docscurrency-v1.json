@@ -1,0 +1,269 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "preloop.review.docscurrency/v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema",
+    "flow",
+    "status",
+    "run_at",
+    "git",
+    "tool_versions",
+    "inputs_declared",
+    "runner",
+    "project",
+    "claims",
+    "counts",
+    "coverage",
+    "drift",
+    "verdict",
+    "checks",
+    "assessments",
+    "artifacts",
+    "disclaimer"
+  ],
+  "properties": {
+    "schema": {
+      "const": "preloop.review.docscurrency/v1"
+    },
+    "flow": {
+      "const": "docs-currency-review"
+    },
+    "status": {
+      "enum": [
+        "success",
+        "error"
+      ]
+    },
+    "run_at": {
+      "type": "string"
+    },
+    "git": {},
+    "tool_versions": {},
+    "inputs_declared": {},
+    "runner": {},
+    "project": {
+      "type": "object",
+      "required": [
+        "path",
+        "documents"
+      ]
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "type",
+          "claim",
+          "doc",
+          "status",
+          "code_shows",
+          "evidence",
+          "search",
+          "severity",
+          "reason"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^docs:(entry_point|service|dependency|env_var|command):"
+          },
+          "type": {
+            "enum": [
+              "entry_point",
+              "service",
+              "dependency",
+              "env_var",
+              "command"
+            ]
+          },
+          "claim": {
+            "type": "string",
+            "minLength": 1
+          },
+          "doc": {
+            "type": "string",
+            "pattern": "^.+:[0-9]+$"
+          },
+          "status": {
+            "enum": [
+              "holds",
+              "drifted",
+              "not_checkable"
+            ]
+          },
+          "code_shows": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "evidence": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "search": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "pattern",
+              "scope",
+              "matches"
+            ],
+            "properties": {
+              "pattern": {
+                "type": "string",
+                "minLength": 1
+              },
+              "scope": {
+                "type": "string",
+                "minLength": 1
+              },
+              "matches": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^.+:[0-9]+$"
+                }
+              }
+            }
+          },
+          "severity": {
+            "enum": [
+              "high",
+              "medium",
+              "low",
+              null
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "drifted"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "severity": {
+                  "enum": [
+                    "high",
+                    "medium",
+                    "low"
+                  ]
+                },
+                "code_shows": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "not_checkable"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "severity": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "holds"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "severity": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "counts": {
+      "type": "object",
+      "required": [
+        "holds",
+        "drifted",
+        "not_checkable",
+        "by_severity",
+        "by_type"
+      ]
+    },
+    "coverage": {
+      "type": "object",
+      "required": [
+        "documents_total",
+        "documents_read",
+        "plan_completed",
+        "claims_extracted",
+        "unsupported_statements_skipped",
+        "not_reviewed"
+      ]
+    },
+    "drift": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "verdict": {
+      "enum": [
+        "pass",
+        "pass_with_findings",
+        "fail"
+      ]
+    },
+    "checks": {
+      "type": "array"
+    },
+    "assessments": {
+      "type": "array"
+    },
+    "artifacts": {
+      "type": "object",
+      "required": [
+        "report",
+        "register",
+        "findings",
+        "inventory",
+        "drift_report"
+      ]
+    },
+    "disclaimer": {
+      "const": "Machine-generated review evidence. Not a certification, audit opinion, or legal advice."
+    }
+  }
+}

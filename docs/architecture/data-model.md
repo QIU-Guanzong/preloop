@@ -50,6 +50,7 @@ The detailed schema is defined using SQLAlchemy models within the `preloop.model
 *   **Trackers:** Holds specific tracker instance details and encrypted credentials.
 *   **Issues:** Stores core issue data (ID, title, description, status, labels, etc.) synchronized from trackers.
 *   **Issue Embeddings:** Contains vector embeddings (using PGVector `vector` type) linked to issues, used for similarity search.
+*   **Session search corpus:** `session_search_document` stores one chunk per slice of session content (gateway interaction, transcript message, tool call, operator note, session summary) with a stored `tsvector` plus an optional 1536-dimension embedding and partial HNSW index. `MODEL_GATEWAY_CAPTURE_CONTENT` gates stored text; `SESSION_SEARCH_INDEX_ENABLED` disables writes. `session_embedding_setting` is the per-account opt-in for the embedding worker. No search endpoint yet.
 *   **Other Metadata:** Tables for comments, users, API keys, etc., as needed.
 
 Schema migrations are managed using Alembic within `preloop.models`.
@@ -150,3 +151,13 @@ periodic monitoring; disable the diagnostics flag separately to stop collection.
 These signatures identify where a connection was acquired, not its current wait
 stack or a proven incident cause. Collection is bounded and best effort. Missing
 frames or untracked checkouts do not establish that a path released its connection.
+
+## Session search corpus
+
+`session_search_document` stores one chunk of one already-persisted source row,
+account-scoped, with a stored tsvector. Keyword writes ride the source
+transaction. Vectors live on the same row (`embedding`, `embedding_model`,
+`embedded_at`) and are filled later by a capped worker. `session_embedding_setting`
+is one row per account, off by default; enabling names the provider, model and
+https endpoint. The shared `SESSION_EMBEDDING_API_KEY` is sent only to URLs on
+`SESSION_EMBEDDING_API_KEY_BASE_URLS`.

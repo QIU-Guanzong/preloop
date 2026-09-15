@@ -11743,6 +11743,43 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
       security:
       - bearerAuth: []
+  /api/v1/runtime-sessions/search:
+    post:
+      tags:
+      - Runtime Sessions
+      summary: Search session content by relevance
+      description: 'Rank the caller''s runtime sessions by relevance to a query.
+
+
+        Returns sessions ordered by a fused relevance score, each with snippets
+
+        that name the turn the match came from. A mode other than ``keyword`` is
+
+        answered with keyword results and a degraded marker rather than an error,
+
+        so a client written against the eventual hybrid contract works today.'
+      operationId: search_runtime_sessions_api_v1_runtime_sessions_search_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionSearchRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionSearchResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+      - bearerAuth: []
   /api/v1/roles:
     get:
       tags:
@@ -25552,6 +25589,371 @@ components:
         \    threshold: Finite threshold in [0, 1] this deployment screens at.\n \
         \   primary_outcome: Optional lowercase label naming the dominant rule\n \
         \       category; omitted for benign content."
+    SessionSearchDegraded:
+      properties:
+        keyword:
+          type: boolean
+          title: Keyword
+          description: Whether keyword ranking contributed to this answer.
+          default: true
+        semantic:
+          type: boolean
+          title: Semantic
+          description: Whether semantic ranking contributed to this answer.
+          default: false
+        reasons:
+          items:
+            type: string
+          type: array
+          title: Reasons
+          description: Machine readable reason codes, empty when nothing degraded.
+        detail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Detail
+          description: One sentence a console can show without decoding a code.
+      type: object
+      title: SessionSearchDegraded
+      description: What the answer could not do, stated rather than implied.
+    SessionSearchFilters:
+      properties:
+        start_date:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Start Date
+          description: Only chunks at or after this instant. Must include a timezone
+            offset; a naive value is rejected.
+        end_date:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: End Date
+          description: Only chunks strictly before this instant. Must include a timezone
+            offset; a naive value is rejected.
+        model_alias:
+          anyOf:
+          - type: string
+            minLength: 1
+          - type: 'null'
+          title: Model Alias
+          description: Model alias recorded on the chunk, for example a gpt-5 alias.
+        provider_name:
+          anyOf:
+          - type: string
+            minLength: 1
+          - type: 'null'
+          title: Provider Name
+          description: Provider recorded on the chunk.
+        runtime_principal_id:
+          anyOf:
+          - type: string
+            minLength: 1
+          - type: 'null'
+          title: Runtime Principal Id
+          description: Runtime principal, the agent or user the session ran as.
+        api_key_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Api Key Id
+          description: API key the traffic was attributed to.
+        flow_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Flow Id
+          description: Flow the session belonged to.
+        source_kind:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source Kind
+          description: 'One corpus source kind: gateway_interaction, transcript_message,
+            tool_call, operator_note, session_summary, flow_log.'
+      additionalProperties: false
+      type: object
+      title: SessionSearchFilters
+      description: 'Filters over the denormalised columns the corpus carries.
+
+
+        Everything here is a column on the corpus row itself, snapshotted by the
+
+        writer, so filtering never joins a source table and never reaches outside
+
+        the account bound applied by the query.'
+    SessionSearchRequest:
+      properties:
+        query:
+          type: string
+          maxLength: 512
+          minLength: 1
+          title: Query
+          description: 'Search text, parsed the way a web search box is: a quoted
+            phrase ("rolling restart") stays a phrase, `or` alternates and a leading
+            `-` excludes.'
+        mode:
+          type: string
+          enum:
+          - keyword
+          - semantic
+          - hybrid
+          title: Mode
+          description: Requested ranking mode. Anything other than keyword is answered
+            with keyword results and a degraded marker until semantic ranking exists.
+          default: keyword
+        filters:
+          $ref: '#/components/schemas/SessionSearchFilters'
+          description: Filters over the corpus columns. Unknown keys are rejected.
+        limit:
+          type: integer
+          maximum: 50.0
+          minimum: 1.0
+          title: Limit
+          description: Sessions per page, at most 50.
+          default: 20
+        offset:
+          type: integer
+          minimum: 0.0
+          title: Offset
+          description: Sessions to skip.
+          default: 0
+        max_snippets_per_session:
+          type: integer
+          maximum: 10.0
+          minimum: 0.0
+          title: Max Snippets Per Session
+          description: Snippets to return per session, at most 10. Zero returns scored
+            sessions with no snippet rows at all.
+          default: 3
+        include_snippet_text:
+          type: boolean
+          title: Include Snippet Text
+          description: When false the snippet text is never generated, so no captured
+            content leaves the database; the snippets still carry the identity needed
+            to open the session at that turn.
+          default: true
+      additionalProperties: false
+      type: object
+      required:
+      - query
+      title: SessionSearchRequest
+      description: One ranked search over the caller's own session corpus.
+    SessionSearchResponse:
+      properties:
+        query:
+          type: string
+          title: Query
+          description: Query as parsed, with whitespace collapsed.
+        mode:
+          type: string
+          enum:
+          - keyword
+          - semantic
+          - hybrid
+          title: Mode
+          description: Mode the caller asked for.
+        effective_mode:
+          type: string
+          enum:
+          - keyword
+          - semantic
+          - hybrid
+          title: Effective Mode
+          description: Mode that actually ran.
+        degraded:
+          $ref: '#/components/schemas/SessionSearchDegraded'
+        indexed_through:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Indexed Through
+          description: Newest content this account has in the corpus. The corpus fills
+            forward, so an empty answer older than this marker means no match, and
+            one newer means not indexed yet.
+        total:
+          type: integer
+          title: Total
+          description: Distinct sessions matching, before paging.
+        limit:
+          type: integer
+          title: Limit
+        offset:
+          type: integer
+          title: Offset
+        elapsed_ms:
+          type: number
+          title: Elapsed Ms
+          description: Server side time spent on the search.
+        results:
+          items:
+            $ref: '#/components/schemas/SessionSearchResult'
+          type: array
+          title: Results
+      type: object
+      required:
+      - query
+      - mode
+      - effective_mode
+      - degraded
+      - total
+      - limit
+      - offset
+      - elapsed_ms
+      title: SessionSearchResponse
+      description: Ranked sessions and everything needed to read them honestly.
+    SessionSearchResult:
+      properties:
+        runtime_session_id:
+          type: string
+          format: uuid
+          title: Runtime Session Id
+        session_source_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Session Source Type
+        session_source_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Session Source Id
+        session_reference:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Session Reference
+        title:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Title
+        started_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Started At
+        last_activity_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Last Activity At
+        score:
+          type: number
+          title: Score
+          description: Fused session score the ordering uses.
+        best_chunk_rank:
+          type: number
+          title: Best Chunk Rank
+          description: Relevance of the single best chunk in this session.
+        matched_chunk_count:
+          type: integer
+          title: Matched Chunk Count
+          description: How many distinct chunks of this session matched.
+        first_match_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: First Match At
+        last_match_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Last Match At
+        snippets:
+          items:
+            $ref: '#/components/schemas/SessionSearchSnippet'
+          type: array
+          title: Snippets
+      type: object
+      required:
+      - runtime_session_id
+      - score
+      - best_chunk_rank
+      - matched_chunk_count
+      title: SessionSearchResult
+      description: One session that matched, with its fused score.
+    SessionSearchSnippet:
+      properties:
+        document_id:
+          type: string
+          format: uuid
+          title: Document Id
+          description: Corpus chunk row id.
+        runtime_session_id:
+          type: string
+          format: uuid
+          title: Runtime Session Id
+          description: Session the chunk belongs to.
+        source_kind:
+          type: string
+          title: Source Kind
+          description: Which kind of turn this came from.
+        source_id:
+          type: string
+          title: Source Id
+          description: Identifier of the turn in its own table.
+        chunk_index:
+          type: integer
+          title: Chunk Index
+          description: Position of the chunk inside the turn.
+        occurred_at:
+          type: string
+          format: date-time
+          title: Occurred At
+          description: When the turn happened.
+        role:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Role
+          description: Role recorded for the turn.
+        rank:
+          type: number
+          title: Rank
+          description: Relevance of this chunk on its own.
+        redaction_state:
+          type: string
+          title: Redaction State
+          description: Whether the stored chunk was masked or metadata only.
+        text:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Text
+          description: Database generated headline with the matching terms marked,
+            or null when the request disabled snippet text.
+      type: object
+      required:
+      - document_id
+      - runtime_session_id
+      - source_kind
+      - source_id
+      - chunk_index
+      - occurred_at
+      - rank
+      - redaction_state
+      title: SessionSearchSnippet
+      description: 'One matching chunk of one session.
+
+
+        The identity fields are the point: ``runtime_session_id`` with
+
+        ``source_kind`` and ``source_id`` names the turn the match came from, and
+
+        ``chunk_index`` names the piece of it, so a console or a CLI can open the
+
+        session at that turn rather than at the top.'
     SigningKeyListRead:
       properties:
         active_key_id:

@@ -78,9 +78,12 @@ DELIVERY_CHANNELS = (
 )
 
 #: Audit actions. ``sent`` is written before the API answers the author,
-#: ``delivered`` before the request carrying the note leaves Preloop.
+#: ``delivered`` before the request carrying the note leaves Preloop, and
+#: ``scope_denied`` before an agent author is told its target is out of reach
+#: (see :mod:`preloop.services.agent_note_scope`).
 AUDIT_NOTE_SENT = "agent.note_sent"
 AUDIT_NOTE_DELIVERED = "agent.note_delivered"
+AUDIT_NOTE_SCOPE_DENIED = "agent.note_scope_denied"
 
 #: Wire protocols the gateway speaks. Gemini is absent on purpose: it
 #: translates to a Responses payload and delegates to the Responses path.
@@ -484,7 +487,50 @@ def claim_pending_notes(
         claimed.append(note)
     if claimed:
         db.commit()
+        _index_claimed_notes(
+            db,
+            account_id=account_id,
+            runtime_session_id=runtime_session_id,
+            notes=claimed,
+            delivered_at=moment,
+            channel=channel,
+        )
     return claimed
+
+
+def _index_claimed_notes(
+    db: Session,
+    *,
+    account_id: str,
+    runtime_session_id: Optional[str],
+    notes: Sequence[Any],
+    delivered_at: datetime,
+    channel: str,
+) -> None:
+    """Write delivered notes into the session search corpus.
+
+    Indexing happens after the claim is committed, so an indexing problem can
+    never cost a delivery. A note delivered without a session has nowhere to
+    hang in a session scoped corpus and is skipped. Imported here because the
+    indexing service imports this module's CRUD dependencies.
+    """
+    if runtime_session_id is None:
+        return
+
+    from preloop.services.session_search_index import index_operator_note
+
+    for note in notes:
+        index_operator_note(
+            db,
+            account_id=account_id,
+            runtime_session_id=runtime_session_id,
+            source_id=note.id,
+            body=getattr(note, "body", None),
+            status=note_state(note),
+            occurred_at=delivered_at,
+            meta_data={"delivery_channel": channel},
+            commit=True,
+        )
 
 
 def deliver_gateway_notes(

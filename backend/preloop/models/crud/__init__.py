@@ -32,6 +32,8 @@ from ..models import (
     RuntimeSessionOptimizationAction,
     RuntimeSessionReplayRun,
     RuntimeSessionOptimizationResult,
+    SessionEmbeddingSetting,
+    SessionSearchDocument,
 )
 from .account import CRUDAccount
 from .account_halt import CRUDAccountHalt, crud_account_halt
@@ -138,6 +140,14 @@ from .runtime_session_optimization_result import (
     CRUDRuntimeSessionOptimizationResult,
 )
 from .runtime_session_replay_run import CRUDRuntimeSessionReplayRun
+from .session_embedding_setting import (
+    CRUDSessionEmbeddingSetting,
+    SessionEmbeddingConfigError,
+)
+from .session_search_document import (
+    CRUDSessionSearchDocument,
+    SessionSearchChunk,
+)
 from .secret_reference import CRUDSecretReference, crud_secret_reference
 from .tool_cost_flag import CRUDToolCostFlag, crud_tool_cost_flag
 from .tool_output_filter import CRUDToolOutputFilter, crud_tool_output_filter
@@ -185,6 +195,8 @@ crud_provider_billing_connection = CRUDProviderBillingConnection(
 crud_provider_billing_snapshot = CRUDProviderBillingSnapshot(ProviderBillingSnapshot)
 crud_runtime_session = CRUDRuntimeSession(RuntimeSession)
 crud_runtime_session_activity = CRUDRuntimeSessionActivity(RuntimeSessionActivity)
+crud_session_search_document = CRUDSessionSearchDocument(SessionSearchDocument)
+crud_session_embedding_setting = CRUDSessionEmbeddingSetting(SessionEmbeddingSetting)
 crud_runtime_session_optimization_action = CRUDRuntimeSessionOptimizationAction(
     RuntimeSessionOptimizationAction
 )
@@ -278,6 +290,10 @@ __all__ = [
     "issue_compliance_result",
     "crud_issue_set",
     "crud_gateway_usage_search_document",
+    "crud_session_search_document",
+    "crud_session_embedding_setting",
+    "SessionEmbeddingConfigError",
+    "SessionSearchChunk",
     "crud_managed_agent",
     "crud_managed_agent_ai_model_binding",
     "crud_managed_agent_credential",

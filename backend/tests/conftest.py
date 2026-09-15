@@ -57,6 +57,38 @@ def reset_gateway_usage_index_queue_between_tests():
     reset_gateway_usage_index_queue()
 
 
+@pytest.fixture(autouse=True)
+def stub_session_embedding_dns(monkeypatch):
+    """Keep embedding opt-in tests off live DNS.
+
+    Production still calls ``socket.getaddrinfo``. Tests map well-known
+    suffixes so hostname policy can be asserted without network.
+    """
+    import ipaddress
+
+    from preloop.models.crud import session_embedding_setting as setting_mod
+
+    def fake_resolve(
+        host: str,
+    ) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+        name = host.strip(".").lower()
+        if name.endswith(".nip.io"):
+            labels = name[: -len(".nip.io")].split(".")
+            if len(labels) >= 4:
+                try:
+                    return [ipaddress.ip_address(".".join(labels[-4:]))]
+                except ValueError:
+                    pass
+            return [ipaddress.ip_address("169.254.169.254")]
+        if name.endswith(".internal") or name.endswith(".corp"):
+            return [ipaddress.ip_address("10.1.2.3")]
+        if name == "localhost" or name.endswith(".localhost"):
+            return [ipaddress.ip_address("127.0.0.1")]
+        return [ipaddress.ip_address("93.184.216.34")]
+
+    monkeypatch.setattr(setting_mod, "_resolved_ip_addresses", fake_resolve)
+
+
 def pytest_configure(config):
     """
     Load environment variables from .env file before tests run.

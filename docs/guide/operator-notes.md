@@ -118,6 +118,119 @@ per-note `from` and `auth` attributes still name the author either way. The
 note still grants nothing: every action taken because of it goes through the
 firewall, the gateway and the approval policy as before.
 
+An agent cannot note whatever it likes inside the account. What it can reach is
+[the runs it started](#which-agent-may-note-which-target).
+
+## Which agent may note which target
+
+A note from an agent is text a model will read on its next turn, so the blast
+radius of this channel is the other agent's behaviour, not just its transcript.
+The default is therefore narrow enough that turning `send_note` on is not
+itself a decision that needs a threat model.
+
+**The default scope is descent.** An agent may note the runs its own run
+started, directly or transitively, and nothing else:
+
+| The target | In the default scope |
+| --- | --- |
+| A run this run started | Yes |
+| A grandchild, or deeper | Yes. Delegation is transitive, or inserting a middleman would widen the reach |
+| A sibling (another run of the same parent) | No |
+| The run that started this one | No. Descent has a direction |
+| An agent running nothing of this run's | No |
+| Anything in another account | No, and not as a scope question: a foreign id is simply not found |
+
+Lineage is the key because it is the only relationship here that Preloop can
+verify instead of accepting from the caller. `parent_execution_id` is written
+by the platform when a child run is created; "we are on the same team" is a
+claim an agent could simply make. The tool takes no lineage argument: the
+calling run is read from the authenticated context.
+
+**A caller with no lineage can note nothing.** A top level run that started no
+children, and an enrolled agent that is not running inside an execution at all,
+both have an empty descendant set, so every target is refused. That is the case
+that makes the default safe: no lineage is no reach, rather than no restriction.
+
+A refusal is a structured answer the model can act on, naming the scope the
+call would have needed, and each one has its own code:
+
+| Reason code | What happened |
+| --- | --- |
+| `note_scope_out_of_scope` | The target exists in the account but does not descend from the calling run |
+| `note_scope_no_lineage` | The call carries no execution lineage, so it reaches nothing |
+| `note_scope_denied_by_rule` | A tool access rule denied it |
+| `note_scope_grant_unavailable` | The rule that would have granted it asked for approval, or could not be evaluated. Scope widening fails closed |
+
+Every refusal writes one `agent.note_scope_denied` audit row carrying that code,
+the target, the calling run and the rule that decided, so "my agent says it
+cannot reach that run" is answerable from the record.
+
+### Granting a wider scope
+
+Wider than descent is a grant, not a setting. When the default refuses, the
+call is put to the same tool policy path every tool call already goes through,
+as a rule evaluation on `send_note`, and **only a rule that explicitly allows it
+is a grant**: the default allow that a tool with no rules returns is not, or
+enabling the tool would quietly mean "note anyone". Add the rule on the
+`send_note` tool in the console, or through the tool access rule API:
+
+```
+tool:       send_note
+condition:  has(args.note_scope) && args.note_scope == "account"
+type:       cel
+action:     allow
+priority:   20
+```
+
+Rules are evaluated in priority order and the first match decides, exactly as
+for every other tool, so a `deny` placed above a grant wins. Disabling or
+deleting the grant takes the reach away on the next call: there is nothing to
+restart and no cache to clear.
+
+Write the `has()` guard. The scope facts below exist only at this evaluation,
+and a CEL expression that reads a key the plain tool call does not carry fails
+that call closed. A `simple` condition needs no guard: a missing key is a
+non-match there.
+
+These bindings are what a rule sees. Every one of them is what the platform
+worked out, never anything the calling agent asserted:
+
+| Binding | Value |
+| --- | --- |
+| `args.note_scope` | `account`, the scope being asked for |
+| `args.note_default_scope` | `descendants` |
+| `args.note_target_relation` | `self`, `ancestor`, `same_tree`, `unrelated` or `no_lineage` |
+| `args.note_author_managed_agent_id`, `args.note_author_execution_id` | Who is asking, and from which run |
+| `args.note_target_managed_agent_id`, `args.note_target_runtime_session_id`, `args.note_target_execution_id` | What it wants to reach |
+| `args.text`, `args.agent_id`, `args.runtime_session_id`, `args.execution_id` | The call's own arguments, under the names the tool uses |
+
+The grant evaluation uses the same subject context as the preceding `send_note`
+call: the caller's `api_key_id`, the caller's `runtime_session_id`, and the rest
+of that chain. Target identity lives only in the `note_*` facts, so an
+API-key-scoped rule is not skipped on the grant path and a rule against
+`runtime_session_id` still means the caller.
+
+So a grant can be narrower than "anyone". `args.note_target_relation ==
+"same_tree"` lets runs in one delegation tree note each other and nothing
+outside it; `args.note_author_managed_agent_id == "..."` grants one coordinator
+the account and leaves every other agent on the default.
+
+There is no scope wider than `account`. The account boundary is resolved before
+scope is considered and no rule can widen past it.
+
+### The honest part
+
+A delivered note is untrusted input rendered into another agent's turn. The
+`(agent)` suffix and the `auth="agent"` attribute tell a reader where it came
+from, but a label is not a boundary against a model: a sufficiently confused
+agent can be talked into acting on a note it should have ignored. What the
+scope model buys is that only a run you started can put the words there, that
+the grant to do more is a rule somebody wrote and can revoke, and that both the
+send and the refusal are in the audit trail. What stops the note from being
+consequential is unchanged: it grants no permission, and every action the
+reader then takes still goes through the MCP firewall, the gateway and the
+approval policy.
+
 ## How it is delivered
 
 Two paths. Both put the note at a turn boundary, never inside a tool result and
@@ -300,6 +413,7 @@ describe:
 | --- | --- |
 | `agent.note_sent` | Before the API tells the author it worked |
 | `agent.note_delivered` | Before the request carrying the note leaves Preloop |
+| `agent.note_scope_denied` | Instead of a note, when an agent's target was out of [its scope](#which-agent-may-note-which-target) |
 
 The same two arrive as webhook events, `agent.note_sent` and
 `agent.note_delivered` (see [webhooks](webhooks.md)), and each delivery is

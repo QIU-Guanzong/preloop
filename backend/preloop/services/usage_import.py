@@ -49,6 +49,10 @@ from preloop.services.model_pricing import (
     estimate_external_model_usage_cost,
     normalize_external_model_name,
 )
+from preloop.services.session_search_index import (
+    index_transcript_message,
+    request_embedding,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -501,24 +505,44 @@ def add_transcript_activities(
         session: The record's runtime session.
         timestamp: Fallback activity timestamp (the record's).
     """
+    indexed: list[tuple[RuntimeSessionActivity, str]] = []
     for message in record.transcript or []:
-        db.add(
-            RuntimeSessionActivity(
-                account_id=account_id,
-                runtime_session_id=session.id,
-                activity_type=TRANSCRIPT_ACTIVITY_TYPE,
-                status=message.role,
-                summary=message.text[:MAX_TRANSCRIPT_ACTIVITY_SUMMARY_CHARS],
-                metadata_={
-                    "role": message.role,
-                    "source": f"usage_ingest:{source}",
-                    "external_id": record.external_id,
-                    "conversation_id": record.conversation_id,
-                },
-                timestamp=message.timestamp or timestamp,
-            )
+        activity = RuntimeSessionActivity(
+            account_id=account_id,
+            runtime_session_id=session.id,
+            activity_type=TRANSCRIPT_ACTIVITY_TYPE,
+            status=message.role,
+            summary=message.text[:MAX_TRANSCRIPT_ACTIVITY_SUMMARY_CHARS],
+            metadata_={
+                "role": message.role,
+                "source": f"usage_ingest:{source}",
+                "external_id": record.external_id,
+                "conversation_id": record.conversation_id,
+            },
+            timestamp=message.timestamp or timestamp,
         )
+        db.add(activity)
+        indexed.append((activity, message.text))
     db.flush()
+
+    # Search corpus chunks ride the caller's transaction (no commit here) and
+    # are written after the flush, so a chunk can only exist for a message
+    # row that exists.
+    for activity, text in indexed:
+        index_transcript_message(
+            db,
+            account_id=account_id,
+            runtime_session_id=session.id,
+            source_id=activity.id,
+            text=text,
+            role=activity.status,
+            occurred_at=activity.timestamp,
+            meta_data={
+                "source": f"usage_ingest:{source}",
+                "external_id": record.external_id,
+                "conversation_id": record.conversation_id,
+            },
+        )
 
 
 def push_record_fingerprint(*, source: str, external_id: str) -> str:
@@ -588,6 +612,7 @@ def ingest_push_records(
         differs from the stored one (first write wins either way).
         Committed once at the end.
     """
+    indexed_transcripts = False
     fingerprints = [
         push_record_fingerprint(source=source, external_id=record.external_id)
         for record in records
@@ -688,6 +713,7 @@ def ingest_push_records(
                                 session=session,
                                 timestamp=timestamp,
                             )
+                        indexed_transcripts = True
                     except SQLAlchemyError:
                         # Activities are bookkeeping; the ledger row stands.
                         logger.warning(
@@ -720,6 +746,10 @@ def ingest_push_records(
             )
         )
     db.commit()
+    if indexed_transcripts:
+        # Chunks rode the caller's transaction (commit=False). Nudge only
+        # after they are visible to the worker's own session.
+        request_embedding(account_id)
     return results
 
 
