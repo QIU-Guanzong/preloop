@@ -380,12 +380,40 @@ def _optional_annotation(annotation: str) -> str:
     return f"Optional[{annotation}]"
 
 
-#: Locals bound in the generated proxied-tool wrapper body. Upstream parameter
-#: names that collide with these would be interpolated into the signature and
-#: then collected via ``locals().get(param_name)``, forwarding the body's own
-#: object instead of the caller-supplied argument.
-_RESERVED_WRAPPER_LOCALS = frozenset(
+#: Keys supplied to ``exec()`` when generating a proxied-tool wrapper. The
+#: generated body reads these as globals (``tool_name``, ``param_names``,
+#: ``account_id``, ...). An upstream property with the same name would become
+#: a function parameter and shadow the trusted value for the whole body.
+_WRAPPER_NAMESPACE_KEYS = (
+    "self",
+    "account_id",
+    "tool_name",
+    "server_id",
+    "param_names",
+    "logger",
+    "get_db",
+    "crud_mcp_server",
+    "get_mcp_client_pool",
+    "apply_output_filters",
+    "Optional",
+    "Union",
+    "Any",
+    "List",
+    "Dict",
+    "Context",
+    "_rule_workflow_id_var",
+    "_correlation_id_var",
+)
+
+#: Locals assigned in the generated wrapper body before argument collection.
+#: Colliding parameter names would make ``locals().get(param_name)`` forward
+#: the body's own object instead of the caller-supplied argument.
+_RESERVED_WRAPPER_BODY_LOCALS = frozenset(
     {"ctx", "arguments", "user_context", "param_name", "value"}
+)
+
+_RESERVED_WRAPPER_LOCALS = (
+    frozenset(_WRAPPER_NAMESPACE_KEYS) | _RESERVED_WRAPPER_BODY_LOCALS
 )
 
 
@@ -394,8 +422,9 @@ def _is_safe_generated_identifier(name: str) -> bool:
 
     Upstream ``tools/list`` names are attacker-controlled. Generated wrappers
     ``exec()`` a function whose signature interpolates those names, so anything
-    that is not a non-keyword identifier, or that collides with locals in the
-    generated body, must be rejected.
+    that is not a non-keyword identifier, that collides with locals in the
+    generated body, or that shadows an exec-namespace global the body reads,
+    must be rejected.
 
     Args:
         name: Candidate parameter or tool name from an upstream MCP server.
@@ -1032,8 +1061,9 @@ async def {internal_name}({params_str}) -> str:
         return f"Error executing tool '{{tool_name}}': {{cause}}"
 """
 
-        # Create local namespace with required variables
-        namespace = {
+        # Create local namespace with required variables. Keys must match
+        # ``_WRAPPER_NAMESPACE_KEYS`` so the identifier guard cannot drift.
+        namespace_values = {
             "self": self,
             "account_id": account_id,
             "tool_name": tool_name,
@@ -1053,6 +1083,11 @@ async def {internal_name}({params_str}) -> str:
             "_rule_workflow_id_var": _rule_workflow_id_var,
             "_correlation_id_var": _correlation_id_var,
         }
+        if namespace_values.keys() != set(_WRAPPER_NAMESPACE_KEYS):
+            raise RuntimeError(
+                "wrapper namespace values must match _WRAPPER_NAMESPACE_KEYS"
+            )
+        namespace = {key: namespace_values[key] for key in _WRAPPER_NAMESPACE_KEYS}
 
         # Execute the code to create the function
         exec(wrapper_code, namespace)

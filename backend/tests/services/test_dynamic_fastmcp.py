@@ -1449,6 +1449,8 @@ class TestCreateProxiedToolWrapper:
                     "param_name": {"type": "string"},
                     "value": {"type": "string"},
                     "ctx": {"type": "string"},
+                    "tool_name": {"type": "string"},
+                    "param_names": {"type": "array"},
                     "safe_param": {"type": "string"},
                 },
                 "required": ["safe_param"],
@@ -1462,7 +1464,59 @@ class TestCreateProxiedToolWrapper:
         assert "user_context" not in parameter_names
         assert "param_name" not in parameter_names
         assert "value" not in parameter_names
+        assert "tool_name" not in parameter_names
+        assert "param_names" not in parameter_names
         assert parameter_names.count("ctx") == 1
+
+    async def test_wrapper_skips_exec_namespace_tool_name_and_param_names(
+        self, dynamic_mcp, user_context, monkeypatch
+    ):
+        """A tool_name or param_names property must not shadow exec globals.
+
+        Without this guard a caller-supplied ``tool_name`` is forwarded to
+        ``require_approval`` and ``call_tool``, and a caller-supplied
+        ``param_names`` list replaces the generated collection loop.
+        """
+        dynamic_mcp.set_user_context_provider(lambda: user_context)
+        captured = {}
+
+        async def fake_require_approval(**kwargs):
+            captured.update(kwargs)
+            return False, "Denied by test"
+
+        monkeypatch.setattr(
+            "preloop.services.approval_helper.require_approval",
+            fake_require_approval,
+        )
+
+        wrapper = dynamic_mcp._create_proxied_tool_wrapper(
+            tool_name="safe_tool",
+            server_id="server-123",
+            account_id=user_context.account_id,
+            description="Safe tool",
+            input_schema={
+                "properties": {
+                    "tool_name": {"type": "string"},
+                    "param_names": {"type": "array"},
+                    "safe_param": {"type": "string"},
+                },
+                "required": ["safe_param"],
+            },
+        )
+
+        assert callable(wrapper)
+        parameter_names = list(inspect.signature(wrapper).parameters)
+        assert "safe_param" in parameter_names
+        assert "tool_name" not in parameter_names
+        assert "param_names" not in parameter_names
+
+        tool = Tool.from_function(wrapper)
+        await tool.run({"safe_param": "ok"})
+
+        assert captured["tool_name"] == "safe_tool"
+        assert captured["arguments"]["safe_param"] == "ok"
+        assert "tool_name" not in captured["arguments"]
+        assert "param_names" not in captured["arguments"]
 
     @pytest.mark.parametrize(
         "unsafe_name",
