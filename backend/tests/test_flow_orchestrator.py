@@ -367,6 +367,76 @@ class TestFlowExecutionOrchestrator:
         assert "`pass` and `fail`" in resolved_prompt
         assert "`error`" in resolved_prompt
 
+    @pytest.mark.asyncio
+    async def test_truncate_filter_bounds_a_simple_resolved_placeholder(self):
+        """`|truncate(N)` caps a webhook field at N bytes and marks the cut.
+
+        A pull request body is whatever its author (often a dependency bot)
+        chose to write. Injecting it verbatim is how a 200 KiB release-notes
+        body ends up in a single execve string.
+        """
+        huge = "R" * 200_000
+        orchestrator = FlowExecutionOrchestrator(
+            db=MagicMock(spec=Session),
+            flow_id=uuid4(),
+            trigger_event_data={"payload": {"description": huge}},
+            nats_client=MagicMock(),
+        )
+        orchestrator.flow = MagicMock(
+            prompt_template="Body: {{payload.description|truncate(1024)}}"
+        )
+
+        resolved_prompt = await orchestrator._resolve_prompt()
+
+        assert huge not in resolved_prompt
+        assert "R" * 1024 in resolved_prompt
+        assert "R" * 1025 not in resolved_prompt
+        assert "[truncated by Preloop" in resolved_prompt
+        assert "200000" in resolved_prompt
+
+    @pytest.mark.asyncio
+    async def test_placeholder_without_a_filter_is_left_unbounded(self):
+        """Templates that ask for no cap keep the old verbatim behaviour."""
+        body = "B" * 5000
+        orchestrator = FlowExecutionOrchestrator(
+            db=MagicMock(spec=Session),
+            flow_id=uuid4(),
+            trigger_event_data={"payload": {"description": body}},
+            nats_client=MagicMock(),
+        )
+        orchestrator.flow = MagicMock(prompt_template="Body: {{payload.description}}")
+
+        resolved_prompt = await orchestrator._resolve_prompt()
+
+        assert body in resolved_prompt
+        assert "[truncated by Preloop" not in resolved_prompt
+
+    @pytest.mark.asyncio
+    async def test_the_same_field_can_carry_two_different_caps(self):
+        """Dedup is on the raw placeholder text, not on the field name."""
+        value = "X" * 4000
+        orchestrator = FlowExecutionOrchestrator(
+            db=MagicMock(spec=Session),
+            flow_id=uuid4(),
+            trigger_event_data={"payload": {"description": value}},
+            nats_client=MagicMock(),
+        )
+        orchestrator.flow = MagicMock(
+            prompt_template=(
+                "Short: {{payload.description|truncate(10)}}\n"
+                "Long: {{payload.description|truncate(2000)}}"
+            )
+        )
+
+        resolved_prompt = await orchestrator._resolve_prompt()
+
+        # The cut marker is set off by a blank line, so each capped value
+        # ends its own line.
+        assert "Short: " + "X" * 10 + "\n\n[truncated by Preloop" in resolved_prompt
+        assert "Long: " + "X" * 2000 + "\n\n[truncated by Preloop" in resolved_prompt
+        assert "X" * 2001 not in resolved_prompt
+        assert resolved_prompt.count("[truncated by Preloop") == 2
+
     @pytest.mark.parametrize(
         "audit_schema_marker",
         [

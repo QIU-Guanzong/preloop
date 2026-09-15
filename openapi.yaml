@@ -5000,7 +5000,7 @@ paths:
       tags:
       - Retention
       summary: Create Legal Hold
-      description: Freeze one execution, approval or evidence pack until released.
+      description: Freeze one execution, approval, evidence pack or runtime session.
       operationId: create_legal_hold_api_v1_retention_holds_post
       security:
       - bearerAuth: []
@@ -16783,6 +16783,15 @@ components:
           title: Timezone
           description: IANA timezone name the schedule is evaluated in
           default: UTC
+        payload:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Payload
+          description: Static trigger payload merged into every scheduled run, for
+            options a schedule has no other way to state (e.g. previous_result_execution_id).
+            Bounded and inline only.
         type:
           type: string
           const: cron
@@ -16820,6 +16829,15 @@ components:
           title: Timezone
           description: IANA timezone name the schedule is evaluated in
           default: UTC
+        payload:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Payload
+          description: Static trigger payload merged into every scheduled run, for
+            options a schedule has no other way to state (e.g. previous_result_execution_id).
+            Bounded and inline only.
         type:
           type: string
           const: daily
@@ -19695,6 +19713,15 @@ components:
           title: Timezone
           description: IANA timezone name the schedule is evaluated in
           default: UTC
+        payload:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Payload
+          description: Static trigger payload merged into every scheduled run, for
+            options a schedule has no other way to state (e.g. previous_result_execution_id).
+            Bounded and inline only.
         type:
           type: string
           const: interval
@@ -20277,7 +20304,7 @@ components:
         resource_type:
           type: string
           title: Resource Type
-          description: One of execution, approval, evidence_pack
+          description: One of execution, approval, evidence_pack, runtime_session
         resource_id:
           type: string
           maxLength: 255
@@ -20294,7 +20321,7 @@ components:
       - resource_id
       - reason
       title: LegalHoldCreate
-      description: Place a hold on one execution, approval or evidence pack.
+      description: Place a hold on one execution, approval, evidence pack or session.
     LegalHoldRead:
       properties:
         id:
@@ -25061,6 +25088,12 @@ components:
           - type: number
           - type: 'null'
           title: Optimization Potential Savings Usd
+        legal_hold:
+          type: boolean
+          title: Legal Hold
+          description: 'True while a legal hold freezes this session: the retention
+            purge leaves it and its activity alone until the hold is released'
+          default: false
       type: object
       required:
       - id
@@ -27871,6 +27904,15 @@ components:
           title: Timezone
           description: IANA timezone name the schedule is evaluated in
           default: UTC
+        payload:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Payload
+          description: Static trigger payload merged into every scheduled run, for
+            options a schedule has no other way to state (e.g. previous_result_execution_id).
+            Bounded and inline only.
         type:
           type: string
           const: weekly

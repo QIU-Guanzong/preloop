@@ -481,3 +481,74 @@ def test_openai_compatible_without_endpoint_still_pages():
     )
     assert should_notify_unpriced_model(ai_model=missing, **_notify_kwargs()) is True
     assert should_notify_unpriced_model(ai_model=blank, **_notify_kwargs()) is True
+
+
+def test_alibaba_alert_reports_billing_dimension_region_and_refresh(
+    db_session, test_user
+):
+    from preloop.models import models
+    from preloop.services import alibaba_price_catalog as catalog
+    from preloop.services.alibaba_pricing import Tariff
+
+    model = models.AIModel(
+        provider_name="openai-compatible",
+        model_identifier="qwen-alert-example",
+        api_endpoint="https://example.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    )
+    catalog.install_live_tariff(
+        "singapore-international", "qwen-alert-example", Tariff(input=1, output=2)
+    )
+    details = {
+        "_preloop_cache_mode": "implicit",
+        "prompt_tokens_details": {"cached_tokens": 50},
+    }
+    try:
+        assert should_notify_unpriced_model(
+            ai_model=model,
+            usage_accounting_requested=False,
+            usage_details=details,
+            completion_tokens=10,
+        )
+        with patch.object(unpriced_model_alert, "notify_admins") as notify:
+            assert notify_unpriced_model(
+                db_session,
+                account_id=str(test_user.account_id),
+                model_alias="qwen/qwen-alert-example",
+                provider_name=model.provider_name,
+                total_tokens=110,
+                prompt_tokens=100,
+                usage_details=details,
+                ai_model=model,
+                refresh_status="host_mismatch",
+            )
+        subject, message = notify.call_args.args
+        assert "unresolved usage pricing" in subject
+        assert "missing_implicit_cache_tariff" in message
+        assert "singapore-international" in message
+        assert "host_mismatch" in message
+    finally:
+        catalog.reset_live_state_for_tests()
+
+
+def test_deferred_alert_does_not_notify_for_repaired_row(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from preloop.models.crud import crud_api_usage
+
+    db = MagicMock()
+
+    def sessions():
+        yield db
+
+    monkeypatch.setattr("preloop.models.db.session.get_db_session", sessions)
+    monkeypatch.setattr(
+        crud_api_usage,
+        "get",
+        lambda *args, **kwargs: SimpleNamespace(cost_source="catalog"),
+    )
+    with patch.object(unpriced_model_alert, "notify_unpriced_model") as notify:
+        assert not unpriced_model_alert.notify_unpriced_usage_row(
+            "usage-example", refresh_status="ingested"
+        )
+    notify.assert_not_called()
+    db.close.assert_called_once()

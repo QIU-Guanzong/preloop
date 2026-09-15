@@ -10,6 +10,12 @@ from aiodocker.exceptions import DockerError
 
 from preloop.services.mcp_config_service import MCPConfigService
 from preloop.services.model_runtime_resolver import gateway_url_for_api
+from preloop.utils.execve_limits import (
+    MAX_LEGACY_PROMPT_BYTES,
+    PROMPT_FILE_PATH,
+    build_prompt_materialization_shell,
+    prompt_transport_env,
+)
 from preloop.utils.git_credentials import (
     GitCredential,
     build_credential_setup_shell,
@@ -126,27 +132,14 @@ class OpenHandsAgent(ContainerAgentExecutor):
             )
             env["MCP_CONFIG_JSON"] = json.dumps(mcp_config)
 
-        # Build the command to run OpenHands in headless mode
-        # We need to completely bypass the entrypoint.sh script
-        max_iterations = execution_context.get("max_iterations", 10)
-        prompt = execution_context["prompt"]
-
-        # Prepare initialization commands (git clone, custom commands)
-        init_commands = self._prepare_init_commands(execution_context)
-
-        # Create the command that runs initialization then OpenHands
-        # Using bash -c to ensure proper execution without entrypoint.sh
-        if init_commands:
-            # Run init commands, then OpenHands
-            full_command = f'{init_commands} && cd /app && /app/.venv/bin/python -m openhands.core.main -t "{prompt}" -i {max_iterations}'
-        else:
-            # No init commands, run OpenHands directly
-            full_command = f'cd /app && /app/.venv/bin/python -m openhands.core.main -t "{prompt}" -i {max_iterations}'
-
+        # The prompt travels as base64 chunks and is reassembled inside the
+        # container. It is never interpolated into this bash -c string, so a
+        # quote in a PR body cannot break -t and a large prompt cannot become
+        # one execve string (preloop.utils.execve_limits).
         cmd = [
             "bash",
             "-c",
-            full_command,
+            self._build_openhands_script(execution_context),
         ]
 
         # Container configuration
@@ -182,6 +175,10 @@ class OpenHandsAgent(ContainerAgentExecutor):
             },
         }
 
+        self._guard_docker_launch_payload(
+            container_config, what=f"{self.agent_type} container for {execution_id}"
+        )
+
         try:
             # Pull image if not available
             try:
@@ -209,6 +206,49 @@ class OpenHandsAgent(ContainerAgentExecutor):
             )
             raise RuntimeError(f"Failed to start OpenHands container: {e}")
 
+    def _build_openhands_script(self, execution_context: Dict[str, Any]) -> str:
+        """Build the Docker/Kubernetes bash script for an OpenHands launch.
+
+        The rendered prompt is not interpolated here. It arrives as base64
+        chunks in the environment and is reassembled into
+        :data:`PROMPT_FILE_PATH` by the materialization block. ``-t`` then
+        reads that file through quoted command substitution, so a ``"`` in
+        the prompt cannot close the shell string.
+
+        The inner ``python -m openhands.core.main -t "$(cat ...)"`` still
+        expands the prompt into that process's argv. That residual is the
+        same class as issue #692 for gemini/opencode and is left alone.
+        """
+        prompt = execution_context["prompt"]
+        max_iterations = execution_context.get("max_iterations", 10)
+        init_commands = self._prepare_init_commands(execution_context)
+        prompt_block = build_prompt_materialization_shell(prompt)
+        # Double quotes around $(cat ...) preserve whitespace. The
+        # substitution result is not re-parsed, so quotes in the file do
+        # not need escaping.
+        task_flag = f'-t "$(cat {PROMPT_FILE_PATH})"'
+        launch = (
+            "cd /app && /app/.venv/bin/python -m openhands.core.main "
+            f"{task_flag} -i {max_iterations}"
+        )
+        body = f"{init_commands} && {launch}" if init_commands else launch
+        return f"""set -e
+# Materialize the rendered prompt from its chunked environment transport.
+{prompt_block}
+
+{body}
+"""
+
+    async def _start_kubernetes_pod(self, execution_context: Dict[str, Any]) -> str:
+        """Run the same OpenHands script on Kubernetes as on Docker."""
+        script = self._build_openhands_script(execution_context)
+        execution_context["_container_command"] = ["bash"]
+        execution_context["_container_args"] = ["-c", script]
+        execution_context["_agent_env"] = await self._prepare_environment(
+            execution_context
+        )
+        return await super()._start_kubernetes_pod(execution_context)
+
     async def _prepare_environment(
         self, execution_context: Dict[str, Any]
     ) -> Dict[str, str]:
@@ -221,13 +261,20 @@ class OpenHandsAgent(ContainerAgentExecutor):
         Returns:
             Environment variables dict
         """
+        prompt = execution_context["prompt"]
         env = {
             "AGENT_TYPE": execution_context.get("openhands_agent_type", "CodeActAgent"),
             "MAX_ITERATIONS": str(execution_context.get("max_iterations", 10)),
-            "PROMPT": execution_context["prompt"],
             "RUNTIME": "local",  # Use local runtime - runs directly in the container without Docker-in-Docker
             "WORKSPACE_BASE": "/workspace",  # Working directory for the agent
         }
+        # Chunked PRELOOP_AGENT_PROMPT_* plus AGENT_PROMPT_FILE. AGENT_PROMPT
+        # is set only while the prompt is <= 64 KiB.
+        env.update(prompt_transport_env(prompt))
+        # Historic OpenHands PROMPT env: same 64 KiB budget as AGENT_PROMPT
+        # so it cannot be the execve string that breaks the launch.
+        if len(prompt.encode("utf-8")) <= MAX_LEGACY_PROMPT_BYTES:
+            env["PROMPT"] = prompt
 
         # Add AI model configuration
         if execution_context.get("model_gateway_enabled"):
@@ -317,6 +364,13 @@ class OpenHandsAgent(ContainerAgentExecutor):
                     )
         else:
             self.logger.debug("No git_clone_config in execution context")
+
+        # Review baseline resolved from a previous execution (see base
+        # class): before the seeds, so an explicit seed at the same path
+        # is written last and wins.
+        baseline_cmd = self._prepare_workspace_baseline_commands(execution_context)
+        if baseline_cmd:
+            commands.append(baseline_cmd)
 
         # Seed /workspace files declared on the trigger payload (see base
         # class): after git clone, before custom commands.

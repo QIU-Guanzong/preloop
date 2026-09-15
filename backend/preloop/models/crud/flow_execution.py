@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import ColumnElement, and_, or_
+from sqlalchemy import ColumnElement, and_, func, or_
 from sqlalchemy.orm import Session, joinedload, load_only, with_expression
 from sqlalchemy.future import select
 
@@ -605,6 +605,38 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         if account_id:
             query = query.join(Flow).filter(Flow.account_id == account_id)
         return query.offset(skip).limit(limit).all()
+
+    def latest_with_result(
+        self,
+        db: Session,
+        *,
+        flow_id: Any,
+        account_id: Optional[str] = None,
+        exclude_execution_id: Any = None,
+    ) -> Optional[FlowExecution]:
+        """Newest execution of this flow that stored a result artifact.
+
+        Backs the ``previous_result_execution_id: "last"`` payload
+        sentinel, which is how a scheduled review run diffs against its own
+        previous run: a schedule cannot know an execution id in advance,
+        and a pinned id would freeze every future run against one baseline.
+        The current execution is excluded explicitly, so a run started
+        before the query cannot pick itself.
+        """
+        # "Stored a result" means a JSON document, not the JSON literal
+        # ``null``: a row created with ``result=None`` persists as JSON null,
+        # which satisfies ``IS NOT NULL`` and would otherwise be picked as a
+        # baseline that contains nothing.
+        query = db.query(FlowExecution).filter(
+            FlowExecution.flow_id == flow_id,
+            FlowExecution.result.isnot(None),
+            func.jsonb_typeof(FlowExecution.result) != "null",
+        )
+        if exclude_execution_id:
+            query = query.filter(FlowExecution.id != exclude_execution_id)
+        if account_id:
+            query = query.join(Flow).filter(Flow.account_id == account_id)
+        return query.order_by(FlowExecution.start_time.desc()).first()
 
     def get_by_result_pr_url(
         self,

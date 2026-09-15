@@ -412,7 +412,7 @@ def clamp_timeout(
     return max(1, min(seconds, remaining))
 
 
-def _console_url(execution_id: Any) -> Optional[str]:
+def console_url_for(execution_id: Any) -> Optional[str]:
     """Deep link to one execution in the console, when a base url is set."""
     import os
 
@@ -450,7 +450,7 @@ def task_record_for_execution(
         "preloop.ai/depth": int(depth),
         "preloop.ai/status": status,
     }
-    console_url = _console_url(execution.id)
+    console_url = console_url_for(execution.id)
     if console_url:
         metadata["preloop.ai/consoleUrl"] = console_url
 

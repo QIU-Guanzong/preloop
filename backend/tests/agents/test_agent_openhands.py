@@ -6,6 +6,14 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from preloop.agents.openhands import OpenHandsAgent
+from preloop.utils.execve_limits import (
+    MAX_LAUNCH_STRING_BYTES,
+    MAX_LEGACY_PROMPT_BYTES,
+    PROMPT_ENV_PREFIX,
+    PROMPT_FILE_PATH,
+    largest_launch_string,
+    prompt_transport_env,
+)
 
 
 @pytest.fixture
@@ -369,3 +377,102 @@ class TestOpenHandsGitCloneCredentials:
         command = agent._prepare_git_clone_command(context)
         assert "-b 'main; echo pwned'" in command
         assert "'https://github.com/acme/repo.git; echo pwned'" in command
+
+
+class TestOpenHandsPromptTransport:
+    """OpenHands is the default agent_type and must use chunked prompt transport."""
+
+    def _context(self, prompt: str, **extra):
+        ctx = {
+            "flow_id": "flow-1",
+            "execution_id": "exec-1",
+            "prompt": prompt,
+            "openhands_agent_type": "CodeActAgent",
+            "max_iterations": 10,
+            "agent_config": {},
+        }
+        ctx.update(extra)
+        return ctx
+
+    def test_script_reads_prompt_from_the_materialized_file_not_inline(self):
+        agent = OpenHandsAgent({})
+        prompt = 'Fix the "auth" bug; do not touch `main`'
+        script = agent._build_openhands_script(self._context(prompt))
+        assert prompt not in script
+        assert f'-t "$(cat {PROMPT_FILE_PATH})"' in script
+        assert f'-t "{prompt}"' not in script
+        assert "PRELOOP_AGENT_PROMPT_" in script
+
+    def test_script_stays_under_the_execve_budget_for_a_huge_prompt(self):
+        agent = OpenHandsAgent({})
+        prompt = "PR body:\n" + ("x" * (200 * 1024))
+        script = agent._build_openhands_script(self._context(prompt))
+        assert prompt not in script
+        assert len(script.encode()) < MAX_LAUNCH_STRING_BYTES
+        env = prompt_transport_env(prompt)
+        biggest = largest_launch_string(command=["bash"], args=["-c", script], env=env)
+        assert biggest.size < MAX_LAUNCH_STRING_BYTES, biggest
+
+    @pytest.mark.asyncio
+    async def test_small_prompt_still_sets_legacy_prompt_env(self, openhands_config):
+        agent = OpenHandsAgent(openhands_config)
+        env = await agent._prepare_environment(self._context("Implement feature X"))
+        assert env["PROMPT"] == "Implement feature X"
+        assert env["AGENT_PROMPT"] == "Implement feature X"
+        assert env["AGENT_PROMPT_FILE"] == PROMPT_FILE_PATH
+        assert f"{PROMPT_ENV_PREFIX}0" in env
+
+    @pytest.mark.asyncio
+    async def test_large_prompt_omits_unbounded_prompt_env(self, openhands_config):
+        agent = OpenHandsAgent(openhands_config)
+        prompt = "y" * (MAX_LEGACY_PROMPT_BYTES + 1)
+        env = await agent._prepare_environment(self._context(prompt))
+        assert "PROMPT" not in env
+        assert "AGENT_PROMPT" not in env
+        assert env["AGENT_PROMPT_FILE"] == PROMPT_FILE_PATH
+        assert f"{PROMPT_ENV_PREFIX}0" in env
+        assert f"{PROMPT_ENV_PREFIX}CHUNKS" in env
+
+    @pytest.mark.asyncio
+    async def test_docker_cmd_does_not_inline_quoted_prompt(
+        self, openhands_config, mock_docker
+    ):
+        mock_container = AsyncMock()
+        mock_container.id = "openhands-quoted-1"
+        mock_docker.containers.create.return_value = mock_container
+
+        agent = OpenHandsAgent(openhands_config)
+        prompt = 'Fix the "auth" bug'
+        await agent.start(self._context(prompt))
+
+        config = mock_docker.containers.create.call_args.kwargs["config"]
+        script = config["Cmd"][-1]
+        assert prompt not in script
+        assert f'-t "$(cat {PROMPT_FILE_PATH})"' in script
+        env = {}
+        for entry in config["Env"]:
+            name, _, value = str(entry).partition("=")
+            env[name] = value
+        assert env["PROMPT"] == prompt
+        assert env["AGENT_PROMPT_FILE"] == PROMPT_FILE_PATH
+        assert f"{PROMPT_ENV_PREFIX}0" in env
+
+    @pytest.mark.asyncio
+    async def test_k8s_pins_script_and_chunked_prompt_env(self):
+        """Hosted Kubernetes must hand the base the script and chunked env."""
+        agent = OpenHandsAgent({})
+        ctx = self._context('Fix the "auth" bug')
+        script = agent._build_openhands_script(ctx)
+        with patch(
+            "preloop.agents.container.ContainerAgentExecutor._start_kubernetes_pod",
+            new_callable=AsyncMock,
+            return_value="job-name",
+        ) as mock_parent:
+            await agent._start_kubernetes_pod(ctx)
+            call_ctx = mock_parent.call_args[0][0]
+            assert call_ctx["_container_command"] == ["bash"]
+            assert call_ctx["_container_args"] == ["-c", script]
+            env = call_ctx["_agent_env"]
+            assert env["AGENT_PROMPT_FILE"] == PROMPT_FILE_PATH
+            assert f"{PROMPT_ENV_PREFIX}0" in env
+            assert env["AGENT_TYPE"] == "CodeActAgent"

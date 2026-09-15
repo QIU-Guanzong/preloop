@@ -210,7 +210,8 @@
             "depth_exceeded",
             "cycle_detected",
             "fanout_exceeded",
-            "budget_exceeded"
+            "budget_exceeded",
+            "execution_not_found"
           ]
         }
       }
