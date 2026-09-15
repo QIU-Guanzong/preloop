@@ -14,7 +14,7 @@ to its session with ``ON DELETE CASCADE``, so a session the purge never
 touches keeps its activity.
 
 Revision ID: 20260915_session_hold
-Revises: 20260915_execution_lineage
+Revises: 20260915_queued_lineage_merge
 Create Date: 2026-09-15
 """
 
@@ -24,7 +24,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "20260915_session_hold"
-down_revision: Union[str, None] = "20260915_execution_lineage"
+down_revision: Union[str, None] = "20260915_queued_lineage_merge"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 # Alembic reads these module globals by name; keep a local reference so static

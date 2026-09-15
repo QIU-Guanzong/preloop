@@ -218,6 +218,15 @@ class FlowExecution(Base):
     # column.
     failure_category = Column(String(32), nullable=True, index=True)
 
+    # Why a PENDING execution has not been admitted yet, from a closed
+    # vocabulary (today: "account_concurrency_cap", see
+    # preloop.services.execution_concurrency). Set by claim_execution when it
+    # refuses admission and cleared the moment the execution is claimed, so
+    # "nothing is happening" has an answer on the row itself rather than in a
+    # worker log. A log line per refusal is not an option: the recovery loop
+    # revisits every unclaimed execution every 30 seconds.
+    queued_reason = Column(String(200), nullable=True)
+
     # Retry tracking
     retry_of_execution_id = Column(
         UUID(as_uuid=True),
@@ -242,7 +251,7 @@ class FlowExecution(Base):
     # comparison instead of a recursive query.
     parent_execution_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("flow_execution.id"),
+        ForeignKey("flow_execution.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )

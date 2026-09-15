@@ -152,7 +152,21 @@ describe('Billing plan comparison', () => {
     await el.updateComplete;
     return el;
   }
+  /** Step 2. The section is collapsed on load, so every action starts here. */
+  async function open(el: BillingPlanComparison) {
+    button(el, 'change-plan').click();
+    await el.updateComplete;
+  }
+  async function showComparison(el: BillingPlanComparison) {
+    button(el, 'show-comparison').click();
+    await el.updateComplete;
+  }
+  async function showUsage(el: BillingPlanComparison) {
+    button(el, 'show-usage').click();
+    await el.updateComplete;
+  }
   async function request(el: BillingPlanComparison) {
+    if (!(el as any).changing) await open(el);
     button(el, 'preview').click();
     await waitUntil(() => !(el as any).busy);
     await el.updateComplete;
@@ -201,8 +215,127 @@ describe('Billing plan comparison', () => {
     invalidateApiCaches();
   });
 
+  it('opens collapsed: the current plan, one action, no tables and no warnings', async () => {
+    data.warnings = [
+      { code: 'subscription_not_reconciled', message: 'Not yet verified.' },
+    ];
+    const el = await mount();
+    expect(text(el)).to.include('Legacy Teams').and.include('Unlimited users');
+    expect(button(el, 'change-plan')).to.exist;
+    expect(el.shadowRoot!.querySelector('[data-testid="plan"]')).to.not.exist;
+    expect(el.shadowRoot!.querySelector('table')).to.not.exist;
+    expect(text(el))
+      .to.not.include('What changes')
+      .and.not.include('Would this plan cover your usage?')
+      .and.not.include('Not yet verified.');
+  });
+  it('reveals the picker, then the comparison, then the usage months, each on request', async () => {
+    const el = await mount();
+    await open(el);
+    expect(el.shadowRoot!.querySelector('[data-testid="plan"]')).to.exist;
+    expect(text(el)).to.not.include('What changes');
+    expect(el.shadowRoot!.querySelector('table')).to.not.exist;
+    await showComparison(el);
+    expect(text(el)).to.include('What changes');
+    expect(text(el)).to.not.include('Would this plan cover your usage?');
+    await showUsage(el);
+    expect(text(el))
+      .to.include('Would this plan cover your usage?')
+      .and.include('Missing records are not zero usage');
+    await showUsage(el);
+    expect(text(el)).to.not.include('Would this plan cover your usage?');
+  });
+  it('defaults the picker to the next tier up, never to Free', async () => {
+    data.current_subscription = null;
+    data.current_plan = plan('free', {
+      name: 'Free',
+      price_monthly: 0,
+      price_annually: 0,
+    });
+    data.plans.unshift(
+      plan('free', { name: 'Free', price_monthly: 0, price_annually: 0 })
+    );
+    const el = await mount();
+    expect((el as any).selectedPlan).to.equal('pro');
+    await open(el);
+    expect(text(el)).to.include('Pro: $10.00 / month');
+  });
+  it('treats an expired trial as Free on the collapsed line and picker default', async () => {
+    data.current_subscription = {
+      ...data.current_subscription!,
+      plan_id: 'pro',
+      status: 'trialing',
+      current_period_end: '2025-07-27T00:00:00Z',
+      legacy: false,
+    };
+    data.current_plan = plan('pro');
+    data.plans.unshift(
+      plan('free', { name: 'Free', price_monthly: 0, price_annually: 0 })
+    );
+    const el = await mount();
+    const current = el.shadowRoot!.querySelector(
+      '[data-testid="current-plan"]'
+    )?.textContent;
+    expect(current).to.include('Free');
+    expect(current).to.not.include('Pro');
+    expect((el as any).selectedPlan).to.equal('pro');
+  });
+  it('does not default the picker to Free when it is the only other catalog plan', async () => {
+    data.current_subscription!.plan_id = 'pro';
+    data.current_subscription!.legacy = false;
+    data.current_plan = plan('pro');
+    data.plans = [
+      plan('free', { name: 'Free', price_monthly: 0, price_annually: 0 }),
+      plan('pro'),
+    ];
+    const el = await mount();
+    expect((el as any).selectedPlan).to.not.equal('free');
+  });
+  it('shows the account warnings beside the action, not as the headline', async () => {
+    data.warnings = [
+      { code: 'subscription_not_reconciled', message: 'Not yet verified.' },
+    ];
+    const el = await mount();
+    expect(el.shadowRoot!.querySelector('[data-testid="warnings"]')).to.not
+      .exist;
+    await open(el);
+    expect(el.shadowRoot!.querySelector('[data-testid="warnings"]')).to.exist;
+    expect(text(el)).to.include('Not yet verified.');
+  });
+  it('states a fit in one line and only offers the months behind a link', async () => {
+    const el = await mount();
+    await open(el);
+    expect(text(el)).to.include('Your current usage fits this plan.');
+    expect(el.shadowRoot!.querySelector('table')).to.not.exist;
+    await showUsage(el);
+    expect(text(el)).to.include('June 2030');
+  });
+  it('lists the reasons inline when the selected plan does not fit', async () => {
+    data.assessments[0].fit = 'exceeds';
+    data.assessments[0].advisories = [
+      { code: 'hosted', message: 'Built-in model spend exceeds this plan.' },
+    ];
+    const el = await mount();
+    await open(el);
+    const summary = el.shadowRoot!.querySelector('[data-testid="fit-summary"]');
+    expect(summary?.textContent).to.include('Exceeds one or more observed');
+    expect(summary?.textContent).to.include(
+      'Built-in model spend exceeds this plan.'
+    );
+    expect(text(el)).to.not.include('Your current usage fits this plan.');
+    expect(el.shadowRoot!.querySelector('table')).to.not.exist;
+  });
+  it('reconciles with the provider only when the reader asks for a refresh', async () => {
+    const el = await mount();
+    expect(String(stub.getCall(0).args[0])).to.not.include('reconcile');
+    button(el, 'refresh').click();
+    await waitUntil(() => !(el as any).loading);
+    expect(calls('?reconcile=true')).to.have.length(1);
+  });
   it('only reads on load and compares three completed months plus current partial', async () => {
     const el = await mount();
+    await open(el);
+    await showUsage(el);
     expect(calls('/plan-change-options')).to.have.length(1);
     expect(
       stub
@@ -224,6 +357,8 @@ describe('Billing plan comparison', () => {
     data.monthly_usage[0].observed_byok_tokens = null;
     data.monthly_usage[0].observed_hosted_cost_usd = null;
     const el = await mount();
+    await open(el);
+    await showUsage(el);
     expect(text(el)).to.include('Not enough evidence to confirm a fit');
     expect(text(el)).to.include('account was created during this month');
     expect(text(el)).to.include('Missing records are not zero usage');
@@ -234,6 +369,8 @@ describe('Billing plan comparison', () => {
     data.monthly_usage[0].observed_hosted_cost_usd = 4;
     data.assessments[0].fit = 'exceeds';
     const el = await mount();
+    await open(el);
+    await showUsage(el);
     expect(text(el))
       .to.include('Above selected quota')
       .and.include('Above included allowance')
@@ -242,6 +379,8 @@ describe('Billing plan comparison', () => {
   it('shows catalog history separately from stored evidence and feature loss', async () => {
     data.plans[0].features.retention_days = 730;
     const el = await mount();
+    await open(el);
+    await showComparison(el);
     expect(text(el))
       .to.include('2 years')
       .and.include('Older analytics are periodically removed')
@@ -258,15 +397,30 @@ describe('Billing plan comparison', () => {
   it('shows legacy unit rate but never offers the legacy plan as a candidate', async () => {
     data.plans.push(data.current_plan);
     const el = await mount();
+    await open(el);
     expect(text(el)).to.include('Legacy Teams').and.include('$29.00 per user');
     const select = el.shadowRoot!.querySelector(
       '[data-testid="plan"]'
     ) as HTMLSelectElement;
     expect([...select.options].map((o) => o.value)).to.not.include('teams');
   });
+  it('never prints placeholder text where a provider amount belongs', async () => {
+    data.current_subscription!.total_amount_cents = null;
+    data.current_subscription!.unit_amount_cents = null;
+    const el = await mount();
+    await open(el);
+    expect(text(el))
+      .to.not.include('Unavailable')
+      .and.not.include('Unknown users')
+      .and.not.include('unverified period');
+    expect(text(el)).to.include(
+      'Current subscription amount: not yet verified with the payment provider.'
+    );
+  });
   it('keeps member actions disabled including direct handler calls', async () => {
     data.can_manage_billing = false;
     const el = await mount();
+    await open(el);
     expect(button(el, 'preview').disabled).to.equal(true);
     await (el as any).requestPreview();
     expect(calls('/plan-change-preview')).to.have.length(0);
@@ -274,15 +428,36 @@ describe('Billing plan comparison', () => {
       'Only a billing owner or account administrator'
     );
   });
-  it('keeps actions disabled when live switching is disabled', async () => {
+  it('explains a disabled change quietly instead of heading the page with it', async () => {
     data.switching_enabled = false;
     const el = await mount();
-    expect(button(el, 'preview').disabled).to.equal(true);
-    expect(text(el)).to.include('Your existing subscription is unchanged');
+    expect(button(el, 'change-plan').disabled).to.equal(true);
+    expect(text(el)).to.include(
+      'Plan changes from the console are not available yet. Manage in Stripe or contact support.'
+    );
+    expect(
+      el
+        .shadowRoot!.querySelector('[data-testid="switching-disabled"] a')
+        ?.getAttribute('href')
+    ).to.equal('mailto:sales@preloop.ai');
+    expect(el.shadowRoot!.querySelector('.warning')).to.not.exist;
+    expect(el.shadowRoot!.querySelector('[data-testid="preview"]')).to.not
+      .exist;
+  });
+  it('keeps checkout for a free account behind the same flag', async () => {
+    data.switching_enabled = false;
+    data.current_subscription = null;
+    data.current_plan = plan('free', { name: 'Free' });
+    const el = await mount();
+    expect(button(el, 'change-plan').disabled).to.equal(true);
+    expect(text(el)).to.include(
+      'Plan changes from the console are not available yet'
+    );
   });
   it('does not silently replace an already scheduled cancellation', async () => {
     data.current_subscription!.cancel_at_period_end = true;
     const el = await mount();
+    await open(el);
     expect(button(el, 'preview').disabled).to.equal(true);
     expect(text(el)).to.include('already scheduled');
   });
@@ -350,6 +525,7 @@ describe('Billing plan comparison', () => {
         resolve = r;
       });
     const el = await mount();
+    await open(el);
     button(el, 'preview').click();
     await waitUntil(() => calls('/plan-change-preview').length === 1);
     (el as any).choose('enterprise');
@@ -414,6 +590,7 @@ describe('Billing plan comparison', () => {
   });
   it('keeps Enterprise sales-led without requesting a checkout or quote', async () => {
     const el = await mount();
+    await open(el);
     (el as any).choose('enterprise');
     await el.updateComplete;
     expect(
@@ -428,6 +605,7 @@ describe('Billing plan comparison', () => {
     data.current_subscription = null;
     data.current_plan = plan('free');
     const el = await mount();
+    await open(el);
     const navigate = sinon.stub(el as any, 'navigate');
     button(el, 'checkout').click();
     await waitUntil(() => !(el as any).busy);
@@ -442,6 +620,7 @@ describe('Billing plan comparison', () => {
     data.current_subscription!.legacy = false;
     data.current_plan = plan('pro');
     const el = await mount();
+    await open(el);
     const select = el.shadowRoot!.querySelector(
       '[data-testid="plan"]'
     ) as HTMLSelectElement;
@@ -474,6 +653,8 @@ describe('Billing plan comparison', () => {
       extra_spending_enabled: false,
     };
     const el = await mount();
+    await open(el);
+    await showUsage(el);
     expect(text(el)).to.include('Available one-time credit: $0.30');
     expect(text(el)).to.include('$0.20 is reserved for calls in progress');
     expect(text(el)).to.include('Extra spending is off');
@@ -488,6 +669,8 @@ describe('Billing plan comparison', () => {
       coverage: 'unknown',
     };
     const el = await mount();
+    await open(el);
+    await showUsage(el);
     expect(text(el)).to.include(
       'historical hosted balance has not been verified'
     );
@@ -516,6 +699,10 @@ describe('Billing plan comparison', () => {
       remaining_credit_usd: 0,
     };
     const el = await mount();
+    await open(el);
+    (el as any).choose('free');
+    await el.updateComplete;
+    await showUsage(el);
     expect(text(el))
       .to.include('$0.50 one-time credit')
       .and.include('Remaining lifetime credit: $0.00');
@@ -574,6 +761,9 @@ describe('Billing plan comparison', () => {
       { code: 'seats', message: 'Current users exceed Free capacity.' },
     ];
     const el = await mount();
+    await open(el);
+    (el as any).choose('free');
+    await el.updateComplete;
     expect(button(el, 'preview').disabled).to.equal(false);
     await request(el);
     await consent(el);
@@ -621,6 +811,7 @@ describe('Billing plan comparison', () => {
     await waitUntil(() => !(first as any).busy);
     first.remove();
     const second = await mount();
+    await open(second);
     expect(calls('/plan-change-confirm')).to.have.length(1);
     expect(button(second, 'recover')).to.exist;
     expect(button(second, 'preview').disabled).to.equal(true);

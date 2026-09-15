@@ -10,7 +10,7 @@ import {
 } from '../../api';
 import { AuthedElement } from '../../api';
 import { unifiedWebSocketManager } from '../../services/unified-websocket-manager';
-import { confirmDialog } from '../../components/confirm-dialog';
+import { confirmStopExecution } from '../../actions/flow-execution-actions';
 import '@shoelace-style/shoelace/dist/components/alert/alert.js';
 import '@shoelace-style/shoelace/dist/components/badge/badge.js';
 import '@shoelace-style/shoelace/dist/components/button/button.js';
@@ -970,19 +970,17 @@ export class FlowExecutionsView extends AuthedElement {
    * which is exactly the kind of thing the console asks about first.
    */
   private async cancelExecution(execution: FlowExecution): Promise<void> {
-    const confirmed = await confirmDialog({
-      title: 'Cancel run',
-      message: `Stop the run of "${execution.flow_name || 'this flow'}"?`,
-      detail:
-        'The agent stops where it is. Work already done is kept in the run, but the run does not finish, and it cannot be resumed — only retried from the start.',
-      confirmLabel: 'Cancel run',
-      cancelLabel: 'Keep running',
-      variant: 'danger',
-    });
+    const confirmed = await confirmStopExecution(execution);
     if (!confirmed) return;
 
     try {
       await sendCommandToExecution(execution.id, 'stop');
+      // Say so at once: a run stopped before it was ever dispatched has no
+      // runtime to publish a status update, so waiting for one leaves the row
+      // reading PENDING until a reload.
+      this.executions = this.executions.map((row) =>
+        row.id === execution.id ? { ...row, status: 'STOPPED' } : row
+      );
       await this.loadExecutions();
     } catch (error) {
       this.showToast(
