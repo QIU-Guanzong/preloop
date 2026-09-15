@@ -5000,7 +5000,7 @@ paths:
       tags:
       - Retention
       summary: Create Legal Hold
-      description: Freeze one execution, approval or evidence pack until released.
+      description: Freeze one execution, approval, evidence pack or runtime session.
       operationId: create_legal_hold_api_v1_retention_holds_post
       security:
       - bearerAuth: []
@@ -19847,7 +19847,7 @@ components:
         resource_type:
           type: string
           title: Resource Type
-          description: One of execution, approval, evidence_pack
+          description: One of execution, approval, evidence_pack, runtime_session
         resource_id:
           type: string
           maxLength: 255
@@ -19864,7 +19864,7 @@ components:
       - resource_id
       - reason
       title: LegalHoldCreate
-      description: Place a hold on one execution, approval or evidence pack.
+      description: Place a hold on one execution, approval, evidence pack or session.
     LegalHoldRead:
       properties:
         id:
@@ -24631,6 +24631,12 @@ components:
           - type: number
           - type: 'null'
           title: Optimization Potential Savings Usd
+        legal_hold:
+          type: boolean
+          title: Legal Hold
+          description: 'True while a legal hold freezes this session: the retention
+            purge leaves it and its activity alone until the hold is released'
+          default: false
       type: object
       required:
       - id

@@ -195,4 +195,6 @@ def test_flow_runners_revision_chains_onto_approval_rule_context() -> None:
     }
     lineage = script.get_revision("20260915_execution_lineage")
     assert lineage.down_revision == "20260914_pricing_merge"
-    assert script.get_heads() == ["20260915_execution_lineage"]
+    session_hold = script.get_revision("20260915_session_hold")
+    assert session_hold.down_revision == "20260915_execution_lineage"
+    assert script.get_heads() == ["20260915_session_hold"]

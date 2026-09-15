@@ -7,7 +7,10 @@ code in the product whose purpose is to delete a customer's records.
 Four properties it has to have, in order of how much they matter:
 
 **It never touches a held record.** Every statement carries the legal hold
-predicate. A hold that a purge could race past is not a hold.
+predicate. A hold that a purge could race past is not a hold. The predicate is
+added centrally, in :func:`class_filters`, from the flag on the class's model,
+so a class cannot carry a cutoff without carrying the hold check; a class whose
+model has no flag has to say so in :data:`HOLD_EXEMPT_CLASSES` and explain why.
 
 **It is off by default.** ``RETENTION_PURGE_ENABLED`` is false. An operator
 upgrading to this release does not discover afterwards that a background job
@@ -174,7 +177,6 @@ def _approval_cutoff_filters(cutoff: datetime):
     return (
         ApprovalRequest.requested_at < cutoff,
         ApprovalRequest.status != _UNRESOLVED_APPROVAL_STATUS,
-        ApprovalRequest.legal_hold.is_(False),
     )
 
 
@@ -182,7 +184,6 @@ def _evidence_cutoff_filters(cutoff: datetime):
     return (
         FlowArtifact.created_at < cutoff,
         FlowArtifact.kind == "evidence",
-        FlowArtifact.legal_hold.is_(False),
     )
 
 
@@ -219,6 +220,43 @@ _CLASS_FILTERS = {
     CLASS_USAGE: _usage_cutoff_filters,
 }
 
+#: Classes whose model carries no legal hold flag, and why. A class may only
+#: be here on purpose: :func:`class_filters` adds the hold predicate to every
+#: class whose model has the column, and the invariant test reads this mapping,
+#: so a new purgeable class without hold coverage has to be written down here
+#: rather than omitted by accident. That is the failure this mapping exists to
+#: prevent: runtime sessions were purged with no hold check for months because
+#: nothing made the omission visible (issue #650).
+HOLD_EXEMPT_CLASSES: dict[str, str] = {
+    CLASS_AUDIT: (
+        "audit rows are the record of the hold itself and of the purge that "
+        "removed them; they are chained and floored rather than held, and a "
+        "hold on one resource does not freeze the whole account's log"
+    ),
+    CLASS_USAGE: (
+        "usage rows carry no hold flag yet; holds over usage are a separate "
+        "gap, deliberately out of scope here"
+    ),
+}
+
+
+def _hold_filters(record_class: str):
+    """The legal hold predicate for one class, empty when it is exempt.
+
+    Read off the model rather than repeated per class: the predicate cannot
+    then be present on three classes and silently missing on the fourth, which
+    is exactly how a held runtime session was purgeable.
+    """
+    flag = getattr(_CLASS_MODELS[record_class], "legal_hold", None)
+    if flag is None:
+        return ()
+    return (flag.is_(False),)
+
+
+def class_filters(record_class: str, cutoff: datetime):
+    """Every predicate the purge applies to one class: cutoff plus hold."""
+    return (*_CLASS_FILTERS[record_class](cutoff), *_hold_filters(record_class))
+
 
 def _candidate_ids_stmt(
     record_class: str, *, account_id: Any, cutoff: datetime, limit: int
@@ -227,7 +265,7 @@ def _candidate_ids_stmt(
     model = _CLASS_MODELS[record_class]
     return (
         select(model.id)
-        .where(model.account_id == account_id, *_CLASS_FILTERS[record_class](cutoff))
+        .where(model.account_id == account_id, *class_filters(record_class, cutoff))
         .order_by(model.id)
         .limit(limit)
     )
@@ -244,7 +282,7 @@ def count_purgeable(
             .select_from(model)
             .where(
                 model.account_id == account_id,
-                *_CLASS_FILTERS[record_class](cutoff),
+                *class_filters(record_class, cutoff),
             )
         ).scalar_one()
     )

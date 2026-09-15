@@ -42,9 +42,11 @@ from preloop.models.models.legal_hold import (
     HOLD_RESOURCE_APPROVAL,
     HOLD_RESOURCE_EVIDENCE_PACK,
     HOLD_RESOURCE_EXECUTION,
+    HOLD_RESOURCE_RUNTIME_SESSION,
     HOLD_RESOURCE_TYPES,
     LegalHold,
 )
+from preloop.models.models.runtime_session import RuntimeSession
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +114,7 @@ def _require_resource(
         HOLD_RESOURCE_EXECUTION: FlowExecution,
         HOLD_RESOURCE_APPROVAL: ApprovalRequest,
         HOLD_RESOURCE_EVIDENCE_PACK: FlowArtifact,
+        HOLD_RESOURCE_RUNTIME_SESSION: RuntimeSession,
     }[resource_type]
     if resource_type == HOLD_RESOURCE_EXECUTION:
         # An execution is owned through its flow, not by a column of its own.
@@ -212,6 +215,14 @@ def _apply_flags(
     elif resource_type == HOLD_RESOURCE_APPROVAL:
         flagged["approval_request"] = crud.set_approval_flag(
             db, account_id=account_id, approval_id=resource_id, held=held
+        )
+    elif resource_type == HOLD_RESOURCE_RUNTIME_SESSION:
+        # One flag covers the session and, through the cascade that ties them
+        # to it, its activity rows: the purge deletes the session row and lets
+        # the database take the activity with it, so a session it never
+        # reaches keeps everything under it.
+        flagged["runtime_session"] = crud.set_runtime_session_flag(
+            db, account_id=account_id, runtime_session_id=resource_id, held=held
         )
     else:
         execution_id = db.execute(
