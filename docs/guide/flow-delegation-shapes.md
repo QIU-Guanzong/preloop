@@ -135,6 +135,7 @@ because a new status is a decision.
 | --- | --- | --- |
 | `PENDING` | `TASK_STATE_SUBMITTED` | Accepted, queued, nothing running |
 | `INITIALIZING` | `TASK_STATE_SUBMITTED` | Container coming up; no model turn has run |
+| `STARTING` | `TASK_STATE_SUBMITTED` | Runtime coming up; no model turn has run |
 | `RUNNING` | `TASK_STATE_WORKING` | The agent is working |
 | `RESUMING` | `TASK_STATE_WORKING` | A parked run being restarted is working again |
 | `WAITING_FOR_HUMAN` | `TASK_STATE_INPUT_REQUIRED` | Alive, holding no runtime, waiting for an answer. Interrupted, not terminal |

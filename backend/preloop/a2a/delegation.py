@@ -21,6 +21,7 @@ maps a status and validates a dictionary. See
 
 from __future__ import annotations
 
+import copy
 import json
 from functools import lru_cache
 from pathlib import Path
@@ -52,6 +53,7 @@ STATUS_TO_TASK_STATE: Final[Mapping[str, str]] = MappingProxyType(
         # Accepted, nothing running yet: no container, no model turn.
         "PENDING": "TASK_STATE_SUBMITTED",
         "INITIALIZING": "TASK_STATE_SUBMITTED",
+        "STARTING": "TASK_STATE_SUBMITTED",
         # The agent is working, including a parked run being restarted.
         "RUNNING": "TASK_STATE_WORKING",
         "RESUMING": "TASK_STATE_WORKING",
@@ -118,8 +120,21 @@ class DelegationShapeError(ValueError):
 
 
 @lru_cache(maxsize=None)
+def _cached_schema(name: str) -> Dict[str, Any]:
+    """Load and cache one frozen schema by name."""
+    path = SCHEMA_DIR / f"{name}.schema.json"
+    if not path.is_file():
+        raise DelegationShapeError(f"No delegation schema named {name!r}")
+    with path.open(encoding="utf-8") as handle:
+        schema: Dict[str, Any] = json.load(handle)
+    return schema
+
+
 def load_schema(name: str) -> Dict[str, Any]:
     """Load one frozen schema by name.
+
+    Returns a deep copy of the cached parse so a caller cannot poison
+    later validation by mutating the dict.
 
     Args:
         name: ``delegation_request`` or ``delegation_task``.
@@ -130,12 +145,7 @@ def load_schema(name: str) -> Dict[str, Any]:
     Raises:
         DelegationShapeError: If no schema of that name is shipped.
     """
-    path = SCHEMA_DIR / f"{name}.schema.json"
-    if not path.is_file():
-        raise DelegationShapeError(f"No delegation schema named {name!r}")
-    with path.open(encoding="utf-8") as handle:
-        schema: Dict[str, Any] = json.load(handle)
-    return schema
+    return copy.deepcopy(_cached_schema(name))
 
 
 def _validate(payload: Mapping[str, Any], schema_name: str) -> None:
@@ -144,7 +154,7 @@ def _validate(payload: Mapping[str, Any], schema_name: str) -> None:
     # dependency and nothing on the request path validates today.
     from jsonschema import Draft202012Validator
 
-    validator = Draft202012Validator(load_schema(schema_name))
+    validator = Draft202012Validator(_cached_schema(schema_name))
     errors = sorted(validator.iter_errors(payload), key=lambda error: error.path)
     if not errors:
         return

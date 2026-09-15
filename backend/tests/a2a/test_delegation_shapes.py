@@ -29,6 +29,7 @@ from preloop.a2a.delegation import (
     REFUSED_STATUS,
     STATUS_TO_TASK_STATE,
     DelegationShapeError,
+    is_refusal,
     load_schema,
     task_state_for_status,
     validate_delegation_request,
@@ -194,6 +195,7 @@ class TestStatusMapping:
     EXPECTED = {
         "PENDING": "TASK_STATE_SUBMITTED",
         "INITIALIZING": "TASK_STATE_SUBMITTED",
+        "STARTING": "TASK_STATE_SUBMITTED",
         "RUNNING": "TASK_STATE_WORKING",
         "RESUMING": "TASK_STATE_WORKING",
         "WAITING_FOR_HUMAN": "TASK_STATE_INPUT_REQUIRED",
@@ -219,6 +221,8 @@ class TestStatusMapping:
         assert task_state_for_status(REFUSED_STATUS) == "TASK_STATE_REJECTED"
         assert task_state_for_status("FAILED") == "TASK_STATE_FAILED"
         assert task_state_for_status(REFUSED_STATUS) != task_state_for_status("FAILED")
+        assert is_refusal(REFUSED_STATUS)
+        assert not is_refusal("FAILED")
 
     def test_unknown_status_raises_rather_than_guessing(self) -> None:
         with pytest.raises(DelegationShapeError):
@@ -251,6 +255,12 @@ class TestDocumentAndSchemaAgree:
         assert A2A_SPECIFICATION_VERSION in text
         assert f"protocol version {A2A_PROTOCOL_VERSION}" in text.lower()
         assert A2A_PROTOCOL_BINDING in text
+
+    def test_load_schema_returns_a_copy(self) -> None:
+        first = load_schema("delegation_request")
+        first["poison"] = True
+        second = load_schema("delegation_request")
+        assert "poison" not in second
 
     def test_metadata_key_list_matches_the_schemas(self) -> None:
         request_keys = set(
