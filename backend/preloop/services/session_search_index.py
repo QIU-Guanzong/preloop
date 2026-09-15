@@ -10,7 +10,8 @@ cut into ``CHUNK_SIZE_CHARS`` windows that advance by
 ``CHUNK_SIZE_CHARS - CHUNK_OVERLAP_CHARS`` characters, with the cut pulled
 back to the last line or word boundary in the tail of the window when there is
 one. The same input always produces the same chunks, so re-indexing a source
-whose content did not change hashes identically and writes nothing.
+whose content and filter metadata did not change hashes identically and
+writes nothing.
 """
 
 from __future__ import annotations
@@ -41,6 +42,8 @@ from preloop.models.models.session_search_document import (
     SessionSearchDocument,
 )
 from preloop.services.gateway_usage_search import GatewayUsageSearchService
+from preloop.utils.secret_scrubbing import REDACTED as SCRUB_PLACEHOLDER
+from preloop.utils.secret_scrubbing import scrub_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,12 @@ REDACTED_VALUE = GatewayUsageSearchService.REDACTED_VALUE
 _CREDENTIAL_PATTERN = re.compile(
     r"(?i)\b([\w.-]*(?:api[_-]?key|authorization|secret|token|password)"
     r"[\w.-]*)\s*[:=]\s*(\"[^\"]*\"|'[^']*'|\S+)"
+)
+#: PEM private-key blocks pasted into transcript, notes, or tool summaries.
+_PEM_PRIVATE_KEY_PATTERN = re.compile(
+    r"-----BEGIN [A-Z0-9 ]{0,64}PRIVATE KEY-----"
+    r"(?:[A-Za-z0-9+/=\s]{1,16384})"
+    r"-----END [A-Z0-9 ]{0,64}PRIVATE KEY-----"
 )
 
 
@@ -130,13 +139,24 @@ def redact_text(text: str) -> tuple[str, bool]:
     are not touched again; this covers the free text sources (transcript
     messages, tool call summaries, operator notes) that never pass through a
     payload sanitiser.
+
+    Labelled pairs (``api_key: value`` / ``secret=value``) are masked first.
+    Known provider key prefixes, URL userinfo, query-parameter secrets and
+    auth headers are masked next via :func:`scrub_secrets`. PEM private key
+    blocks are masked last. Generic high-entropy blobs with no known prefix
+    stay unmasked; that remaining gap is accepted until a broader scanner
+    lands with the retention/legal-hold work.
     """
     if not text:
         return "", False
-    redacted, count = _CREDENTIAL_PATTERN.subn(
+    redacted, _labelled_count = _CREDENTIAL_PATTERN.subn(
         lambda match: f"{match.group(1)}: {REDACTED_VALUE}", text
     )
-    return redacted, bool(count)
+    shaped = scrub_secrets(redacted) or ""
+    if SCRUB_PLACEHOLDER != REDACTED_VALUE:
+        shaped = shaped.replace(SCRUB_PLACEHOLDER, REDACTED_VALUE)
+    pem, _pem_count = _PEM_PRIVATE_KEY_PATTERN.subn(REDACTED_VALUE, shaped)
+    return pem, pem != text
 
 
 def _resolve_redaction_state(*, captured: bool, redacted: bool) -> str:
@@ -296,7 +316,18 @@ def write_source_chunks(
             if savepoint.is_active:
                 savepoint.commit()
         if commit:
-            db.commit()
+            # A failed Session.commit leaves the shared session in a
+            # pending-rollback state. Recover it before the outer swallow
+            # so the caller's next query is not a PendingRollbackError.
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            # Production callers discard the returned list. Refreshing here
+            # would be one extra SELECT per chunk on the gateway path for
+            # attributes nobody reads. The embedding nudge runs after
+            # commit and only inspects embedding_state.
             _request_embedding(account_id, stored)
         return stored
     except Exception:  # noqa: BLE001 - indexing never fails its caller
