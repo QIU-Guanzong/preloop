@@ -5,6 +5,14 @@ one source row (one gateway interaction, one transcript message, one tool
 call, one operator note, one summary, one log excerpt) and touches nothing
 else. Writes are idempotent on the content hash, so re-indexing an unchanged
 source is a no op rather than a delete and insert.
+
+Reading has two shapes. :meth:`CRUDSessionSearchDocument.search_account_chunks`
+lists chunks newest first, which is what a timeline wants.
+:meth:`CRUDSessionSearchDocument.search_sessions_ranked` answers the other
+question, "where did an agent do this": it ranks chunks by relevance, fuses the
+chunk scores of one session into a single session score, and returns database
+generated snippets for the best chunks. Both bind ``account_id`` in the query
+itself, never in a serialiser.
 """
 
 from __future__ import annotations
@@ -14,8 +22,23 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from sqlalchemy import String, and_, case, delete, func, or_, select, update
+from sqlalchemy import (
+    Float,
+    String,
+    Text,
+    and_,
+    case,
+    cast,
+    delete,
+    distinct,
+    func,
+    null,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from preloop.config import settings
 
@@ -34,6 +57,50 @@ from ..models.session_search_document import (
     SessionSearchDocument,
 )
 from .base import CRUDBase
+
+#: Text search configuration. This has to be the configuration the corpus is
+#: indexed with (``session_search_document.search_vector`` is generated as
+#: ``to_tsvector('simple', content)``), otherwise the query would be parsed
+#: with one lexeme set and matched against another.
+SEARCH_CONFIG = "simple"
+
+#: Documented ceiling on how many sessions one search may return. Fifty is a
+#: screenful and a half; past that a caller wants a narrower query, not a
+#: longer page.
+MAX_SESSION_RESULTS = 50
+
+#: Documented ceiling on snippets returned per session. Snippets are the
+#: expensive part of the response (one ``ts_headline`` call each), so the cap
+#: is deliberately low.
+MAX_SNIPPETS_PER_SESSION = 10
+
+#: How much a matching chunk counts for once it is not the best one in its
+#: session. Fusing with the plain sum would let a long, weakly matching session
+#: outrank a short, exactly matching one; fusing with the plain maximum would
+#: throw away the signal that the session matched repeatedly. Half weight on
+#: the rest is the compromise.
+CHUNK_FUSION_SECONDARY_WEIGHT = 0.5
+
+#: Additive bonus for a session that matches in several distinct chunks,
+#: damped by a logarithm so the tenth match is worth much less than the
+#: second. A session that matches in five places is almost always the one the
+#: operator wanted.
+MULTI_CHUNK_BONUS_WEIGHT = 0.15
+
+#: ``ts_headline`` options. ``MaxFragments`` above zero selects the fragment
+#: based headline generator, which picks the densest window rather than simply
+#: truncating from the start of the chunk.
+HEADLINE_OPTIONS = (
+    "StartSel=<mark>, StopSel=</mark>, "
+    "MaxWords=35, MinWords=10, ShortWord=3, "
+    "MaxFragments=2, FragmentDelimiter= ... "
+)
+
+#: The constants above are tunable and unvalidated: they were chosen to make
+#: the documented orderings hold on the fixtures in
+#: ``backend/tests/models/crud/test_session_search_ranking.py``, not from
+#: measured relevance on real corpora. Treat a change to them as a product
+#: change, not a refactor.
 
 
 def _held_session_exists() -> Any:
@@ -63,6 +130,68 @@ def _source_row_gone(source_model: Any) -> Any:
 def content_hash_for(text: str) -> str:
     """Return the stable content hash used to detect an unchanged chunk."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def normalize_query(query: Optional[str]) -> Optional[str]:
+    """Collapse a raw query to the string handed to ``websearch_to_tsquery``."""
+    if not query:
+        return None
+    collapsed = " ".join(query.strip().split())
+    return collapsed or None
+
+
+@dataclass
+class SessionSearchFilters:
+    """Filters over the denormalised columns the corpus carries.
+
+    Every field here is a snapshot the writer took from the source row, so a
+    filtered search never joins the source table and never widens past the
+    account bound.
+    """
+
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    model_alias: Optional[str] = None
+    provider_name: Optional[str] = None
+    runtime_principal_id: Optional[str] = None
+    api_key_id: Optional[Any] = None
+    flow_id: Optional[Any] = None
+    source_kind: Optional[str] = None
+
+
+@dataclass
+class RankedSnippet:
+    """One matching chunk, with the identity needed to reopen that turn."""
+
+    document_id: Any
+    runtime_session_id: Any
+    source_kind: str
+    source_id: str
+    chunk_index: int
+    occurred_at: datetime
+    role: Optional[str]
+    rank: float
+    redaction_state: str
+    text: Optional[str] = None
+
+
+@dataclass
+class RankedSession:
+    """One session, its fused score and its best snippets."""
+
+    runtime_session_id: Any
+    session_source_type: Optional[str]
+    session_source_id: Optional[str]
+    session_reference: Optional[str]
+    title: Optional[str]
+    started_at: Optional[datetime]
+    last_activity_at: Optional[datetime]
+    score: float
+    best_chunk_rank: float
+    matched_chunk_count: int
+    first_match_at: Optional[datetime]
+    last_match_at: Optional[datetime]
+    snippets: List[RankedSnippet] = field(default_factory=list)
 
 
 @dataclass
@@ -546,6 +675,315 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
             )
             for row in db.execute(stmt).all()
         ]
+
+    def _match_conditions(
+        self,
+        *,
+        account_id: Any,
+        tsquery: ColumnElement[Any],
+        filters: Optional[SessionSearchFilters],
+    ) -> List[ColumnElement[bool]]:
+        """Build the WHERE terms shared by the count, rank and snippet passes.
+
+        ``account_id`` is first and unconditional. The account bound lives
+        here, in the query, so there is no code path that can produce a row
+        from another account for a serialiser to have to remember to drop.
+        """
+        conditions: List[ColumnElement[bool]] = [
+            SessionSearchDocument.account_id == account_id,
+            SessionSearchDocument.search_vector.op("@@")(tsquery),
+        ]
+        active = filters or SessionSearchFilters()
+        if active.start_date is not None:
+            conditions.append(SessionSearchDocument.occurred_at >= active.start_date)
+        if active.end_date is not None:
+            conditions.append(SessionSearchDocument.occurred_at < active.end_date)
+        if active.model_alias:
+            conditions.append(SessionSearchDocument.model_alias == active.model_alias)
+        if active.provider_name:
+            conditions.append(
+                SessionSearchDocument.provider_name == active.provider_name
+            )
+        if active.runtime_principal_id:
+            conditions.append(
+                SessionSearchDocument.runtime_principal_id
+                == active.runtime_principal_id
+            )
+        if active.api_key_id is not None:
+            conditions.append(SessionSearchDocument.api_key_id == active.api_key_id)
+        if active.flow_id is not None:
+            conditions.append(SessionSearchDocument.flow_id == active.flow_id)
+        if active.source_kind:
+            conditions.append(SessionSearchDocument.source_kind == active.source_kind)
+        return conditions
+
+    def indexed_through(self, db: Session, *, account_id: Any) -> Optional[datetime]:
+        """Return the newest ``occurred_at`` this account has in the corpus.
+
+        A search answer is only as fresh as the corpus behind it, and the
+        corpus fills forward from deploy. Publishing the marker lets a caller
+        tell "no session did that" apart from "nothing that old is indexed".
+        """
+        marker = (
+            db.query(func.max(SessionSearchDocument.occurred_at))
+            .filter(SessionSearchDocument.account_id == account_id)
+            .scalar()
+        )
+        return marker if isinstance(marker, datetime) else None
+
+    def search_sessions_ranked(
+        self,
+        db: Session,
+        *,
+        account_id: Any,
+        query: str,
+        filters: Optional[SessionSearchFilters] = None,
+        limit: int = 20,
+        offset: int = 0,
+        max_snippets_per_session: int = 3,
+        include_snippet_text: bool = True,
+    ) -> Tuple[List[RankedSession], int]:
+        """Rank sessions by relevance to ``query`` and return their snippets.
+
+        The query text goes through ``websearch_to_tsquery``, so a quoted
+        phrase stays a phrase, ``or`` alternates and a leading ``-`` excludes,
+        parsed with the same text search configuration the corpus is indexed
+        with.
+
+        Chunk ranks are fused into one session score as::
+
+            score = best
+                  + CHUNK_FUSION_SECONDARY_WEIGHT * (total - best)
+                  + MULTI_CHUNK_BONUS_WEIGHT * ln(matching_chunks)
+
+        so a session that matched once scores exactly its chunk rank, and a
+        session that matched in several distinct chunks is lifted above an
+        equally good single match. The constants are tunable and unvalidated;
+        see the module header.
+
+        Returns:
+            The page of ranked sessions and the total number of distinct
+            sessions matching, which is the number a caller pages through.
+        """
+        normalized = normalize_query(query)
+        if not normalized:
+            return [], 0
+
+        limit = max(1, min(int(limit), MAX_SESSION_RESULTS))
+        offset = max(0, int(offset))
+        snippet_budget = max(
+            0, min(int(max_snippets_per_session), MAX_SNIPPETS_PER_SESSION)
+        )
+
+        tsquery = func.websearch_to_tsquery(SEARCH_CONFIG, normalized)
+        conditions = self._match_conditions(
+            account_id=account_id, tsquery=tsquery, filters=filters
+        )
+
+        total = int(
+            db.query(func.count(distinct(SessionSearchDocument.runtime_session_id)))
+            .filter(*conditions)
+            .scalar()
+            or 0
+        )
+        if total == 0:
+            return [], 0
+
+        chunk_rank = cast(
+            func.ts_rank(SessionSearchDocument.search_vector, tsquery), Float
+        )
+        best_rank = func.max(chunk_rank)
+        matched_chunks = func.count(SessionSearchDocument.id)
+        score = (
+            best_rank
+            + CHUNK_FUSION_SECONDARY_WEIGHT * (func.sum(chunk_rank) - best_rank)
+            + MULTI_CHUNK_BONUS_WEIGHT * func.ln(cast(matched_chunks, Float))
+        )
+        last_match_at = func.max(SessionSearchDocument.occurred_at)
+
+        # Grouping by the runtime session primary key lets PostgreSQL resolve
+        # the other session columns by functional dependency, so the join can
+        # carry session identity without widening the GROUP BY.
+        ranked_rows = (
+            db.query(
+                RuntimeSession.id.label("runtime_session_id"),
+                RuntimeSession.session_source_type.label("session_source_type"),
+                RuntimeSession.session_source_id.label("session_source_id"),
+                RuntimeSession.session_reference.label("session_reference"),
+                RuntimeSession.title.label("title"),
+                RuntimeSession.started_at.label("started_at"),
+                RuntimeSession.last_activity_at.label("last_activity_at"),
+                score.label("score"),
+                best_rank.label("best_chunk_rank"),
+                matched_chunks.label("matched_chunk_count"),
+                func.min(SessionSearchDocument.occurred_at).label("first_match_at"),
+                last_match_at.label("last_match_at"),
+            )
+            .join(
+                RuntimeSession,
+                RuntimeSession.id == SessionSearchDocument.runtime_session_id,
+            )
+            .filter(*conditions)
+            .group_by(RuntimeSession.id)
+            # Relevance first, and only then recency: ordering by time is the
+            # wrong answer to "where did an agent do this", which is the whole
+            # reason this endpoint exists. The session id tail break keeps
+            # paging stable when two sessions score identically.
+            .order_by(score.desc(), last_match_at.desc(), RuntimeSession.id.asc())
+            .limit(limit)
+            .offset(offset)
+            .all()
+        )
+        if not ranked_rows:
+            return [], total
+
+        sessions = [
+            RankedSession(
+                runtime_session_id=row.runtime_session_id,
+                session_source_type=row.session_source_type,
+                session_source_id=row.session_source_id,
+                session_reference=row.session_reference,
+                title=row.title,
+                started_at=row.started_at,
+                last_activity_at=row.last_activity_at,
+                score=float(row.score or 0.0),
+                best_chunk_rank=float(row.best_chunk_rank or 0.0),
+                matched_chunk_count=int(row.matched_chunk_count or 0),
+                first_match_at=row.first_match_at,
+                last_match_at=row.last_match_at,
+            )
+            for row in ranked_rows
+        ]
+
+        if snippet_budget:
+            snippets = self._snippets_for_sessions(
+                db,
+                conditions=conditions,
+                tsquery=tsquery,
+                session_ids=[row.runtime_session_id for row in ranked_rows],
+                max_per_session=snippet_budget,
+                include_text=include_snippet_text,
+            )
+            for session in sessions:
+                session.snippets = snippets.get(str(session.runtime_session_id), [])
+
+        return sessions, total
+
+    def _snippets_for_sessions(
+        self,
+        db: Session,
+        *,
+        conditions: Sequence[ColumnElement[bool]],
+        tsquery: ColumnElement[Any],
+        session_ids: Sequence[Any],
+        max_per_session: int,
+        include_text: bool,
+    ) -> Dict[str, List[RankedSnippet]]:
+        """Return the best chunks per session, keyed by session id as text.
+
+        The window runs over the same predicate as the ranking pass, so a
+        snippet can only ever come from a chunk that was counted. ``ts_headline``
+        is applied in the outer query, after the window has cut the candidate
+        set down to ``max_per_session`` rows per session, because a headline
+        costs a re-parse of the chunk text.
+        """
+        chunk_rank = cast(
+            func.ts_rank(SessionSearchDocument.search_vector, tsquery), Float
+        )
+        columns: List[Any] = [
+            SessionSearchDocument.id.label("document_id"),
+            SessionSearchDocument.runtime_session_id.label("runtime_session_id"),
+            SessionSearchDocument.source_kind.label("source_kind"),
+            SessionSearchDocument.source_id.label("source_id"),
+            SessionSearchDocument.chunk_index.label("chunk_index"),
+            SessionSearchDocument.occurred_at.label("occurred_at"),
+            SessionSearchDocument.role.label("role"),
+            SessionSearchDocument.redaction_state.label("redaction_state"),
+            chunk_rank.label("rank"),
+            func.row_number()
+            .over(
+                partition_by=SessionSearchDocument.runtime_session_id,
+                order_by=(
+                    chunk_rank.desc(),
+                    SessionSearchDocument.occurred_at.asc(),
+                    SessionSearchDocument.chunk_index.asc(),
+                ),
+            )
+            .label("position"),
+        ]
+        if include_text:
+            # Only projected when a headline will actually be built from it, so
+            # "no snippet text" means the content column is never read at all,
+            # not read and then dropped on the way out. Withheld text is the
+            # empty string in this projection, the same rule as
+            # search_account_hits: the database never returns the stored body.
+            returnable = SessionSearchDocument.redaction_state.in_(
+                TEXT_RETURNABLE_REDACTION_STATES
+            )
+            guarded_content = case(
+                (returnable, SessionSearchDocument.content),
+                else_="",
+            )
+            columns.append(guarded_content.label("content"))
+
+        windowed = (
+            select(*columns)
+            .where(*conditions)
+            .where(SessionSearchDocument.runtime_session_id.in_(list(session_ids)))
+            .subquery()
+        )
+
+        headline: Any
+        if include_text:
+            headline = func.ts_headline(
+                SEARCH_CONFIG, windowed.c.content, tsquery, HEADLINE_OPTIONS
+            )
+        else:
+            headline = cast(null(), Text)
+
+        rows = (
+            db.query(
+                windowed.c.document_id,
+                windowed.c.runtime_session_id,
+                windowed.c.source_kind,
+                windowed.c.source_id,
+                windowed.c.chunk_index,
+                windowed.c.occurred_at,
+                windowed.c.role,
+                windowed.c.redaction_state,
+                windowed.c.rank,
+                headline.label("snippet"),
+            )
+            .filter(windowed.c.position <= max_per_session)
+            .order_by(
+                windowed.c.runtime_session_id.asc(),
+                windowed.c.position.asc(),
+            )
+            .all()
+        )
+
+        grouped: Dict[str, List[RankedSnippet]] = {}
+        for row in rows:
+            grouped.setdefault(str(row.runtime_session_id), []).append(
+                RankedSnippet(
+                    document_id=row.document_id,
+                    runtime_session_id=row.runtime_session_id,
+                    source_kind=row.source_kind,
+                    source_id=row.source_id,
+                    chunk_index=int(row.chunk_index or 0),
+                    occurred_at=row.occurred_at,
+                    role=row.role,
+                    rank=float(row.rank or 0.0),
+                    redaction_state=row.redaction_state,
+                    text=(
+                        row.snippet
+                        if include_text
+                        and row.redaction_state in TEXT_RETURNABLE_REDACTION_STATES
+                        else None
+                    ),
+                )
+            )
+        return grouped
 
     def count_for_session(
         self, db: Session, *, account_id: Any, runtime_session_id: Any
