@@ -330,6 +330,19 @@ def _describe(strings: Iterable[LaunchString], limit: int = 5) -> str:
     return ", ".join(f"{item.label}={item.size} bytes" for item in ranked)
 
 
+def _budget_clause(size: int, budget: int, kind: str) -> str:
+    """Describe a size that is at or above ``budget``.
+
+    The guard refuses at ``>=``, so a payload that lands exactly on the
+    budget must not claim it exceeds that budget by 0 bytes.
+    """
+    overage = size - budget
+    clause = f"reaches or exceeds the {budget} byte {kind} budget"
+    if overage:
+        clause += f" by {overage} bytes"
+    return clause
+
+
 def check_launch_payload(
     command: Optional[Sequence[str]] = None,
     args: Optional[Sequence[str]] = None,
@@ -352,8 +365,8 @@ def check_launch_payload(
         LaunchPayloadTooLargeError: When one string is at or above
             :data:`MAX_LAUNCH_STRING_BYTES`, or the total is at or above
             :data:`MAX_LAUNCH_TOTAL_BYTES`. The message names the offending
-            item, its size and the overage, because the whole point of the
-            guard is that ``argument list too long`` names none of the three.
+            item and its size, because the whole point of the guard is that
+            ``argument list too long`` names none of the three.
     """
     strings = launch_strings(command, args, env)
     if not strings:
@@ -363,10 +376,9 @@ def check_launch_payload(
     if biggest.size >= MAX_LAUNCH_STRING_BYTES:
         raise LaunchPayloadTooLargeError(
             f"Cannot start {what}: launch payload exceeds the execve string "
-            f"limit. {biggest.label} is {biggest.size} bytes, "
-            f"which exceeds the {MAX_LAUNCH_STRING_BYTES} byte per-string "
-            f"launch budget by {biggest.size - MAX_LAUNCH_STRING_BYTES} "
-            f"bytes (Linux caps one execve string at MAX_ARG_STRLEN, "
+            f"limit. {biggest.label} is {biggest.size} bytes, which "
+            f"{_budget_clause(biggest.size, MAX_LAUNCH_STRING_BYTES, 'per-string launch')} "
+            f"(Linux caps one execve string at MAX_ARG_STRLEN, "
             f"{MAX_ARG_STRLEN} bytes). Largest strings: {_describe(strings)}."
         )
 
@@ -375,10 +387,9 @@ def check_launch_payload(
         raise LaunchPayloadTooLargeError(
             f"Cannot start {what}: launch payload exceeds the total argument "
             f"budget. The launch would pass {total} bytes of "
-            f"arguments and environment, which exceeds the "
-            f"{MAX_LAUNCH_TOTAL_BYTES} byte total budget by "
-            f"{total - MAX_LAUNCH_TOTAL_BYTES} bytes (ARG_MAX bounds argv "
-            f"plus environment together). Largest strings: "
-            f"{_describe(strings)}."
+            f"arguments and environment, which "
+            f"{_budget_clause(total, MAX_LAUNCH_TOTAL_BYTES, 'total')} "
+            f"(ARG_MAX bounds argv plus environment together). Largest "
+            f"strings: {_describe(strings)}."
         )
     return strings

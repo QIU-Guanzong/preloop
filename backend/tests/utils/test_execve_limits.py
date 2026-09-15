@@ -127,8 +127,19 @@ class TestTheGuard:
         # Boundary, at the limit. The guard is >=, not >.
         value = "x" * (MAX_LAUNCH_STRING_BYTES - 3)
         assert largest_launch_string(env={"A": value}).size == MAX_LAUNCH_STRING_BYTES
-        with pytest.raises(LaunchPayloadTooLargeError):
+        with pytest.raises(LaunchPayloadTooLargeError) as excinfo:
             check_launch_payload(env={"A": value})
+        message = str(excinfo.value)
+        assert "reaches or exceeds" in message
+        assert "by 0 bytes" not in message
+
+    def test_overage_is_named_when_the_string_is_over_budget(self):
+        value = "x" * (MAX_LAUNCH_STRING_BYTES - 2)
+        size = largest_launch_string(env={"A": value}).size
+        assert size == MAX_LAUNCH_STRING_BYTES + 1
+        with pytest.raises(LaunchPayloadTooLargeError) as excinfo:
+            check_launch_payload(env={"A": value})
+        assert f"by {size - MAX_LAUNCH_STRING_BYTES} bytes" in str(excinfo.value)
 
     def test_many_legal_strings_can_still_bust_the_total(self):
         # No single string is near the per-string limit; ARG_MAX bounds the
@@ -139,6 +150,7 @@ class TestTheGuard:
         with pytest.raises(LaunchPayloadTooLargeError) as excinfo:
             check_launch_payload(env=env)
         assert "ARG_MAX" in str(excinfo.value)
+        assert "reaches or exceeds" in str(excinfo.value)
 
     def test_an_empty_launch_is_not_an_error(self):
         assert check_launch_payload() == []
