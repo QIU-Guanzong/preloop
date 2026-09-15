@@ -639,7 +639,7 @@ async def test_watchdog_serializes_with_messages_and_uses_independent_session(
     await asyncio.sleep(0)
     case.revoke.assert_not_awaited()
     release.set()
-    assert await task is None
+    assert await task == {}
     assert await timer is None
     case.revoke.assert_awaited_once()
     assert abandon.call_args.args[0] is independent

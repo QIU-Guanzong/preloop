@@ -62,11 +62,11 @@ def read_regular_file(directory: Path, name: str, limit: int) -> bytes:
             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
             dir_fd=dir_fd,
         )
-    try:
-        stream = os.fdopen(fd, "rb")
-    except Exception:
-        os.close(fd)
-        raise
+        try:
+            stream = os.fdopen(fd, "rb")
+        except BaseException:
+            os.close(fd)
+            raise
     with stream:
         observed = os.fstat(stream.fileno())
         if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
