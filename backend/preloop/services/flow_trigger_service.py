@@ -54,14 +54,16 @@ MATRIX_MAX_ENTRIES = 25
 TRACKER_OBJECT_KINDS: frozenset = frozenset({"issue", "pr", "merge_request"})
 
 # An execution in any of these holds, or is about to hold, the object. A
-# terminal run does not, and a parked run (WAITING_FOR_HUMAN) does: it owns
-# the issue until a human answers, and its resume continues the same work.
+# terminal run does not, and a parked run does: WAITING_FOR_HUMAN owns the
+# issue until a human answers, WAITING_FOR_CHILDREN owns it until the flows
+# it started finish, and in both cases the resume continues the same work.
 TRACKER_OBJECT_ACTIVE_STATUSES = (
     "PENDING",
     "INITIALIZING",
     "STARTING",
     "RUNNING",
     "WAITING_FOR_HUMAN",
+    "WAITING_FOR_CHILDREN",
 )
 
 # Event types whose whole purpose is to reach an execution that is already
@@ -1291,24 +1293,16 @@ class FlowTriggerService:
 
         return False
 
-    def _is_triage_self_update(self, flow: Flow, event_data: Dict[str, Any]) -> bool:
+    def _is_triage_self_update(self, event_data: Dict[str, Any]) -> bool:
         """Match a complete issue snapshot to trusted triage write receipts.
 
-        PAT-backed writes may have a human sender. Only automatic triage flows
-        are coalesced, and marker text alone never establishes a self-update.
-        Pending exact snapshots expire; a verified final snapshot may persist.
+        The decision keys on the server-written receipt, not on which tools a
+        flow selected: the receipt is the only evidence that Preloop itself
+        produced this exact issue content. PAT-backed writes may have a human
+        sender, and marker text alone never establishes a self-update. Pending
+        exact snapshots expire; a verified final snapshot may persist.
         """
         if event_data.get("type") != "issue_updated":
-            return False
-        selected_tools = flow.allowed_mcp_tools
-        if not isinstance(selected_tools, list) or not any(
-            isinstance(tool, dict)
-            and tool.get("name") == "apply_issue_triage"
-            and tool.get("source") in (None, "builtin")
-            and not tool.get("mcp_server_id")
-            and not tool.get("server_id")
-            for tool in selected_tools
-        ):
             return False
         account_id = event_data.get("account_id")
         tracker_id = event_data.get("tracker_id")
@@ -1469,6 +1463,11 @@ class FlowTriggerService:
 
             logger.info(f"Found {len(matching_flows)} potential matching flow(s)")
 
+            # The receipt describes the event, not a flow, so evaluate it once.
+            triage_self_update = self._is_triage_self_update(event_data)
+            if triage_self_update:
+                logger.info("Event matches a recorded triage write receipt")
+
             # Filter flows by trigger_config and enabled status
             flows_to_trigger = []
             for flow in matching_flows:
@@ -1483,9 +1482,9 @@ class FlowTriggerService:
                     )
                     continue
 
-                if self._is_triage_self_update(flow, event_data):
+                if triage_self_update:
                     logger.info(
-                        "Skipping triage flow %s for its recorded issue update",
+                        "Skipping flow %s for a recorded triage issue update",
                         flow.id,
                     )
                     continue
@@ -1876,6 +1875,7 @@ class FlowTriggerService:
         parent_execution_id: Optional[uuid.UUID] = None,
         root_execution_id: Optional[uuid.UUID] = None,
         delegation_depth: int = 0,
+        batch_id: Optional[uuid.UUID] = None,
     ) -> Dict[str, Any]:
         """
         Manually trigger a flow execution for testing purposes or as a retry.
@@ -1897,6 +1897,10 @@ class FlowTriggerService:
                 a root run. Controller owned, as above.
             delegation_depth: Distance from the root of the tree, 0 for a run
                 nobody delegated. Controller owned, as above.
+            batch_id: Group this execution belongs to, shared by the children
+                of one delegated fan out (#631) exactly as a matrix trigger
+                shares one across its cells, so the batch rollup endpoint
+                reports the fan out as a unit. Controller owned, as above.
 
         Returns:
             Dict with execution_id and status
@@ -1973,6 +1977,7 @@ class FlowTriggerService:
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id,
             delegation_depth=delegation_depth,
+            batch_id=batch_id,
         )
 
         execution = crud_flow_execution.create(self.db, obj_in=execution_data)

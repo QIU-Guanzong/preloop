@@ -78,7 +78,7 @@ def guard(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 def test_exact_verified_pat_update_is_suppressed(guard: SimpleNamespace) -> None:
     assert not guard.service._is_preloop_triggered_event(guard.event)
-    assert guard.service._is_triage_self_update(guard.flow, guard.event)
+    assert guard.service._is_triage_self_update(guard.event)
     assert guard.lookup.call_args.kwargs == {
         "external_url": "https://github.com/example/project/issues/17",
         "account_id": "account",
@@ -90,7 +90,7 @@ def test_prewrite_intent_covers_early_webhook(guard: SimpleNamespace) -> None:
         "expected_revisions": [guard.revision],
         "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
     }
-    assert guard.service._is_triage_self_update(guard.flow, guard.event)
+    assert guard.service._is_triage_self_update(guard.event)
 
 
 def test_gitlab_complete_snapshot_is_suppressed(guard: SimpleNamespace) -> None:
@@ -113,7 +113,7 @@ def test_gitlab_complete_snapshot_is_suppressed(guard: SimpleNamespace) -> None:
     guard.issue.meta_data["preloop_triage"]["provider_revision"] = provider_revision(
         "Issue", BODY, LABELS, "open"
     )
-    assert guard.service._is_triage_self_update(guard.flow, event)
+    assert guard.service._is_triage_self_update(event)
 
 
 @pytest.mark.parametrize(
@@ -129,7 +129,7 @@ def test_genuine_human_changes_remain_eligible(
     guard: SimpleNamespace, field: str, value: Any
 ) -> None:
     guard.event["payload"]["issue"][field] = value
-    assert not guard.service._is_triage_self_update(guard.flow, guard.event)
+    assert not guard.service._is_triage_self_update(guard.event)
 
 
 @pytest.mark.parametrize(
@@ -139,7 +139,7 @@ def test_non_content_actions_remain_eligible(
     guard: SimpleNamespace, action: str
 ) -> None:
     guard.event["payload"]["action"] = action
-    assert not guard.service._is_triage_self_update(guard.flow, guard.event)
+    assert not guard.service._is_triage_self_update(guard.event)
     guard.lookup.assert_not_called()
 
 
@@ -153,7 +153,7 @@ def test_gitlab_non_written_field_changes_remain_eligible(
         "changes": {changed_field: {"previous": None}},
         "object_attributes": {"action": "update"},
     }
-    assert not guard.service._is_triage_self_update(guard.flow, guard.event)
+    assert not guard.service._is_triage_self_update(guard.event)
     guard.lookup.assert_not_called()
 
 
@@ -169,14 +169,14 @@ def test_later_identical_content_update_is_not_a_final_receipt_match(
         }
     )
     guard.event["payload"]["issue"]["updated_at"] = "2026-09-13T13:00:00Z"
-    assert not guard.service._is_triage_self_update(guard.flow, guard.event)
+    assert not guard.service._is_triage_self_update(guard.event)
 
 
 def test_missing_final_timestamp_does_not_suppress_indefinitely(
     guard: SimpleNamespace,
 ) -> None:
     guard.issue.meta_data["preloop_triage"].pop("provider_updated_at")
-    assert not guard.service._is_triage_self_update(guard.flow, guard.event)
+    assert not guard.service._is_triage_self_update(guard.event)
 
 
 @pytest.mark.parametrize("event_type", ["manual", "issue_opened", "issue_labeled"])
@@ -184,7 +184,7 @@ def test_other_event_types_remain_eligible(
     guard: SimpleNamespace, event_type: str
 ) -> None:
     guard.event["type"] = event_type
-    assert not guard.service._is_triage_self_update(guard.flow, guard.event)
+    assert not guard.service._is_triage_self_update(guard.event)
     guard.lookup.assert_not_called()
 
 
@@ -193,13 +193,23 @@ def test_other_event_types_remain_eligible(
     [
         [],
         [{"name": "update_issue"}],
-        [{"name": "apply_issue_triage", "mcp_server_id": "external-server"}],
+        [{"name": "get_issue"}, {"name": "update_issue"}],
     ],
 )
-def test_unrelated_flows_remain_eligible(guard: SimpleNamespace, tools: list) -> None:
+def test_suppression_keys_on_the_receipt_not_the_selected_tools(
+    guard: SimpleNamespace, tools: list
+) -> None:
+    """The receipt is the only evidence that Preloop wrote this content (#661)."""
     guard.flow.allowed_mcp_tools = tools
-    assert not guard.service._is_triage_self_update(guard.flow, guard.event)
-    guard.lookup.assert_not_called()
+    assert guard.service._is_triage_self_update(guard.event)
+    guard.lookup.assert_called_once()
+
+
+def test_event_without_a_trusted_receipt_remains_eligible(
+    guard: SimpleNamespace,
+) -> None:
+    guard.issue.meta_data = {}
+    assert not guard.service._is_triage_self_update(guard.event)
 
 
 @pytest.mark.parametrize("field", ["body", "title", "labels", "state"])
@@ -207,7 +217,7 @@ def test_incomplete_snapshot_cannot_suppress(
     guard: SimpleNamespace, field: str
 ) -> None:
     del guard.event["payload"]["issue"][field]
-    assert not guard.service._is_triage_self_update(guard.flow, guard.event)
+    assert not guard.service._is_triage_self_update(guard.event)
 
 
 @pytest.mark.parametrize("receipt", [None, {}, {"human_revision": "unchanged"}])
@@ -215,7 +225,7 @@ def test_marker_without_trusted_exact_receipt_cannot_suppress(
     guard: SimpleNamespace, receipt: dict | None
 ) -> None:
     guard.issue.meta_data = {"preloop_triage": receipt}
-    assert not guard.service._is_triage_self_update(guard.flow, guard.event)
+    assert not guard.service._is_triage_self_update(guard.event)
 
 
 @pytest.mark.parametrize("field", ["tracker_id", "project_id"])
@@ -223,7 +233,7 @@ def test_other_resource_identity_cannot_suppress(
     guard: SimpleNamespace, field: str
 ) -> None:
     setattr(guard.issue, field, "different-resource")
-    assert not guard.service._is_triage_self_update(guard.flow, guard.event)
+    assert not guard.service._is_triage_self_update(guard.event)
 
 
 @pytest.mark.parametrize(
@@ -236,7 +246,7 @@ def test_invalid_or_expired_intent_cannot_suppress(
         "expected_revisions": [guard.revision],
         "expires_at": expiry,
     }
-    assert not guard.service._is_triage_self_update(guard.flow, guard.event)
+    assert not guard.service._is_triage_self_update(guard.event)
 
 
 @pytest.mark.asyncio

@@ -898,15 +898,13 @@ def get_tracker_types(account: Account, db: Session) -> List[str]:
 def register_default_tools(server: DynamicMCPServer):
     """Register all default tools with the DynamicMCPServer.
 
-    This function registers the 8 default tools from the current MCP implementation:
-    1. get_issue_triage_context
-    2. apply_issue_triage
-    3. get_issue
-    4. create_issue
-    5. update_issue
-    6. search
-    7. estimate_compliance
-    8. improve_compliance
+    This function registers the 6 default tools from the current MCP implementation:
+    1. get_issue
+    2. create_issue
+    3. update_issue
+    4. search
+    5. estimate_compliance
+    6. improve_compliance
 
     Args:
         server: The DynamicMCPServer instance to register tools with
@@ -915,35 +913,17 @@ def register_default_tools(server: DynamicMCPServer):
     from preloop.api.endpoints import mcp as mcp_router
 
     from preloop.tools.builtin_defs import (
-        APPLY_ISSUE_TRIAGE_TOOL,
-        GET_ISSUE_TRIAGE_CONTEXT_TOOL,
+        GET_ISSUE_DESCRIPTION,
+        GET_ISSUE_SCHEMA,
+        UPDATE_ISSUE_DESCRIPTION,
+        UPDATE_ISSUE_SCHEMA,
     )
-
-    for definition, handler in (
-        (GET_ISSUE_TRIAGE_CONTEXT_TOOL, mcp_router.get_issue_triage_context),
-        (APPLY_ISSUE_TRIAGE_TOOL, mcp_router.apply_issue_triage),
-    ):
-        server.register_default_tool(
-            name=definition["name"],
-            description=definition["description"],
-            input_schema=definition["schema"],
-            handler=handler,
-        )
 
     # Tool 1: get_issue
     server.register_default_tool(
         name="get_issue",
-        description="Get detailed information about an issue by its identifier (URL, key, or ID)",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "issue": {
-                    "type": "string",
-                    "description": "Issue identifier (URL, key like 'PROJECT#123', or UUID)",
-                }
-            },
-            "required": ["issue"],
-        },
+        description=GET_ISSUE_DESCRIPTION,
+        input_schema=GET_ISSUE_SCHEMA,
         handler=mcp_router.get_issue,
     )
 
@@ -992,50 +972,8 @@ def register_default_tools(server: DynamicMCPServer):
     # Tool 3: update_issue
     server.register_default_tool(
         name="update_issue",
-        description="Update an existing issue. Pass add_reaction (e.g. eyes) to ack pickup on GitHub without changing other fields.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "issue": {
-                    "type": "string",
-                    "description": "Issue identifier (URL, key, or UUID)",
-                },
-                "title": {
-                    "type": "string",
-                    "description": "New title",
-                },
-                "description": {
-                    "type": "string",
-                    "description": "New description",
-                },
-                "status": {
-                    "type": "string",
-                    "description": "New status",
-                },
-                "priority": {
-                    "type": "string",
-                    "description": "New priority",
-                },
-                "assignee": {
-                    "type": "string",
-                    "description": "New assignee username",
-                },
-                "labels": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "New labels list",
-                },
-                "add_reaction": {
-                    "type": "string",
-                    "description": "GitHub issue reaction to add (eyes, +1, heart, ...)",
-                },
-                "remove_reaction": {
-                    "type": "string",
-                    "description": "GitHub issue reaction to remove",
-                },
-            },
-            "required": ["issue"],
-        },
+        description=UPDATE_ISSUE_DESCRIPTION,
+        input_schema=UPDATE_ISSUE_SCHEMA,
         handler=mcp_router.update_issue,
     )
 

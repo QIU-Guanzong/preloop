@@ -23,8 +23,12 @@ trace:
 4. the depth cap and the cycle guard pass (``depth_exceeded``,
    ``cycle_detected``).
 5. the direct child count is under both ceilings (``fanout_exceeded``).
+6. the delegation tree can afford the child's cost ceiling
+   (``budget_exceeded``, #631, in ``flow_delegation_budget``). Money is
+   checked last because it is the only rule whose answer changes while the
+   flow definition does not.
 
-The central CEL policy is the sixth rule and it is not evaluated here: every
+The central CEL policy is another rule and it is not evaluated here: every
 tool call already passes through ``DynamicFastMCP.call_tool``, which
 evaluates policy (and the account kill switch) before dispatch, so a policy
 deny never reaches this module. Checking it again here would double the audit
@@ -38,9 +42,8 @@ This module reuses the second one by letting ``FlowHaltActiveError`` out.
 Operator facing documentation of the same rules and the settings that bound
 them: ``docs/guide/flows/flow-delegation.md``.
 
-Not here, on purpose: cost ceilings and cost attribution (#631), reading a
-child's result (#632), waiting for a child in any form (#633). Nothing in
-this module blocks the calling turn.
+Not here, on purpose: reading a child's result (#632), waiting for a child
+in any form (#633). Nothing in this module blocks the calling turn.
 """
 
 from __future__ import annotations
@@ -63,18 +66,34 @@ from preloop.models.crud import crud_flow, crud_flow_execution
 from preloop.models.models.flow import Flow
 from preloop.models.models.flow_execution import FlowExecution
 from preloop.models.schemas.flow import CallableFlowEntry, callable_flows_for
+from preloop.services.flow_delegation_budget import (
+    COST_CEILING_KEY,
+    DELEGATION_DETAILS_KEY,
+    DelegationBudgetError,
+    check_child_affordable,
+    fanout_batch_id,
+    resolve_child_ceiling,
+)
 
 logger = logging.getLogger(__name__)
 
 #: Name of the delegation tool, as an agent calls it and as a flow selects it.
 RUN_FLOW_TOOL_NAME = "run_flow"
 
-#: Key the delegation record is written under on the child's trigger details.
-DELEGATION_DETAILS_KEY = "delegation"
+#: ``DELEGATION_DETAILS_KEY`` and ``COST_CEILING_KEY`` are defined in
+#: ``flow_delegation_budget`` (which reads them off child rows without
+#: importing this module) and re-exported here, where the record they key is
+#: written.
 
 #: ``trigger_event.source`` of a delegated run, so a prompt (and a human
 #: reading the row) can tell a child from a webhook or a schedule.
 DELEGATION_SOURCE = "flow_delegation"
+
+#: ``log_type`` of the row that keeps a refused call on the calling
+#: execution's timeline. A refusal creates no child execution, so this is the
+#: only durable place a parent can read back what it asked for and did not
+#: get (#633 reports one row per attempt, refusals included).
+DELEGATION_REFUSAL_LOG_TYPE = "delegation_refusal"
 
 #: Hard stop for the ancestor walk, independent of the configured depth cap:
 #: lineage is written by this module and cannot loop, but a walk over data is
@@ -118,6 +137,10 @@ class DelegationDecision:
     entry: CallableFlowEntry
     depth: int
     root_execution_id: uuid.UUID
+    #: Cost ceiling in USD the child is admitted under, already clamped by
+    #: the allowlist entry and already checked against the tree's remaining
+    #: allowance (#631). None when nothing bounds this child.
+    cost_ceiling_usd: Optional[float] = None
 
 
 def max_delegation_depth() -> int:
@@ -257,6 +280,7 @@ def evaluate_delegation(
     parent_execution: FlowExecution,
     parent_flow: Flow,
     reference: str,
+    max_cost_usd: Optional[float] = None,
 ) -> DelegationDecision:
     """Run every server side rule for one delegation, in order.
 
@@ -265,10 +289,13 @@ def evaluate_delegation(
         parent_execution: The execution making the call.
         parent_flow: The flow that execution is running.
         reference: Slug or name the agent asked for.
+        max_cost_usd: Cost ceiling the agent asked for, if any. Clamped by
+            the allowlist entry and then checked against what the tree has
+            left.
 
     Returns:
-        The decision, carrying the target flow and the allowlist entry that
-        permitted it.
+        The decision, carrying the target flow, the allowlist entry that
+        permitted it and the ceiling the child will be admitted under.
 
     Raises:
         DelegationRefusedError: The first rule that declined, with its reason.
@@ -348,6 +375,20 @@ def evaluate_delegation(
                 f"{entry.max_children}",
             )
 
+    ceiling = resolve_child_ceiling(
+        requested=max_cost_usd, entry_ceiling=entry.max_usd_per_child
+    )
+    try:
+        check_child_affordable(
+            db,
+            parent_execution=parent_execution,
+            account_id=parent_flow.account_id,
+            ceiling_usd=ceiling,
+            target_name=target.name,
+        )
+    except DelegationBudgetError as exc:
+        raise DelegationRefusedError("budget_exceeded", str(exc)) from exc
+
     return DelegationDecision(
         parent_execution=parent_execution,
         parent_flow=parent_flow,
@@ -355,6 +396,7 @@ def evaluate_delegation(
         entry=entry,
         depth=depth,
         root_execution_id=root_execution_id,
+        cost_ceiling_usd=ceiling,
     )
 
 
@@ -413,7 +455,11 @@ def clamp_timeout(
 
 
 def console_url_for(execution_id: Any) -> Optional[str]:
-    """Deep link to one execution in the console, when a base url is set."""
+    """Deep link to one execution in the console, when a base url is set.
+
+    Public because get_execution (#632) and the child wait (#633) link the
+    same executions, and two spellings of one url is one spelling too many.
+    """
     import os
 
     base = os.getenv("PRELOOP_URL", "").strip()
@@ -556,6 +602,43 @@ def audit_delegation_refusal(
         logger.debug("Failed to audit delegation refusal", exc_info=True)
 
 
+def record_refusal_on_parent(
+    db: Session,
+    *,
+    parent_execution_id: Any,
+    record: Dict[str, Any],
+    label: Optional[str] = None,
+) -> None:
+    """Keep a refused call on the parent's own timeline (#633).
+
+    A refusal creates no child row, so without this the only trace of it is
+    the tool audit log. A parent that later parks on its children has to
+    report what it asked for and did not get, so the refusal record is stored
+    as one log row on the calling execution and read back by
+    ``flow_child_wait`` when the parent is resumed. Never raises: a refusal
+    that could not be written down is still a refusal.
+    """
+    try:
+        crud_flow_execution.append_log(
+            db,
+            execution_id=str(parent_execution_id),
+            log_data={
+                "type": DELEGATION_REFUSAL_LOG_TYPE,
+                "message": (
+                    "run_flow refused: "
+                    f"{record.get('metadata', {}).get('preloop.ai/refusalReason')}"
+                ),
+                "metadata": {
+                    "milestone": DELEGATION_REFUSAL_LOG_TYPE,
+                    "label": str(label)[:200] if label else None,
+                    "task": record,
+                },
+            },
+        )
+    except Exception:  # pragma: no cover - a log row must not break a refusal
+        logger.debug("Could not record the refusal on the parent", exc_info=True)
+
+
 def _child_trigger_details(
     *,
     decision: DelegationDecision,
@@ -564,7 +647,13 @@ def _child_trigger_details(
     timeout_seconds: Optional[int],
     correlation_id: Optional[str],
 ) -> Dict[str, Any]:
-    """Trigger snapshot for the child: agent payload plus its lineage."""
+    """Trigger snapshot for the child: agent payload plus its lineage.
+
+    The cost ceiling is part of that snapshot rather than a column: it is
+    the number the child was admitted under, so it has to survive a restart
+    and be readable by anything summing the tree, and it is written once and
+    never updated.
+    """
     return {
         "source": DELEGATION_SOURCE,
         "payload": dict(payload) if isinstance(payload, dict) else {},
@@ -577,6 +666,7 @@ def _child_trigger_details(
             "label": str(label) if label else None,
             "timeout_seconds": timeout_seconds,
             "correlation_id": correlation_id,
+            COST_CEILING_KEY: decision.cost_ceiling_usd,
         },
     }
 
@@ -590,6 +680,7 @@ async def delegate_flow(
     payload: Optional[Dict[str, Any]] = None,
     label: Optional[str] = None,
     timeout_seconds: Optional[int] = None,
+    max_cost_usd: Optional[float] = None,
     correlation_id: Optional[str] = None,
     user_id: Optional[str] = None,
     runtime_session_id: Optional[str] = None,
@@ -607,6 +698,8 @@ async def delegate_flow(
         payload: Trigger payload for the child.
         label: Optional label recorded on the child.
         timeout_seconds: Optional window, clamped to the caller's own.
+        max_cost_usd: Optional cost ceiling for the child, clamped by the
+            allowlist entry and refused when the tree cannot afford it.
         correlation_id: Correlation id of the tool call, for the audit row.
         user_id: Calling identity, for the audit row.
         runtime_session_id: Runtime session of the call, for the audit row.
@@ -645,6 +738,7 @@ async def delegate_flow(
             parent_execution=parent_execution,
             parent_flow=parent_flow,
             reference=reference,
+            max_cost_usd=max_cost_usd,
         )
     except DelegationRefusedError as refusal:
         audit_delegation_refusal(
@@ -671,7 +765,7 @@ async def delegate_flow(
                 db, reference=reference, account_id=parent_flow.account_id
             )
         named = target if target is not None else parent_flow
-        return refusal_record(
+        record = refusal_record(
             reason=refusal.reason,
             message=refusal.message,
             flow_id=named.id,
@@ -681,6 +775,13 @@ async def delegate_flow(
             root_execution_id=root_execution_id,
             attempt_id=correlation_id or str(uuid.uuid4()),
         )
+        record_refusal_on_parent(
+            db,
+            parent_execution_id=parent_execution.id,
+            record=record,
+            label=label,
+        )
+        return record
 
     child, child_flow = await _start_child(
         db,
@@ -715,6 +816,11 @@ async def _start_child(
     The trigger service is the only thing that starts a flow, so a delegated
     start inherits its account kill switch check, its routing sanitation and
     its dispatch, instead of a second creation path that would drift.
+
+    Every child of one parent is created with the same ``batch_id``, derived
+    from the parent execution, so one fan out is a batch in exactly the sense
+    a matrix trigger already is and the existing batch rollup endpoint
+    reports its cost with no new query (#631).
     """
     from preloop.services.flow_trigger_service import FlowTriggerService
 
@@ -732,6 +838,7 @@ async def _start_child(
         parent_execution_id=decision.parent_execution.id,
         root_execution_id=decision.root_execution_id,
         delegation_depth=decision.depth,
+        batch_id=fanout_batch_id(decision.parent_execution.id),
     )
     child = crud_flow_execution.get(db, id=str(result["id"]))
     if child is None:  # pragma: no cover - the row was just committed

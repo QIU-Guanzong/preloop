@@ -1038,6 +1038,16 @@ class Settings(BaseSettings):
             "account.meta_data['flow_execution_max_running_per_account']."
         ),
     )
+    flow_execution_redispatch_backoff_max_seconds: int = Field(
+        900,
+        description=(
+            "Longest gap the stale-claim reaper leaves between two "
+            "re-dispatches of the same execution. The gap doubles from the "
+            "reclaim interval (30s, 60s, 2m, ...) up to this cap, so an "
+            "execution nothing can claim is republished a handful of times "
+            "an hour instead of on every pass."
+        ),
+    )
     flow_delegation_max_depth: int = Field(
         2,
         description=(
@@ -1056,6 +1066,50 @@ class Settings(BaseSettings):
             "run_flow. Defaults to the matrix fan out ceiling "
             "(MATRIX_MAX_ENTRIES) so both ways of fanning out cost an "
             "account the same at most."
+        ),
+    )
+    flow_delegation_max_tree_usd: float = Field(
+        50.0,
+        description=(
+            "How much one delegation tree may commit, in USD: the spend of "
+            "the run that started it plus the ceilings of everything it "
+            "delegated. A child that does not fit is refused before it "
+            "starts rather than killed mid run. Defaults to the default per "
+            "child ceiling times the fan out ceiling, so a full fan out of "
+            "default sized children is exactly affordable. Set 0 for no "
+            "instance ceiling, leaving only the per entry ceilings on each "
+            "flow's callable_flows allowlist."
+        ),
+    )
+    flow_delegation_default_child_usd: float = Field(
+        2.0,
+        description=(
+            "Cost ceiling in USD for a delegated child whose call named no "
+            "max_cost_usd and whose allowlist entry sets no "
+            "max_usd_per_child. Without it a silent child would reserve "
+            "nothing and a fan out could commit the tree allowance many "
+            "times over. Set 0 to let an unnamed ceiling mean unbounded."
+        ),
+    )
+    flow_delegation_wait_seconds: int = Field(
+        90,
+        description=(
+            "How long run_flow(wait) waits in process before the calling "
+            "execution is parked (WAITING_FOR_CHILDREN), the container "
+            "released and the run resumed when its children finish. Below "
+            "this, waiting in place is cheaper than a park/resume round "
+            "trip; the same threshold and the same reasoning as "
+            "approval_park_after_seconds. Set 0 to park immediately."
+        ),
+    )
+    flow_delegation_child_wait_seconds: int = Field(
+        21600,
+        description=(
+            "How long a parked parent waits for its children before it is "
+            "resumed anyway, with an expired record for each child that has "
+            "not finished (6 hours by default). A parent that waits forever "
+            "is a run nobody ever gets a report from; a parent resumed early "
+            "still writes one, naming the coverage it reached."
         ),
     )
     flow_delegation_result_max_bytes: int = Field(
@@ -1429,9 +1483,24 @@ class Settings(BaseSettings):
             flow_execution_max_running_per_account=int(
                 os.getenv("FLOW_EXECUTION_MAX_RUNNING_PER_ACCOUNT", "3")
             ),
+            flow_execution_redispatch_backoff_max_seconds=int(
+                os.getenv("FLOW_EXECUTION_REDISPATCH_BACKOFF_MAX_SECONDS", "900")
+            ),
             flow_delegation_max_depth=int(os.getenv("FLOW_DELEGATION_MAX_DEPTH", "2")),
             flow_delegation_max_children=int(
                 os.getenv("FLOW_DELEGATION_MAX_CHILDREN", "25")
+            ),
+            flow_delegation_max_tree_usd=float(
+                os.getenv("FLOW_DELEGATION_MAX_TREE_USD", "50.0")
+            ),
+            flow_delegation_default_child_usd=float(
+                os.getenv("FLOW_DELEGATION_DEFAULT_CHILD_USD", "2.0")
+            ),
+            flow_delegation_wait_seconds=int(
+                os.getenv("FLOW_DELEGATION_WAIT_SECONDS", "90")
+            ),
+            flow_delegation_child_wait_seconds=int(
+                os.getenv("FLOW_DELEGATION_CHILD_WAIT_SECONDS", "21600")
             ),
             flow_delegation_result_max_bytes=int(
                 os.getenv("FLOW_DELEGATION_RESULT_MAX_BYTES", "16384")

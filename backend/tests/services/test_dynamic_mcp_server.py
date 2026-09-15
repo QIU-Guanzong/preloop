@@ -547,11 +547,12 @@ class TestHelperFunctions:
                             ):
                                 register_default_tools(server)
 
-        # Check that 8 tools were registered
+        # Check that 6 tools were registered
         names = server.get_registered_tool_names()
-        assert len(names["default"]) == 8
-        assert "get_issue_triage_context" in names["default"]
-        assert "apply_issue_triage" in names["default"]
+        assert len(names["default"]) == 6
+        # Triage folded into get_issue/update_issue (#661).
+        assert "get_issue_triage_context" not in names["default"]
+        assert "apply_issue_triage" not in names["default"]
         assert "get_issue" in names["default"]
         assert "create_issue" in names["default"]
         assert "update_issue" in names["default"]
@@ -578,6 +579,6 @@ class TestHelperFunctions:
 
         assert server is not None
         names = server.get_registered_tool_names()
-        assert len(names["default"]) == 8
-        assert "get_issue_triage_context" in names["default"]
-        assert "apply_issue_triage" in names["default"]
+        assert len(names["default"]) == 6
+        assert "get_issue_triage_context" not in names["default"]
+        assert "apply_issue_triage" not in names["default"]

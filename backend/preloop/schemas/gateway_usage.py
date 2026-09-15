@@ -366,6 +366,15 @@ class RuntimeSessionSummary(BaseModel):
     optimization_waste_score: Optional[int] = None
     optimization_potential_savings_tokens: Optional[int] = None
     optimization_potential_savings_usd: Optional[float] = None
+    # Notes on this session, carried on the list row so the console can show
+    # "noted by" without a second request per row. Zero and no author is the
+    # ordinary case: most sessions were never steered.
+    note_count: int = 0
+    latest_note_author_display: Optional[str] = None
+    #: ``agent`` when another agent wrote it, otherwise the human credential
+    #: (``session``, ``jwt``, ``api_key``).
+    latest_note_author_auth_method: Optional[str] = None
+    latest_note_at: Optional[datetime] = None
     legal_hold: bool = Field(
         False,
         description=(
