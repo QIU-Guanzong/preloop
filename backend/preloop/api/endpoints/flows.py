@@ -42,6 +42,10 @@ from preloop.services.runner_service import (
     resolve_runner_pool,
     runner_id_from_session_reference,
 )
+from preloop.services.flow_delegation import (
+    CallableFlowsError,
+    validate_callable_flows,
+)
 from preloop.services.model_routing import (
     ModelRoutingError,
     model_usable_for_agent as _model_usable_for_agent,
@@ -214,6 +218,19 @@ def create_flow(
     try:
         validate_stored_model_routing(db, flow_in.agent_config, current_user.account_id)
     except ModelRoutingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Delegation allowlist: every entry has to name a flow in this account.
+    # Nothing enforces the list at call time yet, but an entry stored now that
+    # resolves to nothing would be an allowlist nobody can read.
+    try:
+        validate_callable_flows(
+            db,
+            callable_flows=flow_in.callable_flows,
+            account_id=current_user.account_id,
+            flow_name=flow_in.name,
+        )
+    except CallableFlowsError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     flow = crud_flow.create(db=db, flow_in=flow_in, account_id=current_user.account_id)
@@ -726,6 +743,137 @@ def read_batch_executions(
             total_tool_calls=total_tool_calls,
         ),
         executions=items,
+    )
+
+
+#: Most executions one tree read returns. The depth and fan-out caps
+#: (``FLOW_DELEGATION_MAX_DEPTH``, ``FLOW_DELEGATION_MAX_CHILDREN``) already
+#: bound a tree far below this, but they are settings and a read that trusts a
+#: setting is a read with no bound at all. A tree at the cap is reported as
+#: truncated rather than paginated: nobody reads the thousandth child.
+EXECUTION_TREE_MAX_NODES = 1000
+
+
+def _tree_node(execution: Any, *, label: Optional[str]) -> schemas.ExecutionTreeNode:
+    """Turn one execution row into a tree row."""
+    node = schemas.ExecutionTreeNode.model_validate(execution)
+    node.flow_name = execution.flow.name if execution.flow else None
+    node.label = label
+    return node
+
+
+def _label_from_trigger_details(details: Any) -> Optional[str]:
+    """Read the delegation label out of an already loaded trigger payload.
+
+    Only for the one execution the request names, which is read in full
+    anyway. Every other row in the tree gets the same value projected by the
+    query, because loading a webhook payload per row to find one string is
+    not a trade worth making.
+    """
+    from preloop.models.models.flow_execution import DELEGATION_DETAILS_KEY
+
+    if not isinstance(details, dict):
+        return None
+    delegation = details.get(DELEGATION_DETAILS_KEY)
+    if not isinstance(delegation, dict):
+        return None
+    label = delegation.get("label")
+    return str(label) if label else None
+
+
+@router.get(
+    "/flows/executions/{execution_id}/tree",
+    response_model=schemas.ExecutionTreeResponse,
+)
+@require_permission("view_flows")
+def read_execution_tree(
+    *,
+    db: Session = Depends(get_db),
+    execution_id: uuid.UUID,
+    current_user: User = Depends(get_current_active_user),
+):
+    """List what one execution delegated, with a rollup over the subtree.
+
+    The whole lineage is read in one indexed query (every descendant carries
+    the root's id) and the subtree under the requested execution is walked
+    from that in memory, so asking a child about its own children costs the
+    same as asking the root. A run that delegated nothing answers with an
+    empty list and a zeroed rollup rather than a 404: "nothing here" is the
+    common case and the page renders it as an empty state.
+
+    The rollup covers the descendants only. The requested execution's own
+    cost and tokens come back on ``execution``, so the console can show "this
+    run cost X, what it started cost Y" without adding the two numbers.
+    """
+    execution = crud_flow_execution.get(
+        db=db, id=execution_id, account_id=current_user.account_id
+    )
+    if not execution:
+        raise HTTPException(status_code=404, detail="Flow execution not found")
+
+    root_execution_id = execution.root_execution_id or execution.id
+    lineage = crud_flow_execution.get_lineage(
+        db,
+        root_execution_id=root_execution_id,
+        account_id=current_user.account_id,
+        limit=EXECUTION_TREE_MAX_NODES + 1,
+    )
+    truncated = len(lineage) > EXECUTION_TREE_MAX_NODES
+    lineage = lineage[:EXECUTION_TREE_MAX_NODES]
+
+    children_by_parent: Dict[uuid.UUID, List[Any]] = {}
+    for row in lineage:
+        parent_id = row.parent_execution_id
+        if parent_id is None:
+            continue
+        children_by_parent.setdefault(parent_id, []).append(row)
+
+    # Breadth first from the execution asked about, so a row's parent is
+    # always earlier in the list than the row itself and the console can
+    # build the tree in one pass. Bounded by the rows actually read.
+    subtree: List[Any] = []
+    frontier = [execution.id]
+    while frontier:
+        next_frontier: List[uuid.UUID] = []
+        for parent_id in frontier:
+            for row in children_by_parent.get(parent_id, []):
+                subtree.append(row)
+                next_frontier.append(row.id)
+        frontier = next_frontier
+
+    by_status: Dict[str, int] = {}
+    total_tokens = 0
+    total_cost = 0.0
+    total_tool_calls = 0
+    completed = 0
+    for row in subtree:
+        by_status[row.status] = by_status.get(row.status, 0) + 1
+        total_tokens += row.total_tokens or 0
+        total_cost += float(row.estimated_cost or 0)
+        total_tool_calls += row.tool_calls_count or 0
+        if row.status in _TERMINAL_EXECUTION_STATUSES:
+            completed += 1
+
+    return schemas.ExecutionTreeResponse(
+        execution_id=execution.id,
+        root_execution_id=root_execution_id,
+        execution=_tree_node(
+            execution,
+            label=_label_from_trigger_details(execution.trigger_event_details),
+        ),
+        executions=[
+            _tree_node(row, label=getattr(row, "delegation_label", None))
+            for row in subtree
+        ],
+        rollup=schemas.BatchRollup(
+            total=len(subtree),
+            by_status=by_status,
+            completed=completed,
+            total_tokens=total_tokens,
+            total_estimated_cost=round(total_cost, 4),
+            total_tool_calls=total_tool_calls,
+        ),
+        truncated=truncated,
     )
 
 
@@ -2040,6 +2188,21 @@ def update_flow(
                 db, flow_in.agent_config, current_user.account_id
             )
         except ModelRoutingError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Only validate the allowlist when this write carries one: an update that
+    # does not mention callable_flows leaves the stored list alone, and an
+    # explicit null or [] revokes it (which always validates).
+    if "callable_flows" in flow_in.model_fields_set:
+        try:
+            validate_callable_flows(
+                db,
+                callable_flows=flow_in.callable_flows,
+                account_id=current_user.account_id,
+                flow_id=flow.id,
+                flow_name=flow_in.name or flow.name,
+            )
+        except CallableFlowsError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     _reject_host_exec_flow(

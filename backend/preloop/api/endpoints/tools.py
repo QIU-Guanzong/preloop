@@ -52,11 +52,13 @@ from preloop.utils.permissions import require_permission
 
 from preloop.tools.builtin_defs import (
     ASK_USER_TOOL,
+    GET_EXECUTION_TOOL,
     GET_ISSUE_DESCRIPTION,
     GET_ISSUE_SCHEMA,
     PERMISSION_PROMPT_TOOL,
     REQUEST_APPROVAL_TOOL,
     RESOLVE_SBOM_UPSTREAMS_TOOL,
+    RUN_FLOW_TOOL,
     UPDATE_ISSUE_DESCRIPTION,
     UPDATE_ISSUE_SCHEMA,
 )
@@ -72,6 +74,8 @@ BUILTIN_TOOLS = [
     ASK_USER_TOOL,
     PERMISSION_PROMPT_TOOL,
     RESOLVE_SBOM_UPSTREAMS_TOOL,
+    RUN_FLOW_TOOL,
+    GET_EXECUTION_TOOL,
     {
         "name": "get_issue",
         "description": GET_ISSUE_DESCRIPTION,

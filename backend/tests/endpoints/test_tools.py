@@ -98,6 +98,8 @@ class TestListAllTools:
             "improve_compliance",
             "permission_prompt",
             "resolve_sbom_upstreams",
+            "run_flow",
+            "get_execution",
         }
         # Issue triage folded back into get_issue/update_issue (#661): no
         # separate default-disabled triage tools remain in the catalogue.

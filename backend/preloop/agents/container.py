@@ -42,8 +42,24 @@ from preloop.utils.git_credentials import (
     needs_http_path_scoping,
     strip_url_credentials,
 )
+from preloop.utils.execve_limits import (
+    LAUNCH_PAYLOAD_DIR,
+    MAX_LAUNCH_STRING_BYTES,
+    MAX_LAUNCH_TOTAL_BYTES,
+    LaunchPayloadTooLargeError,
+    check_launch_payload,
+    chunk_bytes_env,
+    chunk_count_env,
+    chunked_env,
+    prompt_transport_env,
+)
 from preloop.utils.repo_urls import repo_url_log_location, tracker_host_kind
 from preloop.utils.secret_scrubbing import scrub_secret_lines, scrub_secrets
+from preloop.utils.workspace_baseline import (
+    BaselineDelivery,
+    baseline_env,
+    build_workspace_baseline_shell,
+)
 from preloop.utils.workspace_seed import (
     build_workspace_seed_shell,
     parse_workspace_files,
@@ -588,7 +604,19 @@ ARTIFACT_STREAM_LINE_PREFIX = "PRELOOP_ARTIFACT_"
 
 # Environment variable carrying the original (unwrapped) agent script when the
 # Kubernetes artifact-emission wrapper is applied.
+#
+# The script now travels base64-chunked across ``PRELOOP_INNER_SCRIPT_<n>``
+# (see preloop.utils.execve_limits), because a generated agent script can be
+# well over the 128 KiB MAX_ARG_STRLEN the kernel allows for one execve
+# string. The bare name is still honoured by the wrapper for a pod started by
+# an older control plane, and is the prefix the chunk names extend.
 K8S_INNER_SCRIPT_ENV = "PRELOOP_INNER_SCRIPT"
+K8S_INNER_SCRIPT_ENV_PREFIX = f"{K8S_INNER_SCRIPT_ENV}_"
+K8S_INNER_SCRIPT_CHUNKS_ENV = chunk_count_env(K8S_INNER_SCRIPT_ENV_PREFIX)
+K8S_INNER_SCRIPT_BYTES_ENV = chunk_bytes_env(K8S_INNER_SCRIPT_ENV_PREFIX)
+
+# Where the wrapper reassembles the agent script before running it.
+K8S_INNER_SCRIPT_PATH = f"{LAUNCH_PAYLOAD_DIR}/agent-script.sh"
 
 # Key under which the orchestrator names the SESSION (not the execution) that
 # is being started. One execution can legitimately start several agent
@@ -748,11 +776,40 @@ if [ -z "${{PRELOOP_CHECKPOINT_PUT_TOKEN:-}}" ]; then
     fi
 fi
 }}
-if [ -z "${{{K8S_INNER_SCRIPT_ENV}}}" ]; then
+mkdir -p {LAUNCH_PAYLOAD_DIR}
+_pl_inner={K8S_INNER_SCRIPT_PATH}
+if [ -n "${{{K8S_INNER_SCRIPT_CHUNKS_ENV}:-}}" ]; then
+    # Chunked transport: the script arrives as N base64 environment
+    # variables, none of which can exceed MAX_ARG_STRLEN on its own, and is
+    # reassembled into a file here. `bash <file>` then execs with a tiny
+    # argv, instead of carrying the whole script as one execve string.
+    : > "$_pl_inner.b64"
+    _pl_i=0
+    while [ "$_pl_i" -lt "${{{K8S_INNER_SCRIPT_CHUNKS_ENV}}}" ]; do
+        eval "_pl_c=\\${{{K8S_INNER_SCRIPT_ENV}_$_pl_i:-}}"
+        if [ -z "$_pl_c" ]; then
+            echo "ERROR: {K8S_INNER_SCRIPT_ENV}_$_pl_i is not set" >&2
+            exit 1
+        fi
+        printf '%s' "$_pl_c" >> "$_pl_inner.b64"
+        _pl_i=$((_pl_i + 1))
+    done
+    base64 -d < "$_pl_inner.b64" > "$_pl_inner"
+    rm -f "$_pl_inner.b64"
+    _pl_have=$(wc -c < "$_pl_inner" | tr -d ' ')
+    if [ -n "${{{K8S_INNER_SCRIPT_BYTES_ENV}:-}}" ] && [ "$_pl_have" != "${{{K8S_INNER_SCRIPT_BYTES_ENV}}}" ]; then
+        echo "ERROR: agent script reassembled to $_pl_have bytes, expected ${{{K8S_INNER_SCRIPT_BYTES_ENV}}}" >&2
+        exit 1
+    fi
+elif [ -n "${{{K8S_INNER_SCRIPT_ENV}:-}}" ]; then
+    # Legacy whole-value transport, kept so a pod started by an older
+    # control plane (or a test that sets only this variable) still runs.
+    printf '%s' "${{{K8S_INNER_SCRIPT_ENV}}}" > "$_pl_inner"
+else
     echo "ERROR: {K8S_INNER_SCRIPT_ENV} is not set" >&2
     exit 1
 fi
-bash -c "${{{K8S_INNER_SCRIPT_ENV}}}"
+bash "$_pl_inner"
 _preloop_rc=$?
 _preloop_emit_artifacts
 exit $_preloop_rc
@@ -1008,13 +1065,17 @@ class ContainerAgentExecutor(AgentExecutor):
         docker = await self._get_docker_client()
         execution_id = execution_context["execution_id"]
 
-        # Prepare environment variables
+        # Prepare environment variables. The prompt travels base64-chunked
+        # (see preloop.utils.execve_limits): a rendered prompt carries
+        # whatever a webhook payload interpolated into it, and one execve
+        # string (argv element or NAME=value entry) cannot exceed
+        # MAX_ARG_STRLEN, 128 KiB.
         env = {
             "FLOW_ID": execution_context["flow_id"],
             "EXECUTION_ID": execution_id,
-            "AGENT_PROMPT": execution_context["prompt"],
             "AGENT_CONFIG": str(execution_context.get("agent_config", {})),
         }
+        env.update(prompt_transport_env(execution_context["prompt"]))
 
         # Add AI model credentials if available
         if "model_api_key" in execution_context:
@@ -1104,6 +1165,10 @@ class ContainerAgentExecutor(AgentExecutor):
                 "CpuQuota": int(os.getenv("AGENT_CPU_QUOTA", "100000")),
             },
         }
+
+        self._guard_docker_launch_payload(
+            container_config, what=f"{self.agent_type} container for {execution_id}"
+        )
 
         try:
             # Pull image if not available
@@ -1242,10 +1307,12 @@ class ContainerAgentExecutor(AgentExecutor):
             {
                 "FLOW_ID": flow_id,
                 "EXECUTION_ID": execution_id,
-                "AGENT_PROMPT": execution_context["prompt"],
                 "AGENT_CONFIG": str(execution_context.get("agent_config", {})),
             }
         )
+        # The prompt travels base64-chunked; see the Docker path and
+        # preloop.utils.execve_limits for why it cannot be one variable.
+        env.update(prompt_transport_env(execution_context["prompt"]))
 
         # Add AI model credentials if available (only if not already set by agent-specific env)
         if "model_api_key" in execution_context and "OPENAI_API_KEY" not in env:
@@ -1315,13 +1382,19 @@ class ContainerAgentExecutor(AgentExecutor):
         # Wrap `bash -c <script>` invocations with the artifact-emission
         # epilogue so result.json / the evidence pack become retrievable from
         # the pod's log stream after completion (a finished pod's filesystem
-        # is unreachable through the API). The original script moves into an
-        # env var and runs unchanged in a child shell.
+        # is unreachable through the API). The original script moves into
+        # base64 chunk env vars and runs unchanged in a child shell, which is
+        # what keeps a large generated script (codex/gemini/opencode build
+        # 20 KiB of shell before anything flow-specific is added) from
+        # becoming one oversized execve string.
         wrapped = self._wrap_kubernetes_args_for_artifacts(args)
         if wrapped is not None:
             args, inner_script = wrapped
-            env_vars.append(
-                client.V1EnvVar(name=K8S_INNER_SCRIPT_ENV, value=inner_script)
+            env_vars.extend(
+                client.V1EnvVar(name=name, value=value)
+                for name, value in chunked_env(
+                    K8S_INNER_SCRIPT_ENV_PREFIX, inner_script
+                ).items()
             )
 
         # Run as root by default — codex-universal installs runtimes (nvm, pyenv,
@@ -1366,6 +1439,16 @@ class ContainerAgentExecutor(AgentExecutor):
         # with all pre-installed tools) — no emptyDir mount needed.
 
         # Container specification with hardened security context
+        # Everything the Job would hand to execve is now fixed. Measure it
+        # here, not after the API server has accepted a Job whose pod cannot
+        # start (see _guard_launch_payload).
+        self._guard_launch_payload(
+            command=list(command) if command else None,
+            args=list(args) if args else None,
+            env={var.name: var.value for var in env_vars},
+            what=f"agent Job {job_name}",
+        )
+
         container = client.V1Container(
             name="agent",
             image=self.image,
@@ -2142,6 +2225,74 @@ class ContainerAgentExecutor(AgentExecutor):
                 "detail": f"expected a JSON object, got {type(parsed).__name__}",
             }
         return parsed
+
+    def _guard_launch_payload(
+        self,
+        *,
+        command: Optional[list] = None,
+        args: Optional[list] = None,
+        env: Optional[Dict[str, Any]] = None,
+        what: str,
+    ) -> None:
+        """Refuse a launch the kernel would reject, before creating anything.
+
+        The runtime's own verdict on an oversized launch is ``exec /bin/bash:
+        argument list too long``: it names neither the string that was too
+        long, nor its size, nor the limit it crossed, and it arrives as a
+        container that never started rather than as an execution error a user
+        can read. This runs the same arithmetic the kernel will run, a moment
+        earlier, and turns it into an :class:`AgentStartError` carrying
+        ``runner_error`` and the offending item's name and size.
+
+        Sizes are logged at WARNING whatever the outcome, because "the launch
+        is at 92% of the limit" is the signal that precedes the failure and
+        nothing else reports it.
+
+        Raises:
+            AgentStartError: When one string, or the total, is over budget.
+        """
+        try:
+            strings = check_launch_payload(
+                command=command, args=args, env=env, what=what
+            )
+        except LaunchPayloadTooLargeError as exc:
+            self.logger.warning("%s", exc)
+            raise AgentStartError(
+                str(exc), category=FAILURE_CATEGORY_RUNNER_ERROR
+            ) from exc
+        if not strings:
+            return
+        biggest = max(strings, key=lambda item: item.size)
+        total = sum(item.size for item in strings)
+        self.logger.warning(
+            "Launch payload for %s: largest execve string %s = %d bytes "
+            "(limit %d), total %d bytes (limit %d)",
+            what,
+            biggest.label,
+            biggest.size,
+            MAX_LAUNCH_STRING_BYTES,
+            total,
+            MAX_LAUNCH_TOTAL_BYTES,
+        )
+
+    def _guard_docker_launch_payload(
+        self, container_config: Dict[str, Any], *, what: str
+    ) -> None:
+        """Apply :meth:`_guard_launch_payload` to an aiodocker container config.
+
+        Docker's ``Env`` is a list of ``NAME=value`` strings, which is exactly
+        the execve form, so it is measured as-is rather than re-joined.
+        """
+        raw_env = container_config.get("Env") or []
+        env: Dict[str, Any] = {}
+        for entry in raw_env:
+            name, _, value = str(entry).partition("=")
+            env[name] = value
+        command = list(container_config.get("Entrypoint") or [])
+        args = list(container_config.get("Cmd") or [])
+        self._guard_launch_payload(
+            command=command or None, args=args or None, env=env, what=what
+        )
 
     @staticmethod
     def _wrap_kubernetes_args_for_artifacts(
@@ -3167,6 +3318,10 @@ class ContainerAgentExecutor(AgentExecutor):
         # (128 KiB) and shared with the rendered prompt. See
         # preloop/preloop#505 and preloop.utils.workspace_seed.
         env.update(self._workspace_seed_env(execution_context))
+        # A baseline resolved from a previous execution travels the same way,
+        # split across one variable per base64 chunk because a result envelope
+        # does not fit in a single execve string.
+        env.update(self._workspace_baseline_env(execution_context))
         if self.environment_profile:
             from preloop.services.flow_environment import profile_env
 
@@ -3281,6 +3436,13 @@ class ContainerAgentExecutor(AgentExecutor):
                 + shlex.quote(template_provider)
             )
 
+        # Write the review baseline resolved from a previous execution (or
+        # its mismatch marker) before the seeds, so an explicitly seeded
+        # file at the same path is written last and wins.
+        baseline_cmd = self._prepare_workspace_baseline_commands(execution_context)
+        if baseline_cmd:
+            commands.append(baseline_cmd)
+
         # Seed /workspace files declared on the trigger payload. After git
         # clone (whose pre-clone backup would sweep earlier writes away) and
         # before custom commands (which may consume the seeded files).
@@ -3349,6 +3511,50 @@ class ContainerAgentExecutor(AgentExecutor):
             [seed.path for seed in seeds],
         )
         return build_workspace_seed_shell(seeds)
+
+    @staticmethod
+    def _workspace_baseline_delivery(
+        execution_context: Dict[str, Any],
+    ) -> Optional[BaselineDelivery]:
+        """The baseline the orchestrator resolved for this run, if any.
+
+        The orchestrator does the account-scoped read and records the
+        outcome on the context; the agent layer only transports it. A
+        context without the key (an older execution, a flow that never
+        asked for a baseline) delivers nothing.
+        """
+        declared = execution_context.get("baseline_delivery")
+        if not isinstance(declared, dict):
+            return None
+        return BaselineDelivery.model_validate(declared)
+
+    def _workspace_baseline_env(
+        self, execution_context: Dict[str, Any]
+    ) -> Dict[str, str]:
+        """Environment variables carrying the baseline's base64 chunks."""
+        return baseline_env(self._workspace_baseline_delivery(execution_context))
+
+    def _prepare_workspace_baseline_commands(
+        self, execution_context: Dict[str, Any]
+    ) -> str:
+        """Build shell commands writing the baseline or its mismatch marker."""
+        delivery = self._workspace_baseline_delivery(execution_context)
+        if delivery is None:
+            return ""
+        if delivery.delivered:
+            self.logger.info(
+                "Delivering review baseline from execution %s to /workspace/%s",
+                delivery.source_execution_id,
+                delivery.path,
+            )
+        else:
+            self.logger.info(
+                "No review baseline delivered (%s); writing mismatch marker "
+                "to /workspace/%s",
+                delivery.mismatch_reason,
+                delivery.marker_path,
+            )
+        return build_workspace_baseline_shell(delivery)
 
     def _prepare_setup_commands(self, execution_context: Dict[str, Any]) -> str:
         """Build the ``git_clone_config.setup_commands`` block, if declared."""

@@ -447,6 +447,9 @@ class ModelGatewayBackend(Protocol):
     def completion(self, **kwargs: Any) -> Any:
         pass
 
+    def embedding(self, **kwargs: Any) -> Any:
+        pass
+
 
 # Bounded retries for transient 502 / provider_unavailable /
 # upstream_disconnect / MidStreamFallbackError. Default 1 initial + 2 retries.
@@ -579,6 +582,19 @@ class LiteLLMModelGatewayBackend:
             with _anthropic_oauth_environment(str(anthropic_auth_token)):
                 return litellm.completion(**kwargs)
         return litellm.completion(**kwargs)
+
+    def embedding(self, **kwargs: Any) -> Any:
+        """Call the upstream embeddings endpoint with the gateway's retry policy.
+
+        Same branding and retry ownership as :meth:`completion`: the gateway
+        owns the retry budget, so the SDK must not multiply each attempt.
+        Subscription OAuth has no embeddings surface, so the Anthropic auth
+        token branch has no counterpart here.
+        """
+        apply_preloop_client_headers(kwargs)
+        kwargs["num_retries"] = 0
+        kwargs["max_retries"] = 0
+        return litellm.embedding(**kwargs)
 
 
 class _PrefetchedUpstreamStream:
@@ -1612,6 +1628,183 @@ class OpenAIGatewayService:
                 request_payload=payload,
             )
             raise
+
+    @gateway_database_scope
+    def create_embedding(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle OpenAI-compatible embeddings requests.
+
+        Vectors are spend like any other model output: the call resolves and
+        authorizes a model exactly as the completions routes do, passes the
+        same kill-switch and budget preflight, and lands one usage row priced
+        from the catalog. Embeddings have no stream and no tools, so the
+        request is a single upstream call with no streaming counterpart.
+        """
+        self._begin_request_accounting()
+        if payload.get("stream"):
+            raise ModelGatewayAPIError(
+                provider="openai",
+                status_code=400,
+                message="The embeddings endpoint does not support stream=true",
+            )
+
+        model = self._resolve_requested_model(payload.get("model"), provider="openai")
+        embedding_input = payload.get("input")
+        if embedding_input is None or (
+            isinstance(embedding_input, (str, list)) and len(embedding_input) == 0
+        ):
+            raise ModelGatewayAPIError(
+                provider="openai",
+                status_code=400,
+                message="input must be a non-empty string or list",
+            )
+        started_at = time.perf_counter()
+        self._reject_if_gateway_halted(
+            endpoint="/openai/v1/embeddings",
+            endpoint_kind="embeddings",
+            ai_model=model,
+            requested_model=payload.get("model"),
+            request_payload=payload,
+            started_at=started_at,
+            gateway_provider="openai",
+        )
+        budget_result = self._check_budget(model, payload, gateway_provider="openai")
+        if budget_result and budget_result.hard_limit_exceeded:
+            detail = self._budget_denial_detail(budget_result)
+            self._record_gateway_request(
+                endpoint="/openai/v1/embeddings",
+                method="POST",
+                status_code=403,
+                duration=time.perf_counter() - started_at,
+                ai_model=model,
+                requested_model=payload.get("model"),
+                response_payload=None,
+                upstream_response=None,
+                endpoint_kind="embeddings",
+                budget_result=budget_result,
+                error_detail=detail,
+                request_payload=payload,
+            )
+            raise ModelGatewayAPIError(
+                provider="openai",
+                status_code=403,
+                message=detail,
+                code=self._budget_denial_code(budget_result),
+            )
+
+        try:
+            self._emit_gateway_request_started(
+                ai_model=model,
+                requested_model=payload.get("model"),
+                request_payload=payload,
+                endpoint_kind="embeddings",
+            )
+            response = self._call_litellm_embedding(model, payload=payload)
+            response_dict = self._response_to_dict(response)
+            usage = self._normalize_usage(
+                response_dict.get("usage"),
+                prompt_key="prompt_tokens",
+                completion_key="completion_tokens",
+            )
+            response_payload = {
+                "object": "list",
+                "data": self._embedding_data_items(response_dict),
+                "model": payload.get("model")
+                or resolve_ai_model_runtime(model).model_gateway_model_alias,
+                "usage": usage,
+            }
+            self._record_gateway_request(
+                endpoint="/openai/v1/embeddings",
+                method="POST",
+                status_code=200,
+                duration=time.perf_counter() - started_at,
+                ai_model=model,
+                requested_model=payload.get("model"),
+                # Recording, event emission and interaction indexing all read
+                # this payload. The vectors are the one part of an embeddings
+                # response that carries no accounting or debugging value and
+                # would multiply the stored row size by the model's dimension
+                # count, so they are summarized for the ledger while the
+                # caller still receives them in full.
+                response_payload=self._embedding_recording_payload(response_payload),
+                upstream_response=response_dict,
+                endpoint_kind="embeddings",
+                budget_result=budget_result,
+                request_payload=payload,
+            )
+            return response_payload
+        except ModelGatewayAPIError as exc:
+            self._record_gateway_request(
+                endpoint="/openai/v1/embeddings",
+                method="POST",
+                status_code=exc.status_code,
+                duration=time.perf_counter() - started_at,
+                ai_model=model,
+                requested_model=payload.get("model"),
+                response_payload=None,
+                upstream_response=None,
+                endpoint_kind="embeddings",
+                error_detail=exc.message,
+                error_class=exc.error_class,
+                budget_result=budget_result,
+                request_payload=payload,
+            )
+            raise
+
+    @staticmethod
+    def _embedding_data_items(response_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Return the upstream embedding objects in OpenAI's list shape.
+
+        Args:
+            response_dict: Upstream embeddings response as a plain dict.
+
+        Returns:
+            One ``{"object": "embedding", "index": n, "embedding": [...]}``
+            entry per input, in upstream order. Upstream indexes are kept when
+            present so callers can align vectors with their inputs.
+        """
+        items: List[Dict[str, Any]] = []
+        raw_items = response_dict.get("data")
+        for position, item in enumerate(
+            raw_items if isinstance(raw_items, list) else []
+        ):
+            if not isinstance(item, dict):
+                continue
+            index = item.get("index")
+            items.append(
+                {
+                    "object": item.get("object") or "embedding",
+                    "index": index if isinstance(index, int) else position,
+                    "embedding": item.get("embedding"),
+                }
+            )
+        return items
+
+    @staticmethod
+    def _embedding_recording_payload(
+        response_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Summarize an embeddings response for the accounting/event path.
+
+        Keeps everything the ledger, events and search index need (model,
+        usage, how many vectors of what width were returned) and drops the
+        float arrays themselves.
+        """
+        summary = []
+        for item in response_payload.get("data") or []:
+            vector = item.get("embedding")
+            summary.append(
+                {
+                    "object": item.get("object"),
+                    "index": item.get("index"),
+                    "dimensions": len(vector) if isinstance(vector, list) else None,
+                }
+            )
+        return {
+            "object": response_payload.get("object"),
+            "model": response_payload.get("model"),
+            "usage": response_payload.get("usage"),
+            "embeddings": summary,
+        }
 
     @gateway_database_scope
     def create_message(
@@ -6668,6 +6861,141 @@ class OpenAIGatewayService:
             # LiteLLM relays provider headers in _hidden_params; best effort,
             # absent headers simply record no snapshot.
             self._capture_rate_limit_headers(headers_from_litellm_response(response))
+        return response
+
+    def _build_embedding_kwargs(
+        self,
+        ai_model: GatewayModel,
+        *,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Build the upstream kwargs for one embeddings request.
+
+        Deliberately narrower than :meth:`_build_completion_kwargs`: an
+        embeddings call has no messages, tools, streaming or sampling
+        parameters, so only the credential, routing and embedding-specific
+        fields are resolved here. API-key and ambient (Bedrock) credentials
+        are supported; subscription OAuth is not, because no subscription
+        upstream exposes an embeddings endpoint.
+
+        Args:
+            ai_model: Resolved gateway model for this request.
+            payload: The client's embeddings request body.
+
+        Returns:
+            Keyword arguments for the upstream backend's ``embedding`` call.
+
+        Raises:
+            ModelGatewayAPIError: The model has no usable credentials.
+        """
+        # Reset per request, exactly as the completion path does, so a prior
+        # request's credential type can never be attributed to this one.
+        self._last_upstream_credential_type = None
+        if self._owns_db_session:
+            ai_model = self._model_for_credentials(ai_model)
+        try:
+            resolved_credentials = get_secret_service().resolve_ai_model_credentials(
+                ai_model,
+                db=self.db,
+                allow_refresh=True,
+            )
+        except CredentialRefreshError as exc:
+            status_code = 401
+            if exc.status_code is not None and exc.status_code >= 500:
+                status_code = 502
+            raise ModelGatewayAPIError(
+                provider="openai",
+                status_code=status_code,
+                message=(
+                    "Model credentials could not be refreshed. "
+                    "Reconnect this managed agent or update the model credentials."
+                ),
+                code=exc.code,
+            ) from exc
+        supports_ambient = _supports_ambient_provider_credentials(ai_model)
+        supports_api_key = (
+            resolved_credentials is not None
+            and resolved_credentials.credential_type == "api_key"
+            and bool(resolved_credentials.value)
+        )
+        if not (supports_api_key or supports_ambient):
+            raise ModelGatewayAPIError(
+                provider="openai",
+                status_code=400,
+                message="Model credentials are not configured",
+            )
+        self._last_upstream_credential_type = (
+            "api_key" if supports_api_key else "ambient"
+        )
+
+        kwargs: Dict[str, Any] = {
+            "model": self._to_litellm_model(ai_model),
+            "input": payload.get("input"),
+            "timeout": 600,
+        }
+        if resolved_credentials and supports_ambient:
+            kwargs.update(_bedrock_credential_kwargs(resolved_credentials.value or ""))
+        if (
+            supports_api_key
+            and "api_key" not in kwargs
+            and "aws_access_key_id" not in kwargs
+        ):
+            kwargs["api_key"] = (
+                resolved_credentials.value if resolved_credentials else None
+            )
+        if region := _bedrock_region(ai_model):
+            kwargs.setdefault("aws_region_name", region)
+        if api_base := model_api_base(ai_model):
+            kwargs["api_base"] = api_base
+        for field in ("dimensions", "encoding_format", "user"):
+            if payload.get(field) is not None:
+                kwargs[field] = payload[field]
+        # Same reason as the completion path: upstreams that do not implement
+        # an optional embedding parameter should ignore it, not fail the call.
+        kwargs["drop_params"] = True
+        apply_preloop_client_headers(kwargs, ai_model)
+        return kwargs
+
+    def _call_litellm_embedding(
+        self,
+        ai_model: GatewayModel,
+        *,
+        payload: Dict[str, Any],
+    ) -> Any:
+        """Call the upstream embeddings endpoint through the shared backend.
+
+        Mirrors :meth:`_call_litellm` for the parts an embeddings request
+        shares with a completion: hosted-spend metering, the gateway-owned
+        retry budget and rate-limit header capture.
+        """
+        kwargs = self._build_embedding_kwargs(ai_model, payload=payload)
+
+        def _invoke() -> Any:
+            self.release_db_for_wait(ai_model)
+            from preloop.plugins import get_plugin_manager
+
+            meter = get_plugin_manager().get_service("hosted_spend")
+            reservation = (
+                meter.prepare(
+                    self.db,
+                    account_id=self.auth_context.user.account_id,
+                    model=ai_model,
+                    kwargs=kwargs,
+                    owns_session=self._owns_db_session,
+                )
+                if meter is not None
+                else None
+            )
+            if reservation is not None:
+                return reservation.invoke(
+                    lambda: self.upstream_backend.embedding(**kwargs), stream=False
+                )
+            return self.upstream_backend.embedding(**kwargs)
+
+        response = self._run_with_upstream_retries(
+            "openai", _invoke, ai_model=ai_model, purpose="gateway"
+        )
+        self._capture_rate_limit_headers(headers_from_litellm_response(response))
         return response
 
     def _open_upstream_stream(
