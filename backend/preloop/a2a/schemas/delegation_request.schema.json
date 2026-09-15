@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://preloop.ai/schemas/a2a/delegation-request/v1",
+  "title": "Flow delegation request",
+  "description": "What a parent execution sends when it asks another flow to run. An A2A v1.0 Message, ProtoJSON serialised. Internal delegation in A2A shapes, not A2A support.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["messageId", "role", "parts", "metadata"],
+  "properties": {
+    "messageId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifier of this request, created by the parent."
+    },
+    "contextId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The delegation tree this call belongs to: the root execution id."
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Set only when the request adds a turn to a task that already exists."
+    },
+    "role": {
+      "const": "ROLE_USER",
+      "description": "A2A reserves ROLE_USER for the client side of a task, and the parent is the client here."
+    },
+    "parts": {
+      "type": "array",
+      "minItems": 1,
+      "description": "At least one part: the instruction as text, the inputs as data, or both.",
+      "items": { "$ref": "#/$defs/part" }
+    },
+    "metadata": { "$ref": "#/$defs/requestMetadata" }
+  },
+  "$defs": {
+    "part": {
+      "type": "object",
+      "description": "A2A v1.0 part. The member name is the discriminator; there is no kind field.",
+      "oneOf": [{ "$ref": "#/$defs/textPart" }, { "$ref": "#/$defs/dataPart" }]
+    },
+    "textPart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string" },
+        "mediaType": { "type": "string" },
+        "metadata": { "type": "object" }
+      }
+    },
+    "dataPart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data"],
+      "properties": {
+        "data": {
+          "type": "object",
+          "description": "Structured inputs for the child flow."
+        },
+        "mediaType": { "type": "string", "const": "application/json" },
+        "metadata": { "type": "object" }
+      }
+    },
+    "requestMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Preloop specifics, namespaced. Closed on purpose: adding a key is an edit to this schema and to docs/guide/flow-delegation-shapes.md in the same change.",
+      "required": [
+        "preloop.ai/kind",
+        "preloop.ai/parentExecutionId",
+        "preloop.ai/flowId",
+        "preloop.ai/depth"
+      ],
+      "properties": {
+        "preloop.ai/kind": { "const": "delegation_request" },
+        "preloop.ai/parentExecutionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The execution making the call."
+        },
+        "preloop.ai/rootExecutionId": {
+          "type": ["string", "null"],
+          "description": "First execution of the tree. Null when the caller is itself the root."
+        },
+        "preloop.ai/flowId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The flow being asked to run."
+        },
+        "preloop.ai/flowName": {
+          "type": "string",
+          "description": "That flow's name when the call was made, for reading."
+        },
+        "preloop.ai/depth": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Depth the child would run at: the caller's depth plus one."
+        },
+        "preloop.ai/consoleUrl": {
+          "type": "string",
+          "description": "Console link to the calling execution."
+        }
+      }
+    }
+  }
+}
