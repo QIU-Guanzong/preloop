@@ -168,6 +168,10 @@ class TestPromptEnforcedWriteBound:
         assert "triage-only restriction is prompt-enforced" in text
         assert "approval policy to `update_issue`" in text
         assert "approval gates are deployment-specific" in text
+        assert (
+            "approval gates are deployment-specific.\n\n"
+            "The first provider adapters support GitHub and GitLab."
+        ) in text
 
 
 class TestLoaderIntegration:
