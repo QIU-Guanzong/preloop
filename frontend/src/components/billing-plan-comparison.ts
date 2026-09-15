@@ -77,7 +77,22 @@ export class BillingPlanComparison extends LitElement {
     );
   }
 
-  async refresh(): Promise<void> {
+  /**
+   * "Refresh subscription status" must actually re-read the provider.
+   *
+   * Plain reloads of this component only re-fetched our own database row, so
+   * a subscription whose state changed at Stripe without a delivered webhook
+   * (a finished trial, most visibly) looked identical after every click. The
+   * explicit button now asks the server to reconcile with the provider first;
+   * that request is permission-checked and rate limited server side, so a
+   * user holding the button down cannot turn it into a provider hammer.
+   * Automatic loads stay read-only.
+   */
+  private refreshFromProvider(): void {
+    void this.refresh({ reconcile: true });
+  }
+
+  async refresh(intent?: { reconcile?: boolean }): Promise<void> {
     if (this.busy === 'confirm' || this.busy === 'checkout') return;
     const revision = ++this.revision;
     this.loading = true;
@@ -88,7 +103,9 @@ export class BillingPlanComparison extends LitElement {
     this.permissionChanged(false);
     try {
       const response = await fetchWithAuth(
-        '/api/v1/billing/plan-change-options',
+        intent?.reconcile
+          ? '/api/v1/billing/plan-change-options?reconcile=true'
+          : '/api/v1/billing/plan-change-options',
         { cache: 'no-store' }
       );
       if (!response.ok) throw new Error(await this.responseError(response));
@@ -820,7 +837,8 @@ export class BillingPlanComparison extends LitElement {
         <h2 id="compare-title">Compare and change your cloud plan</h2>
         <button
           class="secondary"
-          @click=${this.refresh}
+          data-testid="refresh"
+          @click=${this.refreshFromProvider}
           ?disabled=${this.loading || this.busy === 'confirm' || this.busy === 'checkout'}
         >
           Refresh subscription status
