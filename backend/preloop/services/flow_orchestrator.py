@@ -4422,6 +4422,21 @@ class FlowExecutionOrchestrator:
 
         if self.execution_log is None:
             return None
+        # A stop in the pre-park window writes durable intent (and often
+        # STOPPED) before this monitor notices the agent exited. Confirming
+        # the park here would resurrect WAITING_FOR_CHILDREN over a row the
+        # operator just stopped.
+        if crud_flow_execution.get_stop_request(
+            self.db, execution_id=self.execution_log.id
+        ):
+            return None
+        current = crud_flow_execution.get(
+            self.db, id=self.execution_log.id, refresh=True
+        )
+        if current is not None and str(current.status or "").upper() in (
+            crud_flow_execution.TERMINAL_EXECUTION_STATUSES
+        ):
+            return None
         park_request = crud_flow_execution.get_park_request(
             self.db,
             execution_id=self.execution_log.id,
@@ -5095,7 +5110,7 @@ class FlowExecutionOrchestrator:
 
         logger.info(f"Execution log created with ID: {self.execution_log.id}")
 
-    async def _update_execution_log(self, status: str, **kwargs):
+    async def _update_execution_log(self, status: Optional[str] = None, **kwargs):
         """Update the execution log and publish the update to NATS."""
         logger.info(f"Updating execution log to status: {status}")
 
@@ -5106,7 +5121,10 @@ class FlowExecutionOrchestrator:
         # category and it is respected; everyone else gets one derived from
         # the message being stored, falling back to the message already on
         # the row when this update only moves the status.
-        if kwargs.get("failure_category") is None:
+        # Park finalize omits status so confirm_park's conditional UPDATE
+        # is the only writer; deriving a category from a missing status
+        # would invent one for a still-live run.
+        if status is not None and kwargs.get("failure_category") is None:
             derived = derive_failure_category(
                 status=status,
                 error_message=(
@@ -5129,7 +5147,11 @@ class FlowExecutionOrchestrator:
                 f"total_tokens={kwargs.get('total_tokens')}, estimated_cost={kwargs.get('estimated_cost')}"
             )
 
-        update_data = schemas.FlowExecutionUpdate(status=status, **kwargs)
+        update_data = (
+            schemas.FlowExecutionUpdate(status=status, **kwargs)
+            if status is not None
+            else schemas.FlowExecutionUpdate(**kwargs)
+        )
 
         # Debug: Log what fields are actually in the update
         update_dict = update_data.model_dump(exclude_unset=True)
@@ -5163,9 +5185,10 @@ class FlowExecutionOrchestrator:
             else:
                 serializable_kwargs[key] = value
 
-        await self._publish_update(
-            "status_update", {"status": status, **serializable_kwargs}
-        )
+        status_payload = dict(serializable_kwargs)
+        if status is not None:
+            status_payload["status"] = status
+        await self._publish_update("status_update", status_payload)
 
         logger.debug(f"Execution log updated: status={status}")
 
@@ -5220,8 +5243,12 @@ class FlowExecutionOrchestrator:
         """
         park = agent_result.get("park") or {}
         park_kind = str(park.get("kind") or crud_flow_execution.PARK_KIND_HUMAN)
+        # Checkpoint fields only. Parked status is applied solely by
+        # confirm_park's conditional UPDATE (not terminal, no stop intent).
+        # An unconditional setattr of WAITING_FOR_CHILDREN here would
+        # overwrite a STOPPED the operator sealed after _park_if_requested
+        # already passed, and the sweep would resume spend after a stop.
         await self._update_execution_log(
-            status=crud_flow_execution.parked_status_for_kind(park_kind),
             model_output_summary=output_summary,
             failure_category=None,
             actions_taken_summary=agent_result.get("actions_taken"),
@@ -5246,6 +5273,14 @@ class FlowExecutionOrchestrator:
                 "Could not confirm the park of execution %s; the sweep will retry",
                 self.execution_log.id,
             )
+        if self.execution_log is not None:
+            try:
+                self.db.refresh(self.execution_log)
+            except Exception:
+                logger.debug(
+                    "Could not refresh execution %s after park confirm",
+                    getattr(self.execution_log, "id", "unknown"),
+                )
         logger.info(
             "Flow execution %s parked on %s %s (%ss of agent time spent so far)",
             self.execution_log.id,

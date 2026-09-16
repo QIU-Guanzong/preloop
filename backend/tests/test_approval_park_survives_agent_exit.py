@@ -210,6 +210,16 @@ class TestParkSurvivesAFastAgentExit:
             "get_park_request",
             MagicMock(return_value=park_request),
         )
+        monkeypatch.setattr(
+            module.crud_flow_execution,
+            "get_stop_request",
+            MagicMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            module.crud_flow_execution,
+            "get",
+            MagicMock(return_value=SimpleNamespace(status="RUNNING")),
+        )
         return orchestrator
 
     async def test_a_pending_park_wins_over_the_container_exit(self, monkeypatch):
@@ -395,6 +405,16 @@ class TestTheWholeHandshakeOnAFastExit:
                 }
             ),
         )
+        monkeypatch.setattr(
+            module.crud_flow_execution,
+            "get_stop_request",
+            MagicMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            module.crud_flow_execution,
+            "get",
+            MagicMock(return_value=SimpleNamespace(status="RUNNING")),
+        )
         confirm = MagicMock()
         monkeypatch.setattr(module.crud_flow_execution, "confirm_park", confirm)
 
@@ -445,7 +465,7 @@ class TestTheWholeHandshakeOnAFastExit:
         )
 
         kwargs = orchestrator._update_execution_log.await_args.kwargs
-        assert kwargs["status"] == "WAITING_FOR_HUMAN"
+        assert "status" not in kwargs
         assert "end_time" not in kwargs
         assert confirm.call_args.kwargs["compute_seconds"] == 558
         # A parked run is alive: nobody is told it ended.

@@ -611,7 +611,7 @@ class TestTheOrchestratorConfirmsTheRightPark:
         )
 
         kwargs = orchestrator._update_execution_log.await_args.kwargs
-        assert kwargs["status"] == "WAITING_FOR_CHILDREN"
+        assert "status" not in kwargs
         assert "end_time" not in kwargs
         assert confirmed["kind"] == "children"
         assert confirmed["compute_seconds"] == 140
@@ -635,9 +635,7 @@ class TestTheOrchestratorConfirmsTheRightPark:
             merged_result=None,
         )
 
-        assert orchestrator._update_execution_log.await_args.kwargs["status"] == (
-            "WAITING_FOR_HUMAN"
-        )
+        assert "status" not in orchestrator._update_execution_log.await_args.kwargs
         assert confirmed["kind"] == "human"
 
     def test_waiting_for_children_is_not_a_terminal_status(self):

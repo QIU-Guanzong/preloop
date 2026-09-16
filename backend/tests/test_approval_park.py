@@ -483,6 +483,9 @@ class TestStatusTransitions:
         assert "WAITING_FOR_HUMAN" in values.values()
         assert 140 in values.values()
         assert not any("end_time" in str(key) for key in values)
+        clause = db.filters[0]
+        assert "stop_requested_at IS NULL" in clause
+        assert "parked_at IS NULL" in clause
 
     def test_negative_compute_seconds_are_floored(self):
         db = _FakeDB(rowcounts=[1])
@@ -1004,7 +1007,7 @@ class TestOrchestratorPark:
             merged_result={"status": "parked"},
         )
         kwargs = orchestrator._update_execution_log.await_args.kwargs
-        assert kwargs["status"] == "WAITING_FOR_HUMAN"
+        assert "status" not in kwargs
         assert "end_time" not in kwargs
         assert kwargs["failure_category"] is None
         confirm.assert_called_once()
