@@ -159,19 +159,26 @@ jobs:
   # run one at a time on a single runner instead of eleven public runners in
   # parallel, so wall clock gets worse even though queue time gets better.
   # Register more runners with the same labels, or flip CI_SELF_HOSTED_TESTS
-  # to false.
+  # to false. Two listeners on one host are OK for backend shards only
+  # because those jobs run in a container and do not bind host 5432.
+  # Frontend/plugin jobs never needed that port.
   #
   # Python: setup-python has no Debian 12 builds. Routed jobs use
   # .github/actions/setup-ci-python, which venvs a matching system
   # interpreter (needs python3.11-venv on Debian) and only then falls
   # back to setup-python. Hosted ubuntu-latest has no system 3.11, so
-  # those jobs still download from the Ubuntu manifest.
+  # those jobs still download from the Ubuntu manifest. Self-hosted
+  # backend shards additionally run in python:<PYTHON_VERSION>-bookworm,
+  # so they see that image's interpreter rather than the VM's.
   pick-runner:
     name: Pick test runner
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       test_runner: ${{ steps.pick.outputs.test_runner }}
+      db_host: ${{ steps.pick.outputs.db_host }}
+      postgres_ports: ${{ steps.pick.outputs.postgres_ports }}
+      job_container: ${{ steps.pick.outputs.job_container }}
     steps:
       - name: Choose self-hosted or public runners for the test jobs
         id: pick
@@ -180,6 +187,7 @@ jobs:
           GH_TOKEN: ${{ secrets.CI_RUNNER_READ_TOKEN }}
           SELF_HOSTED_TESTS: ${{ vars.CI_SELF_HOSTED_TESTS }}
           REPO: ${{ github.repository }}
+          PYTHON_VERSION: ${{ env.PYTHON_VERSION }}
         run: |
           set -uo pipefail
 
@@ -188,6 +196,21 @@ jobs:
 
           pick() {
             echo "test_runner=$1" >> "$GITHUB_OUTPUT"
+            # Backend shards publish Postgres on host 5432 when the job
+            # runs on the VM (public ubuntu-latest). Two self-hosted
+            # listeners on one machine then collide. So self-hosted
+            # backend jobs run in a container and reach Postgres by
+            # service hostname, with no host port. Public jobs keep
+            # localhost:5432 and are unchanged.
+            if [ "$1" = "$SELF_HOSTED" ]; then
+              echo "db_host=postgres" >> "$GITHUB_OUTPUT"
+              echo "postgres_ports=[]" >> "$GITHUB_OUTPUT"
+              echo "job_container={\"image\":\"python:${PYTHON_VERSION}-bookworm\"}" >> "$GITHUB_OUTPUT"
+            else
+              echo "db_host=localhost" >> "$GITHUB_OUTPUT"
+              echo 'postgres_ports=["5432:5432"]' >> "$GITHUB_OUTPUT"
+              echo "job_container=null" >> "$GITHUB_OUTPUT"
+            fi
             echo "reason: $2"
             echo "test jobs will run on: $1"
             echo "- \`runs-on\` for the test jobs: \`$1\`" >> "$GITHUB_STEP_SUMMARY"
@@ -361,19 +384,17 @@ jobs:
   # coverage floor is applied after shards are combined -- a single shard
   # only sees part of the tree.
   #
-  # Runner: pick-runner decides. On a self-hosted runner the `services:`
-  # Postgres below is started by that machine's Docker daemon and published on
-  # localhost:5432, so the VM needs Docker installed and the runner user in the
-  # docker group. Nothing else in this job assumes the GitHub image.
-  #
-  # 5432 is a fixed host port, so each machine carrying these labels must run
-  # exactly ONE runner process. Two runners on one host both report
-  # online+idle, pick-runner cannot tell them apart, and the second shard to
-  # start would die on "port is already allocated". Scale out with more
-  # machines, never with a second listener on the same box.
+  # Runner: pick-runner decides. Public ubuntu-latest keeps this job on
+  # the VM: services Postgres is published at localhost:5432, same as
+  # before. Self-hosted runs the job in python:<version>-bookworm and
+  # reaches Postgres by the service hostname, with no host port, so two
+  # listeners on one machine do not collide on 5432. The VM still needs
+  # Docker and the runner user in the docker group. Nothing else in this
+  # job assumes the GitHub image.
   test-backend:
     name: Backend Tests (${{ matrix.group }}/8)
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.test_runner) }}
+    container: ${{ fromJSON(needs.pick-runner.outputs.job_container) }}
     needs: [changes, pick-runner]
     if: needs.changes.outputs.backend == 'true'
     timeout-minutes: 45
@@ -388,8 +409,7 @@ jobs:
           POSTGRES_DB: test_db
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
-        ports:
-          - 5432:5432
+        ports: ${{ fromJSON(needs.pick-runner.outputs.postgres_ports) }}
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -397,7 +417,7 @@ jobs:
           --health-retries 5
 
     env:
-      DATABASE_URL: postgresql://test_user:test_password@localhost:5432/test_db
+      DATABASE_URL: postgresql://test_user:test_password@${{ needs.pick-runner.outputs.db_host }}:5432/test_db
       OPENAI_API_KEY: mock_key
       ANTHROPIC_API_KEY: mock_key
       PRELOOP_DISABLE_TELEMETRY: "true"

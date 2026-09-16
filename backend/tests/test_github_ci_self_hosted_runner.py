@@ -86,6 +86,12 @@ def test_pick_runner_falls_back_to_the_public_runner() -> None:
     assert "could not parse the runner list" in script
     # `set -e` would turn any of the above into a red required check.
     assert "set -e" not in script
+    # Public fallback must keep VM-local Postgres; self-hosted uses a
+    # job container and the service hostname so host 5432 is not bound.
+    assert "db_host=localhost" in script
+    assert "job_container=null" in script
+    assert "db_host=postgres" in script
+    assert "postgres_ports=[]" in script
 
 
 def test_pick_runner_requires_an_idle_matching_runner() -> None:
@@ -136,3 +142,34 @@ def test_routed_jobs_are_bounded_and_start_clean() -> None:
             if str(step.get("uses", "")).startswith("actions/checkout@")
         )
         assert checkout["with"]["clean"] is True, name
+
+
+def test_backend_postgres_network_follows_the_picked_runner() -> None:
+    """Public runners keep localhost:5432; self-hosted does not bind the host port."""
+    pick = load_ci_jobs()["pick-runner"]
+    assert pick["outputs"]["db_host"] == "${{ steps.pick.outputs.db_host }}"
+    assert pick["outputs"]["postgres_ports"] == (
+        "${{ steps.pick.outputs.postgres_ports }}"
+    )
+    assert pick["outputs"]["job_container"] == (
+        "${{ steps.pick.outputs.job_container }}"
+    )
+    script = _pick_script()
+    assert "python:${PYTHON_VERSION}-bookworm" in script
+    assert 'postgres_ports=["5432:5432"]' in script
+
+    backend = load_ci_jobs()["test-backend"]
+    assert backend["container"] == (
+        "${{ fromJSON(needs.pick-runner.outputs.job_container) }}"
+    )
+    assert backend["services"]["postgres"]["ports"] == (
+        "${{ fromJSON(needs.pick-runner.outputs.postgres_ports) }}"
+    )
+    assert backend["env"]["DATABASE_URL"] == (
+        "postgresql://test_user:test_password@"
+        "${{ needs.pick-runner.outputs.db_host }}:5432/test_db"
+    )
+    # Only backend shards used host 5432. Other routed jobs stay on the VM.
+    for name in ("test-backend-coverage", "test-frontend", "test-runtime-plugins"):
+        assert "container" not in load_ci_jobs()[name]
+        assert "services" not in load_ci_jobs()[name]
