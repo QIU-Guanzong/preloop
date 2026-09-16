@@ -465,7 +465,7 @@ class TestTheWholeHandshakeOnAFastExit:
         )
 
         kwargs = orchestrator._update_execution_log.await_args.kwargs
-        assert kwargs["status"] == "WAITING_FOR_HUMAN"
+        assert "status" not in kwargs
         assert "end_time" not in kwargs
         assert confirm.call_args.kwargs["compute_seconds"] == 558
         # A parked run is alive: nobody is told it ended.

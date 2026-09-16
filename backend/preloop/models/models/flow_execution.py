@@ -46,9 +46,12 @@ DELEGATION_DETAILS_KEY = "delegation"
 
 # Reserved key under which a parent that an operator stopped records the
 # coverage its delegation tree had reached at that moment inside
-# FlowExecution.trigger_event_details. Shape:
-# {"schema_version": 1, "decision", "stopped_at", "counts", "children",
-#  "tree_cost_usd", "own_cost_usd", "truncated"}. Written only by
+# FlowExecution.trigger_event_details. Shape (schema_version 2):
+# {"schema_version": 2, "decision", "stopped_at", "children_total",
+#  "counts": {"completed", "finished", "stopped", "finished_first",
+#  "left_running"}, "children", "children_truncated", "tree_cost_usd",
+#  "own_cost_usd", "truncated"}. ``completed`` is SUCCEEDED children;
+# ``finished`` is any other already-terminal child. Written only by
 # preloop.services.flow_tree_stop when the stop cascades into the children
 # (#689); never accepted from a trigger body, which is why it is in
 # RESERVED_TRIGGER_KEYS.

@@ -1007,7 +1007,7 @@ class TestOrchestratorPark:
             merged_result={"status": "parked"},
         )
         kwargs = orchestrator._update_execution_log.await_args.kwargs
-        assert kwargs["status"] == "WAITING_FOR_HUMAN"
+        assert "status" not in kwargs
         assert "end_time" not in kwargs
         assert kwargs["failure_category"] is None
         confirm.assert_called_once()

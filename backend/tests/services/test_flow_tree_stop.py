@@ -613,6 +613,97 @@ async def test_stop_during_the_pre_park_window_stays_stopped(
         assert child.status == "STOPPED"
 
 
+async def test_finalize_park_after_a_stop_stays_stopped(
+    client, db_session, parent, parent_flow, child_flow
+):
+    """A stop that lands after the park guard must not be overwritten.
+
+    _park_if_requested can pass, then the operator stop seals STOPPED,
+    then _finalize_park used to setattr WAITING_FOR_CHILDREN and the
+    sweep resumed the stopped tree.
+    """
+    from preloop.services.flow_orchestrator import FlowExecutionOrchestrator
+
+    children = [
+        _child(db_session, child_flow, parent, label=f"shard {index}")
+        for index in range(2)
+    ]
+    wait_id = uuid.uuid4()
+    assert crud_flow_execution.request_park(
+        db_session,
+        execution_id=parent.id,
+        approval_request_id=wait_id,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        kind="children",
+    )
+    _stop(client, parent)
+    db_session.refresh(parent)
+    assert parent.status == "STOPPED"
+
+    orchestrator = FlowExecutionOrchestrator(
+        db_session, parent_flow.id, {}, AsyncMock()
+    )
+    orchestrator.execution_log = parent
+    orchestrator.flow = parent_flow
+    orchestrator.tool_calls_count = 1
+    orchestrator.total_tokens = 10
+    orchestrator.estimated_cost = 0.1
+    orchestrator._sync_runtime_session = MagicMock()
+    orchestrator._publish_update = AsyncMock()
+
+    await orchestrator._finalize_park(
+        agent_result={
+            "park": {
+                "kind": "children",
+                "approval_request_id": str(wait_id),
+                "compute_seconds": 30,
+            },
+            "actions_taken": [],
+        },
+        output_summary="waiting on children",
+        merged_result={"status": "parked"},
+    )
+
+    db_session.refresh(parent)
+    assert parent.status == "STOPPED"
+    assert parent.parked_at is None
+    assert parent.stop_requested_at is not None
+    assert not crud_flow_execution.claim_parked_children_for_resume(
+        db_session, execution_id=parent.id, wait_id=wait_id
+    )
+    counts = await sweep_child_parks()
+    assert counts["resumed"] == 0
+    db_session.refresh(parent)
+    assert parent.status == "STOPPED"
+    assert parent.resume_execution_id is None
+    for child in children:
+        db_session.refresh(child)
+        assert child.status == "STOPPED"
+
+
+async def test_a_stop_intent_refuses_a_children_resume_claim(
+    db_session, parent, child_flow
+):
+    """Even if status is WAITING_FOR_CHILDREN, stop intent is not claimable."""
+    _child(db_session, child_flow, parent)
+    wait_id = _park(db_session, parent)
+    parent.status = "STOPPED"
+    parent.stop_requested_at = datetime.now(UTC)
+    db_session.flush()
+    # Simulate the old finalize overwrite that this PR seals: status
+    # looks parked again while the durable stop intent remains.
+    parent.status = "WAITING_FOR_CHILDREN"
+    db_session.flush()
+
+    assert not crud_flow_execution.claim_parked_children_for_resume(
+        db_session, execution_id=parent.id, wait_id=wait_id
+    )
+    counts = await sweep_child_parks()
+    assert counts["resumed"] == 0
+    db_session.refresh(parent)
+    assert parent.resume_execution_id is None
+
+
 async def test_a_second_stop_keeps_the_first_coverage(
     client, db_session, parent, child_flow
 ):

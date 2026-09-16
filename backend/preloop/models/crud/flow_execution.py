@@ -1639,6 +1639,9 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         try to resume the parent, and the second one claims zero rows. The
         wait id is matched too, so a park that was already consumed and
         re-requested cannot be claimed by a late child of the previous wait.
+        A durable stop intent also refuses the claim: a park-finalize that
+        overwrote STOPPED into WAITING_FOR_CHILDREN must not resume spend
+        after the operator stopped the tree.
         """
         now = datetime.now(timezone.utc)
         count = (
@@ -1648,6 +1651,7 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
                 models.FlowExecution.status == self.WAITING_FOR_CHILDREN_STATUS,
                 models.FlowExecution.park_request_id == wait_id,
                 models.FlowExecution.resume_execution_id.is_(None),
+                models.FlowExecution.stop_requested_at.is_(None),
             )
             .update(
                 {
@@ -1694,7 +1698,10 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         """Every execution currently parked on the children it started."""
         return (
             db.query(FlowExecution)
-            .filter(FlowExecution.status == self.WAITING_FOR_CHILDREN_STATUS)
+            .filter(
+                FlowExecution.status == self.WAITING_FOR_CHILDREN_STATUS,
+                FlowExecution.stop_requested_at.is_(None),
+            )
             .order_by(FlowExecution.park_requested_at.asc(), FlowExecution.id.asc())
             .limit(limit)
             .all()
