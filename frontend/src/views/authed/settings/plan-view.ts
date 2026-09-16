@@ -83,8 +83,8 @@ export class PlanView extends LitElement {
    * What to call that capability in a sentence.
    *
    * The name the reader was refused ("AI session optimization") and the
-   * capability a plan sells ("built-in model optimization") are not the same
-   * word, so the card matches on the capability and speaks the refusal.
+   * capability a plan sells ("analysis with built-in models") are not the
+   * same word, so the card matches on the capability and speaks the refusal.
    */
   @state() private _requestedLabel = '';
   @state() private _checkoutPlan = '';

@@ -92,6 +92,63 @@ describe('VerifyEmailView', () => {
     expect((el as any).error).to.contain('Invalid or expired');
   });
 
+  it('signs the user in when the link returns a session', async () => {
+    // The verification link is the only thing an unverified user can act on,
+    // so it is also the sign-in. Otherwise a required-verification instance
+    // sends people back to the login page to type a password again.
+    localStorage.clear();
+    fetchStub.callsFake(
+      async () =>
+        new Response(
+          JSON.stringify({
+            message: 'Email verified successfully',
+            access_token: 'acc-9',
+            refresh_token: 'ref-9',
+            token_type: 'bearer',
+            expires_in: 1800,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+    );
+    restore = withSearch({ token: 'good-token' });
+    const el = (await fixture(
+      html`<verify-email-view></verify-email-view>`
+    )) as VerifyEmailView;
+    await tick();
+    await el.updateComplete;
+
+    expect(localStorage.getItem('accessToken')).to.equal('acc-9');
+    expect(localStorage.getItem('refreshToken')).to.equal('ref-9');
+    expect(el.shadowRoot?.textContent).to.contain('you are signed in');
+    expect(el.shadowRoot?.querySelector('#go-to-console')).to.exist;
+    localStorage.clear();
+  });
+
+  it('keeps the plain confirmation when the server returns no session', async () => {
+    // An older server, or a deactivated user: verified, but no tokens. The
+    // page must still say the address is verified and point at sign-in.
+    localStorage.clear();
+    fetchStub.callsFake(
+      async () =>
+        new Response(
+          JSON.stringify({ message: 'Email verified successfully' }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        )
+    );
+    restore = withSearch({ token: 'good-token' });
+    const el = (await fixture(
+      html`<verify-email-view></verify-email-view>`
+    )) as VerifyEmailView;
+    await tick();
+    await el.updateComplete;
+
+    expect(localStorage.getItem('accessToken')).to.equal(null);
+    expect(el.shadowRoot?.querySelector('a[href="/login"]')).to.exist;
+  });
+
   it('links back to sign in', async () => {
     const el = (await fixture(
       html`<verify-email-view></verify-email-view>`

@@ -12,6 +12,8 @@ import {
   type PricingPlan as Plan,
 } from '../../components/pricing-plans';
 import { loadPricingContent } from '../../utils/pricing-content';
+import { startAnonymousCheckout, startCheckout } from '../../api';
+import { PLAN_PAGE_PATH } from '../../utils/premium-features';
 import {
   CLOUD_COMPARISON_FALLBACK_TITLE,
   CLOUD_LEAD_FALLBACK,
@@ -19,6 +21,16 @@ import {
   DEDICATED_COMPARISON_FALLBACK_TITLE,
   DEDICATED_TAB_FALLBACK_LABEL,
 } from '../../pricing-ssr';
+
+/**
+ * Where a signed-in customer changes an existing subscription.
+ *
+ * The destination has now landed: the console plan page renders these same
+ * cards plus the usage-based comparison, so it, not the account view, is
+ * where a live subscription changes. It is the shared constant rather than a
+ * second literal, so moving the page again stays a one line edit.
+ */
+const PLAN_CHANGE_PATH = PLAN_PAGE_PATH;
 
 interface PricingFaq {
   q: string;
@@ -65,10 +77,33 @@ export class PublicPricingView extends LitElement {
   @state() private _dedicatedLead = '';
   @state() private _billingToggle = true;
   @state() private _loaded = false;
+  /**
+   * One line above the cards: why the click did not open a checkout, or that
+   * a cancelled checkout charged nothing. Server wording whenever the server
+   * sent a sentence.
+   */
+  @state() private _notice = '';
+  /** A checkout call is in flight, so the page says so instead of looking dead. */
+  @state() private _busy = false;
 
   async connectedCallback() {
     super.connectedCallback();
+    this._readCheckoutOutcome();
     await this._loadContent();
+  }
+
+  /**
+   * Stripe sends a visitor who backs out back here with `checkout=cancelled`.
+   * Say what happened: nothing was charged, no account exists yet, and the
+   * plans are still here. Without this the return trip looks like the click
+   * silently failed.
+   */
+  private _readCheckoutOutcome() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('checkout') === 'cancelled') {
+      this._notice =
+        'Checkout cancelled. Nothing was charged and no account was created. Pick a plan whenever you are ready.';
+    }
   }
 
   private async _loadContent() {
@@ -264,6 +299,31 @@ export class PublicPricingView extends LitElement {
     }
   }
 
+  /**
+   * A plan nobody can self-serve into: both intervals are unpriced, which is
+   * how the catalog says "quoted". Shape, not plan id, so a brand that names
+   * its sales-led tier something else still reaches its own CTA.
+   */
+  private _isQuoted(plan?: Plan): boolean {
+    return (
+      !!plan && plan.price_monthly === null && plan.price_annually === null
+    );
+  }
+
+  /** A plan with nothing to charge for. There is no checkout to open. */
+  private _isFree(plan?: Plan): boolean {
+    return (
+      !!plan &&
+      (plan.price_monthly ?? 0) === 0 &&
+      (plan.price_annually ?? 0) === 0 &&
+      !this._isQuoted(plan)
+    );
+  }
+
+  private _planChangePath(planId: string): string {
+    return `${PLAN_CHANGE_PATH}?plan=${encodeURIComponent(planId)}&interval=${this._interval}`;
+  }
+
   private async _handleSignUp(planId: string) {
     const plan = this._planById(planId);
 
@@ -272,20 +332,50 @@ export class PublicPricingView extends LitElement {
     // Shape, not plan id: opensource and enterprise are dedicated in every
     // path that reaches here, so a per-id branch would disagree with this one
     // (an external enterprise cta_url must open a new tab, same as the rest).
-    if (plan?.deployment === 'dedicated') {
-      this._followLink(plan.cta_url || '/request-demo');
+    if (plan?.deployment === 'dedicated' || this._isQuoted(plan)) {
+      this._followLink(plan?.cta_url || '/request-demo');
       return;
     }
 
-    // Existing accounts compare observed usage and confirm a quote in the
-    // account view; the public page must never silently switch a subscription.
-    if (localStorage.getItem('accessToken')) {
-      this._navigate(
-        `/console/settings/account?plan=${encodeURIComponent(planId)}&interval=${this._interval}`
-      );
+    const signedIn = !!localStorage.getItem('accessToken');
+
+    // Free costs nothing, so there is no checkout to open. A visitor needs an
+    // account; a signed-in person is asking to move plans, which is a change
+    // to a live subscription and belongs on the plan page.
+    if (this._isFree(plan)) {
+      this._navigate(signedIn ? this._planChangePath(planId) : '/register');
       return;
     }
-    this._navigate('/register');
+
+    this._notice = '';
+    this._busy = true;
+    try {
+      // One step for a visitor: Stripe collects the email, the card and the
+      // username, and checkout-success creates the account from the completed
+      // session. Registering first and paying later lost people in between.
+      const outcome = signedIn
+        ? await startCheckout(planId, this._interval)
+        : await startAnonymousCheckout(planId, this._interval);
+      if (!outcome) return; // a checkout is already open in this tab
+      if (outcome.action === 'redirect') return; // the browser is navigating
+      // `refresh` is the server saying this account already has a
+      // subscription. It is authoritative (it can see the subscription row,
+      // the page cannot), so it is the signal to send an existing customer to
+      // the plan page instead of guessing with an extra fetch on page load.
+      if (outcome.action === 'refresh') {
+        this._navigate(this._planChangePath(planId));
+        return;
+      }
+      this._notice = outcome.message;
+    } catch (err: any) {
+      // The server explains its own refusals (a retired plan, a catalog that
+      // is not synced, a role without billing rights). Print that sentence
+      // rather than a dead button.
+      this._notice =
+        err?.message || 'Checkout could not be started. Try again in a moment.';
+    } finally {
+      this._busy = false;
+    }
   }
 
   static styles = [
@@ -333,6 +423,16 @@ export class PublicPricingView extends LitElement {
         .period-row {
           justify-content: center;
         }
+      }
+
+      /* The one line above the cards: a cancelled checkout, or the server's
+         explanation of a refusal. Quiet, centred, and it never shifts the
+         card row because it only exists when there is something to say. */
+      .pricing-notice {
+        text-align: center;
+        margin: 0 auto 1rem auto;
+        max-width: 46rem;
+        color: var(--sl-color-text-secondary);
       }
 
       .loading,
@@ -406,6 +506,15 @@ export class PublicPricingView extends LitElement {
   private _renderCards(plans: Plan[]) {
     if (!plans.length) return '';
     return html`
+      ${
+        this._busy || this._notice
+          ? html`<p class="pricing-notice" role="status">
+              ${this._busy ? 'Opening secure checkout...' : this._notice}
+            </p>`
+          : ''
+      }
+      <!-- No \`plans-grid\` here: <pricing-plan-cards> renders that div
+           itself, so the class would nest one grid inside another. -->
       <div @signup-requested=${this._handleSignUpRequest}>
         <pricing-plan-cards
           .plans=${plans}

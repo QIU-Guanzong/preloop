@@ -19,6 +19,7 @@ import '../../components/global-notice';
 import '../../components/console-header';
 import '../../components/approval-bypass-banner';
 import '../../components/kill-switch-banner';
+import '../../components/usage-nudge-banner';
 import consoleStyles from '../../styles/console-styles.css?inline';
 import {
   getFeatures,
@@ -28,6 +29,7 @@ import {
   type UserPermissions,
 } from '../../api';
 import '../../components/permission-denied';
+import '../../components/trial-prompt';
 import { consoleDialogStyles } from '../../styles/console-dialog';
 import { LOCATION_CHANGED, Router } from '../../router';
 import { planPageUrl, premiumFeatureLabel } from '../../utils/premium-features';
@@ -227,7 +229,7 @@ export class ConsoleShell extends LitElement {
       .main-view {
         flex-grow: 1;
         display: grid;
-        grid-template-rows: auto auto auto 1fr; /* Header, banners, content */
+        grid-template-rows: auto auto auto auto 1fr; /* Header, banners, content */
         overflow-y: hidden;
         background-color: var(--console-page);
       }
@@ -672,6 +674,12 @@ export class ConsoleShell extends LitElement {
         </sl-button>
       </sl-dialog>
 
+      <!-- The one-time post-signup trial offer. Gated on the billing feature,
+           so an OSS console never renders it and never asks the server. -->
+      <trial-prompt
+        .enabled=${this._featuresLoaded && this.features['billing'] === true}
+      ></trial-prompt>
+
       <global-notice></global-notice>
 
       <div class="console-container">
@@ -937,7 +945,11 @@ export class ConsoleShell extends LitElement {
                   <!-- The kill-switch banner sits above the bypass banner: a
                        halted account is the most severe state and must be
                        impossible to miss on any console page (#157). -->
-                  <kill-switch-banner></kill-switch-banner>`
+                  <kill-switch-banner></kill-switch-banner>
+                  <!-- Usage sits under both governance banners: it is
+                       information, not a fault, and it renders nothing at
+                       all on OSS, where the endpoint does not exist. -->
+                  <usage-nudge-banner></usage-nudge-banner>`
           }
           <div
             class="main-content ${

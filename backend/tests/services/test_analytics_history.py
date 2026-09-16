@@ -664,3 +664,82 @@ def test_purge_preserves_unmaterialized_plan_promise_even_with_free_access(
     )
     assert keep_id in remaining
     assert (expired_id in remaining) == (expected == -1)
+
+
+def test_a_shorter_display_window_does_not_shorten_storage(monkeypatch):
+    """Reporting may show less than the plan keeps; the purge follows storage."""
+    services = {
+        "analytics_history_policy": MagicMock(return_value=90),
+        "analytics_storage_policy": MagicMock(return_value=183),
+    }
+    monkeypatch.setattr(
+        history,
+        "get_plugin_manager",
+        lambda: SimpleNamespace(get_service=services.get),
+    )
+    account = models.Account(meta_data={})
+    assert history.analytics_history_days(MagicMock(), account=account) == 90
+    assert history.storage_history_days(MagicMock(), account=account) == 183
+
+
+def test_storage_falls_back_to_the_reporting_policy(monkeypatch):
+    """A plugin build that publishes only the reporting policy is unchanged."""
+    provider = MagicMock(return_value=365)
+    services = {"analytics_history_policy": provider}
+    monkeypatch.setattr(
+        history,
+        "get_plugin_manager",
+        lambda: SimpleNamespace(get_service=services.get),
+    )
+    assert (
+        history.storage_history_days(MagicMock(), account=models.Account(meta_data={}))
+        == 365
+    )
+
+
+def test_a_reporting_only_policy_cannot_authorize_a_display_window_purge(monkeypatch):
+    """A display window is not permission to delete to that window.
+
+    Plugin builds that publish only the reporting policy are held to the
+    storage bound, so a 90 day Free display window raises on the purge path
+    rather than making the window permanent.
+    """
+    services = {"analytics_history_policy": MagicMock(return_value=90)}
+    monkeypatch.setattr(
+        history,
+        "get_plugin_manager",
+        lambda: SimpleNamespace(get_service=services.get),
+    )
+    account = models.Account(meta_data={})
+
+    assert history.analytics_history_days(MagicMock(), account=account) == 90
+    with pytest.raises(HTTPException) as failure:
+        history.storage_history_days(MagicMock(), account=account)
+    assert failure.value.status_code == 503
+
+
+def test_oss_has_no_storage_policy(monkeypatch):
+    monkeypatch.setattr(
+        history,
+        "get_plugin_manager",
+        lambda: SimpleNamespace(get_service=lambda _: None),
+    )
+    assert (
+        history.storage_history_days(MagicMock(), account=models.Account(meta_data={}))
+        == 0
+    )
+
+
+@pytest.mark.parametrize("days", [0, -5, 89, True, "183"])
+def test_a_broken_policy_cannot_shrink_the_window(monkeypatch, days):
+    provider = MagicMock(return_value=days)
+    monkeypatch.setattr(
+        history,
+        "get_plugin_manager",
+        lambda: SimpleNamespace(get_service=lambda _: provider),
+    )
+    with pytest.raises(HTTPException) as failure:
+        history.analytics_history_days(
+            MagicMock(), account=models.Account(meta_data={})
+        )
+    assert failure.value.status_code == 503

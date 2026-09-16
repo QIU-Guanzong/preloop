@@ -21,6 +21,10 @@ from sqlalchemy.exc import IntegrityError, TimeoutError as SQLAlchemyTimeoutErro
 from sqlalchemy.orm import Session
 
 from preloop.api.auth import bootstrap
+from preloop.api.auth.email_verification import (
+    check_resend_rate_limit,
+    enforce_verified_email,
+)
 from preloop.api.auth.jwt import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     MAX_SESSION_DAYS,
@@ -38,6 +42,7 @@ from preloop.schemas.auth import (
     ApiKeySummary,
     ApiUsageStatistics,
     EmailVerificationRequest,
+    EmailVerificationResendRequest,
     LoginRequest,
     PasswordChangeRequest,
     PasswordResetConfirmRequest,
@@ -60,10 +65,13 @@ from preloop.utils.agent_kind import (
     is_valid_agent_kind,
     normalize_agent_kind,
 )
-from preloop.utils.email import send_password_reset_email
+from preloop.utils.email import send_password_reset_email, send_verification_email
 from preloop.utils.tokens import (
     TokenError,
+    create_email_verification_token,
     create_password_reset_token,
+    hash_onboarding_claim_token,
+    verify_onboarding_claim_token,
     verify_token,
 )
 from preloop.models.crud import (
@@ -452,6 +460,26 @@ class OnboardingRequest(BaseModel):
     email: str
     username: str
     password: str
+    #: Display name, collected on the welcome page after a Stripe checkout.
+    #: Optional: Stripe may already have supplied one on the card details, in
+    #: which case the welcome page prefills it and sends it back unchanged.
+    full_name: Optional[str] = None
+    #: The single-use claim token from the welcome link. Declared optional so
+    #: a request without one is refused by the handler with the same answer as
+    #: a request with a bad one, rather than by the schema with a 422 that
+    #: tells an anonymous caller which field it is missing.
+    claim_token: Optional[str] = None
+
+
+#: One answer for every way a claim can fail: no token, a forged or expired
+#: token, a token for another account, a token already spent, an address that
+#: has no account, or an account that already has a password. They are
+#: deliberately indistinguishable, so this endpoint cannot be used to discover
+#: which addresses have a checkout account waiting to be claimed.
+INVALID_ONBOARDING_CLAIM_MESSAGE = (
+    "This signup link is no longer valid. Use 'Forgot password' on the sign "
+    "in page to set your password."
+)
 
 
 @router.post(
@@ -653,14 +681,21 @@ async def register(
 async def verify_email(
     verification_data: EmailVerificationRequest,
     db: Session = Depends(get_db_session),
-) -> Dict[str, str]:
-    """Verify a user's email address.
+) -> Dict[str, Any]:
+    """Verify a user's email address and sign the user in.
+
+    The link in the verification email is the one thing an unverified user
+    can act on, so it also ends up being the sign-in: following it returns a
+    session, which is what makes REQUIRE_EMAIL_VERIFICATION a one-click
+    detour instead of "verify, then go and find the login page". An active
+    user gets tokens; ``message`` is always present, so an older client that
+    only reads it keeps working.
 
     Args:
         verification_data: Email verification data with token.
 
     Returns:
-        Success message.
+        Success message plus access/refresh tokens for the verified user.
 
     Raises:
         HTTPException: If the token is invalid or the user does not exist.
@@ -682,10 +717,29 @@ async def verify_email(
             )
 
         # Update email verification status
-        user.email_verified = True
-        session.commit()
+        if not user.email_verified:
+            user = crud_user.update(
+                session, db_obj=user, obj_in={"email_verified": True}
+            )
 
-        return {"message": "Email verified successfully"}
+        response: Dict[str, Any] = {"message": "Email verified successfully"}
+        # A deactivated user verifying an address is still verified, but it
+        # buys no session: is_active is the account-level decision and this
+        # endpoint must not reopen it.
+        if user.is_active:
+            access_token = create_access_token(
+                data={"sub": str(user.id), "scopes": []},
+                expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+            )
+            response.update(
+                {
+                    "access_token": access_token,
+                    "refresh_token": create_refresh_token(sub=str(user.id), scopes=[]),
+                    "token_type": "bearer",
+                    "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+                }
+            )
+        return response
     except TokenError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -697,6 +751,67 @@ async def verify_email(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error verifying email",
         )
+
+
+@router.post("/resend-verification", status_code=status.HTTP_200_OK)
+def resend_verification(
+    verification_data: EmailVerificationResendRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db_session),
+) -> Dict[str, str]:
+    """Send a fresh verification email for an address.
+
+    Anonymous on purpose: the caller is someone the login page just refused
+    for an unverified address, so they hold no token. The answer never says
+    whether the address exists (same rule as forgot-password) and it never
+    says whether it was already verified, so this cannot be used to probe
+    for accounts. Rate limited per client IP and per address.
+
+    Deliberately a plain ``def``: the body is one synchronous lookup on the
+    request-scoped ``Session``, and FastAPI dispatches ``def`` handlers on the
+    threadpool, so a saturated pool costs one worker thread instead of the API
+    event loop (see ``preloop.api.loop_safety``).
+
+    Args:
+        verification_data: Body carrying the address to send to.
+        background_tasks: Background tasks for sending the email.
+        request: The incoming request object (client IP for the limit).
+
+    Returns:
+        The same neutral message for every address.
+
+    Raises:
+        HTTPException: 429 when the resend budget for this IP or address is
+            exhausted.
+    """
+    email = (verification_data.email or "").strip()
+    check_resend_rate_limit(get_client_ip(request) or "", email.lower())
+
+    user = crud_user.get_by_email(db, email=email)
+    if user and not user.email_verified:
+        background_tasks.add_task(
+            _send_verification_email_task,
+            user_email=user.email,
+        )
+    return {
+        "message": (
+            "If that address needs verifying, a new verification email is on its way."
+        )
+    }
+
+
+def _send_verification_email_task(user_email: str) -> None:
+    """Mint a verification token and mail it, swallowing sender failures.
+
+    Args:
+        user_email: Address to verify.
+    """
+    try:
+        token = create_email_verification_token(user_email)
+        send_verification_email(user_email=user_email, token=token)
+    except Exception as error:
+        logger.error("Failed to resend verification email: %s", error)
 
 
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)
@@ -800,7 +915,9 @@ async def login_form(
         Access token.
 
     Raises:
-        HTTPException: If the username or password is incorrect.
+        HTTPException: If the username or password is incorrect, or 403
+            ``email_not_verified`` when the deployment requires a verified
+            address and this password user has not verified one yet.
     """
     user = await authenticate_user(
         form_data.username, form_data.password, source_ip=get_client_ip(request), db=db
@@ -811,6 +928,7 @@ async def login_form(
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    enforce_verified_email(user)
 
     # Create access token with user information
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -849,7 +967,9 @@ async def login_json(
         Access token.
 
     Raises:
-        HTTPException: If the username or password is incorrect.
+        HTTPException: If the username or password is incorrect, or 403
+            ``email_not_verified`` when the deployment requires a verified
+            address and this password user has not verified one yet.
     """
     user = await authenticate_user(
         request.username, request.password, source_ip=get_client_ip(http_request), db=db
@@ -860,6 +980,7 @@ async def login_json(
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    enforce_verified_email(user)
 
     # Create access token with user information
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -932,6 +1053,10 @@ def refresh_token(
                 detail="User not found or inactive",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+
+        # A session may not outlive the verification requirement either: a
+        # user who was signed in when the setting went on stops rotating.
+        enforce_verified_email(user)
 
         # Enforce the sliding-session cap: rotation extends the session by
         # REFRESH_TOKEN_EXPIRE_DAYS each time, but the chain as a whole may
@@ -1708,28 +1833,91 @@ async def complete_onboarding(
     request: OnboardingRequest,
     db: Session = Depends(get_db_session),
 ) -> Dict[str, str]:
-    """
-    Completes the onboarding for a new user created via Stripe checkout.
-    Sets the password and updates the username.
+    """Claim the account a completed checkout created.
+
+    The caller must present the single-use claim token from the welcome link.
+    That token is what proves the person setting the first password is the
+    person who completed the checkout: it is signed by this instance, expires,
+    is bound to this account and to the Stripe checkout session that created
+    it, and is spent here so the link works exactly once. The ``NEEDS_RESET``
+    placeholder password is checked too, but only as a second guard: on its
+    own it is not a credential, because an anonymous caller who merely knows
+    the address would satisfy it.
+
+    An account whose claim token was never minted or has expired is recovered
+    through the ordinary password reset email, which proves the same thing
+    this token proves and costs the customer one click.
+
+    Args:
+        request: Address, username, password, optional name and the claim
+            token from the welcome link.
+        db: Database session.
+
+    Returns:
+        Access and refresh tokens for the claimed account.
+
+    Raises:
+        HTTPException: 400 with one indistinguishable message for every
+            failed claim, or 400 when the chosen username is taken.
     """
     session = db
-    # Find user using CRUD layer
+
+    # Validate the credential before touching the database, and answer every
+    # failure identically. Nothing below this point discloses whether an
+    # address exists.
+    def _refuse_claim() -> HTTPException:
+        return HTTPException(status_code=400, detail=INVALID_ONBOARDING_CLAIM_MESSAGE)
+
+    if not request.claim_token:
+        raise _refuse_claim()
+    try:
+        claims = verify_onboarding_claim_token(request.claim_token)
+    except TokenError:
+        raise _refuse_claim()
+
     user = crud_user.get_by_email(session, email=request.email)
     if not user:
-        raise HTTPException(status_code=404, detail="User not found.")
-
+        raise _refuse_claim()
+    # The token names the account it opens, so one customer's link cannot
+    # claim another customer's account even if both are pending.
+    if (claims["email"] or "").lower() != (user.email or "").lower():
+        raise _refuse_claim()
+    if claims["account_id"] != str(user.account_id):
+        raise _refuse_claim()
+    # Single use: the stored fingerprint is cleared below, so a replay of the
+    # same link finds nothing to compare against.
+    stored_hash = user.onboarding_claim_hash
+    if not stored_hash or not secrets.compare_digest(
+        stored_hash, hash_onboarding_claim_token(request.claim_token)
+    ):
+        raise _refuse_claim()
     if user.hashed_password != "NEEDS_RESET":
-        raise HTTPException(status_code=400, detail="Onboarding already completed.")
+        raise _refuse_claim()
 
     # Check if the new username is taken by someone else using CRUD layer
+    updates: Dict[str, Any] = {
+        "hashed_password": get_password_hash(request.password),
+        # Spend the token. Everything below is one update, so the claim is
+        # consumed in the same transaction that sets the password.
+        "onboarding_claim_hash": None,
+    }
     if user.username != request.username:
         existing_user = crud_user.get_by_username(session, username=request.username)
         if existing_user:
             raise HTTPException(status_code=400, detail="Username is already taken.")
-        user.username = request.username
-
-    user.hashed_password = get_password_hash(request.password)
-    session.commit()
+        updates["username"] = request.username
+    if request.full_name is not None:
+        full_name = request.full_name.strip()
+        if full_name:
+            updates["full_name"] = full_name
+    # The address came off a completed checkout and the claim token proves
+    # this caller is the one who completed it, so an instance that requires
+    # verification must not hold the new customer at the login page. Note the
+    # narrow scope of the guarantee: the payment provider collected a card for
+    # the address, it did not verify the address.
+    if not user.email_verified:
+        updates["email_verified"] = True
+    user = crud_user.update(session, db_obj=user, obj_in=updates)
 
     # Create access and refresh tokens for auto-login
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)

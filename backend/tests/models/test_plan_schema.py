@@ -39,6 +39,29 @@ class TestPlanFeatures:
         assert features.custom_ai_models_enabled is True
         assert features.custom_compliance_metrics_enabled is True
 
+    def test_analytics_window_is_optional_and_defaults_to_storage(self):
+        """A plan that states no window shows everything it stores."""
+        features = PlanFeatures(
+            api_calls_monthly=1,
+            ai_calls_monthly=1,
+            issues_ingested_monthly=1,
+            custom_ai_models_enabled=False,
+            custom_compliance_metrics_enabled=False,
+        )
+
+        assert features.analytics_window_days is None
+        assert (
+            PlanFeatures(
+                api_calls_monthly=1,
+                ai_calls_monthly=1,
+                issues_ingested_monthly=1,
+                custom_ai_models_enabled=False,
+                custom_compliance_metrics_enabled=False,
+                analytics_window_days=90,
+            ).analytics_window_days
+            == 90
+        )
+
     def test_required_fields(self):
         """Test that all fields are required."""
         with pytest.raises(ValidationError):

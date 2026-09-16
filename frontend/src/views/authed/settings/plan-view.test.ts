@@ -3,7 +3,12 @@ import sinon from 'sinon';
 
 import '../../../components/view-header.ts';
 import { invalidateApiCaches } from '../../../api';
-import { PLAN_PAGE_PATH, planPageUrl } from '../../../utils/premium-features';
+import {
+  PLAN_PAGE_PATH,
+  capabilityForFeature,
+  planPageUrl,
+  premiumFeatureLabel,
+} from '../../../utils/premium-features';
 import './plan-view';
 import type { PlanView } from './plan-view';
 
@@ -518,7 +523,12 @@ describe('PlanView', () => {
       requested?.shadowRoot?.querySelector('.plan-name')?.textContent
     ).to.contain('Pro');
     expect(note(element, 'Pro')).to.contain('AI session titles');
-    expect(note(element, 'Pro')).to.not.contain('built-in model optimization');
+    // Read the capability's label from the map rather than quoting it. #772
+    // renamed this one, which silently turned a hardcoded "must not contain"
+    // into an assertion about a string nothing produces any more.
+    expect(note(element, 'Pro')).to.not.contain(
+      premiumFeatureLabel(capabilityForFeature('session_titles'))
+    );
   });
 
   it('opens on the cheapest plan that unlocks a refused feature', async () => {

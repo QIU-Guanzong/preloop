@@ -210,7 +210,21 @@ async function selectTab(
   await el.updateComplete;
 }
 
-function stubLadderFetch() {
+/**
+ * What the mocked checkout endpoint answers.
+ *
+ * A hash URL, never a real Stripe one: the page assigns
+ * `window.location.href` on a redirect, and a real URL would navigate the
+ * test runner away.
+ */
+const CHECKOUT_REDIRECT = {
+  action: 'redirect',
+  code: 'checkout_session_created',
+  url: '#stripe-checkout',
+  message: 'Opening secure checkout.',
+};
+
+function stubLadderFetch(checkout: unknown = CHECKOUT_REDIRECT) {
   return sinon
     .stub(window, 'fetch')
     .callsFake(async (input: RequestInfo | URL) => {
@@ -218,11 +232,18 @@ function stubLadderFetch() {
       if (url.includes('/landing-content.json')) {
         return new Response(JSON.stringify(LADDER_CONTENT), { status: 200 });
       }
+      if (url.includes('create-checkout-session')) {
+        return new Response(JSON.stringify(checkout), { status: 200 });
+      }
       return new Response(JSON.stringify({ features: {} }), { status: 200 });
     });
 }
 
-function stubFetch(features: Record<string, boolean> = { billing: false }) {
+function stubFetch(
+  features: Record<string, boolean> = { billing: false },
+  checkout: unknown = CHECKOUT_REDIRECT,
+  checkoutStatus = 200
+) {
   return sinon
     .stub(window, 'fetch')
     .callsFake(async (input: RequestInfo | URL) => {
@@ -233,8 +254,20 @@ function stubFetch(features: Record<string, boolean> = { billing: false }) {
       if (url.includes('/api/v1/features')) {
         return new Response(JSON.stringify({ features }), { status: 200 });
       }
+      if (url.includes('create-checkout-session')) {
+        return new Response(JSON.stringify(checkout), {
+          status: checkoutStatus,
+        });
+      }
       return new Response('{}', { status: 200 });
     });
+}
+
+/** The checkout calls the page made, newest last. */
+function checkoutCalls(stub: sinon.SinonStub) {
+  return stub
+    .getCalls()
+    .filter((c) => String(c.args[0]).includes('create-checkout-session'));
 }
 
 describe('PublicPricingView', () => {
@@ -380,7 +413,7 @@ describe('PublicPricingView', () => {
     expect(el.shadowRoot?.textContent).to.contain('Is there a trial?');
   });
 
-  it('sends logged-out visitors to /register for the teams plan (card-free signup)', async () => {
+  it('sends a logged-out visitor on a paid plan straight to Stripe', async () => {
     fetchStub = stubFetch({ billing: true, oauth_signin: true });
     localStorage.removeItem('accessToken');
     const el = (await fixture(
@@ -389,14 +422,76 @@ describe('PublicPricingView', () => {
     await tick();
     await el.updateComplete;
     const navStub = sinon.stub(el as any, '_navigate');
-    // The teams CTA never creates a checkout session for anonymous visitors:
-    // signup is card-free; checkout is the in-product upgrade door.
+    const originalHash = window.location.hash;
+    try {
+      // Stripe-first: the visitor pays once and the account is created from
+      // the completed session, instead of registering and then being asked
+      // for a card in a second place.
+      await (el as any)._handleSignUp('teams');
+      const calls = checkoutCalls(fetchStub);
+      expect(calls.length).to.equal(1);
+      const options = calls[0].args[1] as RequestInit;
+      expect(JSON.parse(String(options.body))).to.deep.equal({
+        plan_id: 'teams',
+        interval: 'year',
+        return_to: null,
+      });
+      // No token exists yet, so the call must carry no Authorization header
+      // and must not be diverted to the login page.
+      expect(new Headers(options.headers).get('Authorization')).to.equal(null);
+      expect(navStub.called, 'no /register detour').to.equal(false);
+      expect(window.location.hash).to.equal('#stripe-checkout');
+    } finally {
+      window.location.hash = originalHash;
+    }
+  });
+
+  it('shows the server sentence when an anonymous checkout is refused', async () => {
+    // A refused checkout must say so on the page. Rewriting the server's
+    // sentence would hide the one instruction that resolves it.
+    fetchStub = stubFetch(
+      { billing: true },
+      {
+        detail: {
+          code: 'catalog_not_synced',
+          message: 'Teams is not available for purchase yet.',
+        },
+      },
+      503
+    );
+    localStorage.removeItem('accessToken');
+    const el = (await fixture(
+      html`<public-pricing-view></public-pricing-view>`
+    )) as PublicPricingView;
+    await tick();
+    await el.updateComplete;
     await (el as any)._handleSignUp('teams');
-    const checkoutCalls = fetchStub
-      .getCalls()
-      .filter((c) => String(c.args[0]).includes('create-checkout-session'));
-    expect(checkoutCalls.length).to.equal(0);
-    expect(navStub.calledOnceWith('/register')).to.be.true;
+    await el.updateComplete;
+    expect(el.shadowRoot?.textContent).to.contain(
+      'Teams is not available for purchase yet.'
+    );
+  });
+
+  it('explains a cancelled checkout when Stripe returns the visitor', async () => {
+    fetchStub = stubFetch({ billing: true });
+    const original = window.location.pathname + window.location.search;
+    history.replaceState({}, '', '/pricing?checkout=cancelled');
+    try {
+      const el = (await fixture(
+        html`<public-pricing-view></public-pricing-view>`
+      )) as PublicPricingView;
+      await tick();
+      await el.updateComplete;
+      const text = el.shadowRoot?.textContent || '';
+      expect(text).to.contain('Checkout cancelled');
+      expect(text).to.contain('Nothing was charged');
+      // The cards are still on the page: backing out is not an error state.
+      expect(
+        el.shadowRoot?.querySelectorAll('pricing-card').length
+      ).to.be.above(0);
+    } finally {
+      history.replaceState({}, '', original);
+    }
   });
 
   it('opens on Cloud with four cards and a four-column comparison table', async () => {
@@ -841,7 +936,33 @@ describe('PublicPricingView', () => {
     }
   });
 
-  it('routes existing accounts to comparison before any paid-plan mutation', async () => {
+  it('routes an account that already subscribes to the plan page, not checkout', async () => {
+    // The server owns this decision: it can see the subscription row, the
+    // public page cannot. `refresh` means "you already have one", which is
+    // the cue to send the customer to the plan page rather than open a second
+    // checkout. No extra background fetch is needed to find that out.
+    fetchStub = stubLadderFetch({
+      action: 'refresh',
+      code: 'subscription_exists',
+      message: 'Your account already has a Pro subscription.',
+    });
+    const el = await fixture<PublicPricingView>(
+      html`<public-pricing-view></public-pricing-view>`
+    );
+    await waitUntil(() => (el as any)._loaded);
+    localStorage.setItem('accessToken', 'test-token');
+    const navigate = sinon.stub(el as any, '_navigate');
+    try {
+      await (el as any)._handleSignUp('pro');
+      expect(
+        navigate.calledOnceWith('/console/settings/plan?plan=pro&interval=year')
+      ).to.equal(true);
+    } finally {
+      localStorage.removeItem('accessToken');
+    }
+  });
+
+  it('sends a signed-in account with no subscription straight to Stripe', async () => {
     fetchStub = stubLadderFetch();
     const el = await fixture<PublicPricingView>(
       html`<public-pricing-view></public-pricing-view>`
@@ -849,18 +970,21 @@ describe('PublicPricingView', () => {
     await waitUntil(() => (el as any)._loaded);
     localStorage.setItem('accessToken', 'test-token');
     const navigate = sinon.stub(el as any, '_navigate');
-    await (el as any)._handleSignUp('pro');
-    expect(
-      navigate.calledOnceWith(
-        '/console/settings/account?plan=pro&interval=year'
-      )
-    ).to.equal(true);
-    expect(
-      fetchStub
-        .getCalls()
-        .some((c) => String(c.args[0]).includes('create-checkout-session'))
-    ).to.equal(false);
-    localStorage.removeItem('accessToken');
+    const originalHash = window.location.hash;
+    try {
+      await (el as any)._handleSignUp('pro');
+      const calls = checkoutCalls(fetchStub);
+      expect(calls.length).to.equal(1);
+      const options = calls[0].args[1] as RequestInit;
+      expect(new Headers(options.headers).get('Authorization')).to.equal(
+        'Bearer test-token'
+      );
+      expect(navigate.called, 'no settings detour').to.equal(false);
+      expect(window.location.hash).to.equal('#stripe-checkout');
+    } finally {
+      window.location.hash = originalHash;
+      localStorage.removeItem('accessToken');
+    }
   });
 
   it('routes an existing account considering Free to comparison, never checkout', async () => {
@@ -879,9 +1003,7 @@ describe('PublicPricingView', () => {
         .filter((c) => String(c.args[0]).includes('create-checkout-session'));
       expect(checkoutCalls.length).to.equal(0);
       expect(
-        navStub.calledOnceWith(
-          '/console/settings/account?plan=free&interval=year'
-        )
+        navStub.calledOnceWith('/console/settings/plan?plan=free&interval=year')
       ).to.be.true;
     } finally {
       localStorage.removeItem('accessToken');

@@ -228,4 +228,8 @@ def test_flow_runners_revision_chains_onto_approval_rule_context() -> None:
     assert embedding_scope.down_revision == "20260916_session_saved_search"
     runner_concurrency = script.get_revision("20260916_runner_concurrency")
     assert runner_concurrency.down_revision == "20260916_embedding_scope"
-    assert script.get_heads() == ["20260916_runner_concurrency"]
+    trial_prompt = script.get_revision("20260916_trial_prompt")
+    assert trial_prompt.down_revision == "20260916_runner_concurrency"
+    onboarding_claim = script.get_revision("20260917_onboarding_claim")
+    assert onboarding_claim.down_revision == "20260916_trial_prompt"
+    assert script.get_heads() == ["20260917_onboarding_claim"]

@@ -46,6 +46,7 @@ from webauthn.helpers.structs import (
     UserVerificationRequirement,
 )
 
+from preloop.api.auth.email_verification import enforce_verified_email
 from preloop.api.auth.jwt import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     ALGORITHM,
@@ -409,6 +410,11 @@ def authentication_verify(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive",
         )
+
+    # A passkey is a second way into the same local account, so it obeys the
+    # same verification requirement the password endpoints do. Without this,
+    # registering a passkey would be a way around REQUIRE_EMAIL_VERIFICATION.
+    enforce_verified_email(user)
 
     crud_webauthn_credential.touch(db, obj=cred, sign_count=verification.new_sign_count)
 

@@ -122,6 +122,136 @@ describe('LoginView', () => {
     expect(localStorage.getItem('accessToken')).to.equal('test_token');
   });
 
+  async function submitLogin(username = 'testuser', password = 'correct') {
+    const usernameInput = element.shadowRoot?.querySelector<any>('#username');
+    const passwordInput = element.shadowRoot?.querySelector<any>('#password');
+    usernameInput.value = username;
+    passwordInput.value = password;
+    const form = element.shadowRoot?.querySelector('form') as HTMLFormElement;
+    form.dispatchEvent(
+      new SubmitEvent('submit', { bubbles: true, cancelable: true })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await element.updateComplete;
+  }
+
+  it('offers a resend when the address is not verified yet', async () => {
+    // The password was right. Printing only the refusal would leave the
+    // person retyping a password that already works, so the one action that
+    // fixes it has to be on screen.
+    fetchStub.resolves(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: 'email_not_verified',
+            message: 'Verify your email address to finish signing in.',
+            email: 'bob@example.com',
+          },
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+
+    await submitLogin('bob', 'correct');
+
+    const error = element.shadowRoot?.querySelector('.error-message');
+    expect(error?.textContent).to.contain('Verify your email address');
+    // The envelope must never be printed raw.
+    expect(error?.textContent).to.not.contain('email_not_verified');
+    expect(element.shadowRoot?.querySelector('#resend-verification')).to.exist;
+  });
+
+  it('shows no resend action for an ordinary wrong password', async () => {
+    // The default instance does not require verification at all, so this
+    // action must not appear on a normal failed sign-in.
+    fetchStub.resolves(
+      new Response(JSON.stringify({ detail: 'Invalid credentials' }), {
+        status: 401,
+      })
+    );
+
+    await submitLogin('bob', 'wrong');
+
+    expect(element.shadowRoot?.querySelector('.error-message')).to.exist;
+    expect(element.shadowRoot?.querySelector('#resend-verification')).to.not
+      .exist;
+  });
+
+  it('sends the resend to the address the server named', async () => {
+    fetchStub.onFirstCall().resolves(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: 'email_not_verified',
+            message: 'Verify your email address to finish signing in.',
+            email: 'bob@example.com',
+          },
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    fetchStub.onSecondCall().resolves(
+      new Response(
+        JSON.stringify({
+          message: 'A new verification email is on its way.',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+
+    await submitLogin('bob', 'correct');
+    const resend = element.shadowRoot?.querySelector(
+      '#resend-verification'
+    ) as HTMLElement;
+    resend.click();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await element.updateComplete;
+
+    const call = fetchStub.getCalls()[1];
+    expect(String(call.args[0])).to.contain('/auth/resend-verification');
+    expect(JSON.parse(String(call.args[1].body))).to.deep.equal({
+      email: 'bob@example.com',
+    });
+    expect(
+      element.shadowRoot?.querySelector('.success-message')?.textContent
+    ).to.contain('on its way');
+  });
+
+  it('shows the rate limit in the server words', async () => {
+    fetchStub.onFirstCall().resolves(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: 'email_not_verified',
+            message: 'Verify your email address to finish signing in.',
+            email: 'bob@example.com',
+          },
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    fetchStub.onSecondCall().resolves(
+      new Response(
+        JSON.stringify({
+          detail:
+            'Too many verification emails requested. Wait a few minutes and try again.',
+        }),
+        { status: 429, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+
+    await submitLogin('bob', 'correct');
+    (
+      element.shadowRoot?.querySelector('#resend-verification') as HTMLElement
+    ).click();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await element.updateComplete;
+
+    expect(
+      element.shadowRoot?.querySelector('.error-message')?.textContent
+    ).to.contain('Too many verification emails');
+  });
+
   it('should have links for password reset and registration', () => {
     const forgotPasswordLink = element.shadowRoot?.querySelector(
       'a[href="/forgot-password"]'

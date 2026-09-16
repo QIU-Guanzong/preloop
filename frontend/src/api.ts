@@ -3,6 +3,7 @@ import { Router } from './router';
 import { DEFAULT_SIMILARITY_THRESHOLD } from './config';
 import { PermissionError, permissionErrorFromResponse } from './permissions';
 import { ATTENTION_SUMMARY_STORAGE_KEY } from './utils/attention-summary';
+import { historyUnavailableError } from './utils/history-window';
 import type {
   ApprovalBypass,
   ApprovalBypassMode,
@@ -208,6 +209,16 @@ export function extractErrorMessage(
         .map((item: any) => item.msg || JSON.stringify(item))
         .join(', ');
     } else if (typeof errorData.detail === 'object') {
+      // The house refusal shape is {code, message}: a sentence written for
+      // the person who clicked, plus a machine-readable case. Print the
+      // sentence. JSON.stringify used to put the whole envelope on screen,
+      // braces and all.
+      if (
+        typeof errorData.detail.message === 'string' &&
+        errorData.detail.message.trim()
+      ) {
+        return errorData.detail.message;
+      }
       return JSON.stringify(errorData.detail);
     }
     return String(errorData.detail);
@@ -582,21 +593,48 @@ export async function startCheckout(
   interval: 'month' | 'year',
   returnTo?: string
 ): Promise<CheckoutOutcome | null> {
+  return runCheckout(planId, interval, returnTo, false);
+}
+
+/**
+ * Start a Stripe checkout for a visitor who has no account yet.
+ *
+ * Stripe collects the email, the card and the username, and
+ * `checkout-success` creates the account from the completed session, so
+ * signing up and subscribing are one step instead of two. The one difference
+ * from {@link startCheckout} is the transport: this call must not go through
+ * `fetchWithAuth`, which treats a missing token as a dead session and sends
+ * the browser to the login page, which is exactly the detour this flow
+ * exists to remove. Backing out at Stripe returns to the pricing page.
+ */
+export async function startAnonymousCheckout(
+  planId: string,
+  interval: 'month' | 'year'
+): Promise<CheckoutOutcome | null> {
+  return runCheckout(planId, interval, undefined, true);
+}
+
+async function runCheckout(
+  planId: string,
+  interval: 'month' | 'year',
+  returnTo: string | undefined,
+  anonymous: boolean
+): Promise<CheckoutOutcome | null> {
   if (_checkoutInFlight) return null; // double-click guard: one Stripe tab
   _checkoutInFlight = true;
   try {
-    const response = await fetchWithAuth(
-      '/api/v1/billing/create-checkout-session',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          plan_id: planId,
-          interval,
-          return_to: returnTo ?? null,
-        }),
-      }
-    );
+    const request: RequestInit = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        plan_id: planId,
+        interval,
+        return_to: returnTo ?? null,
+      }),
+    };
+    const response = anonymous
+      ? await fetchPublic('/api/v1/billing/create-checkout-session', request)
+      : await fetchWithAuth('/api/v1/billing/create-checkout-session', request);
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
       const detail = body.detail;
@@ -665,6 +703,180 @@ export async function getEntitlements(): Promise<Entitlements> {
     return { premium: true, reason: 'unavailable' };
   }
   return response.json();
+}
+
+/** One plan the post-signup trial offer can start. */
+export interface TrialPromptPlan {
+  id: string;
+  name: string;
+  price_monthly: number | null;
+  price_annually: number | null;
+}
+
+/**
+ * The one-time trial offer for the signed-in user.
+ *
+ * `show` is the server's decision, not a hint the client re-derives:
+ * eligibility depends on the account's subscription history and the person's
+ * billing rights, neither of which the console can see. `reason` names the
+ * case for support and tests.
+ */
+export interface TrialPrompt {
+  show: boolean;
+  reason: string;
+  trial_days: number;
+  plans: TrialPromptPlan[];
+}
+
+const NO_TRIAL_PROMPT: TrialPrompt = {
+  show: false,
+  reason: 'unavailable',
+  trial_days: 0,
+  plans: [],
+};
+
+/**
+ * Ask whether to show the post-signup trial step.
+ *
+ * The endpoint lives on the billing plugin, so an instance without billing
+ * answers 404 and this resolves to "do not show". Never throws: an offer is
+ * not worth an error state in the console shell.
+ *
+ * Passive, like every other question the console asks on its own behalf: the
+ * shell asks this on load, and a rate limit or a gate on an offer nobody
+ * requested must not interrupt the page with a dialog.
+ */
+export async function getTrialPrompt(): Promise<TrialPrompt> {
+  try {
+    const response = await fetchWithAuth('/api/v1/billing/trial-prompt', {
+      passive: true,
+    });
+    if (!response.ok) return NO_TRIAL_PROMPT;
+    const body = await response.json();
+    return {
+      show: body?.show === true,
+      reason: typeof body?.reason === 'string' ? body.reason : 'unavailable',
+      trial_days: Number(body?.trial_days) || 0,
+      plans: Array.isArray(body?.plans) ? body.plans : [],
+    };
+  } catch {
+    return NO_TRIAL_PROMPT;
+  }
+}
+
+/**
+ * Record that the user answered the trial offer, so it is asked once.
+ *
+ * Called for both answers, including before opening Stripe: cancelling there
+ * leaves the account on Free and must not bring the step back. The answer is
+ * stored on the user server-side, so a new browser does not re-ask.
+ */
+export async function dismissTrialPrompt(): Promise<void> {
+  try {
+    await fetchWithAuth('/api/v1/billing/trial-prompt/dismiss', {
+      method: 'POST',
+    });
+  } catch {
+    // The offer is optional; failing to record the answer must not block the
+    // console. The worst case is the step being offered once more.
+  }
+}
+
+/**
+ * One plan limit the account is close to, as the billing plugin sees it.
+ *
+ * `ratio` is used/limit clamped to [0, 1]; `limit` is always a real number
+ * because unlimited items are dropped server-side. `unlocks_at_plan` is the
+ * cheapest plan that raises the limit, or null when nothing does.
+ */
+export interface UsageNudge {
+  key: string;
+  ratio: number;
+  used: number;
+  limit: number;
+  unit: string;
+  plan_id: string;
+  unlocks_at_plan: string | null;
+}
+
+/**
+ * The plan's analytics window, stated apart from the nudge list.
+ *
+ * The console ends a chronological list with a row saying where the plan
+ * stops showing history. That row is a fact about the plan, not about
+ * consumption, so it is not inferred from `nudges`: an account with a 90 day
+ * window and a week of data is nowhere near any threshold and still needs
+ * the row. Null means no finite window, and then there is no row.
+ */
+export interface AnalyticsWindow {
+  days: number;
+  /** Cheapest purchasable plan with a longer window, or null at the top. */
+  unlocks_at_plan: string | null;
+  /** That plan's catalog name, so the console never title-cases an id. */
+  unlocks_at_plan_name: string | null;
+}
+
+/** Everything the console needs to nudge this account, in one answer. */
+export interface UsageNudges {
+  nudges: UsageNudge[];
+  analytics_window: AnalyticsWindow | null;
+  /** Ratio at which the server says nudging starts, or null if unstated. */
+  threshold: number | null;
+  /** The ladder a dismissed nudge climbs back over, or null if unstated. */
+  bands: number[] | null;
+}
+
+/** No plugin, no answer, nothing to draw. The OSS console's whole story. */
+export const NO_USAGE_NUDGES: UsageNudges = {
+  nudges: [],
+  analytics_window: null,
+  threshold: null,
+  bands: null,
+};
+
+/**
+ * Usage against plan limits, for the nudge banner and the cutoff row.
+ *
+ * Advisory only, fetched in the background, so every failure is "no
+ * nudges": OSS has no billing plugin and answers 404, a server older than
+ * this endpoint answers 404 or 405, and a network error must never take a
+ * console page down over chrome. A body that is not the documented envelope
+ * is the same answer, because half-understood chrome is worse than none.
+ *
+ * Passive for the same reason: nobody asked for it. A rate limit or a gate
+ * on a banner nobody requested must not interrupt the page with a dialog.
+ */
+export async function getUsageNudges(): Promise<UsageNudges> {
+  try {
+    const response = await fetchWithAuth('/api/v1/billing/nudges', {
+      passive: true,
+    });
+    if (!response.ok) {
+      return NO_USAGE_NUDGES;
+    }
+    const data: unknown = await response.json();
+    // A bare list is the shape this endpoint carried before the window and
+    // the ladder joined it. Reading it costs one line and makes the order
+    // the two repositories deploy in stop mattering.
+    if (Array.isArray(data)) {
+      return { ...NO_USAGE_NUDGES, nudges: data as UsageNudge[] };
+    }
+    if (!data || typeof data !== 'object') {
+      return NO_USAGE_NUDGES;
+    }
+    const body = data as Partial<UsageNudges>;
+    return {
+      nudges: Array.isArray(body.nudges) ? body.nudges : [],
+      analytics_window:
+        body.analytics_window && typeof body.analytics_window === 'object'
+          ? body.analytics_window
+          : null,
+      threshold: typeof body.threshold === 'number' ? body.threshold : null,
+      bands: Array.isArray(body.bands) ? body.bands : null,
+    };
+  } catch {
+    return NO_USAGE_NUDGES;
+  }
 }
 
 export type {
@@ -914,6 +1126,10 @@ export async function getAccountGatewayUsageSummary(
     `/api/v1/account/gateway-usage/summary${buildGatewayUsageQuery(params)}`
   );
   if (!response.ok) {
+    // A period outside the plan's analytics window is a plan fact, not a
+    // failure, and the caller has to be able to tell them apart.
+    const refused = await historyUnavailableError(response);
+    if (refused) throw refused;
     throw new Error('Failed to fetch account gateway usage summary');
   }
   return response.json();
@@ -1009,6 +1225,8 @@ export async function getCostAnalyticsSummary(
     `/api/v1/cost/summary${buildGatewayUsageQuery(params)}`
   );
   if (!response.ok) {
+    const refused = await historyUnavailableError(response);
+    if (refused) throw refused;
     throw new Error('Failed to fetch cost analytics summary');
   }
   return response.json();
@@ -1878,6 +2096,8 @@ export async function getAccountRuntimeSessionDetail(
     `/api/v1/runtime-sessions/${runtimeSessionId}`
   );
   if (!response.ok) {
+    const refused = await historyUnavailableError(response);
+    if (refused) throw refused;
     throw new Error('Failed to fetch session detail');
   }
   return response.json();
@@ -1916,6 +2136,12 @@ export async function getAccountRuntimeSessionActivityTimeline(
     `/api/v1/runtime-sessions/${runtimeSessionId}/activity`
   );
   if (!response.ok) {
+    // This is the call that refuses when a session's whole activity sits
+    // behind the plan's analytics window (`require_session_history`), so it
+    // is where opening an old session learns that it is a plan fact rather
+    // than a failure.
+    const refused = await historyUnavailableError(response);
+    if (refused) throw refused;
     throw new Error('Failed to fetch session activity timeline');
   }
   return response.json();
@@ -2594,6 +2820,34 @@ export async function searchIssues(
   return data.results.map((r: any) => r.item);
 }
 
+/**
+ * An HTTP refusal, carrying the server's own case name.
+ *
+ * Some refusals need more than a sentence: a login blocked by
+ * `email_not_verified` has to grow a "resend the email" action, and only the
+ * code tells the caller which refusal it is. The message is unchanged, so
+ * existing `error.message` handling keeps working.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  /** The refusal body as sent, for the few callers that need a field. */
+  readonly detail?: Record<string, unknown>;
+
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    detail?: Record<string, unknown>
+  ) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
 export async function post(url: string, body: any) {
   const response = await window.fetch(url, {
     method: 'POST',
@@ -2606,17 +2860,40 @@ export async function post(url: string, body: any) {
   if (!response.ok) {
     // Try to extract error detail from response body
     let errorMessage = `HTTP error! status: ${response.status}`;
+    let code: string | undefined;
+    let detail: Record<string, unknown> | undefined;
     try {
       const errorData = await response.json();
       if (errorData.detail) {
         errorMessage = extractErrorMessage(errorData, errorMessage);
+        if (errorData.detail && typeof errorData.detail === 'object') {
+          detail = errorData.detail as Record<string, unknown>;
+          if (typeof detail.code === 'string') {
+            code = detail.code;
+          }
+        }
       }
     } catch (e) {
       // If JSON parsing fails, use the default error message
     }
-    throw new Error(errorMessage);
+    throw new ApiError(errorMessage, response.status, code, detail);
   }
   return response.json();
+}
+
+/**
+ * Ask for another verification email.
+ *
+ * Deliberately anonymous and deliberately vague: the endpoint answers the
+ * same way whether or not the address exists, so this cannot be used to
+ * discover who has an account. It is rate limited server-side, and a 429
+ * comes back as its own sentence.
+ */
+export async function resendVerificationEmail(email: string): Promise<string> {
+  const data = await post('/api/v1/auth/resend-verification', { email });
+  return typeof data?.message === 'string'
+    ? data.message
+    : 'If that address needs verifying, a new link is on its way.';
 }
 
 export async function detectIssueDependencies(
