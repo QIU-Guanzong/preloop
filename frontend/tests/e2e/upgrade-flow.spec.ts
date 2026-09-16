@@ -1,16 +1,19 @@
 /**
- * T2 E2E: premium gate → upgrade modal → checkout round-trip → return.
+ * T2 E2E: premium gate, upgrade modal, and where its buttons lead.
  *
  * Per the eng-review decision (D37), the STRIPE BOUNDARY IS MOCKED in CI:
- * page.route intercepts the three billing endpoints so this spec runs with
+ * page.route intercepts the billing endpoints so this spec runs with
  * zero external dependencies and asserts the code WE wrote:
  *
  *   1. A 402 {code:"upgrade_required"} response opens the upgrade modal with
- *      feature-specific copy (fetchWithAuth dispatch → console-shell dialog).
- *   2. "Upgrade now" calls create-checkout-session with the SAME-ORIGIN
- *      return_to of the page where the gate was hit.
- *   3. Following the (mocked) checkout-success redirect lands the browser
- *      back on return_to — the paid user returns exactly where they left.
+ *      feature-specific copy (fetchWithAuth dispatch, console-shell dialog).
+ *   2. "Upgrade now" closes the dialog and hands the decision to the plan
+ *      page, naming the refused feature in the query so that page can open
+ *      on the cheapest plan that unlocks it. The dialog buys nothing itself:
+ *      it used to start a checkout for one hardcoded plan, which was the
+ *      wrong plan for half the gates.
+ *   3. No checkout request leaves the dialog, so nothing is charged by a
+ *      button whose only job is to explain what was refused.
  *   4. With entitlements {premium:false}, the sessions list shows the
  *      AI-titles upsell hint, and clicking it opens the same modal.
  *
@@ -63,33 +66,20 @@ async function login(page: Page, creds: Creds): Promise<void> {
 test.describe('T2 upgrade flow (mocked Stripe boundary)', () => {
   test.skip(IS_STAGING, 'CI-only: staging runs the real-Stripe script instead');
 
-  test('402 opens the feature-named modal; upgrade round-trips back to return_to', async ({
+  test('402 opens the feature-named modal; upgrade goes to the plan page', async ({
     page,
-    baseURL,
   }) => {
     const gatePath = '/console/runtime-sessions';
-    let checkoutBody: Record<string, unknown> | null = null;
+    let checkoutCalls = 0;
 
-    // Mocked Stripe boundary: checkout creation answers with a "redirect"
-    // straight to a mocked checkout-success, which bounces to return_to —
-    // exactly the shape the real loop produces, minus Stripe.
+    // Mocked Stripe boundary, kept so that a checkout started by mistake is
+    // counted here instead of reaching a real account.
     await page.route('**/api/v1/billing/create-checkout-session', (route) => {
-      checkoutBody = route.request().postDataJSON();
-      const returnTo = String(checkoutBody?.return_to ?? '/console');
+      checkoutCalls += 1;
       void route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({
-          action: 'redirect',
-          url: `${baseURL}/api/v1/billing/checkout-success?session_id=cs_mock&return_to=${encodeURIComponent(returnTo)}`,
-        }),
-      });
-    });
-    await page.route('**/api/v1/billing/checkout-success**', (route) => {
-      const url = new URL(route.request().url());
-      void route.fulfill({
-        status: 307,
-        headers: { location: url.searchParams.get('return_to') || '/console' },
+        body: JSON.stringify({ action: 'redirect', url: '/console' }),
       });
     });
     // The premium gate itself, mocked at the boundary: one gated endpoint
@@ -147,12 +137,14 @@ test.describe('T2 upgrade flow (mocked Stripe boundary)', () => {
     await expect(dialog).toBeVisible();
     await expect(dialog).toContainText('AI session optimization');
 
-    // Upgrade now → mocked checkout → mocked checkout-success → return_to.
+    // "Upgrade now" leaves for the plan page, carrying the capability that
+    // was refused. `session_optimization` is sold as `ai_optimization`, so
+    // that is the name the plan page can actually match against a plan.
     await dialog.locator('sl-button', { hasText: 'Upgrade now' }).click();
-    await page.waitForURL(`**${gatePath}`, { timeout: 15_000 });
-    expect(checkoutBody).not.toBeNull();
-    expect(String(checkoutBody!.return_to)).toContain(gatePath);
-    expect(checkoutBody!.plan_id).toBe('pro');
+    await page.waitForURL(/feature=ai_optimization/, { timeout: 15_000 });
+    expect(page.url()).toContain('/console/settings/account');
+    await expect(dialog).toBeHidden();
+    expect(checkoutCalls, 'the dialog buys nothing by itself').toBe(0);
   });
 
   test('free accounts see the AI-titles upsell hint on the sessions list', async ({

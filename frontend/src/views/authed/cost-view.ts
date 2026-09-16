@@ -741,8 +741,12 @@ export class CostView extends AuthedElement {
       await this.loadBudgetPolicies();
       this.aiModels = aiModels;
       if (this.featureFlags.model_price_overrides === true) {
+        // Passive: this list decorates the cost tables on page load. A plan
+        // without the capability answers 402, which is an answer about the
+        // account, not about anything the reader just clicked.
         this.pricingOverrides = await getModelPriceOverrides({
           activeOnly: true,
+          passive: true,
         }).catch(() => []);
       } else {
         this.pricingOverrides = [];

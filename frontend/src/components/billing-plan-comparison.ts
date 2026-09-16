@@ -1,6 +1,7 @@
 import { LitElement, css, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { fetchWithAuth } from '../api';
+import { capabilityForFeature } from '../utils/premium-features';
 import type {
   BillingMonth,
   BillingNotice,
@@ -58,7 +59,15 @@ export class BillingPlanComparison extends LitElement {
   @state() private busy: 'preview' | 'confirm' | 'checkout' | null = null;
   @state() private error = '';
   @state() private selectedPlan = '';
-  @state() private interval: 'month' | 'year' = 'month';
+  /**
+   * Annual by default, like the public pricing page.
+   *
+   * Both surfaces sell the same catalog, so opening one on "Monthly" and the
+   * other on "Annually" made the same plan look like two prices. `?interval=`
+   * still wins, and a target with no period at all (Free) is normalised back
+   * to month in `refresh`, where the period question does not arise.
+   */
+  @state() private interval: 'month' | 'year' = 'year';
   @state() private preview: PlanChangePreview | null = null;
   @state() private accepted = false;
   @state() private now = Date.now();
@@ -73,6 +82,17 @@ export class BillingPlanComparison extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.refresh();
+  }
+
+  /**
+   * Open the picker from outside: the account page's "Choose a plan".
+   *
+   * An account with no subscription has nothing to manage in the provider's
+   * portal, so its one billing action is this section. Calling it a second
+   * time is harmless.
+   */
+  openPicker(): void {
+    this.changing = true;
   }
 
   disconnectedCallback(): void {
@@ -113,6 +133,51 @@ export class BillingPlanComparison extends LitElement {
   /** Candidate plans, in catalog order, quote-only entries removed. */
   private get targets(): BillingPlan[] {
     return (this.options?.plans ?? []).filter((p) => this.isTarget(p));
+  }
+
+  /**
+   * What "Change to" may offer: the candidates minus the plan the account is
+   * already entitled to.
+   *
+   * Listing the current plan in a list of changes offers a change that is not
+   * one, and it was the first option in the list, so a Free account opened the
+   * picker on "Free". The plan stays visible either way: the line above the
+   * picker names it, and the comparison table keeps its column. The one
+   * exception is a paid subscription that can move between monthly and annual
+   * billing on the same plan: that is a real change with a real quote.
+   */
+  private get changeTargets(): BillingPlan[] {
+    return this.targets.filter((p) => this.isChangeTarget(p));
+  }
+
+  /** Whether choosing `plan` in the picker would change anything at all. */
+  private isChangeTarget(
+    plan: BillingPlan,
+    options: PlanChangeOptions | null = this.options
+  ): boolean {
+    if (!options) return false;
+    if (plan.id !== this.effectiveCurrentPlan(options)?.id) return true;
+    return this.intervalSwitchable(plan, options);
+  }
+
+  /**
+   * Whether the account could bill the same plan on the other period.
+   *
+   * Only a live paid subscription has a period to move. Free has no period
+   * and an expired trial has no subscription to re-time, so for those the
+   * current plan is not a change target at all.
+   */
+  private intervalSwitchable(
+    plan: BillingPlan,
+    options: PlanChangeOptions
+  ): boolean {
+    if (!options.current_subscription || this.trialExpired(options))
+      return false;
+    return (
+      plan.price_monthly != null &&
+      plan.price_annually != null &&
+      (plan.price_monthly > 0 || plan.price_annually > 0)
+    );
   }
 
   /** Quote-only plans, named with their contact link instead of a price. */
@@ -212,20 +277,39 @@ export class BillingPlanComparison extends LitElement {
       if (firstLoad) {
         const params = new URLSearchParams(window.location.search);
         const requested = options.plans.find(
-          (p) => p.id === params.get('plan') && this.isTarget(p)
+          (p) =>
+            p.id === params.get('plan') &&
+            this.isTarget(p) &&
+            this.isChangeTarget(p, options)
         );
+        const feature = params.get('feature') || '';
         if (requested) this.selectedPlan = requested.id;
+        else if (feature) {
+          // Arrived from the upgrade dialog. The reader was refused one named
+          // thing, so open on the cheapest plan that includes it rather than
+          // on the next rung of the ladder, which may not include it at all.
+          const unlocking = this.cheapestUnlocking(options, feature);
+          if (unlocking) this.selectedPlan = unlocking;
+        }
         if (
           params.get('interval') === 'year' ||
           params.get('interval') === 'month'
         ) {
           this.interval = params.get('interval') as 'month' | 'year';
         }
+        // A request that names a plan, an interval or a refused feature came
+        // from somewhere that already asked the question, so answer it:
+        // opening on "Change plan" would make the reader click again.
+        if (requested || feature || params.get('interval'))
+          this.changing = true;
       }
       this.refreshRequired = false;
       if (
         !options.plans.some(
-          (p) => p.id === this.selectedPlan && this.isTarget(p)
+          (p) =>
+            p.id === this.selectedPlan &&
+            this.isTarget(p) &&
+            this.isChangeTarget(p, options)
         )
       )
         this.selectedPlan = this.defaultSelection(options);
@@ -295,7 +379,10 @@ export class BillingPlanComparison extends LitElement {
       typeof plan.price_monthly === 'number'
         ? plan.price_monthly
         : Number.POSITIVE_INFINITY;
-    const targets = options.plans.filter((p) => this.isTarget(p));
+    const currentId = this.effectiveCurrentPlan(options)?.id;
+    const targets = options.plans.filter(
+      (p) => this.isTarget(p) && p.id !== currentId
+    );
     // A plan the server blocked is never the default, not even as a last
     // resort: the picker has just labelled it "(not available)" and the action
     // under it is disabled, so opening on it offers a choice that cannot be
@@ -303,7 +390,6 @@ export class BillingPlanComparison extends LitElement {
     // under the picker are the whole screen.
     const selectable = targets.filter((p) => this.eligible(p));
     const currentPlan = this.effectiveCurrentPlan(options);
-    const currentId = currentPlan?.id;
     const ladder = selectable
       .filter(
         (p) =>
@@ -331,6 +417,36 @@ export class BillingPlanComparison extends LitElement {
         : undefined) ??
       ''
     );
+  }
+
+  /**
+   * The cheapest plan this account can move to that includes `feature`.
+   *
+   * `feature` is the capability named by the 402 upgrade contract. A plan that
+   * does not publish a capability list cannot be proven to include it, so it
+   * is not offered; the caller falls back to the ordinary default.
+   */
+  private cheapestUnlocking(
+    options: PlanChangeOptions,
+    feature: string
+  ): string | undefined {
+    const capability = capabilityForFeature(feature);
+    const price = (plan: BillingPlan): number =>
+      typeof plan.price_monthly === 'number'
+        ? plan.price_monthly
+        : Number.POSITIVE_INFINITY;
+    const currentId = this.effectiveCurrentPlan(options)?.id;
+    return options.plans
+      .filter(
+        (p) =>
+          this.isTarget(p) &&
+          p.id !== currentId &&
+          this.eligible(p) &&
+          p.purchasable !== false &&
+          Number.isFinite(price(p)) &&
+          (p.capabilities ?? []).includes(capability)
+      )
+      .sort((a, b) => price(a) - price(b))[0]?.id;
   }
 
   /** One line of what the plan includes, for the collapsed state. */
@@ -364,6 +480,9 @@ export class BillingPlanComparison extends LitElement {
     this.revision++;
     this.selectedPlan = plan;
     this.interval = interval;
+    // A plan with nothing to bill has no period to choose, so the annual
+    // default must not follow the reader onto it and quote a year of zero.
+    if (!this.showPeriod) this.interval = 'month';
     this.preview = null;
     window.clearTimeout(this.expiryTimer);
     this.accepted = false;
@@ -1119,7 +1238,7 @@ export class BillingPlanComparison extends LitElement {
    * here in full: the count, the cap, and what would have to change.
    */
   private renderUnavailable() {
-    const blocked = this.targets
+    const blocked = this.changeTargets
       .filter((p) => !this.eligible(p))
       .map((p) => ({ plan: p, verdict: this.verdict(p.id)! }));
     if (!blocked.length) return nothing;
@@ -1201,7 +1320,7 @@ export class BillingPlanComparison extends LitElement {
             ?disabled=${this.busy === 'confirm' || this.busy === 'checkout' || !!this.pendingConfirmation}
             @change=${(e: Event) => this.choose((e.target as HTMLSelectElement).value)}
           >
-            ${this.targets.map((p) => html`<option value=${p.id} ?disabled=${!this.eligible(p)}>${p.name}${this.eligible(p) ? '' : ' (not available)'}</option>`)}
+            ${this.changeTargets.map((p) => html`<option value=${p.id} ?selected=${p.id === this.selectedPlan} ?disabled=${!this.eligible(p)}>${p.name}${this.eligible(p) ? '' : ' (not available)'}</option>`)}
           </select></label
         >
         ${
