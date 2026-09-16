@@ -175,4 +175,9 @@ is reported in a degraded block with keyword results, never as an error.
 query at all: a session is compared by a stride sample of its own chunks, in
 its own model's space, and spends nothing.
 See [Similar sessions](docs/architecture/similar-sessions.md).
+A question worth repeating can be saved under a name in `session_saved_search`
+and re-run from `/runtime-sessions/search/saved`; a saved search stores the
+question and never the answer, is private until its author shares it with the
+account, and a run says which of its filters no longer resolve.
 Operator knobs: [Session embedding](docs/operations/session-embedding.md).
+Saved searches: [Saved session searches](docs/guide/session-saved-searches.md).
