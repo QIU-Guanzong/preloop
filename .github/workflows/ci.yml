@@ -160,6 +160,12 @@ jobs:
   # parallel, so wall clock gets worse even though queue time gets better.
   # Register more runners with the same labels, or flip CI_SELF_HOSTED_TESTS
   # to false.
+  #
+  # Python: setup-python has no Debian 12 builds. Routed jobs use
+  # .github/actions/setup-ci-python, which venvs a matching system
+  # interpreter (needs python3.11-venv on Debian) and only then falls
+  # back to setup-python. Hosted ubuntu-latest has no system 3.11, so
+  # those jobs still download from the Ubuntu manifest.
   pick-runner:
     name: Pick test runner
     runs-on: ubuntu-latest
@@ -255,7 +261,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: ./.github/actions/setup-ci-python
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -299,7 +305,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: ./.github/actions/setup-ci-python
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -405,7 +411,7 @@ jobs:
           clean: true
 
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: ./.github/actions/setup-ci-python
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -464,7 +470,7 @@ jobs:
           clean: true
 
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: ./.github/actions/setup-ci-python
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -623,7 +629,7 @@ jobs:
           clean: true
 
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: ./.github/actions/setup-ci-python
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
