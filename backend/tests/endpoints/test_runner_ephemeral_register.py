@@ -174,7 +174,7 @@ async def test_unregister_deletes_an_ephemeral_row_immediately(
     websocket.receive_json = AsyncMock(
         side_effect=[{"type": "unregister"}, WebSocketDisconnect()]
     )
-    sweep = MagicMock(return_value=1)
+    delete = MagicMock(return_value=True)
     monkeypatch.setattr(runners, "_authenticate_runner", lambda *args: runner)
     monkeypatch.setattr(runners, "emit_runner_updated", MagicMock())
     monkeypatch.setattr(runners.crud_flow_runner, "get", lambda *args, **kwargs: runner)
@@ -182,7 +182,7 @@ async def test_unregister_deletes_an_ephemeral_row_immediately(
         runners.crud_flow_runner, "get_fresh", lambda *args, **kwargs: runner
     )
     monkeypatch.setattr(runners.crud_flow_runner, "touch_heartbeat", MagicMock())
-    monkeypatch.setattr(runners.crud_flow_runner, "sweep_stale_ephemeral", sweep)
+    monkeypatch.setattr(runners.crud_flow_runner, "delete_ephemeral", delete)
     monkeypatch.setattr(
         runners.crud_flow_runner,
         "set_publication_capabilities",
@@ -191,8 +191,49 @@ async def test_unregister_deletes_an_ephemeral_row_immediately(
 
     await runners.runner_ws(websocket, runner.id, MagicMock())
 
-    sweep.assert_called_once()
-    assert sweep.call_args.kwargs["grace"] == timedelta(0)
-    assert sweep.call_args.kwargs["account_id"] == runner.account_id
+    delete.assert_called_once()
+    # By id, not by account: a sibling CI job's idle row must survive.
+    assert delete.call_args.kwargs["runner_id"] == runner.id
     # The runner still gets its acknowledgement before the socket closes.
     assert websocket.send_json.await_args_list[-1].args[0] == {"type": "ack"}
+
+
+@pytest.mark.asyncio
+async def test_unregister_leaves_a_sibling_ci_runner_alone(
+    db_session: Session, test_user: models.User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a matrix build registers several one-shot runners in one
+    account. The first job to finish must delete its own row only."""
+    rows = [
+        crud_flow_runner.create(
+            db_session,
+            obj_in={
+                "account_id": test_user.account_id,
+                "name": name,
+                "token_hash": f"hash-{uuid4()}",
+                "ephemeral": True,
+                "status": "online",
+                "last_heartbeat": datetime.now(timezone.utc),
+            },
+        )
+        for name in ("ci-matrix-py311", "ci-matrix-py312")
+    ]
+    leaving, sibling = rows[0].id, rows[1].id
+
+    websocket = MagicMock()
+    websocket.accept = AsyncMock()
+    websocket.send_json = AsyncMock()
+    websocket.receive_json = AsyncMock(
+        side_effect=[{"type": "unregister"}, WebSocketDisconnect()]
+    )
+    websocket.query_params = {"token": "tok"}
+    websocket.headers = {}
+    monkeypatch.setattr(runners, "emit_runner_updated", lambda *args: None)
+    monkeypatch.setattr(
+        runners, "_authenticate_runner", lambda db, runner_id, token: rows[0]
+    )
+
+    await runners.runner_ws(websocket, leaving, db_session)
+
+    assert crud_flow_runner.get_fresh(db_session, runner_id=leaving) is None
+    assert crud_flow_runner.get_fresh(db_session, runner_id=sibling) is not None

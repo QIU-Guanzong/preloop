@@ -8,7 +8,7 @@ import logging
 import socket
 import secrets
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from string import ascii_letters, digits
 from typing import Any, Dict, List, Mapping, Optional
 from uuid import UUID, uuid4, uuid5
@@ -587,13 +587,13 @@ async def runner_ws(
                     if fresh_runner is not None:
                         emit_runner_updated(fresh_runner, db)
                         # A one-shot runner said goodbye on purpose: the
-                        # process is gone, so the row goes with it instead of
-                        # waiting out the heartbeat grace.
+                        # process is gone, so this row goes with it instead of
+                        # waiting out the heartbeat grace. Only this row: a
+                        # sibling CI job in the same account may still be
+                        # waiting idle for its own execution.
                         if fresh_runner.ephemeral:
-                            crud_flow_runner.sweep_stale_ephemeral(
-                                db,
-                                account_id=fresh_runner.account_id,
-                                grace=timedelta(0),
+                            crud_flow_runner.delete_ephemeral(
+                                db, runner_id=fresh_runner.id
                             )
                 await websocket.send_json({"type": "ack"})
                 break

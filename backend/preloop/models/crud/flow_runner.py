@@ -486,6 +486,34 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
         db.commit()
         return bool(updated)
 
+    def delete_ephemeral(self, db: Session, *, runner_id: UUID) -> bool:
+        """Delete a single one-shot runner row by id.
+
+        Used when an ephemeral runner says goodbye on purpose. Only that row
+        goes: a sweep by account would take out the idle runners of sibling
+        CI jobs in the same account (a matrix build) that have not started
+        their own job yet. A row holding an execution is left alone so
+        completion handling still finds it.
+
+        Args:
+            db: Database session.
+            runner_id: Runner primary key.
+
+        Returns:
+            True when the row was deleted.
+        """
+        deleted = (
+            db.query(FlowRunner)
+            .filter(
+                FlowRunner.id == runner_id,
+                FlowRunner.ephemeral.is_(True),
+                FlowRunner.current_execution_id.is_(None),
+            )
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        return bool(deleted)
+
     def sweep_stale_ephemeral(
         self,
         db: Session,

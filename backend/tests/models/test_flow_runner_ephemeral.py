@@ -131,10 +131,51 @@ def test_sweep_spares_a_runner_that_has_not_connected_yet(
     )
     assert crud_flow_runner.get_fresh(db_session, runner_id=fresh.id) is not None
 
-    # With no grace at all (the unregister path), the same row does go.
+    # With no grace at all the same row does go.
     assert (
         crud_flow_runner.sweep_stale_ephemeral(
             db_session, account_id=account.id, grace=timedelta(0)
         )
         == 1
     )
+
+
+def test_delete_ephemeral_takes_only_the_unregistering_row(
+    db_session: Session,
+) -> None:
+    """A matrix build shares one account: a goodbye is not a fleet reap."""
+    account = _account(db_session, "Ephemeral matrix")
+    leaving = _runner(db_session, account.id, ephemeral=True)
+    # Registered moments ago, still waiting for its own job, so its heartbeat
+    # is older than "now" exactly like every other idle row.
+    sibling = _runner(db_session, account.id, ephemeral=True)
+    leaving_id, sibling_id = leaving.id, sibling.id
+
+    assert crud_flow_runner.delete_ephemeral(db_session, runner_id=leaving_id) is True
+
+    assert crud_flow_runner.get_fresh(db_session, runner_id=leaving_id) is None
+    assert crud_flow_runner.get_fresh(db_session, runner_id=sibling_id) is not None
+
+
+def test_delete_ephemeral_spares_persistent_and_busy_rows(
+    db_session: Session,
+) -> None:
+    """The guards are in the delete, not only in the caller."""
+    account = _account(db_session, "Ephemeral guards")
+    persistent = _runner(db_session, account.id)
+    busy = _runner(db_session, account.id, ephemeral=True, status="busy")
+    busy.current_execution_id = _execution(db_session, account.id).id
+    db_session.add(busy)
+    db_session.commit()
+    persistent_id, busy_id = persistent.id, busy.id
+
+    assert (
+        crud_flow_runner.delete_ephemeral(db_session, runner_id=persistent_id) is False
+    )
+    assert crud_flow_runner.delete_ephemeral(db_session, runner_id=busy_id) is False
+
+    remaining = {
+        row.id
+        for row in crud_flow_runner.list_for_account(db_session, account_id=account.id)
+    }
+    assert {persistent_id, busy_id} <= remaining
