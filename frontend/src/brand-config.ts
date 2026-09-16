@@ -214,6 +214,7 @@ export interface PricingConfig {
    * The one-line lead printed under the tab bar while the Cloud tab is open.
    * The page `lead` sits under the H1 and covers both tabs; this one belongs
    * to the Cloud tab alone, exactly as `dedicated.lead` belongs to the other.
+   * Ignored on a cloud-only page: there is no tab bar, so the H1 lead is it.
    */
   cloud_lead?: string;
   billing_toggle?: boolean;

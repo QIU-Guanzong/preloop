@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- CI prefers a matching system Python (through a venv) and only then
+  falls back to `actions/setup-python`. The action has no Debian 12
+  builds, so a self-hosted bookworm runner with `python3.11` already
+  installed used to fail before any test ran. Distro Python is PEP 668
+  managed; the venv is what makes `pip install` legal. Needs
+  `python3.11-venv` on Debian. Public `ubuntu-latest` jobs are
+  unchanged: they have no system 3.11, so they still use setup-python.
+- Self-hosted backend shards run in a `python:<version>-bookworm` job
+  container and reach Postgres by service hostname, so they do not bind
+  host 5432. Two runner processes on one VM can run shards together.
+  Public `ubuntu-latest` backend jobs stay on the VM with
+  `localhost:5432`.
+
 ### Added
 
 - `run-flow` composite GitHub Action (`.github/actions/run-flow`) and a
