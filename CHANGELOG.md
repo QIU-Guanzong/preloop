@@ -86,6 +86,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Keyword search still reads the whole corpus. Read and write it at `GET`
   and `PUT /api/v1/runtime-sessions/settings/embedding`; an unknown scope is
   a 422.
+- Every session content search is audited. One row per call through the
+  existing audit path, with `action="query"`, `resource_type="session_search"`
+  and a status of `success`, `denied` or `failure`; details carry the mode, the
+  filters that narrowed the read, the result count and a stable hash of the
+  query. The query text itself is stored only when the account sets
+  `session_search_audit_store_query_text`, because a query is often the secret
+  somebody is hunting for. A search made through the `search_sessions` tool is
+  recorded with the agent as the actor and `source="mcp"`. An audit write
+  failure is logged and never changes the search answer. Docs at
+  `docs/guide/session-search-audit.md`.
 - `search_sessions` built-in tool. An agent searches the runtime session
   corpus before repeating work: ranked results, one trimmed snippet per
   session, a match reason and the endpoint's degraded markers. Scope is the
