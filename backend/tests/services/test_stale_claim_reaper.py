@@ -225,10 +225,15 @@ class TestReaperLease:
     def test_a_non_postgres_session_always_wins(self):
         """Single-process dev has no second reaper to exclude."""
         db = MagicMock()
-        db.bind.dialect.name = "sqlite"
+        db.bind.dialect.name = "postgresql"
+        db.bind.engine.connect.side_effect = AssertionError(
+            "lease must read get_bind(), not db.bind"
+        )
+        db.get_bind.return_value.dialect.name = "sqlite"
         with crud_flow_execution.stale_claim_reaper_lease(db) as leased:
             assert leased is True
         db.execute.assert_not_called()
+        db.get_bind.assert_called()
 
     def test_an_aborted_pass_still_releases_the_lease(self, db_engine):
         """A DBAPI abort mid-pass must not strand the lock on the connection."""
@@ -248,6 +253,93 @@ class TestReaperLease:
         finally:
             first.close()
             second.close()
+
+    def test_a_commit_mid_pass_does_not_strand_the_lease(self, db_engine):
+        """Unlock must not ride a different checkout after Session.commit()."""
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        engine = create_engine(
+            db_engine.url,
+            pool_use_lifo=True,
+            pool_size=5,
+            max_overflow=10,
+        )
+        factory = sessionmaker(bind=engine)
+        first = factory()
+        second = factory()
+        extra = engine.connect()
+        try:
+            with crud_flow_execution.stale_claim_reaper_lease(
+                first, holder="worker-commit"
+            ) as leased:
+                assert leased is True
+                first.commit()
+                extra.execute(text("SELECT 1"))
+                extra.commit()
+            with crud_flow_execution.stale_claim_reaper_lease(
+                second, holder="worker-next"
+            ) as leased:
+                assert leased is True
+        finally:
+            first.close()
+            second.close()
+            extra.close()
+            engine.dispose()
+
+    def test_a_failed_session_rollback_still_releases_the_lease(self, db_engine):
+        """Rollback must not skip pg_advisory_unlock on the dedicated checkout."""
+        first = Session(bind=db_engine.connect())
+        second = Session(bind=db_engine.connect())
+        try:
+            with patch.object(
+                first, "rollback", side_effect=RuntimeError("rollback boom")
+            ):
+                with crud_flow_execution.stale_claim_reaper_lease(
+                    first, holder="worker-rollback"
+                ) as leased:
+                    assert leased is True
+            with crud_flow_execution.stale_claim_reaper_lease(
+                second, holder="worker-next"
+            ) as leased:
+                assert leased is True
+        finally:
+            first.close()
+            second.close()
+
+    def test_a_failed_unlock_invalidates_the_checkout(self):
+        """Pool return would keep a session-level lock until recycle."""
+        lock_conn = MagicMock()
+        lock_conn.execute.return_value.scalar.side_effect = [True, False]
+        engine = MagicMock()
+        engine.connect.return_value.__enter__.return_value = lock_conn
+        engine.connect.return_value.__exit__.return_value = False
+        db = MagicMock()
+        bind = MagicMock()
+        bind.dialect.name = "postgresql"
+        bind.engine = engine
+        db.get_bind.return_value = bind
+        with crud_flow_execution.stale_claim_reaper_lease(db) as leased:
+            assert leased is True
+        lock_conn.invalidate.assert_called_once()
+
+    def test_an_unlock_exception_invalidates_the_checkout(self):
+        lock_conn = MagicMock()
+        lock_conn.execute.return_value.scalar.side_effect = [
+            True,
+            RuntimeError("unlock boom"),
+        ]
+        engine = MagicMock()
+        engine.connect.return_value.__enter__.return_value = lock_conn
+        engine.connect.return_value.__exit__.return_value = False
+        db = MagicMock()
+        bind = MagicMock()
+        bind.dialect.name = "postgresql"
+        bind.engine = engine
+        db.get_bind.return_value = bind
+        with crud_flow_execution.stale_claim_reaper_lease(db) as leased:
+            assert leased is True
+        lock_conn.invalidate.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_only_the_lease_holder_re_dispatches(
