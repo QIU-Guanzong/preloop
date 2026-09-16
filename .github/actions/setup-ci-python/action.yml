@@ -18,7 +18,10 @@ runs:
       shell: bash
       env:
         PYTHON_VERSION: ${{ inputs.python-version }}
-      run: bash "${{ github.action_path }}/prefer-system-python.sh"
+      # github.action_path is the host path. Job containers mount the
+      # workspace at /__w, so bash that path from inside the container
+      # fails with "No such file". GITHUB_WORKSPACE is remapped.
+      run: bash "${GITHUB_WORKSPACE}/.github/actions/setup-ci-python/prefer-system-python.sh"
 
     - name: Set up Python
       if: steps.system.outputs.use_setup == 'true'
