@@ -132,6 +132,27 @@ def test_the_list_holds_mine_and_the_shared_ones_only(
     assert private["id"] not in ids
 
 
+def test_an_unknown_update_key_is_refused_rather_than_ignored(client):
+    """A PATCH typo must 422, not silently apply the rest of the body."""
+    saved = _create(client).json()
+
+    mixed = client.patch(
+        f"{SAVED_URL}/{saved['id']}",
+        json={"query": "billing", "visiblity": "account"},
+    )
+    typo_only = client.patch(
+        f"{SAVED_URL}/{saved['id']}",
+        json={"visiblity": "account"},
+    )
+
+    assert mixed.status_code == 422
+    assert typo_only.status_code == 422
+    current = client.get(f"{SAVED_URL}/{saved['id']}")
+    assert current.status_code == 200
+    assert current.json()["query"] == saved["query"]
+    assert current.json()["visibility"] == "private"
+
+
 def test_sharing_stamps_when_it_was_shared_and_unsharing_clears_it(client):
     """ "Shared since" is never a date from a share that was already undone."""
     saved = _create(client).json()

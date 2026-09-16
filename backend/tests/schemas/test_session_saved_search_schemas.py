@@ -40,6 +40,17 @@ def test_an_unknown_key_is_refused_rather_than_ignored():
         SessionSavedSearchCreate(name="billing", query="billing", notafield=True)
 
 
+def test_an_unknown_update_key_is_refused_rather_than_ignored():
+    """A PATCH typo must 422, not silently drop the share or look like an empty body."""
+    with pytest.raises(ValidationError) as mixed:
+        SessionSavedSearchUpdate(query="billing", visiblity="account")
+    assert {error["type"] for error in mixed.value.errors()} == {"extra_forbidden"}
+
+    with pytest.raises(ValidationError) as typo_only:
+        SessionSavedSearchUpdate(visiblity="account")
+    assert {error["type"] for error in typo_only.value.errors()} == {"extra_forbidden"}
+
+
 def test_an_unknown_filter_key_is_refused():
     """Filters are validated at save time so a stored search can always run."""
     with pytest.raises(ValidationError):
