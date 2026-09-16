@@ -1232,4 +1232,89 @@ describe('PreloopSessionObserver', () => {
       }
     });
   });
+
+  describe('a session outside the plan analytics window', () => {
+    /**
+     * The gate that matters here is the one on the path a person actually
+     * takes: selecting a session whose whole activity predates the plan's
+     * window. The server refuses that with its own sentence, and the modal
+     * follows the click, never the automatic first selection.
+     */
+    const oldSession = { ...session, id: 'runtime-session-old' };
+    const REFUSAL =
+      "This session has no activity within your plan's analytics history.";
+    let seenModals: CustomEvent[];
+    const onModal = (event: Event) => seenModals.push(event as CustomEvent);
+
+    beforeEach(() => {
+      seenModals = [];
+      window.addEventListener('show-upgrade-modal', onModal);
+      fetchStub.callsFake(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.includes(oldSession.id) && url.includes('/activity')) {
+          return new Response(
+            JSON.stringify({
+              detail: {
+                code: 'analytics_history_unavailable',
+                available_from: '2026-03-01T00:00:00Z',
+                message: REFUSAL,
+              },
+            }),
+            { status: 403, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        if (url.includes('/gateway-events')) {
+          return new Response(JSON.stringify({ logs: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ items: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+    });
+
+    afterEach(() => {
+      window.removeEventListener('show-upgrade-modal', onModal);
+    });
+
+    it('states the server sentence and stays silent on the first load', async () => {
+      const el = (await fixture(
+        html`<preloop-session-observer
+          .sessions=${[oldSession]}
+        ></preloop-session-observer>`
+      )) as PreloopSessionObserver;
+
+      await waitUntil(() => deepText(el.shadowRoot).includes(REFUSAL), '', {
+        timeout: 3000,
+      });
+      // Auto-selection is not a person asking for anything, so no paywall.
+      expect(seenModals).to.have.length(0);
+    });
+
+    it('opens the upgrade modal when a person selects that session', async () => {
+      const el = (await fixture(
+        html`<preloop-session-observer
+          .sessions=${[session, oldSession]}
+        ></preloop-session-observer>`
+      )) as PreloopSessionObserver;
+
+      await waitUntil(
+        () => !!el.shadowRoot?.querySelector('session-list-panel'),
+        '',
+        { timeout: 3000 }
+      );
+      el.shadowRoot!.querySelector('session-list-panel')!.dispatchEvent(
+        new CustomEvent('session-selected', {
+          detail: { sessionId: oldSession.id },
+        })
+      );
+
+      await waitUntil(() => seenModals.length > 0, '', { timeout: 3000 });
+      expect(seenModals[0].detail.feature).to.equal('analytics_window_days');
+      expect(deepText(el.shadowRoot)).to.include(REFUSAL);
+    });
+  });
 });
