@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `models.crud.billing_preflight` reports the entitled half of the fleet:
+  entitled accounts per plan, how many of them sit at or over a given seat
+  or agent ceiling (seats counted as active users plus live invitations, the
+  way the seat gate counts them), and the same counts for a single account.
+  Read-only aggregates, no names, emails or provider identifiers.
 - `search_sessions` built-in tool. An agent searches the runtime session
   corpus before repeating work: ranked results, one trimmed snippet per
   session, a match reason and the endpoint's degraded markers. Scope is the
@@ -196,6 +201,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   treatment of `notifications.on_failure.attention_item`.
 
 ### Fixed
+
+- The console upgrade modal repeats what the server said instead of
+  "Unexpected checkout response". `startCheckout` resolves a `refresh`
+  answer (asking the billing views to re-read the subscription summary and
+  returning the reason), surfaces the server's sentence for any other
+  action, and keeps the redirect path. A deployment refusal such as
+  `catalog_not_synced` now reaches the dialog word for word.
 
 - The stale-claim reaper no longer re-publishes every unclaimed execution
   from every worker on every pass. One replica runs the pass per interval
