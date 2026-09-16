@@ -17,7 +17,13 @@
     "root_path": ".",
     "max_depth": 3,
     "auto_select_threshold": 3,
-    "max_inline_projects": 5,
+    "lenses": [
+      "docs-currency-review"
+    ],
+    "max_projects": 5,
+    "max_children": 20,
+    "max_cost_usd_per_child": 2.0,
+    "child_timeout_seconds": 3600,
     "depth": "standard",
     "eol_runtimes": [
       {
@@ -100,7 +106,9 @@
             "no_licence",
             "eol_runtime"
           ]
-        }
+        },
+        "sbom_paths": [],
+        "has_sbom": false
       },
       {
         "path": "services/billing-api",
@@ -120,7 +128,7 @@
         ],
         "last_commit_date": "2025-05-02",
         "commits_12m": 0,
-        "file_count": 4,
+        "file_count": 5,
         "has_readme": true,
         "has_architecture_doc": false,
         "has_ci": false,
@@ -137,7 +145,11 @@
             "no_licence",
             "eol_runtime"
           ]
-        }
+        },
+        "sbom_paths": [
+          "services/billing-api/sbom.cdx.json"
+        ],
+        "has_sbom": true
       },
       {
         "path": "services/notifications",
@@ -172,7 +184,9 @@
             "no_ci",
             "no_tests_dir"
           ]
-        }
+        },
+        "sbom_paths": [],
+        "has_sbom": false
       },
       {
         "path": "libs/shared-utils",
@@ -205,7 +219,9 @@
             "no_architecture_doc",
             "no_licence"
           ]
-        }
+        },
+        "sbom_paths": [],
+        "has_sbom": false
       },
       {
         "path": "tools/report-cli",
@@ -235,26 +251,20 @@
           "score": 0,
           "band": "low",
           "reasons": []
-        }
+        },
+        "sbom_paths": [],
+        "has_sbom": false
       }
     ]
   },
   "selection": {
     "source": "expired_default",
     "auto_select_threshold": 3,
-    "inline_cap": 5,
+    "project_cap": 5,
     "selected": [],
-    "over_inline_cap": [],
+    "over_project_cap": [],
     "depth": "standard",
     "depth_source": "default"
-  },
-  "budget": {
-    "max_cost_usd": null,
-    "ceiling_source": null,
-    "measurement": "execution_cost",
-    "spent_usd": 0.34,
-    "ceiling_hit": false,
-    "stopped_after": null
   },
   "questions": [
     {
@@ -294,101 +304,134 @@
       "selectable_ids": []
     }
   ],
+  "fan_out": {
+    "lenses": [
+      "docs-currency-review"
+    ],
+    "lenses_refused": [],
+    "child_cap": 20,
+    "max_cost_usd_per_child": 2.0,
+    "children_planned": 0,
+    "children_started": 0,
+    "children_over_cap": [],
+    "parked": false,
+    "wait_expired": []
+  },
   "projects": [
     {
       "path": "legacy/inventory-web",
-      "lens": "docs-currency-review",
-      "lens_schema": null,
-      "lens_status": "not_run",
-      "not_run_reason": "the selection question expired at 2026-09-19T09:02:00Z",
-      "verdict": null,
-      "health": "unknown",
-      "counts": {
-        "holds": 0,
-        "drifted": 0,
-        "not_checkable": 0,
-        "high": 0,
-        "medium": 0,
-        "low": 0
-      },
-      "result_artifact": null,
-      "lens_payload": null
+      "status": "unknown",
+      "cost_usd": 0.0,
+      "lenses": [
+        {
+          "lens": "docs-currency-review",
+          "lens_schema": null,
+          "lens_status": "not_run",
+          "reason": "the selection question expired at 2026-09-19T09:02:00Z",
+          "verdict": null,
+          "health": "unknown",
+          "counts": {
+            "high": 0,
+            "medium": 0,
+            "low": 0
+          },
+          "child": null,
+          "result_artifact": null,
+          "lens_payload": null
+        }
+      ]
     },
     {
       "path": "services/billing-api",
-      "lens": "docs-currency-review",
-      "lens_schema": null,
-      "lens_status": "not_run",
-      "not_run_reason": "the selection question expired at 2026-09-19T09:02:00Z",
-      "verdict": null,
-      "health": "unknown",
-      "counts": {
-        "holds": 0,
-        "drifted": 0,
-        "not_checkable": 0,
-        "high": 0,
-        "medium": 0,
-        "low": 0
-      },
-      "result_artifact": null,
-      "lens_payload": null
+      "status": "unknown",
+      "cost_usd": 0.0,
+      "lenses": [
+        {
+          "lens": "docs-currency-review",
+          "lens_schema": null,
+          "lens_status": "not_run",
+          "reason": "the selection question expired at 2026-09-19T09:02:00Z",
+          "verdict": null,
+          "health": "unknown",
+          "counts": {
+            "high": 0,
+            "medium": 0,
+            "low": 0
+          },
+          "child": null,
+          "result_artifact": null,
+          "lens_payload": null
+        }
+      ]
     },
     {
       "path": "services/notifications",
-      "lens": "docs-currency-review",
-      "lens_schema": null,
-      "lens_status": "not_run",
-      "not_run_reason": "the selection question expired at 2026-09-19T09:02:00Z",
-      "verdict": null,
-      "health": "unknown",
-      "counts": {
-        "holds": 0,
-        "drifted": 0,
-        "not_checkable": 0,
-        "high": 0,
-        "medium": 0,
-        "low": 0
-      },
-      "result_artifact": null,
-      "lens_payload": null
+      "status": "unknown",
+      "cost_usd": 0.0,
+      "lenses": [
+        {
+          "lens": "docs-currency-review",
+          "lens_schema": null,
+          "lens_status": "not_run",
+          "reason": "the selection question expired at 2026-09-19T09:02:00Z",
+          "verdict": null,
+          "health": "unknown",
+          "counts": {
+            "high": 0,
+            "medium": 0,
+            "low": 0
+          },
+          "child": null,
+          "result_artifact": null,
+          "lens_payload": null
+        }
+      ]
     },
     {
       "path": "libs/shared-utils",
-      "lens": "docs-currency-review",
-      "lens_schema": null,
-      "lens_status": "not_run",
-      "not_run_reason": "the selection question expired at 2026-09-19T09:02:00Z",
-      "verdict": null,
-      "health": "unknown",
-      "counts": {
-        "holds": 0,
-        "drifted": 0,
-        "not_checkable": 0,
-        "high": 0,
-        "medium": 0,
-        "low": 0
-      },
-      "result_artifact": null,
-      "lens_payload": null
+      "status": "unknown",
+      "cost_usd": 0.0,
+      "lenses": [
+        {
+          "lens": "docs-currency-review",
+          "lens_schema": null,
+          "lens_status": "not_run",
+          "reason": "the selection question expired at 2026-09-19T09:02:00Z",
+          "verdict": null,
+          "health": "unknown",
+          "counts": {
+            "high": 0,
+            "medium": 0,
+            "low": 0
+          },
+          "child": null,
+          "result_artifact": null,
+          "lens_payload": null
+        }
+      ]
     },
     {
       "path": "tools/report-cli",
-      "lens": "docs-currency-review",
-      "lens_schema": null,
-      "lens_status": "not_run",
-      "not_run_reason": "the selection question expired at 2026-09-19T09:02:00Z",
-      "verdict": null,
-      "health": "unknown",
-      "counts": {
-        "holds": 0,
-        "drifted": 0,
-        "not_checkable": 0,
-        "high": 0,
-        "medium": 0,
-        "low": 0
-      },
-      "result_artifact": null,
-      "lens_payload": null
+      "status": "unknown",
+      "cost_usd": 0.0,
+      "lenses": [
+        {
+          "lens": "docs-currency-review",
+          "lens_schema": null,
+          "lens_status": "not_run",
+          "reason": "the selection question expired at 2026-09-19T09:02:00Z",
+          "verdict": null,
+          "health": "unknown",
+          "counts": {
+            "high": 0,
+            "medium": 0,
+            "low": 0
+          },
+          "child": null,
+          "result_artifact": null,
+          "lens_payload": null
+        }
+      ]
     }
   ],
   "follow_ups": [],
@@ -396,6 +439,8 @@
     "projects_discovered": 5,
     "projects_selected": 0,
     "projects_reviewed": 0,
+    "lens_runs_planned": 0,
+    "lens_runs_completed": 0,
     "plan_completed": false,
     "not_reviewed": [
       {
@@ -441,14 +486,13 @@
     },
     "follow_ups_total": 0,
     "follow_ups_approved": 0,
-    "issues_filed": 0
-  },
-  "publication": {
-    "open_portfolio_readme_pr": false,
-    "source": "default",
-    "pr_opened": false,
-    "pr_url": null,
-    "reason": "toggle off"
+    "issues_filed": 0,
+    "children_started": 0,
+    "children_succeeded": 0,
+    "children_failed": 0,
+    "children_refused": 0,
+    "children_expired": 0,
+    "children_cost_usd": 0.0
   },
   "verdict": "pass_with_findings",
   "checks": [
@@ -465,10 +509,10 @@
       "details": "expired at 2026-09-19T09:02:00Z with no answer: safe default applied, inventory only"
     },
     {
-      "name": "lenses_run",
+      "name": "fan_out_completed",
       "passed": true,
       "skipped": true,
-      "details": "0 of 5: no project was selected"
+      "details": "0 child executions started: no project was selected"
     },
     {
       "name": "issues_filed",
@@ -488,8 +532,24 @@
     "register": "evidence/projects-register.md",
     "findings": "evidence/findings.json",
     "inventory": "evidence/inventory.json",
-    "questions": "evidence/questions.json"
+    "questions": "evidence/questions.json",
+    "children": "evidence/children.json"
   },
+  "disclaimer": "Machine-generated review evidence. Not a certification, audit opinion, or legal advice.",
   "note": "synthetic fixture",
-  "disclaimer": "Machine-generated review evidence. Not a certification, audit opinion, or legal advice."
+  "budget": {
+    "max_cost_usd": null,
+    "ceiling_source": null,
+    "measurement": "execution_cost",
+    "spent_usd": 0.34,
+    "ceiling_hit": false,
+    "stopped_after": null
+  },
+  "publication": {
+    "open_portfolio_readme_pr": false,
+    "source": "default",
+    "pr_opened": false,
+    "pr_url": null,
+    "reason": "toggle off"
+  }
 }

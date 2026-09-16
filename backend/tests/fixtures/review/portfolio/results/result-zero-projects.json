@@ -17,7 +17,13 @@
     "root_path": ".",
     "max_depth": 3,
     "auto_select_threshold": 3,
-    "max_inline_projects": 5,
+    "lenses": [
+      "docs-currency-review"
+    ],
+    "max_projects": 5,
+    "max_children": 20,
+    "max_cost_usd_per_child": 2.0,
+    "child_timeout_seconds": 3600,
     "depth": "standard",
     "eol_runtimes": [
       {
@@ -55,19 +61,11 @@
   "selection": {
     "source": "auto_below_threshold",
     "auto_select_threshold": 3,
-    "inline_cap": 5,
+    "project_cap": 5,
     "selected": [],
-    "over_inline_cap": [],
+    "over_project_cap": [],
     "depth": "standard",
     "depth_source": "default"
-  },
-  "budget": {
-    "max_cost_usd": null,
-    "ceiling_source": null,
-    "measurement": "execution_cost",
-    "spent_usd": 0.12,
-    "ceiling_hit": false,
-    "stopped_after": null
   },
   "questions": [
     {
@@ -95,12 +93,27 @@
       "selectable_ids": []
     }
   ],
+  "fan_out": {
+    "lenses": [
+      "docs-currency-review"
+    ],
+    "lenses_refused": [],
+    "child_cap": 20,
+    "max_cost_usd_per_child": 2.0,
+    "children_planned": 0,
+    "children_started": 0,
+    "children_over_cap": [],
+    "parked": false,
+    "wait_expired": []
+  },
   "projects": [],
   "follow_ups": [],
   "coverage": {
     "projects_discovered": 0,
     "projects_selected": 0,
     "projects_reviewed": 0,
+    "lens_runs_planned": 0,
+    "lens_runs_completed": 0,
     "plan_completed": true,
     "not_reviewed": [],
     "projects_not_reviewed": []
@@ -119,14 +132,13 @@
     },
     "follow_ups_total": 0,
     "follow_ups_approved": 0,
-    "issues_filed": 0
-  },
-  "publication": {
-    "open_portfolio_readme_pr": false,
-    "source": "default",
-    "pr_opened": false,
-    "pr_url": null,
-    "reason": "toggle off: no projects to publish"
+    "issues_filed": 0,
+    "children_started": 0,
+    "children_succeeded": 0,
+    "children_failed": 0,
+    "children_refused": 0,
+    "children_expired": 0,
+    "children_cost_usd": 0.0
   },
   "verdict": "pass_with_findings",
   "checks": [
@@ -147,12 +159,6 @@
       "passed": true,
       "skipped": false,
       "details": "0: this preset has no write tools"
-    },
-    {
-      "name": "run_ceiling_respected",
-      "passed": true,
-      "skipped": true,
-      "details": "no ceiling in force: nobody was asked and the payload named none; measured spend 0.12 USD"
     }
   ],
   "assessments": [
@@ -166,8 +172,24 @@
     "register": "evidence/projects-register.md",
     "findings": "evidence/findings.json",
     "inventory": "evidence/inventory.json",
-    "questions": "evidence/questions.json"
+    "questions": "evidence/questions.json",
+    "children": "evidence/children.json"
   },
   "disclaimer": "Machine-generated review evidence. Not a certification, audit opinion, or legal advice.",
-  "note": "synthetic fixture"
+  "note": "synthetic fixture",
+  "budget": {
+    "max_cost_usd": null,
+    "ceiling_source": null,
+    "measurement": "execution_cost",
+    "spent_usd": 0.12,
+    "ceiling_hit": false,
+    "stopped_after": null
+  },
+  "publication": {
+    "open_portfolio_readme_pr": false,
+    "source": "default",
+    "pr_opened": false,
+    "pr_url": null,
+    "reason": "toggle off: no projects to publish"
+  }
 }
