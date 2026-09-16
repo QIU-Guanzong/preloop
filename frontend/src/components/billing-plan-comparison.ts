@@ -9,6 +9,7 @@ import type {
   PlanChangeOptions,
   PlanChangePreview,
   PlanChangeResult,
+  PlanEligibility,
 } from '../types/billing';
 
 const CAPABILITIES: Record<string, string> = {
@@ -84,6 +85,64 @@ export class BillingPlanComparison extends LitElement {
     return plan?.is_legacy ?? plan?.legacy ?? false;
   }
 
+  /** The server's verdict on one plan, absent on an older server. */
+  private verdict(planId: string): PlanEligibility | undefined {
+    return this.options?.plan_eligibility?.find((e) => e.plan_id === planId);
+  }
+
+  /**
+   * Whether a plan can be a checkout or switch target at all.
+   *
+   * A quote-only plan (Enterprise: no self-serve price, ``purchasable``
+   * false) is not one. It used to sit in the picker beside Pro and Team, so
+   * choosing it replaced the price and the action with a sales paragraph: a
+   * dead end dressed as a choice. It is now named outside the picker, with
+   * the contact link the server supplies. The account's own plan stays in the
+   * list even when it is quote-only, because a reader has to see what they
+   * are on.
+   */
+  private isTarget(plan: BillingPlan): boolean {
+    if (this.isLegacy(plan)) return false;
+    const verdict = this.verdict(plan.id);
+    if (verdict) return verdict.purchasable || verdict.is_current;
+    return (
+      plan.purchasable !== false || plan.id === this.options?.current_plan?.id
+    );
+  }
+
+  /** Candidate plans, in catalog order, quote-only entries removed. */
+  private get targets(): BillingPlan[] {
+    return (this.options?.plans ?? []).filter((p) => this.isTarget(p));
+  }
+
+  /** Quote-only plans, named with their contact link instead of a price. */
+  private get contactPlans(): BillingPlan[] {
+    return (this.options?.plans ?? []).filter(
+      (p) => !this.isLegacy(p) && !this.isTarget(p)
+    );
+  }
+
+  private eligible(plan: BillingPlan | null | undefined): boolean {
+    if (!plan) return false;
+    return this.verdict(plan.id)?.eligible !== false;
+  }
+
+  /**
+   * Whether the target has a billing period to choose.
+   *
+   * Free is priced zero monthly and zero annually, so asking a reader to pick
+   * between "Monthly" and "Annually" for it offers a choice between two
+   * identical nothings, and the confirmation that followed quoted a period
+   * that does not exist.
+   */
+  private get showPeriod(): boolean {
+    const target = this.target;
+    if (!target) return false;
+    const verdict = this.verdict(target.id);
+    if (verdict) return verdict.requires_period;
+    return !!target.price_monthly || !!target.price_annually;
+  }
+
   private permissionChanged(allowed: boolean): void {
     this.dispatchEvent(
       new CustomEvent('billing-permission-changed', {
@@ -153,7 +212,7 @@ export class BillingPlanComparison extends LitElement {
       if (firstLoad) {
         const params = new URLSearchParams(window.location.search);
         const requested = options.plans.find(
-          (p) => p.id === params.get('plan') && !this.isLegacy(p)
+          (p) => p.id === params.get('plan') && this.isTarget(p)
         );
         if (requested) this.selectedPlan = requested.id;
         if (
@@ -166,10 +225,11 @@ export class BillingPlanComparison extends LitElement {
       this.refreshRequired = false;
       if (
         !options.plans.some(
-          (p) => p.id === this.selectedPlan && !this.isLegacy(p)
+          (p) => p.id === this.selectedPlan && this.isTarget(p)
         )
       )
         this.selectedPlan = this.defaultSelection(options);
+      if (!this.showPeriod) this.interval = 'month';
       this.permissionChanged(options.can_manage_billing === true);
     } catch (error) {
       if (revision !== this.revision) return;
@@ -225,16 +285,19 @@ export class BillingPlanComparison extends LitElement {
 
   /**
    * The plan the picker opens on: the cheapest plan above what the account is
-   * entitled to today. Opening on Free would offer a downgrade to someone who
-   * clicked "Change plan", and would offer an expired trial the plan it is
-   * already on.
+   * entitled to today that the account can actually hold. Opening on Free
+   * would offer a downgrade to someone who clicked "Change plan", and opening
+   * on a plan the account is already too large for opens the flow on a
+   * refusal.
    */
   private defaultSelection(options: PlanChangeOptions): string {
     const price = (plan: BillingPlan): number =>
       typeof plan.price_monthly === 'number'
         ? plan.price_monthly
         : Number.POSITIVE_INFINITY;
-    const selectable = options.plans.filter((p) => !this.isLegacy(p));
+    const targets = options.plans.filter((p) => this.isTarget(p));
+    const fitting = targets.filter((p) => this.eligible(p));
+    const selectable = fitting.length ? fitting : targets;
     const currentPlan = this.effectiveCurrentPlan(options);
     const currentId = currentPlan?.id;
     const ladder = selectable
@@ -255,6 +318,13 @@ export class BillingPlanComparison extends LitElement {
       ladder.find((p) => price(p) > current)?.id ??
       ladder[0]?.id ??
       selectable.find((p) => p.id !== currentId && p.id !== 'free')?.id ??
+      // The server blocked every paid candidate, so Free is the only plan
+      // this account can move to. Opening on it is a poor offer, but an empty
+      // picker is worse: it hides the one plan that is left. With nothing
+      // blocked, Free stays off the default as before.
+      (fitting.length < targets.length
+        ? selectable.find((p) => p.id !== currentId)?.id
+        : undefined) ??
       ''
     );
   }
@@ -321,8 +391,10 @@ export class BillingPlanComparison extends LitElement {
       !this.pendingConfirmation &&
       !!this.target &&
       !this.salesLed &&
+      // Cancelling down to Free must never be trapped by the caps of the plan
+      // being left: existing users and agents are kept, only growth stops.
       ((!!this.options.current_subscription && this.selectedPlan === 'free') ||
-        !this.assessment()?.blockers?.length) &&
+        (this.eligible(this.target) && !this.assessment()?.blockers?.length)) &&
       (!this.options.current_subscription ||
         (!!this.options.current_subscription.revision &&
           Number.isFinite(
@@ -620,56 +692,46 @@ export class BillingPlanComparison extends LitElement {
     );
   }
   /**
-   * A fit is only claimed when three complete months back it up. An
-   * assessment of "fits" over missing history is an opinion, not a record.
+   * Step 3: what choosing this plan would actually do, and nothing else.
+   *
+   * There used to be a summary line on every plan. When it could not prove a
+   * fit it said "Not enough evidence to confirm a fit", which is a statement
+   * about our records rather than about the reader's account, and it appeared
+   * for every account whose three month history was not complete, which is
+   * most of them. A reader cannot act on it. It is gone. What is left is the
+   * server's list: a refusal with both numbers, a consequence with its date,
+   * or nothing at all.
    */
-  private fitsSelected(assessment?: PlanAssessment): boolean {
-    if (assessment?.fit !== 'fits') return false;
-    const completed =
-      this.options?.monthly_usage.filter((m) => !m.is_partial) ?? [];
-    return (
-      completed.length === 3 &&
-      completed.every(
-        (m) =>
-          m.coverage === 'complete' &&
-          m.observed_byok_tokens != null &&
-          m.observed_hosted_cost_usd != null
-      )
+  private renderConsequences() {
+    const verdict = this.verdict(this.selectedPlan);
+    const observed = (this.assessment()?.advisories ?? []).map((n) =>
+      this.notice(n)
     );
-  }
-  private fitLabel(assessment?: PlanAssessment): string {
-    if (assessment?.fit === 'blocked')
-      return 'Current account capacity exceeds this plan';
-    if (assessment?.fit === 'exceeds' || assessment?.fit === 'exceeded')
-      return 'Exceeds one or more observed limits';
-    return this.fitsSelected(assessment)
-      ? 'Within the recorded monthly limits'
-      : 'Not enough evidence to confirm a fit';
-  }
-  /** Step 3: the fit summary, and the control that reveals the months. */
-  private renderFit() {
-    const assessment = this.assessment();
-    const fits = this.fitsSelected(assessment);
-    const reasons = [
-      ...(assessment?.blockers ?? []),
-      ...(assessment?.advisories ?? []),
-    ].map((n) => this.notice(n));
+    const blockers = (verdict?.blockers ?? []).map((b) => b.message);
+    const warnings = [
+      ...(verdict?.warnings ?? []).map((w) => w.message),
+      ...observed,
+    ];
+    const benefit = verdict?.retention.benefit_message;
+    const protectedNote = verdict?.retention.protected_by_floor
+      ? verdict.retention.message
+      : null;
     return html`${
-        fits
-          ? html`<p data-testid="fit-summary">
-              Your current usage fits this plan.
-            </p>`
-          : html`<div class="warning" data-testid="fit-summary">
-              <p>${this.fitLabel(assessment)}.</p>
-              ${
-                reasons.length
-                  ? html`<ul>
-                      ${reasons.map((reason) => html`<li>${reason}</li>`)}
-                    </ul>`
-                  : nothing
-              }
-            </div>`
+        blockers.length
+          ? html`<ul class="warning" data-testid="plan-blockers">
+              ${blockers.map((message) => html`<li>${message}</li>`)}
+            </ul>`
+          : nothing
       }
+      ${
+        warnings.length
+          ? html`<ul class="warning" data-testid="plan-warnings">
+              ${warnings.map((message) => html`<li>${message}</li>`)}
+            </ul>`
+          : nothing
+      }
+      ${benefit ? html`<p data-testid="plan-benefit">${benefit}</p>` : nothing}
+      ${protectedNote ? html`<p data-testid="retention-protected">${protectedNote}</p>` : nothing}
       <button
         class="link"
         type="button"
@@ -701,7 +763,6 @@ export class BillingPlanComparison extends LitElement {
           : nothing
       }
       <h3>Would this plan cover your usage?</h3>
-      <p class="fit" data-testid="fit">${this.fitLabel(assessment)}</p>
       <p>
         The previous three completed calendar months are shown separately from
         the current partial month. Missing records are not zero usage.
@@ -746,12 +807,6 @@ export class BillingPlanComparison extends LitElement {
         <strong>${this.count(o.current_usage.pending_invitations)}</strong>;
         current agents:
         <strong>${this.count(o.current_usage.active_agents)}</strong>.
-      </p>
-      <p>
-        Historical user peak:
-        ${this.count(o.current_usage.historical_seat_peak)}. Historical agent
-        peak: ${this.count(o.current_usage.historical_agent_peak)}. Current
-        counts do not establish past peaks.
       </p>
       ${
         assessment?.blockers?.length
@@ -1039,6 +1094,50 @@ export class BillingPlanComparison extends LitElement {
     `;
   }
 
+  /**
+   * The plans this account cannot switch to, and the arithmetic that says so.
+   *
+   * Disabled options carry "(not available)" in the picker, which is where a
+   * reader looks, but an option's text is not the place for a sentence and a
+   * disabled option cannot be opened to read one. So each refusal is repeated
+   * here in full: the count, the cap, and what would have to change.
+   */
+  private renderUnavailable() {
+    const blocked = this.targets
+      .filter((p) => !this.eligible(p))
+      .map((p) => ({ plan: p, verdict: this.verdict(p.id)! }));
+    if (!blocked.length) return nothing;
+    return html`<div class="warning" data-testid="unavailable-plans">
+      <p>Not available for this account:</p>
+      <ul>
+        ${blocked.map(
+          ({ plan, verdict }) =>
+            html`<li>
+              <strong>${plan.name}</strong>:
+              ${verdict.blockers.map((b) => b.message).join(' ')}
+            </li>`
+        )}
+      </ul>
+    </div>`;
+  }
+
+  /** Quote-only plans: named, with the contact link, never a checkout. */
+  private renderContactPlans() {
+    const plans = this.contactPlans;
+    if (!plans.length) return nothing;
+    return html`<p data-testid="contact-plans">
+      ${plans.map(
+        (p) =>
+          html`${p.name} is priced per deployment.
+            <a
+              class="contact"
+              href=${this.verdict(p.id)?.contact_url ?? '/request-demo'}
+              >Contact us about ${p.name}</a
+            >.`
+      )}
+    </p>`;
+  }
+
   /** Step 2: the picker, the price, the action, and what they imply. */
   private renderChange() {
     const o = this.options!;
@@ -1053,40 +1152,44 @@ export class BillingPlanComparison extends LitElement {
             ?disabled=${this.busy === 'confirm' || this.busy === 'checkout' || !!this.pendingConfirmation}
             @change=${(e: Event) => this.choose((e.target as HTMLSelectElement).value)}
           >
-            ${o.plans.filter((p) => !this.isLegacy(p)).map((p) => html`<option value=${p.id}>${p.name}</option>`)}
+            ${this.targets.map((p) => html`<option value=${p.id} ?disabled=${!this.eligible(p)}>${p.name}${this.eligible(p) ? '' : ' (not available)'}</option>`)}
           </select></label
         >
-        <label
-          >Billing period<select
-            data-testid="interval"
-            .value=${this.interval}
-            ?disabled=${this.busy === 'confirm' || this.busy === 'checkout' || !!this.pendingConfirmation}
-            @change=${(e: Event) => this.choose(this.selectedPlan, (e.target as HTMLSelectElement).value as 'month' | 'year')}
-          >
-            <option value="month">Monthly</option>
-            <option value="year">Annually</option>
-          </select></label
-        >
+        ${
+          this.showPeriod
+            ? html`<label
+                >Billing period<select
+                  data-testid="interval"
+                  .value=${this.interval}
+                  ?disabled=${this.busy === 'confirm' || this.busy === 'checkout' || !!this.pendingConfirmation}
+                  @change=${(e: Event) => this.choose(this.selectedPlan, (e.target as HTMLSelectElement).value as 'month' | 'year')}
+                >
+                  <option value="month">Monthly</option>
+                  <option value="year">Annually</option>
+                </select></label
+              >`
+            : nothing
+        }
       </div>
+      ${this.renderUnavailable()}${this.renderContactPlans()}
       ${
         target
           ? html`
               ${
                 this.salesLed
-                  ? html`<p>
-                        Enterprise starts at $30,000 per year for a scoped
-                        deployment with up to 100 users. Deployment and support
-                        requirements need an agreed quote.
+                  ? html`<p data-testid="sales-led">
+                        ${target.name} is priced per deployment and is not
+                        bought from the console.
                       </p>
-                      <a class="contact" href="/request-demo"
-                        >Contact us about Enterprise</a
+                      <a
+                        class="contact"
+                        href=${this.verdict(target.id)?.contact_url ?? '/request-demo'}
+                        >Contact us about ${target.name}</a
                       >`
                   : html`
                       <p data-testid="price">
                         ${target.name}:
-                        ${this.money((this.interval === 'year' ? target.price_annually : target.price_monthly) == null ? null : (this.interval === 'year' ? target.price_annually! : target.price_monthly!) * 100)}
-                        /
-                        ${this.interval}.${o.current_subscription ? ' The preview shows the exact amount and effective date before anything changes.' : ' Secure checkout shows the final amount and any taxes before you subscribe.'}
+                        ${this.money((this.interval === 'year' ? target.price_annually : target.price_monthly) == null ? null : (this.interval === 'year' ? target.price_annually! : target.price_monthly!) * 100)}${this.showPeriod ? html` / ${this.interval}` : nothing}.${o.current_subscription ? ' The preview shows the exact amount and effective date before anything changes.' : ' Secure checkout shows the final amount and any taxes before you subscribe.'}
                       </p>
                       ${this.renderActionNotices()}
                       ${
@@ -1120,7 +1223,7 @@ export class BillingPlanComparison extends LitElement {
                 ${this.showComparison ? 'Hide detailed comparison' : 'Show detailed comparison'}
               </button>
               ${this.showComparison ? this.renderLimits() : nothing}
-              ${this.renderFit()}${this.renderPreview()}
+              ${this.renderConsequences()}${this.renderPreview()}
             `
           : html`<p>
               No other cloud plans are available.
