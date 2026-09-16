@@ -90,6 +90,12 @@ QUERY_HASH_PREFIX = "sha256"
 #: MCP argument must not inflate the JSONB column.
 AUDIT_SCOPE_MAX_CHARS = 64
 
+#: Longest `mode` kept on the row. Known values are `keyword`, `semantic`
+#: and `hybrid` (at most 8 chars). Refusal paths record the raw tool
+#: argument before `SessionSearchRequest` validates the Literal, so the
+#: write path caps it the same way as `scope`.
+AUDIT_MODE_MAX_CHARS = 32
+
 
 def _normalized(query: Optional[str]) -> str:
     """The query as the search itself parsed it, never None.
@@ -263,7 +269,7 @@ def build_details(
     details: Dict[str, Any] = dict(actor.as_details())
     details.update(
         {
-            "mode": mode,
+            "mode": _bounded(mode, AUDIT_MODE_MAX_CHARS),
             "filters": filters,
             "result_count": result_count,
             "query_hash": query_hash(query),
@@ -498,6 +504,7 @@ __all__ = [
     "ACTOR_UNKNOWN",
     "ACTOR_USER",
     "AUDIT_ACTION",
+    "AUDIT_MODE_MAX_CHARS",
     "AUDIT_RESOURCE_TYPE",
     "AUDIT_SCOPE_MAX_CHARS",
     "QUERY_HASH_PREFIX",

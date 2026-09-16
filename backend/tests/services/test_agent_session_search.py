@@ -548,9 +548,14 @@ def test_a_malformed_refusal_cannot_inflate_the_audit_row(db_session, test_user)
     db_session.flush()
     oversized_scope = "everything-" + ("z" * 200)
     oversized_query = "secret " + ("x" * 2000)
+    oversized_mode = "keyword-" + ("m" * 200)
 
     answer = _search(
-        db_session, str(test_user.account_id), oversized_query, scope=oversized_scope
+        db_session,
+        str(test_user.account_id),
+        oversized_query,
+        scope=oversized_scope,
+        mode=oversized_mode,
     )
 
     assert answer["reason"] == REFUSAL_UNKNOWN_SCOPE
@@ -560,6 +565,11 @@ def test_a_malformed_refusal_cannot_inflate_the_audit_row(db_session, test_user)
         == oversized_scope[: session_search_audit.AUDIT_SCOPE_MAX_CHARS]
     )
     assert len(row.details["scope"]) == session_search_audit.AUDIT_SCOPE_MAX_CHARS
+    assert (
+        row.details["mode"]
+        == oversized_mode[: session_search_audit.AUDIT_MODE_MAX_CHARS]
+    )
+    assert len(row.details["mode"]) == session_search_audit.AUDIT_MODE_MAX_CHARS
     assert row.details["query_text"] == oversized_query[:MAX_QUERY_CHARS]
     assert len(row.details["query_text"]) == MAX_QUERY_CHARS
     assert row.details["query_chars"] == len(oversized_query)

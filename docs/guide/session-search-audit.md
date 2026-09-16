@@ -64,8 +64,9 @@ An account that needs the text sets `session_search_audit_store_query_text` to
 what it turns on. With it on the row also carries `query_text`, cut at 512
 characters (the same cap the search request accepts); with it off, no field
 in the row contains the query. An unknown-scope refusal still echoes the
-caller string, but only the first 64 characters, so a malformed call cannot
-inflate the row. `query_chars` still records the real length.
+caller string, but only the first 64 characters, and an unknown-mode
+refusal only the first 32, so a malformed call cannot inflate the row.
+`query_chars` still records the real length.
 
 ## Who searched
 

@@ -24,6 +24,7 @@ from preloop.schemas.session_search import (
 from preloop.services import session_search_audit
 from preloop.services.session_search_audit import (
     AUDIT_ACTION,
+    AUDIT_MODE_MAX_CHARS,
     AUDIT_RESOURCE_TYPE,
     AUDIT_SCOPE_MAX_CHARS,
     QUERY_TEXT_OPT_IN_KEY,
@@ -176,6 +177,23 @@ def test_an_unknown_scope_echo_is_capped_on_the_row():
 
     assert details["scope"] == oversized_scope[:AUDIT_SCOPE_MAX_CHARS]
     assert len(details["scope"]) == AUDIT_SCOPE_MAX_CHARS
+    assert "query_text" not in details
+
+
+def test_an_unknown_mode_echo_is_capped_on_the_row():
+    oversized_mode = "keyword-" + ("m" * 200)
+    details = build_details(
+        actor=agent_actor(managed_agent_id="agent-row-1"),
+        query=SECRET_QUERY,
+        mode=oversized_mode,
+        filters={},
+        result_count=0,
+        include_query_text=False,
+        reason="unknown_scope",
+    )
+
+    assert details["mode"] == oversized_mode[:AUDIT_MODE_MAX_CHARS]
+    assert len(details["mode"]) == AUDIT_MODE_MAX_CHARS
     assert "query_text" not in details
 
 
