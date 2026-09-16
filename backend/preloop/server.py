@@ -10,13 +10,14 @@ import uvicorn
 
 import preloop.logging as preloop_logging
 
-# Add backend/ so SpaceModels can be imported, and the OSS repo root so
-# ``INIT_TEST_DATA`` can import ``scripts.init_test_data`` when cwd is backend/.
+# Add backend/ so SpaceModels can be imported. INIT_TEST_DATA seeding
+# re-derives the OSS repo root in the lifespan
+# (``preloop.api.app._ensure_repo_root_on_sys_path``). A parent-process
+# insert here would not reach the uvicorn --reload child that compose
+# actually uses for ``python -m preloop.server --debug --init-test-data``.
 _backend_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_repo_root = os.path.abspath(os.path.join(_backend_root, ".."))
-for _path in (_backend_root, _repo_root):
-    if _path not in sys.path:
-        sys.path.insert(0, _path)
+if _backend_root not in sys.path:
+    sys.path.insert(0, _backend_root)
 
 # Resolve stdlib logging without `import logging`, which CodeQL flags as a
 # self-import relative to preloop.logging.

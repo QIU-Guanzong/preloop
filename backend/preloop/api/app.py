@@ -55,10 +55,19 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _ensure_repo_root_on_sys_path() -> None:
-    """Make ``scripts.init_test_data`` importable when cwd is ``backend/``."""
+    """Make ``scripts.init_test_data`` importable when cwd is ``backend/``.
+
+    Guard on the seeder file so a packaged/wheel install (where
+    ``parents[3]`` is not the checkout) does not put ``lib/python3.x`` on
+    the path. Append rather than prepend so checkout top-level names
+    (``assets``, ``cli``, ``docs``, ``frontend``, ``helm``, ...) cannot
+    shadow site-packages for the lifetime of the process.
+    """
+    if not (_REPO_ROOT / "scripts" / "init_test_data.py").is_file():
+        return
     root = str(_REPO_ROOT)
     if root not in sys.path:
-        sys.path.insert(0, root)
+        sys.path.append(root)
 
 
 class PyinstrumentMiddleware(BaseHTTPMiddleware):
