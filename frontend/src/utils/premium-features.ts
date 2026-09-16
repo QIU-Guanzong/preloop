@@ -16,12 +16,16 @@ export const PREMIUM_FEATURE_LABELS: Record<string, string> = {
   session_optimization: 'AI session optimization',
   replay_verification: 'replay verification',
   session_titles: 'AI session titles',
-  ai_optimization: 'built-in model optimization',
   value_reviews: 'value reviews',
   rbac: 'role-based access control',
   team_approvals: 'team approval workflows',
-  price_overrides: 'model price overrides',
   reconciliation: 'provider billing reconciliation',
+  // The three gates a person reaches by doing something: setting a price,
+  // running an analysis on a built-in model, asking for older data. Without
+  // a label the modal prints the raw capability key at the reader.
+  price_overrides: 'custom model prices',
+  ai_optimization: 'analysis with built-in models',
+  analytics_window_days: 'analytics history beyond your plan window',
 };
 
 /**

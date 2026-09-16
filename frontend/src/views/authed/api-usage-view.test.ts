@@ -713,4 +713,85 @@ describe('ApiUsageView', () => {
       'new-range captured interaction'
     );
   });
+
+  function refusesHistory(input: RequestInfo | URL): Response | null {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (!url.startsWith('/api/v1/account/gateway-usage/summary')) return null;
+    return jsonResponse(
+      {
+        detail: {
+          code: 'analytics_history_unavailable',
+          available_from: '2026-06-18T00:00:00+00:00',
+          message: "This period is outside your plan's analytics history.",
+        },
+      },
+      403
+    );
+  }
+
+  // The paywall modal follows a user action. Landing on a page is not one,
+  // whatever range it opens with, so the first load states where the data
+  // stops and leaves it there.
+  it('does not sell on a first load nobody asked for', async () => {
+    fetchStub.callsFake(async (input: RequestInfo | URL) => {
+      return refusesHistory(input) ?? (await defaultUsageFetch(input));
+    });
+
+    const seen: Event[] = [];
+    const handler = (event: Event) => seen.push(event);
+    window.addEventListener('show-upgrade-modal', handler);
+
+    const element = (await fixture(
+      html`<api-usage-view></api-usage-view>`
+    )) as ApiUsageView;
+    await waitUntil(
+      () => (element as any).error !== null,
+      'the refused first load never settled',
+      { timeout: 3000 }
+    );
+    await element.updateComplete;
+    window.removeEventListener('show-upgrade-modal', handler);
+
+    expect(seen).to.have.length(0);
+    expect((element as any).error).to.contain(
+      "outside your plan's analytics history"
+    );
+  });
+
+  it('offers the upgrade when a person picks a range their plan hides', async () => {
+    const element = (await fixture(
+      html`<api-usage-view></api-usage-view>`
+    )) as ApiUsageView;
+    await waitUntil(
+      () => !(element as any).loading && (element as any).summary !== null,
+      'API usage view did not finish loading'
+    );
+    await element.updateComplete;
+
+    fetchStub.callsFake(async (input: RequestInfo | URL) => {
+      return refusesHistory(input) ?? (await defaultUsageFetch(input));
+    });
+
+    const seen: CustomEvent[] = [];
+    const handler = (event: Event) => seen.push(event as CustomEvent);
+    window.addEventListener('show-upgrade-modal', handler);
+
+    element.shadowRoot?.querySelector('time-range-select')?.dispatchEvent(
+      new CustomEvent('range-change', {
+        detail: { value: 'last-90' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await waitUntil(
+      () => (element as any).error !== null,
+      'the refused range never settled',
+      { timeout: 3000 }
+    );
+    await element.updateComplete;
+    window.removeEventListener('show-upgrade-modal', handler);
+
+    expect(seen).to.have.length(1);
+    expect(seen[0].detail.feature).to.equal('analytics_window_days');
+  });
 });

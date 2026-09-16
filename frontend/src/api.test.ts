@@ -17,8 +17,17 @@ import {
   validateTrackerToken,
   startCheckout,
   coalesceKey,
+  getUsageNudges,
+  getAccountGatewayUsageSummary,
+  getAccountRuntimeSessionActivityTimeline,
+  getCostAnalyticsSummary,
   BILLING_SUBSCRIPTION_CHANGED,
+  NO_USAGE_NUDGES,
 } from './api.js';
+import {
+  HISTORY_UNAVAILABLE_CODE,
+  isHistoryUnavailable,
+} from './utils/history-window.js';
 import { customElement } from 'lit/decorators.js';
 
 // Minimal test element that exposes fetchData for testing
@@ -455,6 +464,25 @@ describe('api', () => {
 
       expect(fetchStub.callCount, 'two separate requests').to.equal(2);
       expect(seen, 'one dialog, for the caller who asked').to.have.length(1);
+    });
+
+    it('reads the usage nudges without ever interrupting the page', async () => {
+      // The nudge banner loads itself on every console page, so it is the
+      // definition of a request nobody asked for. A 429 there used to raise
+      // the rate-limit dialog over whatever the reader was doing.
+      fetchStub.resolves(
+        new Response('{"detail":"slow down"}', { status: 429 })
+      );
+
+      let nudges: unknown;
+      const seen = await modalEvents(async () => {
+        nudges = await getUsageNudges();
+      });
+
+      expect(seen, 'no dialog from the banner').to.have.length(0);
+      expect(nudges).to.eql(NO_USAGE_NUDGES);
+      const [, options] = fetchStub.firstCall.args;
+      expect(options).to.not.have.property('passive');
     });
 
     it('namespaces the passive key with printable characters only', () => {
@@ -1103,6 +1131,191 @@ describe('api', () => {
 
       expect(await messageOf(startCheckout('pro', 'month'))).to.equal(
         'Pro is not available for purchase yet. Ask an administrator to sync the plan catalog.'
+      );
+    });
+  });
+
+  describe('getUsageNudges', () => {
+    /**
+     * Chrome, not content. Every failure has to read as "no nudges", because
+     * the OSS console's whole guarantee is that a missing billing plugin
+     * changes nothing on screen, and a console page must never fail over a
+     * banner it was only going to be helpful with.
+     */
+    function body(payload: unknown, status = 200): Response {
+      return new Response(JSON.stringify(payload), {
+        status,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    it('reads the envelope: nudges, window and ladder', async () => {
+      fetchStub.resolves(
+        body({
+          nudges: [
+            {
+              key: 'max_agents',
+              ratio: 0.67,
+              used: 2,
+              limit: 3,
+              unit: 'agents',
+              plan_id: 'free',
+              unlocks_at_plan: 'pro',
+            },
+          ],
+          analytics_window: {
+            days: 90,
+            unlocks_at_plan: 'team',
+            unlocks_at_plan_name: 'Team',
+          },
+          threshold: 0.5,
+          bands: [0.5, 0.8, 1.0],
+        })
+      );
+
+      const payload = await getUsageNudges();
+
+      expect(payload.nudges).to.have.length(1);
+      expect(payload.nudges[0].key).to.equal('max_agents');
+      expect(payload.analytics_window?.days).to.equal(90);
+      expect(payload.analytics_window?.unlocks_at_plan_name).to.equal('Team');
+      expect(payload.threshold).to.equal(0.5);
+      expect(payload.bands).to.deep.equal([0.5, 0.8, 1.0]);
+    });
+
+    it('answers with nothing on OSS, where the route does not exist', async () => {
+      fetchStub.resolves(body({ detail: 'Not Found' }, 404));
+      expect(await getUsageNudges()).to.deep.equal(NO_USAGE_NUDGES);
+    });
+
+    it('answers with nothing when a server has no such method', async () => {
+      fetchStub.resolves(body({ detail: 'Method Not Allowed' }, 405));
+      expect(await getUsageNudges()).to.deep.equal(NO_USAGE_NUDGES);
+    });
+
+    it('answers with nothing when the network is gone', async () => {
+      fetchStub.rejects(new TypeError('Failed to fetch'));
+      expect(await getUsageNudges()).to.deep.equal(NO_USAGE_NUDGES);
+    });
+
+    it('answers with nothing when the body is not the contract', async () => {
+      for (const payload of ['a string', 42, null]) {
+        fetchStub.resolves(body(payload));
+        expect(await getUsageNudges()).to.deep.equal(NO_USAGE_NUDGES);
+      }
+
+      fetchStub.resolves(new Response('not json', { status: 200 }));
+      expect(await getUsageNudges()).to.deep.equal(NO_USAGE_NUDGES);
+    });
+
+    it('drops envelope fields that are the wrong shape', async () => {
+      fetchStub.resolves(
+        body({
+          nudges: 'many',
+          analytics_window: 90,
+          threshold: 'half',
+          bands: 3,
+        })
+      );
+      expect(await getUsageNudges()).to.deep.equal(NO_USAGE_NUDGES);
+    });
+
+    it('still reads a server that answers with the list alone', async () => {
+      // The shape this endpoint carried before the window and the ladder
+      // joined it, so the order the two repositories deploy in cannot
+      // silently empty the banner.
+      fetchStub.resolves(
+        body([
+          {
+            key: 'max_agents',
+            ratio: 0.9,
+            used: 9,
+            limit: 10,
+            unit: 'agents',
+            plan_id: 'free',
+            unlocks_at_plan: 'pro',
+          },
+        ])
+      );
+
+      const payload = await getUsageNudges();
+
+      expect(payload.nudges).to.have.length(1);
+      expect(payload.analytics_window).to.equal(null);
+      expect(payload.threshold).to.equal(null);
+    });
+  });
+
+  describe('a period outside the plan analytics window', () => {
+    /**
+     * The 403 the reporting endpoints answer with is a plan fact, not a
+     * failure, and only the typed error lets a caller tell the two apart
+     * (one is worth offering an upgrade for, the other is a bug report).
+     */
+    function refused(): Response {
+      return new Response(
+        JSON.stringify({
+          detail: {
+            code: HISTORY_UNAVAILABLE_CODE,
+            available_from: '2026-03-18T00:00:00+00:00',
+            message: "This period is outside your plan's analytics history.",
+          },
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    async function caught(promise: Promise<unknown>): Promise<unknown> {
+      try {
+        await promise;
+        return null;
+      } catch (error) {
+        return error;
+      }
+    }
+
+    it('is a typed refusal on the gateway usage summary', async () => {
+      fetchStub.resolves(refused());
+
+      const error = await caught(getAccountGatewayUsageSummary({}));
+
+      expect(isHistoryUnavailable(error)).to.equal(true);
+      expect((error as Error).message).to.equal(
+        "This period is outside your plan's analytics history."
+      );
+      expect((error as { availableFrom: string }).availableFrom).to.equal(
+        '2026-03-18T00:00:00+00:00'
+      );
+    });
+
+    it('is a typed refusal on the cost summary and the session timeline', async () => {
+      fetchStub.resolves(refused());
+      expect(
+        isHistoryUnavailable(await caught(getCostAnalyticsSummary({})))
+      ).to.equal(true);
+
+      fetchStub.resolves(refused());
+      expect(
+        isHistoryUnavailable(
+          await caught(getAccountRuntimeSessionActivityTimeline('session-1'))
+        )
+      ).to.equal(true);
+    });
+
+    it('leaves a plain 403 as the generic failure it is', async () => {
+      // A permission problem is not something to sell a plan for.
+      fetchStub.resolves(
+        new Response(JSON.stringify({ detail: 'Forbidden' }), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+
+      const error = await caught(getAccountGatewayUsageSummary({}));
+
+      expect(isHistoryUnavailable(error)).to.equal(false);
+      expect((error as Error).message).to.equal(
+        'Failed to fetch account gateway usage summary'
       );
     });
   });

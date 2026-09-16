@@ -31,6 +31,14 @@ class PlanFeatures(BaseModel):
         None,
         description="Customer-facing price for each additional USD of hosted-model usage.",
     )
+    analytics_window_days: Optional[int] = Field(
+        None,
+        description=(
+            "Days of analytics history the plan shows at read time, -1 for "
+            "unlimited. Never a storage promise: physical retention follows "
+            "retention_days and is unaffected by this key."
+        ),
+    )
 
 
 class PlanBase(BaseModel):
