@@ -12,7 +12,9 @@ description: >-
   declares the projects it did not reach. The lenses it may start are
   named on its callable list (docs currency, code health, release
   security audit); the security lens runs only where an SBOM exists and
-  reads not_checkable everywhere else. Read-only: it files nothing, opens
+  reads not_checkable everywhere else. The follow ups the human keeps
+  are filed as tracker issues, one per row, by the platform after the
+  agent has exited. The agent is read-only: it files nothing, opens
   nothing and modernises nothing. Emits /workspace/result.json
   (preloop.review.portfolio/v1) plus an evidence pack under
   /workspace/evidence/ opening on the review family's one-minute verdict
@@ -57,6 +59,27 @@ prompt_template: |
   MODERNISATION IS OUT OF SCOPE. You never fix, upgrade, refactor or
   rewrite anything, and you never open a pull request. The output of
   this run is a report and a ranked list of follow ups a human approved.
+
+  THE PLATFORM PUBLISHES THE REPORT, NOT YOU. When the flow's git clone
+  config enables report publication, the platform copies
+  /workspace/evidence/portfolio-report.md into the repository as a pull
+  request AFTER you have exited, on a stable branch of its own. That is
+  a platform step, with no tool and no credential on your side: you
+  still never commit, never push, never open a pull request, and never
+  write to the checkout. Your part is unchanged, and it is the whole
+  contract: the report file must exist and be complete when you finish,
+  because the file on disk is what gets published.
+
+  THE PLATFORM FILES THE APPROVED FOLLOW UPS, NOT YOU. When the flow
+  enables follow up filing, the platform turns the rows a human
+  approved in PHASE 6 into tracker issues AFTER you have exited, one
+  issue per approved row, using the account's tracker credential. That
+  is a platform step with no tool and no credential on your side: you
+  never call create_issue, you never have it, and you never claim an
+  issue exists. Your part is to record approval accurately, which means
+  writing every follow up with "filed": false and "filed_issue": null
+  and leaving rollup.issues_filed at 0. Those three fields belong to the
+  platform, which overwrites them with what it actually filed.
 
   Trigger payload (webhook, schedule, or manual trigger):
   {{trigger_event.payload}}
@@ -656,11 +679,16 @@ prompt_template: |
   "expired_default", no publishing step runs, and a window that closed
   is never read as permission to open anything.
 
-  NOTHING IS EVER FILED BY THIS PRESET. It has no write tools, and the
-  only flows it may start are read-only lenses: approved follow ups are
-  a list in result.json for a human or a later flow to act on, so
-  rollup.issues_filed is always 0 and follow_ups[].filed is always
-  false. Approving is not filing and you never claim otherwise.
+  YOU NEVER FILE ANYTHING. You have no write tools, and approving is not
+  filing. Record the human's decision on the row (status, note,
+  approved_by, approved_at) and write "filed": false, "filed_issue":
+  null and rollup.issues_filed 0 on every row without exception. When
+  the flow enables follow up filing, the platform files one issue per
+  approved row after you exit, keyed on the follow up id, and rewrites
+  those three fields from what it actually created; a follow up that
+  already has an issue from an earlier run is not filed twice. Claiming
+  an issue you did not create, or could not have created, is a lie the
+  platform will overwrite: write the false and let it.
 
   ═══════════════════════════════════════════════════════════
   PHASE 7: EVIDENCE PACK AND REPORT (MANDATORY)
@@ -692,7 +720,13 @@ prompt_template: |
       BOX 3 — "What you should do next week". A short, concrete, ordered
       list of the approved follow ups, highest severity first. No legal
       advice, no certification, and no modernisation plan: name the
-      project, the finding and its pointer, nothing more.
+      project, the finding and its pointer, nothing more. SAY WHAT
+      HAPPENS TO THEM: approved rows are handed to the platform to file
+      as tracker issues, one per row, after this run exits. WHEN NOTHING
+      WAS APPROVED THE BOX SAYS SO IN ONE SENTENCE and names the reason:
+      the gate expired at its deadline (name the deadline), the human
+      approved none, or there were no candidates. An empty box is not
+      allowed to be silent, and you never write that an issue was filed.
     HONESTY RAIL. The cover may only summarize projects, rows, findings
     and coverage already present in the body of this report or the other
     evidence files. No new claims. Strictly one page.
@@ -756,7 +790,7 @@ prompt_template: |
     "questions": [ { "phase": "selection" | "follow_ups", "asked": true|false, "status": "answered" | "expired" | "declined" | "cancelled" | "unroutable" | "not_asked", "reason": "<why it was not asked, else null>", "request_id": "<platform id or null>", "expires_at": "<ISO 8601 or null>", "answered_by": "<platform identity or null>", "answered_at": "<ISO 8601 or null>", "items": [ "<row id>" ], "selectable_ids": [ "<id the input schema offered>" ] } ],
     "fan_out": { "lenses": [ "<lens slug, in declared order>" ], "lenses_refused": [ { "lens": "...", "reason": "not on the callable list" } ], "child_cap": <int>, "max_cost_usd_per_child": <float>, "children_planned": <int>, "children_started": <int>, "children_over_cap": [ { "project": "...", "lens": "..." } ], "parked": true|false, "wait_expired": [ "<child execution id>" ] },
     "projects": [ { "path": "...", "status": "healthy" | "findings" | "failing" | "unknown", "cost_usd": <float or null>, "lenses": [ { "lens": "<lens slug>", "lens_schema": "<the schema that lens emits>" | null, "lens_status": "ran" | "failed" | "refused" | "expired" | "not_checkable" | "not_run", "reason": "<required unless lens_status is 'ran', else null>", "verdict": "pass" | "pass_with_findings" | "fail" | null, "health": "healthy" | "findings" | "failing" | "unknown", "counts": { "high": 0, "medium": 0, "low": 0 }, "child": { "execution_id": "<id>", "state": "<the platform status>", "cost_usd": <float or null>, "label": "<project path>|<lens slug>" } | null, "result_artifact": "evidence/projects/<slug>/<lens slug>/result.json" | null, "lens_payload": { "project_path": "...", "depth": "quick" | "standard" | "deep" } | null } ] } ],
-    "follow_ups": [ { "id": "portfolio:<project path>:<slug>", "project": "...", "lens": "<lens slug>", "title": "...", "severity": "high|medium|low", "evidence": "<path:line>", "rank": <int>, "status": "approved" | "unapproved", "note": "<the human's note, else null>", "approved_by": "<platform identity or null>", "approved_at": "<ISO 8601 or null>", "filed": false } ],
+    "follow_ups": [ { "id": "portfolio:<project path>:<slug>", "project": "...", "lens": "<lens slug>", "title": "...", "severity": "high|medium|low", "evidence": "<path:line>", "rank": <int>, "status": "approved" | "unapproved", "note": "<the human's note, else null>", "approved_by": "<platform identity or null>", "approved_at": "<ISO 8601 or null>", "child_execution_id": "<id or null>", "filed": false, "filed_issue": null } ],
     "coverage": { "projects_discovered": <int>, "projects_selected": <int>, "projects_reviewed": <int>, "lens_runs_planned": <int>, "lens_runs_completed": <int>, "plan_completed": true|false, "not_reviewed": [ { "path": "...", "reason": "..." } ], "projects_not_reviewed": [ "<project path>" ] },
     "rollup": { "by_health": { "healthy": 0, "findings": 0, "failing": 0, "unknown": 0 }, "by_severity": { "high": 0, "medium": 0, "low": 0 }, "follow_ups_total": 0, "follow_ups_approved": 0, "issues_filed": 0, "children_started": 0, "children_succeeded": 0, "children_failed": 0, "children_refused": 0, "children_expired": 0, "children_cost_usd": 0.0 },
     "publication": { "open_portfolio_readme_pr": true|false, "source": "human" | "default" | "expired_default", "pr_opened": false, "pr_url": null, "reason": "<why nothing was opened>" },
@@ -799,6 +833,12 @@ prompt_template: |
     "findings" project, any failed, refused or expired child, any
     truncated coverage and a repository that held no projects, is
     "pass_with_findings".
+  - PLATFORM OWNED FIELDS. "filed", "filed_issue" and
+    rollup.issues_filed describe what the platform did after you exited.
+    You always write false, null and 0; the platform rewrites them from
+    the issues it actually filed, and adds its own receipt.
+    "child_execution_id" is the child that produced the finding, when
+    there was one.
   - THE REGISTER CANNOT UPGRADE THE VERDICT. Healthy rows, approved
     follow ups, a high healthy-to-failing ratio and positive prose never
     raise it. A project nobody reviewed is not evidence of health, an
@@ -831,9 +871,9 @@ allowed_mcp_servers: []
 # child per project per lens, and parks this run while they work.
 # get_execution both reads back a child this run started when its
 # completion record carried no result artifact, and is the read-only meter
-# the run ceiling is measured with. This preset still files nothing, opens
+# the run ceiling is measured with. The agent still files nothing, opens
 # nothing and pushes nothing; the walk and git run in the sandbox against
-# the checkout.
+# the checkout. Report publication is a platform step after the agent exits.
 allowed_mcp_tools:
   - name: ask_user
   - name: run_flow
@@ -856,7 +896,52 @@ callable_flows:
   - flow: release-security-audit
     max_children: 12
     max_usd_per_child: 3.0
-git_clone_config: null
+# Clone one repository read only, then publish the report through the
+# platform's own pull request path after the agent has exited (issue #648).
+# The agent keeps no write tools: publication is a post-execution step of the
+# flow, outside the agent's tool surface. Add the target repository (or
+# trigger the flow from a project) to use it; leave
+# report_publication.enabled false to keep the report purely as an artifact.
+git_clone_config:
+  enabled: true
+  repositories: []
+  git_user_name: Preloop
+  git_user_email: hello@preloop.ai
+  source_branch: null
+  target_branch: null
+  # Required by report publication: the document lands as a pull request a
+  # human reviews and merges, never as a direct commit on the default branch.
+  create_pull_request: true
+  pull_request_title: Portfolio review report
+  pull_request_description: |
+    Refreshes the portfolio review report produced by the Portfolio Review
+    flow. One file, generated by the flow, reviewed by you.
+
+    The report is regenerated on every run and pushed to the same branch, so
+    this pull request updates in place instead of a second one appearing.
+  report_publication:
+    enabled: true
+    # Written in PHASE 7; the file on disk is what gets published.
+    source_path: evidence/portfolio-report.md
+    # One file at the repository root. The branch defaults to
+    # preloop/report/portfolio, derived from this path and stable across runs.
+    destination_path: PORTFOLIO.md
+    commit_message: Update the portfolio review report
+  # Issue #687: the third output of the run. The rows a human approved at the
+  # PHASE 6 gate become tracker issues, one per row, filed by the platform
+  # after the agent has exited and keyed on the stable follow up id, so a
+  # re-run of the same portfolio does not file the same follow up twice. The
+  # agent still has no write tool. The issues land in the project of the
+  # repository this flow clones unless project_id names another one; a flow
+  # with no project configured files nothing and records why.
+  follow_up_filing:
+    enabled: true
+    project_id: null
+    labels:
+      - preloop
+      - portfolio-review
+      - follow-up
+    max_issues: 25
 trigger_config: null
 # Discovery, the fan out and the aggregation. The children carry their own
 # windows and the timeout budget pauses while this run is parked on them,

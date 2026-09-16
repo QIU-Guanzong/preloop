@@ -478,7 +478,9 @@
       "note": null,
       "approved_by": "user-2f0b1d4c",
       "approved_at": "2026-09-16T11:12:00Z",
-      "filed": false
+      "filed": false,
+      "child_execution_id": null,
+      "filed_issue": null
     }
   ],
   "coverage": {

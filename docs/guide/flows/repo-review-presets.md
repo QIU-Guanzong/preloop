@@ -23,7 +23,10 @@ in such a repository from manifests only, asks a human which ones to
 review, then starts one child execution per selected project per lens
 (docs currency, code health, release security audit) and aggregates what
 they reported into `preloop.review.portfolio/v1`. It reuses the lenses
-below unchanged rather than restating them.
+below unchanged rather than restating them. Its agent is read only on
+the same terms as the four: what leaves that run (the report as a pull
+request, the approved follow ups as issues) is written by the platform
+after the agent has exited, never by a tool on its allowlist.
 
 They are a **family sharing one skeleton**, not one parameterized preset:
 the four lenses have different required inputs, different failure modes
