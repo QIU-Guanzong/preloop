@@ -486,7 +486,10 @@ func newHostExecJobCmd(job map[string]any) (*exec.Cmd, string, time.Duration, er
 	return cmd, bin, hostExecTimeout(profile, job), nil
 }
 
-func runnerHeartbeatMessage() map[string]any {
+// runnerHeartbeatMessage reports what this process can do, including how
+// many executions it is willing to hold. The server treats that as a
+// ceiling it may lower, never raise.
+func runnerHeartbeatMessage(concurrency int) map[string]any {
 	msg := publicationHeartbeat()
 	msg["host_exec_profiles"] = hostExecAdvertisements()
 	// Re-assert ephemeral on every handshake and heartbeat. Registration
@@ -495,6 +498,9 @@ func runnerHeartbeatMessage() map[string]any {
 	// this process disappears without unregistering.
 	if runnerOnce.registersEphemeral() {
 		msg["ephemeral"] = true
+	}
+	if concurrency > 0 {
+		msg["concurrency"] = concurrency
 	}
 	return msg
 }
@@ -556,24 +562,29 @@ func waitHostExecJob(cmd *exec.Cmd, executionID string, buf interface{ String() 
 	return outcome
 }
 
-func beginHostExecJob(conn *websocket.Conn, job map[string]any, executionID string, runningCmd **exec.Cmd, runningExecID *string, jobDone *<-chan leasedJobOutcome, halted *atomic.Bool, lastComplete **leasedJobOutcome) error {
+func beginHostExecJob(
+	conn *websocket.Conn,
+	job map[string]any,
+	executionID string,
+	halted *atomic.Bool,
+	jobs *runnerJobs,
+) error {
 	cmd, _, timeout, err := newHostExecJobCmd(job)
 	profile := jobHostExecProfileName(job)
 	if err != nil {
 		outcome := leasedJobOutcome{executionID: executionID, status: "FAILED", hostExec: true, profile: profile, errMsg: err.Error(), exitCode: -1}
-		rememberOutcome(lastComplete, outcome)
+		jobs.remember(outcome)
 		return writeJobOutcome(conn, outcome)
 	}
 	buffer := &runnerLogBuffer{native: true}
 	cmd.Stdout, cmd.Stderr = buffer, buffer
 	if err := cmd.Start(); err != nil {
 		outcome := leasedJobOutcome{executionID: executionID, status: "FAILED", hostExec: true, profile: profile, errMsg: err.Error(), exitCode: -1}
-		rememberOutcome(lastComplete, outcome)
+		jobs.remember(outcome)
 		return writeJobOutcome(conn, outcome)
 	}
-	*runningCmd, *runningExecID = cmd, executionID
-	done := make(chan leasedJobOutcome, 1)
-	*jobDone = done
+	jobs.start(&runnerJob{executionID: executionID, cmd: cmd, halted: halted})
+	done := jobs.outcomes
 	go func() {
 		outcome := waitHostExecJob(cmd, executionID, buffer, halted, timeout, profile)
 		if outcome.result != nil {

@@ -95,14 +95,13 @@ def _ws_runner(ephemeral: bool) -> SimpleNamespace:
     return SimpleNamespace(
         id=uuid4(),
         account_id=uuid4(),
-        current_execution_id=None,
-        pending_job=None,
-        halt_requested=False,
         status="online",
-        reported_status=None,
         publication_capabilities=None,
         ephemeral=ephemeral,
         capabilities={},
+        assignments=[],
+        capacity=1,
+        free_slots=1,
     )
 
 
