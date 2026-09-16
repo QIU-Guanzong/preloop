@@ -435,7 +435,10 @@ describe('Billing plan comparison', () => {
     expect(el.shadowRoot!.querySelector('[data-testid="plan"]')).to.exist;
   });
 
-  it('opens the picker for the account page when Free has no portal to manage', async () => {
+  it('opens on a named plan for an account with no subscription', async () => {
+    // The plan page's cards are the only caller now that the account page
+    // links out instead of embedding this section, so the Free path in has
+    // to work through the same entry point as every other card.
     data.current_subscription = null;
     data.current_plan = plan('free', {
       name: 'Free',
@@ -444,9 +447,10 @@ describe('Billing plan comparison', () => {
     });
     const el = await mount();
     expect((el as any).changing).to.be.false;
-    el.openPicker();
+    el.startChange('pro', 'year');
     await el.updateComplete;
     expect(el.shadowRoot!.querySelector('[data-testid="plan"]')).to.exist;
+    expect((el as any).selectedPlan).to.equal('pro');
   });
 
   it('treats an expired trial as Free on the collapsed line and picker default', async () => {

@@ -974,17 +974,18 @@ describe('ConsoleShell', () => {
       ) as HTMLElement;
     }
 
-    it('takes "Upgrade now" to the plan page with the refused capability', async () => {
+    it('takes "Upgrade now" to the plan page naming what was refused', async () => {
       const go = sinon.stub(Router, 'go').returns(true);
       const el = await openGate('session_titles');
       footer(el, 'upgrade-now').click();
       await el.updateComplete;
 
-      // session_titles is sold as the ai_optimization capability. The plan
-      // page looks the feature up in each plan's capability list, so the
-      // caller-facing name would match no plan at all.
+      // The name travels exactly as this dialog showed it. The plan page maps
+      // it to the capability a plan sells (session_titles is part of
+      // ai_optimization) before matching, and keeps the name for the sentence
+      // it prints, so the card answers in the words the reader was refused in.
       expect(go.lastCall.args[0]).to.equal(
-        '/console/settings/plan?feature=ai_optimization'
+        '/console/settings/plan?feature=session_titles'
       );
     });
 

@@ -3,6 +3,7 @@ import sinon from 'sinon';
 
 import '../../../components/view-header.ts';
 import { invalidateApiCaches } from '../../../api';
+import { PLAN_PAGE_PATH, planPageUrl } from '../../../utils/premium-features';
 import './plan-view';
 import type { PlanView } from './plan-view';
 
@@ -169,6 +170,7 @@ describe('PlanView', () => {
       canManageBilling?: boolean;
       legacy?: boolean;
       checkout?: Record<string, unknown>;
+      blocked?: string[];
     } = {}
   ) {
     const billing = opts.billing !== false;
@@ -222,8 +224,43 @@ describe('PlanView', () => {
                 },
               ]
             : CATALOG;
+          const blocked = opts.blocked ?? [];
+          const eligibility = opts.blocked
+            ? plans.map((p) => ({
+                plan_id: p.id,
+                name: p.name,
+                eligible: !blocked.includes(p.id),
+                purchasable:
+                  (p as { purchasable?: boolean }).purchasable !== false,
+                contact_url: null,
+                requires_period: p.id !== 'free',
+                is_current: p.id === currentPlan,
+                blockers: blocked.includes(p.id)
+                  ? [
+                      {
+                        kind: 'members',
+                        current: 9,
+                        limit: 1,
+                        message: 'Too many users for this plan.',
+                      },
+                    ]
+                  : [],
+                warnings: [],
+                retention: {
+                  oldest_record_at: null,
+                  oldest_record_class: null,
+                  target_days: null,
+                  cutoff_at: null,
+                  affected: false,
+                  protected_by_floor: false,
+                  floor_days: null,
+                  legal_hold: false,
+                },
+              }))
+            : undefined;
           return json({
             can_manage_billing: opts.canManageBilling !== false,
+            ...(eligibility ? { plan_eligibility: eligibility } : {}),
             switching_enabled: true,
             current_subscription: subscription,
             current_plan: plans.find((p) => p.id === currentPlan) ?? null,
@@ -376,6 +413,73 @@ describe('PlanView', () => {
     ).to.equal(false);
   });
 
+  it('re-renders the cards after a change is confirmed below', async () => {
+    const element = await mount({ currentPlan: 'pro' });
+    expect(ctas(element)['Pro']).to.equal('Your plan');
+
+    // The change goes through in the section below, which answers with this
+    // event. Nothing else tells the cards that "Your plan" moved.
+    fetchStub.restore();
+    fetchStub = createFetchStub({ currentPlan: 'team' });
+    element.shadowRoot?.querySelector('billing-plan-comparison')?.dispatchEvent(
+      new CustomEvent('billing-subscription-changed', {
+        bubbles: true,
+        composed: true,
+      })
+    );
+
+    await waitUntil(async () => {
+      await element.updateComplete;
+      return ctas(element)['Team'] === 'Your plan';
+    }, 'the cards kept the plan the account no longer holds');
+    expect(ctas(element)['Pro']).to.equal('Switch to Pro');
+  });
+
+  it('says so when the reload after a change fails', async () => {
+    const element = await mount({ currentPlan: 'pro' });
+    fetchStub.restore();
+    fetchStub = sinon
+      .stub(window, 'fetch')
+      .callsFake(async () => json({ detail: 'nope' }, 500));
+
+    // An un-awaited throw here used to be an unhandled rejection: stale cards
+    // and nothing on screen admitting the refresh failed.
+    element.shadowRoot?.querySelector('billing-plan-comparison')?.dispatchEvent(
+      new CustomEvent('billing-subscription-changed', {
+        bubbles: true,
+        composed: true,
+      })
+    );
+
+    await waitUntil(async () => {
+      await element.updateComplete;
+      return !!element.shadowRoot?.querySelector('[data-testid="plan-error"]');
+    }, 'a failed reload said nothing');
+    expect(
+      element.shadowRoot?.querySelector('[data-testid="plan-error"]')
+        ?.textContent
+    ).to.contain('current plan');
+  });
+
+  it('speaks the refusal the dialog showed, end to end from a 402', async () => {
+    // The whole path: a 402 names `session_titles`, the upgrade dialog builds
+    // the URL, this page reads it. The card matches on the capability the
+    // feature maps to (`ai_optimization`, which Pro sells) and the note says
+    // it back in the words the reader was refused in.
+    const element = await mount(
+      {},
+      planPageUrl('session_titles').slice(PLAN_PAGE_PATH.length)
+    );
+    const requested = element.shadowRoot?.querySelector(
+      'pricing-card.requested'
+    );
+    expect(
+      requested?.shadowRoot?.querySelector('.plan-name')?.textContent
+    ).to.contain('Pro');
+    expect(note(element, 'Pro')).to.contain('AI session titles');
+    expect(note(element, 'Pro')).to.not.contain('built-in model optimization');
+  });
+
   it('opens on the cheapest plan that unlocks a refused feature', async () => {
     const element = await mount({}, '?feature=session_optimization');
     const requested = element.shadowRoot?.querySelector(
@@ -386,6 +490,26 @@ describe('PlanView', () => {
       requested?.shadowRoot?.querySelector('.plan-name')?.textContent
     ).to.contain('Pro');
     expect(note(element, 'Pro')).to.contain('AI session optimization');
+  });
+
+  it('highlights the same plan the quote panel opens on when one is blocked', async () => {
+    // Pro is the cheapest plan that unlocks it, but the server says this
+    // account cannot take it. Highlighting Pro while the panel below opened
+    // on Team would put the refusal and its fix on two different plans.
+    const element = await mount(
+      { blocked: ['pro'] },
+      '?feature=session_optimization'
+    );
+    expect(
+      element.shadowRoot
+        ?.querySelector('pricing-card.requested')
+        ?.shadowRoot?.querySelector('.plan-name')?.textContent
+    ).to.contain('Team');
+    const panel = element.shadowRoot?.querySelector(
+      'billing-plan-comparison'
+    ) as any;
+    await waitUntil(() => !panel.loading, 'the quote panel never loaded');
+    expect(panel.selectedPlan).to.equal('team');
   });
 
   it('honours an explicit plan and interval in the query', async () => {

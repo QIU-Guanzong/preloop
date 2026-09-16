@@ -24,12 +24,20 @@ import {
 } from '../../../api';
 import type { BillingPlan, PlanChangeOptions } from '../../../types/billing';
 import {
+  PLAN_PAGE_PATH,
   capabilityForFeature,
+  cheapestPlanUnlocking,
   premiumFeatureLabel,
 } from '../../../utils/premium-features';
 
-/** Where checkout returns to, so a bought plan lands back on this page. */
-const PLAN_PATH = '/console/settings/plan';
+/**
+ * Where checkout returns to, so a bought plan lands back on this page.
+ *
+ * The route string itself lives in `premium-features`, which declares itself
+ * the one place to edit when the page moves; a second literal here would keep
+ * sending buyers to the old path long after the first one changed.
+ */
+const PLAN_PATH = PLAN_PAGE_PATH;
 
 /**
  * The console plan page.
@@ -63,8 +71,10 @@ export class PlanView extends LitElement {
   @state() private _options: PlanChangeOptions | null = null;
   /** The plan the reader arrived asking about, from `?plan=` or `?feature=`. */
   @state() private _requestedPlan = '';
-  /** The refused capability behind `?feature=`, matched against each plan. */
+  /** The refused feature behind `?feature=`, exactly as the 402 named it. */
   @state() private _requestedFeature = '';
+  /** The plan capability that feature maps to, matched against each plan. */
+  @state() private _requestedCapability = '';
   /**
    * What to call that capability in a sentence.
    *
@@ -76,10 +86,40 @@ export class PlanView extends LitElement {
   @state() private _checkoutPlan = '';
   @state() private _notice = '';
 
+  /**
+   * Re-read the current plan when something changed the subscription.
+   *
+   * The plan change section's own event reaches `_reloadOptions` through the
+   * template binding on the element; it is composed, so it also arrives here
+   * after bubbling out of the shadow root. Ignoring anything that did not
+   * originate on `window` keeps one change to one fetch, and leaves this
+   * listener for the module-level dispatch in `api.ts`, which has no element
+   * to bubble from.
+   */
   private _refreshOnChange = (event: Event) => {
     if (event.target !== window) return;
-    void this._loadOptions();
+    void this._reloadOptions();
   };
+
+  /**
+   * Reload the plan state after a change, and say so if the reload fails.
+   *
+   * `_loadOptions` throws on a bad response, so calling it from an event
+   * handler without this would turn a failed refresh into an unhandled
+   * rejection: cards frozen on the plan the account no longer holds, and
+   * nothing on screen admitting it.
+   */
+  private async _reloadOptions(): Promise<void> {
+    try {
+      await this._loadOptions();
+      this._error = '';
+    } catch (error) {
+      this._error =
+        error instanceof Error
+          ? error.message
+          : 'Could not reload your current plan.';
+    }
+  }
 
   async connectedCallback() {
     super.connectedCallback();
@@ -106,7 +146,8 @@ export class PlanView extends LitElement {
     if (plan) this._requestedPlan = plan;
     const feature = params.get('feature');
     if (feature) {
-      this._requestedFeature = capabilityForFeature(feature);
+      this._requestedFeature = feature;
+      this._requestedCapability = capabilityForFeature(feature);
       this._requestedLabel = premiumFeatureLabel(feature);
     }
     const interval = params.get('interval');
@@ -181,25 +222,26 @@ export class PlanView extends LitElement {
     return this._options?.plans.find((p) => p.id === planId);
   }
 
-  /** The cheapest plan this account can hold that includes `capability`. */
+  /**
+   * The cheapest plan this account can hold that unlocks `feature`.
+   *
+   * The rule lives in `premium-features` and is shared with the quote panel
+   * below, which asks the same question about the same reader: when the two
+   * answered separately they could name different plans, and the card the
+   * page highlighted was then not the plan the panel opened on.
+   */
   private _cheapestUnlocking(
     options: PlanChangeOptions,
-    capability: string
+    feature: string
   ): string {
-    const price = (plan: BillingPlan): number =>
-      typeof plan.price_monthly === 'number'
-        ? plan.price_monthly
-        : Number.POSITIVE_INFINITY;
-    return (
-      options.plans
-        .filter(
-          (p) =>
-            p.purchasable !== false &&
-            !(p.is_legacy ?? p.legacy ?? false) &&
-            Number.isFinite(price(p)) &&
-            (p.capabilities ?? []).includes(capability)
-        )
-        .sort((a, b) => price(a) - price(b))[0]?.id ?? ''
+    const currentId = this._currentPlanId();
+    return cheapestPlanUnlocking(
+      options.plans,
+      feature,
+      (plan) =>
+        plan.id !== currentId &&
+        options.plan_eligibility?.find((e) => e.plan_id === plan.id)
+          ?.eligible !== false
     );
   }
 
@@ -296,8 +338,8 @@ export class PlanView extends LitElement {
     }
 
     const unlocks =
-      this._requestedFeature &&
-      (catalog.capabilities ?? []).includes(this._requestedFeature)
+      this._requestedCapability &&
+      (catalog.capabilities ?? []).includes(this._requestedCapability)
         ? `Includes ${this._requestedLabel}. `
         : '';
 
@@ -328,6 +370,21 @@ export class PlanView extends LitElement {
           note: `Takes effect on ${this._periodEnd()}. Paid time is not refunded.`,
         };
   };
+
+  /**
+   * The card row's CTA callback, rebuilt on every render on purpose.
+   *
+   * `_ctaFor` reads state the row cannot see (the current plan, the period
+   * end, an in-flight checkout), and its identity never changes, so passing
+   * the method itself left Lit with nothing changed to notice: the row kept
+   * whatever it had rendered the first time. After a confirmed change that
+   * meant a stale "Your plan" mark on the plan the account had just left. A
+   * new closure is what tells the row to ask again; four cards is a cheap
+   * question to re-ask.
+   */
+  private get _cardCta(): (plan: PricingPlan) => PlanCta | null {
+    return (plan: PricingPlan) => this._ctaFor(plan);
+  }
 
   private get _changeSection(): BillingPlanComparison | null {
     return this.renderRoot?.querySelector('billing-plan-comparison') ?? null;
@@ -422,7 +479,7 @@ export class PlanView extends LitElement {
         <pricing-plan-cards
           .plans=${this._plans}
           .interval=${this._interval}
-          .ctaFor=${this._ctaFor}
+          .ctaFor=${this._cardCta}
           .highlightId=${this._requestedPlan}
         ></pricing-plan-cards>
       </div>
@@ -467,7 +524,18 @@ export class PlanView extends LitElement {
             this._billingEnabled
               ? html`
                   ${this._renderCards()}
-                  <billing-plan-comparison></billing-plan-comparison>
+                  <!--
+                    The section confirms the change; the cards above still
+                    show the plan the account held before it. Without this
+                    binding the event never reaches the page (it is retargeted
+                    to this host before it reaches window, where the listener
+                    ignores it), and the cards kept a stale "Your plan" mark
+                    and a stale renewal date until a manual reload.
+                  -->
+                  <billing-plan-comparison
+                    @billing-subscription-changed=${() =>
+                      void this._reloadOptions()}
+                  ></billing-plan-comparison>
                   <pricing-plan-comparison
                     .comparison=${this._comparison}
                     .plans=${this._plans}

@@ -3,6 +3,7 @@ import { expect } from '@open-wc/testing';
 import {
   PREMIUM_FEATURE_LABELS,
   capabilityForFeature,
+  cheapestPlanUnlocking,
   planPageUrl,
   premiumFeatureLabel,
 } from './premium-features';
@@ -38,10 +39,14 @@ describe('premium features (the 402 upgrade contract)', () => {
     }
   });
 
-  it('carries the capability to the plan page, and nothing when there is none', () => {
+  it('carries the refused feature to the plan page, not the capability', () => {
+    // The page maps it to a capability itself, so sending the capability
+    // here would buy nothing and cost the only thing the name carries: the
+    // words the reader was actually refused in.
     expect(planPageUrl('session_titles')).to.equal(
-      '/console/settings/plan?feature=ai_optimization'
+      '/console/settings/plan?feature=session_titles'
     );
+    expect(premiumFeatureLabel('session_titles')).to.equal('AI session titles');
     expect(planPageUrl('')).to.equal('/console/settings/plan');
     expect(planPageUrl(null)).to.equal('/console/settings/plan');
     expect(planPageUrl(undefined)).to.equal('/console/settings/plan');
@@ -51,5 +56,58 @@ describe('premium features (the 402 upgrade contract)', () => {
     expect(planPageUrl('a b&c')).to.equal(
       '/console/settings/plan?feature=a%20b%26c'
     );
+  });
+
+  describe('the cheapest plan that unlocks a feature', () => {
+    const plans = [
+      { id: 'free', price_monthly: 0, capabilities: [] },
+      { id: 'pro', price_monthly: 12, capabilities: ['ai_optimization'] },
+      {
+        id: 'team',
+        price_monthly: 120,
+        capabilities: ['ai_optimization', 'rbac'],
+      },
+      {
+        id: 'teams',
+        price_monthly: 29,
+        is_legacy: true,
+        capabilities: ['ai_optimization', 'rbac'],
+      },
+      {
+        id: 'enterprise',
+        price_monthly: null,
+        purchasable: false,
+        capabilities: ['ai_optimization', 'rbac'],
+      },
+    ];
+
+    it('maps the refused feature to a capability before matching', () => {
+      expect(cheapestPlanUnlocking(plans, 'session_titles')).to.equal('pro');
+    });
+
+    it('skips a plan that does not publish the capability', () => {
+      expect(cheapestPlanUnlocking(plans, 'rbac')).to.equal('team');
+    });
+
+    it('skips legacy, quote-only and unpriced plans', () => {
+      // Legacy Teams is cheaper than Team and holds rbac, but an account
+      // cannot newly take it, and Enterprise has no price to compare.
+      expect(cheapestPlanUnlocking(plans, 'rbac')).to.not.equal('teams');
+      expect(cheapestPlanUnlocking(plans, 'rbac')).to.not.equal('enterprise');
+    });
+
+    it('offers only a plan the account may actually hold', () => {
+      // Pro is cheapest, but the server blocked it, so the answer is the
+      // next plan that unlocks the same thing rather than a card whose
+      // button cannot be pressed.
+      expect(
+        cheapestPlanUnlocking(plans, 'session_titles', (p) => p.id !== 'pro')
+      ).to.equal('team');
+    });
+
+    it('answers nothing when no plan unlocks it', () => {
+      expect(cheapestPlanUnlocking(plans, 'something_new')).to.equal('');
+      expect(cheapestPlanUnlocking([], 'rbac')).to.equal('');
+    });
   });
 });
