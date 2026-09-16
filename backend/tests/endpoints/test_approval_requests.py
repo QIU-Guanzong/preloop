@@ -980,7 +980,11 @@ class TestDecideRequestsBatchPermission:
         app.dependency_overrides[get_current_active_user] = _current_user
         # Unbound, so the RBAC query builds without touching a database.
         app.dependency_overrides[get_db_session] = _sync_session
-        app.dependency_overrides[module._async_db_session] = lambda: AsyncMock()
+
+        async def _async_session():
+            yield AsyncMock()
+
+        app.dependency_overrides[module._async_db_session] = _async_session
         # Surface an unhandled error as the 500 a caller would actually see.
         return TestClient(app, raise_server_exceptions=False)
 

@@ -60,8 +60,8 @@ MAX_CHUNKS_PER_SOURCE = 64
 REDACTED_VALUE = GatewayUsageSearchService.REDACTED_VALUE
 
 _CREDENTIAL_PATTERN = re.compile(
-    r"(?i)\b([\w.-]*(?:api[_-]?key|authorization|secret|token|password)"
-    r"[\w.-]*)\s*[:=]\s*(\"[^\"]*\"|'[^']*'|\S+)"
+    r"(?i)\b([\w.-]{0,64}(?:api[_-]?key|authorization|secret|token|password)"
+    r"[\w.-]{0,64})\s*[:=]\s*(\"[^\"]{0,4096}\"|'[^']{0,4096}'|\S{1,4096})"
 )
 #: PEM private-key blocks pasted into transcript, notes, or tool summaries.
 _PEM_PRIVATE_KEY_PATTERN = re.compile(

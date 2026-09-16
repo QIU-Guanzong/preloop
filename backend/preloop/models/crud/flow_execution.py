@@ -255,10 +255,6 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         self, db: Session, db_obj: FlowExecution, obj_in: FlowExecutionUpdate
     ) -> FlowExecution:
         """Update an existing flow execution (synchronous)."""
-        import logging
-
-        logger = logging.getLogger(__name__)
-
         update_data = obj_in.model_dump(exclude_unset=True)
         if "result" in update_data:
             # Result writers may hold an old ORM snapshot while the runner

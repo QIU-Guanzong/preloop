@@ -37,8 +37,6 @@ _runtime_session_columns_cache: dict[int, frozenset[str]] = {}
 _SUMMARY_COLUMN_NAMES = frozenset(
     {"summary", "summary_updated_at", "title", "title_request_count"}
 )
-# Alias so tests that clear the summary probe still empty the shared cache.
-_summary_columns_cache = _runtime_session_columns_cache
 
 # Preloop-internal model-gateway calls (session summarization/optimization,
 # session-title generation, and replay-validation re-executions) are logged

@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from preloop.models.crud.runtime_session import (
     _latest_gateway_usage_for_sessions,
-    _summary_columns_cache,
+    _runtime_session_columns_cache,
     crud_runtime_session,
 )
 from preloop.models.models.ai_model import AIModel
@@ -158,7 +158,7 @@ def test_latest_gateway_usage_for_sessions_returns_latest_per_session(
 
 def test_summary_columns_available_caches_per_bind(db_session) -> None:
     """Summary-column detection should introspect the schema only once per bind."""
-    _summary_columns_cache.clear()
+    _runtime_session_columns_cache.clear()
     bind = db_session.get_bind() or db_session.bind
     assert bind is not None
     inspector = MagicMock()
@@ -179,14 +179,14 @@ def test_summary_columns_available_caches_per_bind(db_session) -> None:
 
     inspect_mock.assert_called_once_with(bind)
     assert inspector.get_columns.call_count == 1
-    assert id(bind) in _summary_columns_cache
+    assert id(bind) in _runtime_session_columns_cache
 
 
 def test_parent_session_id_is_probed_separately_from_summary_columns(
     db_session,
 ) -> None:
     """parent_session_id landed later; a summary-migrated schema can still miss it."""
-    _summary_columns_cache.clear()
+    _runtime_session_columns_cache.clear()
     bind = db_session.get_bind() or db_session.bind
     assert bind is not None
     inspector = MagicMock()

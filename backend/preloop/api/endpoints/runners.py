@@ -821,8 +821,6 @@ async def runner_ws(
                     "TIMED_OUT",
                     "ABORTED",
                 }
-                if already_terminal:
-                    status = execution.status
                 if not crud_flow_runner.set_publication_capabilities(
                     db,
                     runner_id=runner.id,

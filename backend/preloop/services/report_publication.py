@@ -84,6 +84,22 @@ REPORT_PUBLICATION_REASONS = frozenset(
     }
 )
 
+
+def closed_vocabulary_member(value: object, allowed: frozenset[str]) -> Optional[str]:
+    """Return the vocabulary string itself, never the caller-supplied copy.
+
+    Equality against ``allowed`` is not enough for logging: the matching
+    member of the frozenset is a constant, so a tainted agent line cannot
+    ride into a log sink through the parsed JSON.
+    """
+    if not isinstance(value, str):
+        return None
+    for item in allowed:
+        if value == item:
+            return item
+    return None
+
+
 MAX_PATH_LENGTH = 255
 MAX_COMMIT_MESSAGE_LENGTH = 512
 
@@ -479,14 +495,16 @@ def parse_report_publication_marker(line: str) -> Optional[dict[str, Any]]:
         return None
     if not isinstance(parsed, dict):
         return None
-    outcome = parsed.get("outcome")
-    if outcome not in REPORT_PUBLICATION_OUTCOMES:
+    outcome = closed_vocabulary_member(
+        parsed.get("outcome"), REPORT_PUBLICATION_OUTCOMES
+    )
+    if outcome is None:
         logger.warning(
             "Ignoring %s marker with unknown outcome", REPORT_PUBLICATION_MARKER
         )
         return None
-    reason = parsed.get("reason")
-    if not isinstance(reason, str) or reason not in REPORT_PUBLICATION_REASONS:
+    reason = closed_vocabulary_member(parsed.get("reason"), REPORT_PUBLICATION_REASONS)
+    if reason is None:
         return None
     record: dict[str, Any] = {"outcome": outcome, "reason": reason}
     for key in ("branch", "document", "log"):

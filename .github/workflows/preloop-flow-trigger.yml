@@ -40,9 +40,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Install the Preloop CLI
         run: |
-          curl -fsSL https://preloop.ai/install/cli | sh
+          set -euo pipefail
+          sh scripts/install-cli.sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Resolve PR head SHA

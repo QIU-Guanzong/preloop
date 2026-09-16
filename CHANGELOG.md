@@ -374,6 +374,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-establish any that are real by reconciling them against the provider,
   or by moving the account onto a custom plan row, which is on sale by
   construction and never subject to this rule.
+- Code scanning and Code Quality findings on main: report-publication
+  logs only closed-vocabulary outcomes, session-search credential
+  redaction uses length-bounded patterns, the in-repo flow-trigger
+  workflow installs the CLI from the checked-out `scripts/install-cli.sh`
+  instead of piping curl to sh, and the remaining CodeQL quality notes
+  (unclosed publication fds, lock-file Close, unused locals/imports,
+  mixed returns, test lambdas) are cleared.
 
 - The console upgrade modal repeats what the server said instead of
   "Unexpected checkout response". `startCheckout` resolves a `refresh`

@@ -105,7 +105,10 @@ from preloop.services.follow_up_filing import (
 )
 from preloop.services.report_publication import (
     REPORT_PUBLICATION_MARKER,
+    REPORT_PUBLICATION_OUTCOMES,
+    REPORT_PUBLICATION_REASONS,
     REPORT_PUBLICATION_RESULT_KEY,
+    closed_vocabulary_member,
     parse_report_publication_marker,
 )
 from preloop.services.tracker_git_token import resolve_tracker_git_token
@@ -3791,8 +3794,19 @@ class FlowExecutionOrchestrator:
         if parsed is None:
             return
         self._report_publication = parsed
-        logger.info("Report publication outcome: %s", parsed.get("outcome"))
-        self.execution_logger.log_milestone("report_publication", dict(parsed))
+        outcome = closed_vocabulary_member(
+            parsed.get("outcome"), REPORT_PUBLICATION_OUTCOMES
+        )
+        if outcome is None:
+            return
+        reason = (
+            closed_vocabulary_member(parsed.get("reason"), REPORT_PUBLICATION_REASONS)
+            or ""
+        )
+        logger.info("Report publication outcome: %s", outcome)
+        self.execution_logger.log_milestone(
+            "report_publication", {"outcome": outcome, "reason": reason}
+        )
 
     def _resolve_report_publication(self) -> Optional[Dict[str, Any]]:
         """The publication outcome, from the live stream or the stored logs.

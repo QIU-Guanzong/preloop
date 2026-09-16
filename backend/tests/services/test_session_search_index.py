@@ -23,9 +23,11 @@ from preloop.services import session_search_index
 from preloop.services.session_search_index import (
     CHUNK_OVERLAP_CHARS,
     CHUNK_SIZE_CHARS,
+    REDACTED_VALUE,
     chunk_text,
     index_gateway_interaction,
     index_transcript_message,
+    redact_text,
 )
 
 OCCURRED_AT = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
@@ -187,6 +189,16 @@ def test_free_text_credential_is_stored_redacted(db_session, test_user):
     assert "sk-not-a-real-key" not in stored[0].content
     assert "[redacted]" in stored[0].content
     assert stored[0].redaction_state == REDACTION_STATE_REDACTED
+
+
+def test_labelled_credential_redaction_is_bounded_against_repetition():
+    """Repeating a keyword must not turn labelled redaction into a ReDoS."""
+    noise = "token" * 20_000
+    text = f"{noise} api_key=sk-not-a-real-key {noise}"
+    redacted, changed = redact_text(text)
+    assert changed is True
+    assert "sk-not-a-real-key" not in redacted
+    assert REDACTED_VALUE in redacted
 
 
 def test_bare_provider_key_in_free_text_is_stored_redacted(db_session, test_user):

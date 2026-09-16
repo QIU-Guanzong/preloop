@@ -274,16 +274,20 @@ func readOperatorNoteSpool(path string) []operatorNoteSpoolEntry {
 	return entries
 }
 
-func withOperatorNoteSpoolLock(path string, fn func() error) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+func withOperatorNoteSpoolLock(path string, fn func() error) (err error) {
+	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	lockFile, err := os.OpenFile(operatorNoteSpoolLockPath(path), os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec
-	if err != nil {
-		return err
+	lockFile, openErr := os.OpenFile(operatorNoteSpoolLockPath(path), os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec
+	if openErr != nil {
+		return openErr
 	}
-	defer lockFile.Close() //nolint:errcheck
-	if err := lockOperatorNoteFile(lockFile); err != nil {
+	defer func() {
+		if cerr := lockFile.Close(); err == nil && cerr != nil {
+			err = cerr
+		}
+	}()
+	if err = lockOperatorNoteFile(lockFile); err != nil {
 		return err
 	}
 	defer unlockOperatorNoteFile(lockFile) //nolint:errcheck

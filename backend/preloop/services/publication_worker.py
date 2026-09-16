@@ -15,7 +15,6 @@ import re
 import stat
 import sys
 import tempfile
-from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -48,25 +47,26 @@ def read_regular_file(directory: Path, name: str, limit: int) -> bytes:
         parts = name.split("/")
     else:
         raise PublicationError("Unsupported publication input name")
-    with ExitStack() as stack:
-        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        stack.callback(os.close, dir_fd)
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
         for part in parts[:-1]:
             next_fd = os.open(
                 part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd
             )
-            stack.callback(os.close, next_fd)
+            os.close(dir_fd)
             dir_fd = next_fd
         fd = os.open(
             parts[-1],
             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
             dir_fd=dir_fd,
         )
-        try:
-            stream = os.fdopen(fd, "rb")
-        except BaseException:
-            os.close(fd)
-            raise
+    finally:
+        os.close(dir_fd)
+    try:
+        stream = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
     with stream:
         observed = os.fstat(stream.fileno())
         if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
