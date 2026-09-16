@@ -41,7 +41,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy.orm import Session
 
-from preloop.models.crud import crud_session_search_document
+from preloop.models.crud import (
+    crud_session_embedding_setting,
+    crud_session_search_document,
+)
+from preloop.models.models.session_embedding_setting import source_kinds_for_scope
 from preloop.models.crud.session_search_document import (
     MATCH_REASON_BOTH,
     MATCH_REASON_KEYWORD,
@@ -234,8 +238,14 @@ def _plan_semantic(
     if outcome.embedding is None:
         return SemanticPlan(reasons=[outcome.reason] if outcome.reason else [])
 
+    setting = crud_session_embedding_setting.get_for_account(db, account_id=account_id)
     coverage = crud_session_search_document.embedding_coverage(
-        db, account_id=account_id, embedding_model=outcome.embedding.model_identity
+        db,
+        account_id=account_id,
+        embedding_model=outcome.embedding.model_identity,
+        source_kinds=source_kinds_for_scope(
+            setting.scope if setting is not None else None
+        ),
     )
     reasons: List[str] = []
     if coverage.model_vectors == 0:

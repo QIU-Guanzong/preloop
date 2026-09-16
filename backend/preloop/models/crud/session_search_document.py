@@ -1441,7 +1441,12 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         }
 
     def embedding_coverage(
-        self, db: Session, *, account_id: Any, embedding_model: str
+        self,
+        db: Session,
+        *,
+        account_id: Any,
+        embedding_model: str,
+        source_kinds: Optional[Sequence[str]] = None,
     ) -> EmbeddingCoverage:
         """What one account's corpus can answer with vectors of one model.
 
@@ -1450,6 +1455,12 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         returned little. The counts are what turn "no semantic results" into
         one of "nothing is embedded", "everything is embedded with a
         different model" or "the backfill has not got there yet".
+
+        ``source_kinds`` is the account's embedding scope, applied only to the
+        ``waiting`` aggregate. A transcript chunk an account has chosen not
+        to embed is not backlog, so it must not keep the search's backfill
+        marker permanently on. ``None`` means every kind, matching
+        ``source_kinds_for_scope("full")``.
         """
         embedded = SessionSearchDocument.embedding.isnot(None)
         same_model = and_(
@@ -1460,6 +1471,10 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
             SessionSearchDocument.redaction_state == REDACTION_STATE_CLEAR,
             SessionSearchDocument.content != "",
         )
+        if source_kinds is not None:
+            waiting = and_(
+                waiting, SessionSearchDocument.source_kind.in_(list(source_kinds))
+            )
         row = db.execute(
             select(
                 func.count(SessionSearchDocument.id).filter(embedded).label("vectors"),
@@ -1861,7 +1876,11 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         return stamp - window
 
     def _embeddable_filters(
-        self, *, account_id: Any, now: Optional[datetime] = None
+        self,
+        *,
+        account_id: Any,
+        now: Optional[datetime] = None,
+        source_kinds: Optional[Sequence[str]] = None,
     ) -> list[Any]:
         """Conditions every embeddable chunk must satisfy.
 
@@ -1874,6 +1893,12 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         ``updated_at`` is older than the reclaim window are claimable too,
         so a worker crash between the claim commit and store cannot hide
         the backlog from the pending count or from the next run.
+
+        ``source_kinds`` narrows the corpus to the kinds the account's
+        embedding scope admits; ``None`` means every kind. Narrowing is a
+        filter on the claim rather than a state written onto the rows, so
+        widening the scope later needs no sweep: the chunks were pending all
+        along and the next pass sees them.
         """
         stale_before = self._stale_claim_cutoff(now)
         claimable_state = or_(
@@ -1883,13 +1908,16 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
                 SessionSearchDocument.updated_at < stale_before,
             ),
         )
-        return [
+        filters = [
             SessionSearchDocument.account_id == account_id,
             claimable_state,
             SessionSearchDocument.redaction_state == REDACTION_STATE_CLEAR,
             SessionSearchDocument.embedding.is_(None),
             SessionSearchDocument.content != "",
         ]
+        if source_kinds is not None:
+            filters.append(SessionSearchDocument.source_kind.in_(list(source_kinds)))
+        return filters
 
     def count_pending_embeddings(
         self,
@@ -1898,10 +1926,18 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         account_id: Any,
         excluded_session_ids: Optional[Iterable[Any]] = None,
         now: Optional[datetime] = None,
+        source_kinds: Optional[Sequence[str]] = None,
     ) -> int:
-        """How many chunks this account still has waiting for a vector."""
+        """How many chunks this account still has waiting for a vector.
+
+        ``source_kinds`` is the account's embedding scope: a transcript chunk
+        an account has chosen not to embed is not backlog, so it is not
+        counted as pending either.
+        """
         stmt = db.query(func.count(SessionSearchDocument.id)).filter(
-            *self._embeddable_filters(account_id=account_id, now=now)
+            *self._embeddable_filters(
+                account_id=account_id, now=now, source_kinds=source_kinds
+            )
         )
         excluded = [str(value) for value in (excluded_session_ids or [])]
         if excluded:
@@ -1918,6 +1954,7 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         limit: int,
         excluded_session_ids: Optional[Iterable[Any]] = None,
         now: Optional[datetime] = None,
+        source_kinds: Optional[Sequence[str]] = None,
         commit: bool = False,
     ) -> List[SessionSearchDocument]:
         """Claim the oldest waiting chunks of one session, oldest first.
@@ -1933,11 +1970,18 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         a second worker skips these rows instead of waiting behind them.
         A claim left ``in_progress`` past the reclaim window is treated as
         pending again, so a restart cannot strand the batch.
+
+        ``source_kinds`` carries the account's embedding scope into the
+        claim, which is the only place the scope is enforced: rows outside it
+        are never claimed, so they are never sent to a provider and never
+        cost anything.
         """
         if limit <= 0:
             return []
         excluded = [str(value) for value in (excluded_session_ids or [])]
-        filters = self._embeddable_filters(account_id=account_id, now=now)
+        filters = self._embeddable_filters(
+            account_id=account_id, now=now, source_kinds=source_kinds
+        )
 
         oldest_stmt = db.query(SessionSearchDocument.runtime_session_id).filter(
             *filters

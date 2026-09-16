@@ -22,10 +22,13 @@ from preloop.models.crud import (
 from preloop.models.crud.session_search_document import SessionSearchChunk
 from preloop.models.models.session_embedding_setting import (
     DEGRADED_DAILY_CAP,
+    EMBEDDING_SCOPE_FULL,
+    EMBEDDING_SCOPE_SUMMARIES_ONLY,
     PROVIDER_LOCAL,
 )
 from preloop.models.models.session_search_document import (
     EMBEDDING_DIMENSIONS,
+    SOURCE_KIND_SESSION_SUMMARY,
     SOURCE_KIND_TRANSCRIPT_MESSAGE,
 )
 from preloop.schemas.session_search import (
@@ -144,13 +147,14 @@ def _write(
     occurred_at=BASE_AT,
     vector=None,
     model_identity=MODEL_IDENTITY,
+    source_kind=SOURCE_KIND_TRANSCRIPT_MESSAGE,
 ):
     """Write one chunk, and give it a vector when the test wants one."""
     rows = crud_session_search_document.replace_source_chunks(
         db_session,
         account_id=account_id,
         runtime_session_id=session.id,
-        source_kind=SOURCE_KIND_TRANSCRIPT_MESSAGE,
+        source_kind=source_kind,
         source_id=source_id,
         occurred_at=occurred_at,
         chunks=[SessionSearchChunk(content=text, role="assistant")],
@@ -487,7 +491,7 @@ def test_a_partly_embedded_corpus_is_marked_behind(
     client, db_session, test_user, provider
 ):
     """Results, plus the fact that the semantic half searched less."""
-    _opt_in(db_session, test_user.account_id)
+    _opt_in(db_session, test_user.account_id, scope=EMBEDDING_SCOPE_FULL)
     _corpus(db_session, test_user.account_id)
     waiting = _session(db_session, test_user.account_id, "waiting")
     _write(
@@ -505,6 +509,38 @@ def test_a_partly_embedded_corpus_is_marked_behind(
     assert payload["degraded"]["semantic"] is True
     assert payload["embedded_through"] is not None
     assert payload["indexed_through"] is not None
+    assert payload["results"]
+
+
+def test_summaries_only_does_not_mark_unembedded_transcripts_as_backfill(
+    client, db_session, test_user, provider
+):
+    """Out-of-scope transcript text is a decision, not an unfinished job."""
+    _opt_in(db_session, test_user.account_id, scope=EMBEDDING_SCOPE_SUMMARIES_ONLY)
+    session = _session(db_session, test_user.account_id, "summaries-scope")
+    for index in range(30):
+        _write(
+            db_session,
+            test_user.account_id,
+            session,
+            f"transcript turn {index} the account chose not to embed",
+            source_id=f"transcript-{index}",
+        )
+    _write(
+        db_session,
+        test_user.account_id,
+        session,
+        SEMANTIC_TEXT,
+        source_id=str(session.id),
+        source_kind=SOURCE_KIND_SESSION_SUMMARY,
+        vector=_axis(0),
+    )
+
+    payload = _search(client).json()
+
+    assert DEGRADED_SEMANTIC_BACKFILL_INCOMPLETE not in _reasons(payload)
+    assert payload["effective_mode"] == "hybrid"
+    assert payload["degraded"]["semantic"] is True
     assert payload["results"]
 
 

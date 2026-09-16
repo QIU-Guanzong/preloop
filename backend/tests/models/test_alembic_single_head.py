@@ -224,4 +224,6 @@ def test_flow_runners_revision_chains_onto_approval_rule_context() -> None:
     assert ephemeral_runner.down_revision == "20260915_session_backfill"
     session_saved_search = script.get_revision("20260916_session_saved_search")
     assert session_saved_search.down_revision == "20260916_ephemeral_runner"
-    assert script.get_heads() == ["20260916_session_saved_search"]
+    embedding_scope = script.get_revision("20260916_embedding_scope")
+    assert embedding_scope.down_revision == "20260916_session_saved_search"
+    assert script.get_heads() == ["20260916_embedding_scope"]
