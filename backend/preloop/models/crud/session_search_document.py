@@ -36,6 +36,7 @@ from sqlalchemy import (
     null,
     or_,
     select,
+    text,
     update,
 )
 from sqlalchemy.orm import Session
@@ -100,10 +101,15 @@ HEADLINE_OPTIONS = (
 )
 
 #: Chunks the vector pass reads before anything is grouped into sessions.
-#: This is the nearest neighbour depth: the HNSW index answers "the closest
-#: N", and everything after it (session grouping, fusion, paging) happens over
-#: that set. Too small and a session with one very close chunk is invisible;
-#: too large and every search pays for vectors nobody will read.
+#: This is the requested nearest-neighbour depth, not a guarantee of the
+#: closest N. The HNSW index cannot carry the equality filters
+#: (``account_id``, ``embedding_model``, ``redaction_state``), so pgvector
+#: post-filters candidates inside the ``hnsw.ef_search`` window. On a
+#: multi-tenant corpus, or mid re-embedding sweep, that filter is selective:
+#: the scan can return fewer qualifying chunks than this depth while closer
+#: matches for this account were never visited. ``search_vector_chunks``
+#: raises ``hnsw.ef_search`` to at least this depth for the statement. A
+#: full page is still treated as "maybe more" rather than complete coverage.
 VECTOR_CANDIDATE_CHUNKS = 200
 
 #: Sessions the vector pass hands to fusion, after grouping.
@@ -1191,6 +1197,11 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         if not embedding or not embedding_model:
             return []
         depth = max(1, min(int(limit), VECTOR_CANDIDATE_CHUNKS))
+        # Filtered ANN: equality predicates are applied after the HNSW scan.
+        # Raise ef_search to the requested depth so the window is at least as
+        # large as the page we intend to return. Recall is still approximate.
+        ef_search = max(depth, VECTOR_CANDIDATE_CHUNKS)
+        db.execute(text(f"SET LOCAL hnsw.ef_search = {int(ef_search)}"))
         distance = SessionSearchDocument.embedding.cosine_distance(list(embedding))
         similarity = (literal(1.0) - distance).label("similarity")
         conditions = self._scoped_conditions(account_id=account_id, filters=filters)

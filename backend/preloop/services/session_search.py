@@ -140,6 +140,23 @@ _REASON_DETAILS: Dict[str, str] = {
     ),
 }
 
+#: Same reason codes as above, used when the vector half of *this* search
+#: did run. The worker can still have stopped filling the corpus (cap or
+#: provider), and that is lag behind the query, not a skipped semantic pass.
+_REASON_DETAILS_WHEN_SEMANTIC_RAN: Dict[str, str] = {
+    DEGRADED_SEMANTIC_DAILY_CAP: (
+        "Embedding spend reached the daily cap; the corpus may be behind."
+    ),
+    DEGRADED_SEMANTIC_PROVIDER_ERROR: (
+        "The embedding worker last failed against the provider; the corpus "
+        "may be behind."
+    ),
+    DEGRADED_SEMANTIC_MISCONFIGURED: (
+        "The account's embedding provider is not configured usably; the "
+        "corpus may be behind."
+    ),
+}
+
 
 class SemanticPlan:
     """What the semantic half of one search is able to do.
@@ -256,7 +273,13 @@ def _degraded_block(
 ) -> SessionSearchDegraded:
     """State what this answer is, and what it is not."""
     ordered = [reason for reason in _REASON_DETAILS if reason in set(reasons)]
-    detail = " ".join(_REASON_DETAILS[reason] for reason in ordered) or None
+    detail_parts = []
+    for reason in ordered:
+        if plan.ran and reason in _REASON_DETAILS_WHEN_SEMANTIC_RAN:
+            detail_parts.append(_REASON_DETAILS_WHEN_SEMANTIC_RAN[reason])
+        else:
+            detail_parts.append(_REASON_DETAILS[reason])
+    detail = " ".join(detail_parts) or None
     return SessionSearchDegraded(
         keyword=effective_mode != "semantic",
         semantic=plan.searched,
@@ -434,9 +457,11 @@ def _fused_page(
         )
     semantic_sessions = group_vector_hits(hits)[:MAX_VECTOR_SESSIONS]
     # The keyword half knows its exact total, so it can say whether anything
-    # was actually left behind. The vector half cannot: a nearest neighbour
-    # search that filled its depth may or may not have had more to give, and
-    # saying "maybe" is the honest answer.
+    # was actually left behind. The vector half cannot: a filtered HNSW scan
+    # that filled its requested depth may still have missed closer matches,
+    # and one that did not fill it may still have more outside the ef_search
+    # window. Saying "maybe" when the requested depth came back full is the
+    # honest answer.
     truncated = keyword_total > FUSION_CANDIDATE_DEPTH or len(hits) >= (
         VECTOR_CANDIDATE_CHUNKS
     )

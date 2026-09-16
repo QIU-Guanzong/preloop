@@ -20,7 +20,10 @@ from preloop.models.crud import (
     crud_session_search_document,
 )
 from preloop.models.crud.session_search_document import SessionSearchChunk
-from preloop.models.models.session_embedding_setting import PROVIDER_LOCAL
+from preloop.models.models.session_embedding_setting import (
+    DEGRADED_DAILY_CAP,
+    PROVIDER_LOCAL,
+)
 from preloop.models.models.session_search_document import (
     EMBEDDING_DIMENSIONS,
     SOURCE_KIND_TRANSCRIPT_MESSAGE,
@@ -408,6 +411,7 @@ def test_a_reached_daily_cap_still_returns_keyword_results(
     assert payload["effective_mode"] == "keyword"
     assert payload["results"]
     assert provider.calls == 0
+    assert "did not run" in payload["degraded"]["detail"]
 
 
 def test_a_provider_failure_still_returns_keyword_results(
@@ -429,6 +433,7 @@ def test_a_provider_failure_still_returns_keyword_results(
     assert payload["effective_mode"] == "keyword"
     assert payload["results"]
     assert failing.calls == 1
+    assert "did not run" in payload["degraded"]["detail"]
 
 
 def test_semantic_mode_with_no_vectors_is_empty_and_says_so(
@@ -622,3 +627,25 @@ def test_a_query_embedding_is_recorded_as_spend(
     assert len(rows) == 1
     assert (rows[0].meta_data or {})["purpose"] == SESSION_EMBEDDING_PURPOSE
     assert QUERY not in str(rows[0].meta_data)
+
+
+def test_a_worker_cap_does_not_claim_the_semantic_half_skipped(
+    client, db_session, test_user, provider
+):
+    """The worker stopping is corpus lag, not this search skipping vectors."""
+    _opt_in(db_session, test_user.account_id)
+    _corpus(db_session, test_user.account_id)
+    crud_session_embedding_setting.mark_degraded(
+        db_session,
+        account_id=test_user.account_id,
+        reason=DEGRADED_DAILY_CAP,
+    )
+
+    payload = _search(client).json()
+
+    assert payload["effective_mode"] == "hybrid"
+    assert payload["degraded"]["semantic"] is True
+    assert DEGRADED_SEMANTIC_DAILY_CAP in _reasons(payload)
+    assert "did not run" not in payload["degraded"]["detail"]
+    assert "corpus may be behind" in payload["degraded"]["detail"]
+    assert provider.calls == 1

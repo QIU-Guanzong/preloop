@@ -163,7 +163,12 @@ class _QueryEmbeddingCache:
             self._entries[key] = (now + ttl, embedding)
 
     def clear(self) -> None:
-        """Drop everything. Used by tests and by an account turning off."""
+        """Drop everything. Used by tests.
+
+        An account turning embedding off is not a caller. ``embed_query``
+        checks ``setting.enabled`` before the cache lookup, so an opted-out
+        account cannot read a stale vector even if one is still in memory.
+        """
         with self._lock:
             self._entries.clear()
 
