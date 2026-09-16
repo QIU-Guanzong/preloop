@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   setup, the double-review trap when a webhook already drives the same
   flow, and what changes on self-hosted GitHub runners.
 
+- Private runners hold several executions at once (default 2, owner
+  ceiling 1..32 editable in the console, `PATCH
+  /api/v1/runners/{runner_id}/concurrency`). `--concurrency`,
+  `PRELOOP_RUNNER_CONCURRENCY` and `runner.concurrency` set what the
+  process will hold (flag, then env, then file, then 2). Halt and
+  status are per execution. A connected process can only lower the
+  ceiling, never raise it, and a process that does not report
+  concurrency is treated as one slot, including a rollback to a
+  pre-multi-slot CLI that reuses the same runner id. The migration
+  carries live single-slot leases into `flow_runner_assignment`.
+
 - One-shot ephemeral runner mode for CI: `preloop runner fg --once
   --ephemeral [--labels ...] [--wait-for-job 15m]` registers a runner that
   belongs to a single process, runs exactly one execution, prints its

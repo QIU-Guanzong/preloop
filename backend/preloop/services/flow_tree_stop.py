@@ -215,9 +215,11 @@ async def _signal_runtime(db: Any, execution: Any, *, nats_client: Any = None) -
         try:
             runner = crud_flow_runner.get(db, id=runner_id)
             if runner is not None:
-                runner.halt_requested = True
-                db.add(runner)
-                db.commit()
+                # Halt the one assignment. The same runner may be running
+                # other executions that this tree stop did not ask to end.
+                crud_flow_runner.request_halt(
+                    db, runner_id=runner.id, execution_id=execution.id
+                )
         except Exception:
             logger.exception(
                 "Could not flag the runner of execution %s to halt", execution.id

@@ -91,18 +91,28 @@ def _capability_writer(runner: SimpleNamespace):
     return set_publication_capabilities
 
 
+def _record_reported(runner: SimpleNamespace):
+    """Stand-in so a MagicMock db still records the declared concurrency."""
+
+    def set_reported_concurrency(db, *, runner, reported, commit=True):
+        runner.reported_concurrency = reported
+        return runner
+
+    return set_reported_concurrency
+
+
 def _ws_runner(ephemeral: bool) -> SimpleNamespace:
     return SimpleNamespace(
         id=uuid4(),
         account_id=uuid4(),
-        current_execution_id=None,
-        pending_job=None,
-        halt_requested=False,
         status="online",
-        reported_status=None,
         publication_capabilities=None,
         ephemeral=ephemeral,
         capabilities={},
+        assignments=[],
+        capacity=1,
+        free_slots=1,
+        reported_concurrency=None,
     )
 
 
@@ -153,6 +163,11 @@ async def test_heartbeat_upgrades_a_row_the_register_missed(
     monkeypatch.setattr(runners.crud_flow_runner, "mark_ephemeral", mark)
     monkeypatch.setattr(
         runners.crud_flow_runner,
+        "set_reported_concurrency",
+        _record_reported(runner),
+    )
+    monkeypatch.setattr(
+        runners.crud_flow_runner,
         "set_publication_capabilities",
         _capability_writer(runner),
     )
@@ -161,6 +176,67 @@ async def test_heartbeat_upgrades_a_row_the_register_missed(
 
     mark.assert_called_once()
     assert mark.call_args.kwargs["runner_id"] == runner.id
+    assert runner.reported_concurrency is None
+
+
+def test_register_resume_without_concurrency_clears_a_stale_report(
+    db_session: Session, test_user: models.User, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-multi-slot CLI reusing a runner_id must not keep four slots."""
+    monkeypatch.setattr(runners, "emit_runner_updated", lambda *args: None)
+    existing = crud_flow_runner.create(
+        db_session,
+        obj_in={
+            "account_id": test_user.account_id,
+            "name": "desk-mac",
+            "token_hash": f"hash-{uuid4()}",
+            "status": "online",
+            "reported_concurrency": 4,
+        },
+    )
+    with _client(db_session, test_user) as client:
+        response = client.post(
+            "/api/v1/runners/register",
+            json={"runner_id": str(existing.id), "name": "desk-mac"},
+        )
+    assert response.status_code == 200, response.text
+    db_session.expire_all()
+    saved = crud_flow_runner.get_fresh(db_session, runner_id=existing.id)
+    assert saved is not None
+    assert saved.reported_concurrency is None
+    assert saved.capacity == 1
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_without_concurrency_clears_a_stale_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _ws_runner(False)
+    runner.reported_concurrency = 4
+    websocket = MagicMock()
+    websocket.accept = AsyncMock()
+    websocket.send_json = AsyncMock()
+    websocket.receive_json = AsyncMock(
+        side_effect=[{"type": "heartbeat"}, WebSocketDisconnect()]
+    )
+    monkeypatch.setattr(runners, "_authenticate_runner", lambda *args: runner)
+    monkeypatch.setattr(runners, "emit_runner_updated", MagicMock())
+    monkeypatch.setattr(runners.crud_flow_runner, "get", lambda *args, **kwargs: runner)
+    monkeypatch.setattr(runners.crud_flow_runner, "touch_heartbeat", MagicMock())
+    monkeypatch.setattr(
+        runners.crud_flow_runner,
+        "set_reported_concurrency",
+        _record_reported(runner),
+    )
+    monkeypatch.setattr(
+        runners.crud_flow_runner,
+        "set_publication_capabilities",
+        _capability_writer(runner),
+    )
+
+    await runners.runner_ws(websocket, runner.id, MagicMock())
+
+    assert runner.reported_concurrency is None
 
 
 @pytest.mark.asyncio

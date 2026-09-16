@@ -113,6 +113,11 @@ func init() {
 		"wait-for-job", defaultRunnerWaitForJob,
 		"how long --once waits for a job before exiting non-zero",
 	)
+	runnerFgCmd.Flags().Int(
+		"concurrency",
+		0,
+		"executions to run at once (default: runner.concurrency in config, else 2)",
+	)
 }
 
 type runnerState struct {
@@ -122,14 +127,18 @@ type runnerState struct {
 }
 
 type runnerAPIRecord struct {
-	ID                 string   `json:"id"`
-	Name               string   `json:"name"`
-	Status             string   `json:"status"`
-	LastHeartbeat      *string  `json:"last_heartbeat"`
-	CurrentExecutionID *string  `json:"current_execution_id"`
-	Hostname           string   `json:"hostname"`
-	Labels             []string `json:"labels"`
-	Token              string   `json:"token"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	Status              string   `json:"status"`
+	LastHeartbeat       *string  `json:"last_heartbeat"`
+	CurrentExecutionID  *string  `json:"current_execution_id"`
+	RunningExecutionIDs []string `json:"running_execution_ids"`
+	Concurrency         int      `json:"concurrency"`
+	Capacity            int      `json:"capacity"`
+	RunningCount        int      `json:"running_count"`
+	Hostname            string   `json:"hostname"`
+	Labels              []string `json:"labels"`
+	Token               string   `json:"token"`
 }
 
 type runnerWSMessage struct {
@@ -148,13 +157,53 @@ type runnerWSMessage struct {
 	Binding       map[string]any     `json:"binding,omitempty"`
 	Lease         map[string]any     `json:"lease,omitempty"`
 
-	Type            string         `json:"type"`
-	Ephemeral       bool           `json:"ephemeral,omitempty"`
-	Job             map[string]any `json:"job,omitempty"`
-	Halt            bool           `json:"halt,omitempty"`
-	HaltExecutionID string         `json:"halt_execution_id,omitempty"`
-	Error           string         `json:"error,omitempty"`
-	RunnerID        string         `json:"runner_id,omitempty"`
+	Type      string `json:"type"`
+	Ephemeral bool   `json:"ephemeral,omitempty"`
+	// Job is the first held execution and Jobs is all of them. A server
+	// that predates concurrency sends only Job.
+	Job              map[string]any   `json:"job,omitempty"`
+	Jobs             []map[string]any `json:"jobs,omitempty"`
+	Concurrency      int              `json:"concurrency,omitempty"`
+	Halt             bool             `json:"halt,omitempty"`
+	HaltExecutionID  string           `json:"halt_execution_id,omitempty"`
+	HaltExecutionIDs []string         `json:"halt_execution_ids,omitempty"`
+	Error            string           `json:"error,omitempty"`
+	RunnerID         string           `json:"runner_id,omitempty"`
+}
+
+// deliveredJobs returns every job in one server frame, first one first and
+// without duplicates, so old and new servers are handled the same way.
+func (m runnerWSMessage) deliveredJobs() []map[string]any {
+	jobs := make([]map[string]any, 0, len(m.Jobs)+1)
+	seen := map[string]bool{}
+	for _, job := range append([]map[string]any{m.Job}, m.Jobs...) {
+		if job == nil {
+			continue
+		}
+		id, _ := job["execution_id"].(string)
+		if id != "" {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs
+}
+
+// haltedExecutions returns the executions a halt frame names.
+func (m runnerWSMessage) haltedExecutions() []string {
+	ids := make([]string, 0, len(m.HaltExecutionIDs)+1)
+	seen := map[string]bool{}
+	for _, id := range append([]string{m.HaltExecutionID}, m.HaltExecutionIDs...) {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 func runRunnerFg(cmd *cobra.Command, args []string) error {
@@ -165,6 +214,7 @@ func runRunnerFg(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	runnerOnce = once
+	requested, _ := cmd.Flags().GetInt("concurrency")
 	hostname, _ := os.Hostname()
 	if once.registersEphemeral() {
 		labels = ephemeralRunnerLabels(labels, hostname, os.Getpid())
@@ -172,13 +222,14 @@ func runRunnerFg(cmd *cobra.Command, args []string) error {
 	if name == "" {
 		name = hostname
 	}
+	concurrency := resolveRunnerConcurrency(requested)
 
 	client, err := api.NewClient(FlagToken, FlagURL)
 	if err != nil {
 		return err
 	}
 
-	state, err := loadOrRegisterRunner(client, name, hostname, labels)
+	state, err := loadOrRegisterRunner(client, name, hostname, labels, concurrency)
 	if err != nil {
 		return err
 	}
@@ -189,7 +240,11 @@ func runRunnerFg(cmd *cobra.Command, args []string) error {
 	if once.registersEphemeral() {
 		defer unregisterRunnerBestEffort(state)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Runner %s (%s) connecting...\n", state.Name, state.ID)
+	fmt.Fprintf(
+		cmd.OutOrStdout(),
+		"Runner %s (%s) connecting with %d slots...\n",
+		state.Name, state.ID, concurrency,
+	)
 
 	reapOrphanedPublicationRuntimes()
 
@@ -204,13 +259,37 @@ func runRunnerFg(cmd *cobra.Command, args []string) error {
 	}
 	stopWaiting := once.armWaitForJob(interrupt)
 	defer stopWaiting()
-	if err := runnerForegroundLoop(state, interrupt, cmd.OutOrStdout()); err != nil {
+	if err := runnerForegroundLoop(state, interrupt, cmd.OutOrStdout(), concurrency); err != nil {
 		return err
 	}
 	return once.result()
 }
 
-func loadOrRegisterRunner(client *api.Client, name, hostname string, labels []string) (*runnerState, error) {
+// resolveRunnerConcurrency picks how many executions this process will hold:
+// the flag when given, otherwise runner.concurrency from the environment or
+// config file, otherwise the default. The value is a ceiling the server may
+// lower, never a promise it must honour, so an out-of-range request is
+// clamped rather than rejected.
+func resolveRunnerConcurrency(flagValue int) int {
+	concurrency := flagValue
+	if concurrency <= 0 {
+		concurrency = config.RunnerConcurrency()
+	}
+	if concurrency < 1 {
+		return 1
+	}
+	if concurrency > config.MaxRunnerConcurrency {
+		return config.MaxRunnerConcurrency
+	}
+	return concurrency
+}
+
+func loadOrRegisterRunner(
+	client *api.Client, name, hostname string, labels []string, concurrency int,
+) (*runnerState, error) {
+	if concurrency < 1 {
+		concurrency = config.DefaultRunnerConcurrency
+	}
 	req := map[string]any{
 		"host_exec_profiles": hostExecAdvertisements(),
 		"name":               name,
@@ -218,6 +297,7 @@ func loadOrRegisterRunner(client *api.Client, name, hostname string, labels []st
 		"os":                 runtime.GOOS,
 		"arch":               runtime.GOARCH,
 		"labels":             labels,
+		"concurrency":        concurrency,
 	}
 	if runnerOnce.registersEphemeral() {
 		return registerEphemeralRunner(client, req)
@@ -358,78 +438,51 @@ func writeJobOutcome(conn *websocket.Conn, outcome leasedJobOutcome) error {
 	return nil
 }
 
-func rememberOutcome(dst **leasedJobOutcome, outcome leasedJobOutcome) {
-	if dst == nil {
-		return
-	}
-	copy := outcome
-	*dst = &copy
-}
-
+// applyJobOutcome reports one execution's terminal outcome and frees the
+// slot it held. Other jobs on this runner are untouched.
 func applyJobOutcome(
 	conn *websocket.Conn,
 	outcome leasedJobOutcome,
-	runningCmd **exec.Cmd,
-	runningExecID *string,
-	jobDone *<-chan leasedJobOutcome,
-	halt *bool,
-	halted *atomic.Bool,
-	lastComplete **leasedJobOutcome,
+	jobs *runnerJobs,
 ) error {
-	rememberOutcome(lastComplete, outcome)
+	if jobs != nil {
+		jobs.remember(outcome)
+	}
 	err := writeJobOutcome(conn, outcome)
-	if runningCmd != nil {
-		*runningCmd = nil
-	}
-	if runningExecID != nil {
-		*runningExecID = ""
-	}
-	if jobDone != nil {
-		*jobDone = nil
-	}
-	if halt != nil {
-		*halt = false
-	}
-	if halted != nil {
-		halted.Store(false)
+	if jobs != nil {
+		jobs.finish(outcome.executionID)
 	}
 	return err
 }
 
-func flushPendingOutcome(
-	conn *websocket.Conn,
-	jobDone *<-chan leasedJobOutcome,
-	runningCmd **exec.Cmd,
-	runningExecID *string,
-	halt *bool,
-	halted *atomic.Bool,
-	lastComplete **leasedJobOutcome,
-) error {
-	if jobDone == nil || *jobDone == nil {
+// flushPendingOutcomes delivers outcomes that completed while the socket was
+// down, before the new session reports anything else.
+func flushPendingOutcomes(conn *websocket.Conn, jobs *runnerJobs) error {
+	if jobs == nil {
 		return nil
 	}
-	select {
-	case outcome := <-*jobDone:
-		return applyJobOutcome(
-			conn, outcome, runningCmd, runningExecID, jobDone, halt, halted, lastComplete,
-		)
-	default:
+	for {
+		select {
+		case outcome := <-jobs.outcomes:
+			releaseWorkspaceLease(outcome.executionID)
+			if err := applyJobOutcome(conn, outcome, jobs); err != nil {
+				return err
+			}
+		default:
+			return nil
+		}
 	}
-	return nil
 }
 
-func runnerForegroundLoop(state *runnerState, interrupt <-chan os.Signal, out io.Writer) error {
+func runnerForegroundLoop(
+	state *runnerState, interrupt <-chan os.Signal, out io.Writer, concurrency int,
+) error {
 	wsURL, err := runnerWebsocketURL(state.ID)
 	if err != nil {
 		return err
 	}
 
-	halt := false
-	halted := &atomic.Bool{}
-	var runningCmd *exec.Cmd
-	var runningExecID string
-	var jobDone <-chan leasedJobOutcome
-	var lastComplete *leasedJobOutcome
+	jobs := newRunnerJobs(concurrency)
 	backoff := runnerReconnectMin
 	connectedOnce := false
 
@@ -438,7 +491,7 @@ func runnerForegroundLoop(state *runnerState, interrupt <-chan os.Signal, out io
 		if err != nil {
 			fmt.Fprintf(out, "Connection failed (%v). Retrying in %s...\n", err, backoff)
 			if !waitOrInterrupt(interrupt, backoff) {
-				stopForegroundOnInterrupt(state, runningCmd, &halt, halted, out)
+				stopForegroundOnInterrupt(state, jobs, out)
 				return nil
 			}
 			backoff = nextRunnerBackoff(backoff)
@@ -451,17 +504,7 @@ func runnerForegroundLoop(state *runnerState, interrupt <-chan os.Signal, out io
 			connectedOnce = true
 		}
 		backoff = runnerReconnectMin
-		err = runRunnerSession(
-			conn,
-			interrupt,
-			out,
-			&runningCmd,
-			&runningExecID,
-			&jobDone,
-			&halt,
-			halted,
-			&lastComplete,
-		)
+		err = runRunnerSession(conn, interrupt, out, jobs)
 		_ = conn.Close()
 		if err == nil {
 			return nil
@@ -478,23 +521,17 @@ func runnerForegroundLoop(state *runnerState, interrupt <-chan os.Signal, out io
 		}
 		fmt.Fprintf(out, "Connection lost (%v). Reconnecting in %s...\n", err, backoff)
 		if !waitOrInterrupt(interrupt, backoff) {
-			stopForegroundOnInterrupt(state, runningCmd, &halt, halted, out)
+			stopForegroundOnInterrupt(state, jobs, out)
 			return nil
 		}
 		backoff = nextRunnerBackoff(backoff)
 	}
 }
 
-func stopForegroundOnInterrupt(
-	state *runnerState,
-	runningCmd *exec.Cmd,
-	halt *bool,
-	halted *atomic.Bool,
-	out io.Writer,
-) {
+func stopForegroundOnInterrupt(state *runnerState, jobs *runnerJobs, out io.Writer) {
 	fmt.Fprintf(out, "Unregistering...\n")
-	if !requestJobHalt(halted, runningCmd) && halt != nil {
-		*halt = false
+	if jobs != nil {
+		jobs.haltAll()
 	}
 	unregisterRunnerBestEffort(state)
 }
@@ -533,20 +570,11 @@ func runRunnerSession(
 	conn *websocket.Conn,
 	interrupt <-chan os.Signal,
 	out io.Writer,
-	runningCmd **exec.Cmd,
-	runningExecID *string,
-	jobDone *<-chan leasedJobOutcome,
-	halt *bool,
-	halted *atomic.Bool,
-	lastComplete **leasedJobOutcome,
+	jobs *runnerJobs,
 ) error {
-	var publication *runnerPublication
-	var publicationEvents <-chan publicationEvent
-	defer func() {
-		if publication != nil {
-			publication.abort()
-		}
-	}()
+	// Publication controllers talk to the server over this socket, so they
+	// cannot outlive the session. The jobs themselves can, and do.
+	defer jobs.abortPublications()
 	_ = conn.SetReadDeadline(time.Now().Add(runnerReadWait))
 	conn.SetPongHandler(func(string) error {
 		return conn.SetReadDeadline(time.Now().Add(runnerReadWait))
@@ -575,25 +603,23 @@ func runRunnerSession(
 		}
 	}()
 
-	if err := writeRunnerJSON(conn, runnerHeartbeatMessage()); err != nil {
+	if err := writeRunnerJSON(conn, runnerHeartbeatMessage(jobs.concurrency)); err != nil {
 		return fmt.Errorf("initial heartbeat: %w", err)
 	}
 
-	if *runningCmd != nil {
-		if buffer, ok := (*runningCmd).Stdout.(*runnerLogBuffer); ok {
+	// Unacknowledged output has to be offered again on the new socket, for
+	// every held job and every outcome still waiting to be reported.
+	for _, id := range jobs.ids() {
+		if buffer := jobs.job(id).logBuffer(); buffer != nil {
 			buffer.resetDelivery()
 		}
 	}
-	if *lastComplete != nil && (*lastComplete).logBuffer != nil {
-		(*lastComplete).logBuffer.resetDelivery()
-	}
-	logAcknowledgements := false
-
-	killRunning := func() {
-		if !requestJobHalt(halted, *runningCmd) {
-			*halt = false
+	for _, outcome := range jobs.completed {
+		if outcome != nil && outcome.logBuffer != nil {
+			outcome.logBuffer.resetDelivery()
 		}
 	}
+	logAcknowledgements := false
 
 	logTicker := time.NewTicker(100 * time.Millisecond)
 	defer logTicker.Stop()
@@ -604,25 +630,23 @@ func runRunnerSession(
 		select {
 		case <-interrupt:
 			fmt.Fprintf(out, "Unregistering...\n")
-			killRunning()
+			jobs.haltAll()
 			_ = writeRunnerJSON(conn, map[string]any{"type": "unregister"})
 			return nil
 		case <-logTicker.C:
-			if *runningCmd != nil {
-				if buffer, ok := (*runningCmd).Stdout.(*runnerLogBuffer); ok {
-					if err := flushRunnerLogs(conn, *runningExecID, buffer, false); err != nil {
-						return err
-					}
+			for _, id := range jobs.ids() {
+				buffer := jobs.job(id).logBuffer()
+				if buffer == nil {
+					continue
+				}
+				if err := flushRunnerLogs(conn, id, buffer, false); err != nil {
+					return err
 				}
 			}
-		case event := <-publicationEvents:
+		case event := <-jobs.events:
 			if event.outcome != nil {
-				deliveryErr := applyJobOutcome(conn, *event.outcome, runningCmd, runningExecID, jobDone, halt, halted, lastComplete)
-				publication.cancel()
-				publication = nil
-				publicationEvents = nil
-				if deliveryErr != nil {
-					return deliveryErr
+				if err := applyJobOutcome(conn, *event.outcome, jobs); err != nil {
+					return err
 				}
 			} else if event.message != nil {
 				if err := writeRunnerJSON(conn, event.message); err != nil {
@@ -630,35 +654,34 @@ func runRunnerSession(
 				}
 			}
 		case <-ticker.C:
-			if publication == nil {
+			if !jobs.publicationActive() {
 				_ = cleanupPublicationRecovery(time.Now())
 			}
-			// Retention progresses even when the runner receives no new jobs.
-			keep := map[string]bool{}
-			if *runningExecID != "" {
-				keep[*runningExecID] = true
-				_ = touchWorkspaceLease(*runningExecID)
+			// Retention progresses even when the runner receives no new jobs,
+			// and it must keep the workspace of every job, not just one.
+			for _, id := range jobs.ids() {
+				_ = touchWorkspaceLease(id)
 			}
-			_ = cleanupStaleWorkspaces(keep)
+			_ = cleanupStaleWorkspaces(jobs.keepSet())
 			_ = conn.WriteControl(
 				websocket.PingMessage, nil, time.Now().Add(runnerPingWait),
 			)
-			if err := writeRunnerJSON(conn, runnerHeartbeatMessage()); err != nil {
+			if err := writeRunnerJSON(conn, runnerHeartbeatMessage(jobs.concurrency)); err != nil {
 				return fmt.Errorf("heartbeat: %w", err)
 			}
 		case err := <-readErr:
 			return fmt.Errorf("runner read: %w", err)
-		case outcome := <-*jobDone:
+		case outcome := <-jobs.outcomes:
 			releaseWorkspaceLease(outcome.executionID)
-			if publication != nil {
-				*jobDone = nil
-				*runningCmd = nil
-				publication.start(outcome)
+			job := jobs.job(outcome.executionID)
+			if job != nil && job.publication != nil && !job.publication.started {
+				// The agent finished; the slot stays held until its
+				// publication reports a terminal outcome of its own.
+				job.cmd = nil
+				job.publication.start(outcome)
 				continue
 			}
-			if err := applyJobOutcome(
-				conn, outcome, runningCmd, runningExecID, jobDone, halt, halted, lastComplete,
-			); err != nil {
+			if err := applyJobOutcome(conn, outcome, jobs); err != nil {
 				return err
 			}
 		case msg := <-incoming:
@@ -667,58 +690,63 @@ func runRunnerSession(
 				// The echo is how a one-shot run learns whether this
 				// control plane will delete its row on the way out.
 				runnerOnce.noteHelloEphemeral(msg.Ephemeral)
-				if *runningCmd != nil {
-					if b, ok := (*runningCmd).Stdout.(*runnerLogBuffer); ok {
+				for _, id := range jobs.ids() {
+					if b := jobs.job(id).logBuffer(); b != nil {
 						b.setLogAcknowledgements(logAcknowledgements)
 					}
 				}
-				if err := flushPendingOutcome(conn, jobDone, runningCmd, runningExecID, halt, halted, lastComplete); err != nil {
+				if err := flushPendingOutcomes(conn, jobs); err != nil {
 					return err
 				}
-				if *lastComplete != nil {
-					if b := (*lastComplete).logBuffer; b != nil {
+				for _, outcome := range jobs.completed {
+					if outcome == nil {
+						continue
+					}
+					if b := outcome.logBuffer; b != nil {
 						b.setLogAcknowledgements(logAcknowledgements)
 					}
-					if err := writeJobOutcome(conn, **lastComplete); err != nil {
+					if err := writeJobOutcome(conn, *outcome); err != nil {
 						return err
 					}
 				}
 			}
 			if msg.Type == "logs_ack" {
-				if *runningCmd != nil && *runningExecID == msg.ExecutionID {
-					if b, ok := (*runningCmd).Stdout.(*runnerLogBuffer); ok {
-						b.acknowledgeBatch(msg.BatchID)
-					}
+				if b := jobs.job(msg.ExecutionID).logBuffer(); b != nil {
+					b.acknowledgeBatch(msg.BatchID)
 				}
-				if *lastComplete != nil && (*lastComplete).executionID == msg.ExecutionID && (*lastComplete).logBuffer != nil {
-					(*lastComplete).logBuffer.acknowledgeBatch(msg.BatchID)
+				if done := jobs.completedOutcome(msg.ExecutionID); done != nil && done.logBuffer != nil {
+					done.logBuffer.acknowledgeBatch(msg.BatchID)
 				}
 				continue
 			}
 			if msg.Type == "error" && msg.Error == "Invalid runner log batch" && msg.BatchID != "" {
-				if *runningCmd != nil {
-					if b, ok := (*runningCmd).Stdout.(*runnerLogBuffer); ok {
+				// The batch is unidentifiable, so retire it everywhere.
+				for _, id := range jobs.ids() {
+					if b := jobs.job(id).logBuffer(); b != nil {
 						b.acknowledgeBatch(msg.BatchID)
 					}
 				}
-				if *lastComplete != nil && (*lastComplete).logBuffer != nil {
-					(*lastComplete).logBuffer.acknowledgeBatch(msg.BatchID)
+				for _, outcome := range jobs.completed {
+					if outcome != nil && outcome.logBuffer != nil {
+						outcome.logBuffer.acknowledgeBatch(msg.BatchID)
+					}
 				}
 				continue
 			}
 			if strings.HasPrefix(msg.Type, "publication_") {
-				if publication == nil {
+				job := jobs.job(msg.ExecutionID)
+				if job == nil || job.publication == nil {
 					return errors.New("unexpected publication message without active lease")
 				}
 				if msg.Error != "" {
-					publication.abort()
+					job.publication.abort()
 					return errors.New("publication controller rejected transition")
 				}
-				if err := publication.accept(msg); err != nil {
+				if err := job.publication.accept(msg); err != nil {
 					if msg.Lease != nil {
 						delete(msg.Lease, "token")
 					}
-					publication.abort()
+					job.publication.abort()
 					return err
 				}
 				continue
@@ -727,59 +755,58 @@ func runRunnerSession(
 				return &runnerFatalError{fmt.Errorf("runner server: %s", msg.Error)}
 			}
 			if msg.Halt || msg.Type == "halt" {
-				*halt = true
-				fmt.Fprintf(out, "Halt received for %s\n", msg.HaltExecutionID)
-				killRunning()
-				if publication != nil {
-					publication.stopRequested.Store(true)
-					publication.abort()
+				halted := msg.haltedExecutions()
+				if len(halted) == 0 {
+					// A server that names no execution means the runner.
+					fmt.Fprintf(out, "Halt received for this runner\n")
+					jobs.haltAll()
+					continue
+				}
+				for _, executionID := range halted {
+					fmt.Fprintf(out, "Halt received for %s\n", executionID)
+					jobs.haltOne(executionID)
 				}
 				continue
 			}
-			if msg.Job == nil {
-				continue
-			}
-			jobID, _ := msg.Job["execution_id"].(string)
-			if lastComplete != nil && *lastComplete != nil &&
-				jobID != "" && (*lastComplete).executionID == jobID {
-				if err := writeJobOutcome(conn, **lastComplete); err != nil {
-					return err
+			for _, job := range msg.deliveredJobs() {
+				jobID, _ := job["execution_id"].(string)
+				if done := jobs.completedOutcome(jobID); done != nil {
+					if err := writeJobOutcome(conn, *done); err != nil {
+						return err
+					}
+					continue
 				}
-				continue
-			}
-			if *runningExecID != "" {
-				fmt.Fprintf(out, "Ignoring job while %s is running\n", *runningExecID)
-				continue
-			}
-			if err := beginLeasedJob(
-				conn, msg.Job, *halt, out, runningCmd, runningExecID, jobDone, halted, lastComplete, &publication,
-			); err != nil {
-				return fmt.Errorf("job delivery: %w", err)
-			}
-			if *runningCmd != nil {
-				if b, ok := (*runningCmd).Stdout.(*runnerLogBuffer); ok {
+				if jobs.job(jobID) != nil {
+					// Redelivery of work this process already holds.
+					continue
+				}
+				if jobs.freeSlots() <= 0 {
+					fmt.Fprintf(
+						out,
+						"Ignoring job %s: all %d slots are busy\n",
+						jobID, jobs.concurrency,
+					)
+					continue
+				}
+				if err := beginLeasedJob(conn, job, out, jobs); err != nil {
+					return fmt.Errorf("job delivery: %w", err)
+				}
+				if b := jobs.job(jobID).logBuffer(); b != nil {
 					b.setLogAcknowledgements(logAcknowledgements)
 				}
 			}
-			if publication != nil {
-				publicationEvents = publication.events
-			}
-			*halt = false
 		}
 	}
 }
 
+// beginLeasedJob takes one slot in jobs and starts the execution in it.
+// Everything it needs is per execution: its own halt latch, its own log
+// buffer, its own workspace and its own publication controller.
 func beginLeasedJob(
 	conn *websocket.Conn,
 	job map[string]any,
-	alreadyHalted bool,
 	out io.Writer,
-	runningCmd **exec.Cmd,
-	runningExecID *string,
-	jobDone *<-chan leasedJobOutcome,
-	halted *atomic.Bool,
-	lastComplete **leasedJobOutcome,
-	publication **runnerPublication,
+	jobs *runnerJobs,
 ) error {
 	executionID, _ := job["execution_id"].(string)
 	if executionID == "" {
@@ -788,12 +815,11 @@ func beginLeasedJob(
 	runnerOnce.markLeased(executionID)
 	if err := isolatedPublicationHostExecError(job); err != nil {
 		outcome := leasedJobOutcome{executionID: executionID, status: "FAILED", errMsg: err.Error()}
-		rememberOutcome(lastComplete, outcome)
+		jobs.remember(outcome)
 		return writeJobOutcome(conn, outcome)
 	}
-	if halted != nil {
-		halted.Store(false)
-	}
+	alreadyHalted := jobs.pendingHalt[executionID]
+	halted := &atomic.Bool{}
 	fmt.Fprintf(out, "Leased execution %s\n", executionID)
 	_ = writeRunnerJSON(conn, map[string]any{
 		"type":         "status",
@@ -806,13 +832,14 @@ func beginLeasedJob(
 		"lines":        []string{"runner leased job " + executionID},
 	})
 	if alreadyHalted {
+		delete(jobs.pendingHalt, executionID)
 		outcome := leasedJobOutcome{executionID: executionID, status: "STOPPED", hostExec: jobHostExecProfileName(job) != "", profile: jobHostExecProfileName(job)}
-		rememberOutcome(lastComplete, outcome)
+		jobs.remember(outcome)
 		return writeJobOutcome(conn, outcome)
 	}
 
 	if jobHostExecProfileName(job) != "" {
-		return beginHostExecJob(conn, job, executionID, runningCmd, runningExecID, jobDone, halted, lastComplete)
+		return beginHostExecJob(conn, job, executionID, halted, jobs)
 	}
 
 	opts, optsErr := runnerDockerOptsFromJob(job)
@@ -822,7 +849,7 @@ func beginLeasedJob(
 	}
 	if optsErr != nil {
 		outcome := leasedJobOutcome{executionID: executionID, status: "FAILED", errMsg: optsErr.Error()}
-		rememberOutcome(lastComplete, outcome)
+		jobs.remember(outcome)
 		return writeJobOutcome(conn, outcome)
 	}
 	if isolated != nil {
@@ -844,7 +871,9 @@ func beginLeasedJob(
 			optsErr = fmt.Errorf("persist workspace: %w", persistErr)
 		}
 	}
-	_ = cleanupStaleWorkspaces(map[string]bool{executionID: true})
+	keep := jobs.keepSet()
+	keep[executionID] = true
+	_ = cleanupStaleWorkspaces(keep)
 
 	image := runnerImageFromJob(job)
 	dockerOK := image != "" && runnerHasDocker()
@@ -855,7 +884,7 @@ func beginLeasedJob(
 			errMsg:      reason,
 			lines:       []string{reason},
 		}
-		rememberOutcome(lastComplete, outcome)
+		jobs.remember(outcome)
 		return writeJobOutcome(conn, outcome)
 	}
 
@@ -868,14 +897,14 @@ func beginLeasedJob(
 			errMsg:      reason,
 			lines:       []string{reason},
 		}
-		rememberOutcome(lastComplete, outcome)
+		jobs.remember(outcome)
 		return writeJobOutcome(conn, outcome)
 	}
 
 	launch, launchErr := runnerLaunchFromJob(job)
 	if launchErr != nil {
 		outcome := leasedJobOutcome{executionID: executionID, status: "FAILED", errMsg: launchErr.Error()}
-		rememberOutcome(lastComplete, outcome)
+		jobs.remember(outcome)
 		return writeJobOutcome(conn, outcome)
 	}
 	env := runnerJobEnv(job, apiURL)
@@ -901,7 +930,7 @@ func beginLeasedJob(
 			errMsg:      reason,
 			lines:       []string{reason},
 		}
-		rememberOutcome(lastComplete, outcome)
+		jobs.remember(outcome)
 		return writeJobOutcome(conn, outcome)
 	}
 	if opts.Network != "" {
@@ -913,7 +942,7 @@ func beginLeasedJob(
 				errMsg:      reason,
 				lines:       []string{reason},
 			}
-			rememberOutcome(lastComplete, outcome)
+			jobs.remember(outcome)
 			return writeJobOutcome(conn, outcome)
 		}
 	}
@@ -927,21 +956,26 @@ func beginLeasedJob(
 			status:      "FAILED",
 			errMsg:      err.Error(),
 		}
-		rememberOutcome(lastComplete, outcome)
+		jobs.remember(outcome)
 		return writeJobOutcome(conn, outcome)
 	}
 	launched = true
-	if publication != nil {
-		*publication = isolated
+	if isolated != nil {
+		// One controller per execution: two concurrent publications each
+		// need their own nonce, writer credential and expiry.
+		isolated.events = jobs.events
 	}
-	*runningCmd = cmd
-	*runningExecID = executionID
-	done := make(chan leasedJobOutcome, 1)
-	*jobDone = done
+	jobs.start(&runnerJob{
+		executionID: executionID,
+		cmd:         cmd,
+		halted:      halted,
+		publication: isolated,
+	})
+	outcomes := jobs.outcomes
 	go func() {
 		outcome := waitDockerJob(cmd, executionID, &buf, halted)
 		outcome.publicationRequired = isolated != nil
-		done <- outcome
+		outcomes <- outcome
 	}()
 	return nil
 }
@@ -1253,8 +1287,18 @@ func runRunnerStatus(cmd *cobra.Command, args []string) error {
 			if row.LastHeartbeat != nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "last_heartbeat: %s\n", *row.LastHeartbeat)
 			}
-			if row.CurrentExecutionID != nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "current_execution: %s\n", *row.CurrentExecutionID)
+			if row.Capacity > 0 {
+				fmt.Fprintf(
+					cmd.OutOrStdout(),
+					"running: %d/%d\n",
+					row.RunningCount, row.Capacity,
+				)
+			}
+			for _, executionID := range row.RunningExecutionIDs {
+				fmt.Fprintf(cmd.OutOrStdout(), "execution: %s\n", executionID)
+			}
+			if len(row.RunningExecutionIDs) == 0 && row.CurrentExecutionID != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "execution: %s\n", *row.CurrentExecutionID)
 			}
 		}
 	}

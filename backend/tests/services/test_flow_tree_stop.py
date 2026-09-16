@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from preloop.models.crud import crud_flow, crud_flow_execution
+from preloop.models.crud import crud_flow, crud_flow_execution, crud_flow_runner
 from preloop.models.models.flow_execution import STOP_COVERAGE_KEY
 from preloop.models.schemas.flow import FlowCreate
 from preloop.models.schemas.flow_execution import FlowExecutionCreate
@@ -789,21 +789,27 @@ async def test_a_runner_backed_child_is_flagged_to_halt(
         name="halt-runner",
         token_hash="local-test",
         status="busy",
-        reported_status="RUNNING",
+        reported_concurrency=2,
     )
     db_session.add(runner)
     db_session.flush()
     child = _child(db_session, child_flow, parent)
     child.agent_session_reference = f"runner:{runner.id}:{child.id}"
-    runner.current_execution_id = child.id
+    assignment = crud_flow_runner.create_assignment(
+        db_session,
+        runner_id=runner.id,
+        execution_id=child.id,
+        commit=False,
+    )
+    assignment.reported_status = "RUNNING"
     db_session.flush()
     _park(db_session, parent)
 
     _stop(client, parent)
 
-    db_session.refresh(runner)
+    db_session.refresh(assignment)
     db_session.refresh(child)
-    assert runner.halt_requested is True
+    assert assignment.halt_requested is True
     assert child.status == "STOPPED"
 
 
