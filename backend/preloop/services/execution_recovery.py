@@ -216,14 +216,17 @@ class ExecutionRecoveryService:
           that still needs a container is left queued. Publishing into a
           queue nobody can drain is pure load;
         * per-account admission: an execution whose account is already at its
-          concurrency cap is left alone. Publishing it would have a worker
-          fetch it, refuse the claim and nak it, which is exactly the storm
-          the cap is supposed to end.
+          hosted concurrency cap is left alone. Publishing it would have a
+          worker fetch it, refuse the claim and nak it, which is exactly the
+          storm the cap is supposed to end. Work a private runner already
+          holds (``runner_id`` set, even before the session reference lands)
+          does not count towards that cap and does not consume a planned
+          hosted slot.
 
-        The last two filters apply only to unstarted PENDING rows. Anything
-        with a live agent session is re-dispatched whatever the cap or the
-        capacity says: an unmonitored container is worse than being one over
-        a limit.
+        The last two filters apply only to unstarted hosted PENDING rows.
+        Anything with a live agent session is re-dispatched whatever the cap
+        or the capacity says: an unmonitored container is worse than being
+        one over a limit.
         """
         from preloop.services.execution_concurrency import account_running_cap
         from preloop.services.execution_reaper import (
@@ -234,7 +237,7 @@ class ExecutionRecoveryService:
         counts = summary if summary is not None else ReaperPassSummary()
         moment = now or _utcnow()
         admitted = crud_flow_execution.count_admitted_by_account(
-            db, stale_after_seconds=stale_after_seconds
+            db, stale_after_seconds=stale_after_seconds, hosted_only=True
         )
         planned: dict[Any, int] = {}
         caps: dict[Any, int] = {}
@@ -257,8 +260,12 @@ class ExecutionRecoveryService:
                 )
                 continue
 
+            # Same predicate as claim_execution: a runner lease is not hosted
+            # admission. runner_id is set before the session reference lands.
             needs_admission = (
-                execution.status == "PENDING" and not execution.agent_session_reference
+                execution.status == "PENDING"
+                and not execution.agent_session_reference
+                and getattr(execution, "runner_id", None) is None
             )
             if needs_admission and has_capacity is False:
                 counts.skipped_no_capacity += 1
