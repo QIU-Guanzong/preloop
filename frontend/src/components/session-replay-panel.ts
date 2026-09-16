@@ -4588,10 +4588,21 @@ export class SessionReplayPanel extends LitElement {
   /**
    * Resolve the deep linked turn and jump to it once.
    *
-   * The search corpus names a gateway turn by its api usage id, while the
-   * transcript keys turns by activity event id, so both are accepted and the
-   * payload's api usage id is the bridge between them.
+   * The search corpus names a gateway turn by its api usage id and a tool
+   * call or transcript message by the activity row id, which is also the
+   * gateway event id. Both are accepted; the payload's api usage id is the
+   * bridge for model calls.
    */
+  private eventMatchesFocus(event: FlowGatewayEvent, focusId: string): boolean {
+    if (event.id === focusId) return true;
+    const payload = event.payload || {};
+    if (payload.api_usage_id === focusId) return true;
+    const activityId = payload.activity_id;
+    if (typeof activityId === 'string' && activityId === focusId) return true;
+    const noteId = payload.operator_note_id;
+    return typeof noteId === 'string' && noteId === focusId;
+  }
+
   private jumpToFocusedTurn(): void {
     const focusId = this.focusEventId;
     if (!focusId) {
@@ -4599,10 +4610,19 @@ export class SessionReplayPanel extends LitElement {
       return;
     }
     if (this.jumpedFocusEventId === focusId) return;
-    const match = (this.events || []).find(
-      (event) => event.id === focusId || event.payload?.api_usage_id === focusId
+    const match = (this.events || []).find((event) =>
+      this.eventMatchesFocus(event, focusId)
     );
-    if (!match) return;
+    if (!match) {
+      // An empty list is "not loaded yet". Once this page of events is
+      // complete and none of them is the turn, latch so later re-renders do
+      // not keep looking. Extra pages still retry until hasMoreEvents is
+      // false.
+      if ((this.events || []).length > 0 && !this.hasMoreEvents) {
+        this.jumpedFocusEventId = focusId;
+      }
+      return;
+    }
     this.jumpedFocusEventId = focusId;
     // After the turns for these events have painted.
     void this.updateComplete.then(() => this.jumpToTurn(match.id));

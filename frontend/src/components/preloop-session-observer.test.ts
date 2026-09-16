@@ -925,6 +925,34 @@ describe('PreloopSessionObserver', () => {
         .null;
     });
 
+    it('switches out of conversation when a turn is linked', async () => {
+      const el = (await fixture(
+        html`<preloop-session-observer
+          defaultReplayMode="conversation"
+          .sessions=${[session]}
+          .selectedSessionId=${session.id}
+        ></preloop-session-observer>`
+      )) as PreloopSessionObserver;
+
+      await waitUntil(
+        () => deepText(el.shadowRoot).includes('Build a widget'),
+        'Session did not load',
+        { timeout: 3000 }
+      );
+      expect((el as any).replayMode).to.equal('conversation');
+
+      el.focusTurnId = 'event-1';
+      await waitUntil(
+        () => (el as any).replayMode === 'timeline',
+        'Linking a turn did not switch to the transcript',
+        { timeout: 3000 }
+      );
+      const panel = el.shadowRoot?.querySelector(
+        'session-replay-panel'
+      ) as HTMLElement & { focusEventId: string | null };
+      expect(panel.focusEventId).to.equal('event-1');
+    });
+
     it('ignores an invalid replay param', async () => {
       window.history.replaceState(
         {},

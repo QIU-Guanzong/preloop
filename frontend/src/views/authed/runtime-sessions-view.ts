@@ -81,6 +81,20 @@ const MATCH_TAG_LABELS: Record<string, string> = {
   flow_log: 'Flow log',
 };
 
+/**
+ * Corpus kinds whose source_id names a turn the transcript can scroll to.
+ *
+ * Gateway interactions store the api usage id, tool calls and transcript
+ * messages store the activity row id, and the transcript keys turns by those
+ * same ids. Session summaries, operator notes and flow logs name something
+ * else, so a click opens the session rather than a turn.
+ */
+const TURN_JUMP_KINDS = new Set([
+  'gateway_interaction',
+  'tool_call',
+  'transcript_message',
+]);
+
 @customElement('runtime-sessions-view')
 export class RuntimeSessionsView extends LitElement {
   @state()
@@ -587,6 +601,12 @@ export class RuntimeSessionsView extends LitElement {
         font-style: italic;
       }
 
+      .snippet-open-hint {
+        margin-top: var(--sl-spacing-2x-small);
+        font-size: var(--console-text-meta);
+        color: var(--console-meta-color);
+      }
+
       .search-notices {
         display: flex;
         flex-direction: column;
@@ -678,7 +698,9 @@ export class RuntimeSessionsView extends LitElement {
     this.cancelSearchDebounce();
     if (!this.isSearching) {
       this.clearSearchResults();
-      void this.loadSessions();
+      // Keep the list that is already on screen; a hard reload would blank
+      // the observer for the length of the round trip.
+      void this.loadSessions(this.sessions !== null);
       return;
     }
     if (this.searchQuery !== previousQuery || !this.searchResults) {
@@ -1172,7 +1194,7 @@ export class RuntimeSessionsView extends LitElement {
     }
     this.clearSearchResults();
     this.syncUrl();
-    await this.loadSessions();
+    await this.loadSessions(this.sessions !== null);
   }
 
   private cancelSearchDebounce(): void {
@@ -1297,14 +1319,22 @@ export class RuntimeSessionsView extends LitElement {
    *
    * The corpus names the turn (its source id), the transcript scrolls to it,
    * and the location records both, so the answer to "where did that happen"
-   * is a link rather than a two hour session to scroll through.
+   * is a link rather than a two hour session to scroll through. Kinds that
+   * have no turn in the transcript still open the session; they just omit
+   * the turn so the page does not pretend it jumped.
    */
+  private snippetJumpsToTurn(snippet: SessionSearchSnippet): boolean {
+    return TURN_JUMP_KINDS.has(snippet.source_kind);
+  }
+
   private openSnippet(
     result: SessionSearchResult,
     snippet: SessionSearchSnippet
   ) {
     this.selectedSessionId = result.runtime_session_id;
-    this.focusTurnId = snippet.source_id;
+    this.focusTurnId = this.snippetJumpsToTurn(snippet)
+      ? snippet.source_id
+      : null;
     this.syncUrl({ push: true });
   }
 
@@ -1587,6 +1617,13 @@ export class RuntimeSessionsView extends LitElement {
                   <span>${this.formatDateTime(snippet.occurred_at)}</span>
                 </div>
                 ${this.renderSnippetText(snippet)}
+                ${
+                  this.snippetJumpsToTurn(snippet)
+                    ? ''
+                    : html`<div class="snippet-open-hint">
+                        Opens the session
+                      </div>`
+                }
               </button>
             `
           )}
@@ -1596,7 +1633,10 @@ export class RuntimeSessionsView extends LitElement {
   }
 
   private renderSearchResults() {
-    if (this.searchLoading) {
+    // A keystroke makes searchQuery non-empty immediately, while the request
+    // waits behind the debounce. Until a response (or error) exists, this is
+    // still in flight: claiming "nothing matched" would be a lie.
+    if (this.searchLoading || (!this.searchResults && !this.searchError)) {
       return html`
         <sl-card>
           <div class="loading-state" data-testid="search-loading">

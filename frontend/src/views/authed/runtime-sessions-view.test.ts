@@ -1036,6 +1036,68 @@ describe('RuntimeSessionsView', () => {
       expect(buttons[1].textContent).to.contain('Tool call');
     });
 
+    it('opens a session-summary hit without claiming a turn jump', async () => {
+      fetchStub.withArgs(SEARCH_URL, sinon.match.any).callsFake(async () => {
+        const body = searchResponse();
+        body.results[0].snippets = [
+          {
+            document_id: 'doc-summary',
+            runtime_session_id: 'runtime-session-2',
+            source_kind: 'session_summary',
+            source_id: 'runtime-session-2',
+            chunk_index: 0,
+            occurred_at: '2026-03-09T19:00:00Z',
+            role: 'system',
+            rank: 0.5,
+            redaction_state: 'clear',
+            text: 'Triage Assistant <mark>rollout</mark>',
+          },
+        ];
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+
+      const element = await renderedSearch();
+      const button = snippetButtons(element)[0];
+      expect(button.textContent).to.contain('Opens the session');
+      button.click();
+      await element.updateComplete;
+
+      expect((element as any).selectedSessionId).to.equal('runtime-session-2');
+      expect((element as any).focusTurnId).to.equal(null);
+      expect(new URLSearchParams(window.location.search).get('turn')).to.equal(
+        null
+      );
+    });
+
+    it('does not claim nothing matched before a search has run', async () => {
+      const element = (await fixture(
+        html`<runtime-sessions-view></runtime-sessions-view>`
+      )) as RuntimeSessionsView;
+      await waitUntil(
+        () => !(element as any).loading,
+        'Runtime sessions view did not finish loading'
+      );
+      await element.updateComplete;
+
+      await typeQuery(element, 'r');
+      await element.updateComplete;
+
+      expect((element as any).searchQuery).to.equal('r');
+      expect((element as any).searchResults).to.equal(null);
+      expect((element as any).searchLoading).to.equal(false);
+      expect(
+        element.shadowRoot!.querySelector('[data-testid="search-empty"]')
+      ).to.equal(null);
+      const loadingState = element.shadowRoot!.querySelector(
+        '[data-testid="search-loading"]'
+      );
+      expect(loadingState).to.not.equal(null);
+      expect(loadingState!.textContent).to.contain('Searching session content');
+    });
+
     it('opens the session at the matching turn, and the location reproduces it', async () => {
       const element = await renderedSearch();
 
@@ -1089,7 +1151,9 @@ describe('RuntimeSessionsView', () => {
             .getCalls()
             .filter((call) =>
               String(call.args[0]).startsWith('/api/v1/runtime-sessions?')
-            ).length > listCallsBefore,
+            ).length > listCallsBefore &&
+          element.shadowRoot!.querySelector('preloop-session-observer') !==
+            null,
         'Emptying the query did not go back to the list',
         { timeout: 3000 }
       );

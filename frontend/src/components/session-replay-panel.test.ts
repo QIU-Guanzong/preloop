@@ -1172,4 +1172,66 @@ describe('SessionReplayPanel', () => {
     )!;
     expect(highlighted.getAttribute('data-event-id')).to.equal('e2');
   });
+
+  it('jumps to a deep linked turn named by its event id', async () => {
+    // A tool_call snippet names the activity row id, which is also the
+    // gateway event id the transcript already keys turns by.
+    const events: FlowGatewayEvent[] = [
+      previewEvent('tool-7', '2026-06-07T12:00:00Z', [
+        { role: 'user', text: 'FIRST_TURN' },
+      ]),
+      previewEvent('tool-8', '2026-06-07T12:01:00Z', [
+        { role: 'user', text: 'SECOND_TURN' },
+      ]),
+    ];
+    const element = await fixture<SessionReplayPanel>(html`
+      <session-replay-panel
+        replayMode="timeline"
+        .session=${SESSION}
+        .events=${events}
+        .focusEventId=${'tool-7'}
+      ></session-replay-panel>
+    `);
+    await waitUntil(
+      () =>
+        Boolean(element.shadowRoot?.querySelector('.chat-turn.jump-highlight')),
+      'The tool-call turn was never jumped to'
+    );
+    const highlighted = element.shadowRoot!.querySelector(
+      '.chat-turn.jump-highlight'
+    )!;
+    expect(highlighted.getAttribute('data-event-id')).to.equal('tool-7');
+  });
+
+  it('stops looking once events have loaded without a matching turn', async () => {
+    const events: FlowGatewayEvent[] = [
+      previewEvent('e1', '2026-06-07T12:00:00Z', [
+        { role: 'user', text: 'ONLY_TURN' },
+      ]),
+    ];
+    const element = await fixture<SessionReplayPanel>(html`
+      <session-replay-panel
+        replayMode="timeline"
+        .session=${SESSION}
+        .events=${events}
+        .focusEventId=${'runtime-session-1'}
+      ></session-replay-panel>
+    `);
+    await element.updateComplete;
+    expect((element as any).jumpedFocusEventId).to.equal('runtime-session-1');
+    expect(
+      element.shadowRoot?.querySelector('.chat-turn.jump-highlight')
+    ).to.equal(null);
+
+    element.events = [
+      ...events,
+      previewEvent('e2', '2026-06-07T12:02:00Z', [
+        { role: 'user', text: 'LATER' },
+      ]),
+    ];
+    await element.updateComplete;
+    expect(
+      element.shadowRoot?.querySelector('.chat-turn.jump-highlight')
+    ).to.equal(null);
+  });
 });
