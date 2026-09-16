@@ -283,6 +283,49 @@ describe('PublicPricingView', () => {
     ).to.equal(false);
   });
 
+  it('hydrates a dedicated-only slotted page without refetching JSON', async () => {
+    fetchStub = stubFetch();
+    const el = await fixture<PublicPricingView>(
+      html`<public-pricing-view
+        ><article>
+          <header
+            slot="pricing-heading"
+            data-title="Dedicated only"
+            data-lead="Self-hosted editions."
+          ></header>
+          <section>
+            <div
+              slot="dedicated-plan-0"
+              data-plan-id="opensource"
+              data-plan-name="Open Source"
+              data-price-monthly="0"
+              data-price-annually="0"
+              data-price-label="$0"
+              data-tagline="Run it yourself."
+              data-cta-text="Explore"
+              data-cta-url="https://github.com/preloop/preloop"
+              data-deployment="dedicated"
+            ></div>
+          </section></article
+      ></public-pricing-view>`
+    );
+    await waitUntil(() => (el as any)._loaded);
+    await el.updateComplete;
+    expect(el.shadowRoot?.textContent)
+      .to.include('Dedicated only')
+      .and.include('Self-hosted editions.');
+    const card = el.shadowRoot?.querySelector('pricing-card') as HTMLElement;
+    expect(card, 'dedicated card hydrates from dedicated-plan slots').to.exist;
+    expect(card.shadowRoot?.textContent)
+      .to.include('Open Source')
+      .and.include('Run it yourself.');
+    expect(
+      fetchStub
+        .getCalls()
+        .some((c) => String(c.args[0]).includes('landing-content.json'))
+    ).to.equal(false);
+  });
+
   it('loads plans from JSON and renders the hero copy and cards', async () => {
     fetchStub = stubFetch();
     const el = (await fixture(
@@ -515,8 +558,13 @@ describe('PublicPricingView', () => {
       await (el as any)._handleSignUp('business-selfhosted');
       expect(navStub.calledOnceWith('/request-demo')).to.be.true;
       await (el as any)._handleSignUp('opensource');
-      expect(openStub.calledOnceWith('https://github.com/preloop/preloop')).to
-        .be.true;
+      expect(
+        openStub.calledOnceWith(
+          'https://github.com/preloop/preloop',
+          '_blank',
+          'noopener,noreferrer'
+        )
+      ).to.be.true;
       expect(
         fetchStub
           .getCalls()
@@ -625,6 +673,64 @@ describe('PublicPricingView', () => {
     } finally {
       localStorage.removeItem('accessToken');
     }
+  });
+
+  it('opens an external enterprise CTA in a new tab with noopener', async () => {
+    const content = structuredClone(LADDER_CONTENT);
+    content.pricing.dedicated.plans[2].cta_url = 'https://example.com/contact';
+    fetchStub = sinon
+      .stub(window, 'fetch')
+      .callsFake(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/landing-content.json')) {
+          return new Response(JSON.stringify(content), { status: 200 });
+        }
+        return new Response(JSON.stringify({ features: {} }), { status: 200 });
+      });
+    const el = (await fixture(
+      html`<public-pricing-view></public-pricing-view>`
+    )) as PublicPricingView;
+    await tick();
+    await el.updateComplete;
+    const navStub = sinon.stub(el as any, '_navigate');
+    const openStub = sinon.stub(window, 'open');
+    try {
+      await (el as any)._handleSignUp('enterprise');
+      expect(navStub.called).to.equal(false);
+      expect(
+        openStub.calledOnceWith(
+          'https://example.com/contact',
+          '_blank',
+          'noopener,noreferrer'
+        )
+      ).to.be.true;
+    } finally {
+      openStub.restore();
+    }
+  });
+
+  it('prints the SSR comparison fallback titles when the brand omits title', async () => {
+    const content = structuredClone(LADDER_CONTENT);
+    delete (content.pricing.comparison as { title?: string }).title;
+    delete (content.pricing.dedicated.comparison as { title?: string }).title;
+    fetchStub = sinon
+      .stub(window, 'fetch')
+      .callsFake(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/landing-content.json')) {
+          return new Response(JSON.stringify(content), { status: 200 });
+        }
+        return new Response(JSON.stringify({ features: {} }), { status: 200 });
+      });
+    const el = (await fixture(
+      html`<public-pricing-view></public-pricing-view>`
+    )) as PublicPricingView;
+    await tick();
+    await el.updateComplete;
+    expect(el.shadowRoot?.textContent).to.contain('Compare cloud plans');
+    expect(el.shadowRoot?.textContent).to.not.contain('Compare plans');
+    await selectTab(el, 'dedicated');
+    expect(el.shadowRoot?.textContent).to.contain('Compare dedicated editions');
   });
 
   it('sends enterprise to the contact route, never to checkout', async () => {

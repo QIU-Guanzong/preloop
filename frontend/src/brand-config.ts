@@ -132,8 +132,8 @@ export interface PricingPlan {
   /**
    * Which pricing tab the plan belongs to. `cloud` plans are the hosted
    * subscriptions shown with the billing period toggle and the comparison
-   * table; `dedicated` plans are quoted (self-managed or dedicated) and are
-   * shown alongside the deployment options instead. An explicit value is
+   * table; `dedicated` plans are quoted (self-managed or dedicated) and
+   * belong on the Dedicated tab. An explicit value is
    * honoured so EE brands.yaml can route a plan without a catalog change.
    * When unset, a configured `catalog_path` tags the plan from the billing
    * catalog; otherwise the tab defaults to `cloud`.
@@ -181,6 +181,10 @@ export interface PricingComparison {
  * No billing period applies here: an open-source edition is free and a quoted
  * edition is agreed per year, so these plans carry a `price_label` rather
  * than a monthly/annual pair.
+ *
+ * Replaces the old `deployment_options` list. That key is no longer read
+ * (unknown keys are ignored), so a leftover block renders nothing. Author
+ * this block in brands.yaml; the EE Preloop brand already ships it.
  */
 export interface PricingDedicated {
   /** Tab and section label. Defaults to "Dedicated". */
@@ -202,6 +206,11 @@ export interface PricingConfig {
   billing_toggle?: boolean;
   plans: PricingPlan[];
   comparison?: PricingComparison;
+  /**
+   * Dedicated tab (cards plus one comparison table). Replaces
+   * `deployment_options`. Omit only for a cloud-only brand; a leftover
+   * `deployment_options` key is ignored and will not render.
+   */
   dedicated?: PricingDedicated;
   faqs?: PricingFAQ[];
 }

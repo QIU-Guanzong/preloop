@@ -321,6 +321,26 @@ describe('Server-rendered pricing (light DOM)', () => {
     expect(text).to.contain('from $30k/yr');
   });
 
+  it('falls back to the same table titles the hydrated view uses when title is omitted', () => {
+    const pricing = (CONFIG as any).landing.pricing;
+    const untitled = {
+      ...CONFIG,
+      landing: {
+        pricing: {
+          ...pricing,
+          comparison: { groups: pricing.comparison.groups },
+          dedicated: {
+            ...pricing.dedicated,
+            comparison: { groups: pricing.dedicated.comparison.groups },
+          },
+        },
+      },
+    } as unknown as BrandConfig;
+    const { text } = render(untitled);
+    expect(text).to.contain('Compare cloud plans');
+    expect(text).to.contain('Compare dedicated editions');
+  });
+
   it('renders nothing dedicated for a cloud-only brand', () => {
     const pricing = (CONFIG as any).landing.pricing;
     const cloudOnly = {

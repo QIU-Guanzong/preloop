@@ -6,6 +6,10 @@ import pricingStyles from '../../styles/pricing-styles.css?inline';
 import '../../components/billing-toggle';
 import '../../components/deployment-toggle';
 import '../../components/pricing-card';
+import {
+  CLOUD_COMPARISON_FALLBACK_TITLE,
+  DEDICATED_COMPARISON_FALLBACK_TITLE,
+} from '../../pricing-ssr';
 
 interface Plan {
   id: string;
@@ -87,9 +91,10 @@ export class PublicPricingView extends LitElement {
       // Prefer slotted SEO content (SSR-injected light DOM) so we keep
       // whatever was actually served to the user / crawler.
       const children = Array.from(this.querySelectorAll('[slot]'));
-      const hasSlottedPlan = children.some((el) =>
-        el.getAttribute('slot')?.startsWith('plan-')
-      );
+      const hasSlottedPlan = children.some((el) => {
+        const slot = el.getAttribute('slot');
+        return slot?.startsWith('plan-') || slot?.startsWith('dedicated-plan-');
+      });
 
       if (hasSlottedPlan) {
         this._loadFromSlots(children);
@@ -286,7 +291,7 @@ export class PublicPricingView extends LitElement {
 
   private _followLink(url: string) {
     if (/^https?:\/\//.test(url)) {
-      window.open(url, '_blank');
+      window.open(url, '_blank', 'noopener,noreferrer');
     } else {
       this._navigate(url);
     }
@@ -295,19 +300,11 @@ export class PublicPricingView extends LitElement {
   private async _handleSignUp(planId: string) {
     const plan = this._planById(planId);
 
-    if (planId === 'opensource') {
-      this._followLink(plan?.cta_url || 'https://github.com/preloop/preloop');
-      return;
-    }
-
-    // Enterprise is quoted, never checked out: send it to the contact route.
-    if (planId === 'enterprise') {
-      this._navigate(plan?.cta_url || '/request-demo');
-      return;
-    }
-
     // Nothing on the Dedicated tab is a subscription a visitor can buy: every
     // edition there is quoted or downloaded, so its CTA is the only route.
+    // Shape, not plan id: opensource and enterprise are dedicated in every
+    // path that reaches here, so a per-id branch would disagree with this one
+    // (an external enterprise cta_url must open a new tab, same as the rest).
     if (plan?.deployment === 'dedicated') {
       this._followLink(plan.cta_url || '/request-demo');
       return;
@@ -524,7 +521,11 @@ export class PublicPricingView extends LitElement {
    * Dedicated compares the editions. Only the columns and the rows differ,
    * never the shape of the table.
    */
-  private _renderComparison(comparison: Comparison | null, plans: Plan[]) {
+  private _renderComparison(
+    comparison: Comparison | null,
+    plans: Plan[],
+    fallbackTitle: string
+  ) {
     if (!comparison?.groups?.length || !plans.length) return '';
 
     const planIds = plans.map((p) => p.id);
@@ -533,7 +534,7 @@ export class PublicPricingView extends LitElement {
     return html`
       <section class="comparison-section">
         <div class="section-container">
-          <h2 class="text-center">${comparison.title || 'Compare plans'}</h2>
+          <h2 class="text-center">${comparison.title || fallbackTitle}</h2>
           <div class="comparison-scroll">
             <table class="comparison-table">
               <thead>
@@ -689,7 +690,13 @@ export class PublicPricingView extends LitElement {
             ${this._renderCards(plans)}
           </div>
         </section>
-        ${this._renderComparison(this._activeComparison(), plans)}
+        ${this._renderComparison(
+          this._activeComparison(),
+          plans,
+          deployment === 'cloud'
+            ? CLOUD_COMPARISON_FALLBACK_TITLE
+            : DEDICATED_COMPARISON_FALLBACK_TITLE
+        )}
         ${this._renderFaqs()}
       </main>
       <app-footer></app-footer>

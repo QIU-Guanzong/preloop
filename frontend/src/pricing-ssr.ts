@@ -31,6 +31,11 @@ function escapeHtml(value: string | number | null | undefined): string {
 
 const escapeAttr = escapeHtml;
 
+/** Heading when a brand ships comparison groups but no `comparison.title`. */
+export const CLOUD_COMPARISON_FALLBACK_TITLE = 'Compare cloud plans';
+/** Heading when a brand ships dedicated comparison groups but no title. */
+export const DEDICATED_COMPARISON_FALLBACK_TITLE = 'Compare dedicated editions';
+
 interface PricingSsrBrand {
   name?: string;
   landing?: { pricing?: PricingConfig };
@@ -208,13 +213,13 @@ export function generatePricingSlottedContent(config: PricingSsrBrand): string {
     pricing.comparison,
     cloudPlans,
     'comparison',
-    'Compare cloud plans'
+    CLOUD_COMPARISON_FALLBACK_TITLE
   );
   const dedicatedComparison = generatePricingComparisonBlock(
     pricing.dedicated?.comparison,
     dedicatedPlans,
     'dedicated-comparison',
-    'Compare dedicated editions'
+    DEDICATED_COMPARISON_FALLBACK_TITLE
   );
 
   const cloudLabel = pricing.cloud_label || 'Cloud';
