@@ -134,10 +134,12 @@ def register_runner(
             if value := getattr(body, field):
                 updates[field] = value
         existing = crud_flow_runner.update(db, db_obj=existing, obj_in=updates)
-        if body.concurrency is not None:
-            existing = crud_flow_runner.set_reported_concurrency(
-                db, runner=existing, reported=body.concurrency
-            )
+        # A process that omits concurrency is unreported, even if an earlier
+        # process left a stale report on this row (a rollback to a
+        # pre-multi-slot CLI reusing the same runner_id).
+        existing = crud_flow_runner.set_reported_concurrency(
+            db, runner=existing, reported=body.concurrency
+        )
         emit_runner_updated(existing, db)
         return schemas.RunnerRegisterResponse(
             **_to_response(existing, db).model_dump(), token=token
@@ -576,10 +578,14 @@ async def runner_ws(
                 if not updated_capability:
                     break
                 reported = raw.get("concurrency")
-                if isinstance(reported, int) and not isinstance(reported, bool):
-                    crud_flow_runner.set_reported_concurrency(
-                        db, runner=runner, reported=reported
-                    )
+                declared = (
+                    reported
+                    if isinstance(reported, int) and not isinstance(reported, bool)
+                    else None
+                )
+                crud_flow_runner.set_reported_concurrency(
+                    db, runner=runner, reported=declared
+                )
                 if raw.get("ephemeral") is True and not runner.ephemeral:
                     crud_flow_runner.mark_ephemeral(db, runner_id=runner.id)
                     db.refresh(runner)

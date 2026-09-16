@@ -62,6 +62,26 @@ def test_a_new_runner_gets_the_default_two_slots(db_session: Session) -> None:
     assert runner.free_slots == 2
 
 
+def test_clearing_a_stale_report_restores_the_one_slot_clamp(
+    db_session: Session,
+) -> None:
+    """A rolled-back CLI must not keep a previous process's slot count."""
+    account = _account(db_session, "Runner stale reported concurrency")
+    runner = _runner(db_session, account.id, reported=4)
+    assert runner.capacity == 2
+    crud_flow_runner.set_reported_concurrency(db_session, runner=runner, reported=None)
+    db_session.refresh(runner)
+    assert runner.reported_concurrency is None
+    assert runner.capacity == 1
+    first = _execution(db_session, account.id)
+    crud_flow_runner.create_assignment(
+        db_session, runner_id=runner.id, execution_id=first.id
+    )
+    db_session.refresh(runner)
+    assert runner.free_slots == 0
+    assert crud_flow_runner.claim_free_slot(db_session, runner_id=runner.id) is None
+
+
 def test_an_unreported_process_cannot_hold_two_leases(db_session: Session) -> None:
     account = _account(db_session, "Runner never reported concurrency")
     runner = _runner(db_session, account.id)

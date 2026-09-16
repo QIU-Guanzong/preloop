@@ -433,6 +433,7 @@ async def test_real_ws_protocol_and_all_terminal_credential_paths(
         if stage == 1:
             return {
                 "type": "heartbeat",
+                "concurrency": 2,
                 "publication_capabilities": {
                     "version": 1,
                     "helper_ready": True,

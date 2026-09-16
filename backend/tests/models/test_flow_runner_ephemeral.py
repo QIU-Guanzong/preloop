@@ -29,7 +29,7 @@ def _runner(db: Session, account_id, **overrides) -> models.FlowRunner:
 
 
 def _execution(db: Session, account_id) -> models.FlowExecution:
-    """A real row: flow_runner.current_execution_id carries a foreign key."""
+    """A real execution row so an assignment can hold a live lease."""
     flow = crud_flow.create(
         db=db,
         flow_in=FlowCreate(
@@ -84,13 +84,16 @@ def test_sweep_deletes_only_lapsed_idle_ephemeral_runners(
         ephemeral=True,
         last_heartbeat=stale_at,
         status="busy",
+        reported_concurrency=1,
     )
     # A persistent runner going quiet is an outage to show, not a row to drop.
     persistent = _runner(db_session, account.id, last_heartbeat=stale_at)
 
-    busy.current_execution_id = _execution(db_session, account.id).id
-    db_session.add(busy)
-    db_session.commit()
+    crud_flow_runner.create_assignment(
+        db_session,
+        runner_id=busy.id,
+        execution_id=_execution(db_session, account.id).id,
+    )
 
     doomed_id, alive_id = doomed.id, alive.id
     busy_id, persistent_id = busy.id, persistent.id
@@ -163,10 +166,14 @@ def test_delete_ephemeral_spares_persistent_and_busy_rows(
     """The guards are in the delete, not only in the caller."""
     account = _account(db_session, "Ephemeral guards")
     persistent = _runner(db_session, account.id)
-    busy = _runner(db_session, account.id, ephemeral=True, status="busy")
-    busy.current_execution_id = _execution(db_session, account.id).id
-    db_session.add(busy)
-    db_session.commit()
+    busy = _runner(
+        db_session, account.id, ephemeral=True, status="busy", reported_concurrency=1
+    )
+    crud_flow_runner.create_assignment(
+        db_session,
+        runner_id=busy.id,
+        execution_id=_execution(db_session, account.id).id,
+    )
     persistent_id, busy_id = persistent.id, busy.id
 
     assert (

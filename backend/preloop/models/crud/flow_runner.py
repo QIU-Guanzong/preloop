@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from sqlalchemy import func
+from sqlalchemy import exists, func, or_
 from sqlalchemy.orm import Session
 
 from preloop.models import models
@@ -829,7 +829,7 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
             .filter(
                 FlowRunner.id == runner_id,
                 FlowRunner.ephemeral.is_(True),
-                FlowRunner.current_execution_id.is_(None),
+                ~exists().where(FlowRunnerAssignment.runner_id == runner_id),
             )
             .delete(synchronize_session=False)
         )
@@ -861,9 +861,10 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
             Number of deleted rows.
         """
         cutoff = datetime.now(timezone.utc) - grace
+        idle = ~exists().where(FlowRunnerAssignment.runner_id == FlowRunner.id)
         query = db.query(FlowRunner).filter(
             FlowRunner.ephemeral.is_(True),
-            FlowRunner.current_execution_id.is_(None),
+            idle,
             or_(
                 FlowRunner.last_heartbeat.is_(None),
                 FlowRunner.last_heartbeat < cutoff,
@@ -888,7 +889,7 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
             .filter(
                 FlowRunner.id.in_(doomed),
                 FlowRunner.ephemeral.is_(True),
-                FlowRunner.current_execution_id.is_(None),
+                idle,
                 or_(
                     FlowRunner.last_heartbeat.is_(None),
                     FlowRunner.last_heartbeat < cutoff,
