@@ -22,7 +22,6 @@ from sqlalchemy.orm import Session
 
 from preloop.api.auth import get_current_active_user
 from preloop.api.common import get_account_for_user
-from preloop.api.loop_safety import run_db_off_loop
 from preloop.models.crud import crud_session_embedding_setting
 from preloop.models.db.session import get_db_session
 from preloop.models.models.account import Account
@@ -72,7 +71,7 @@ def _to_response(setting: SessionEmbeddingSetting) -> SessionEmbeddingSettingRes
     summary="Read this account's session embedding setting",
 )
 @require_permission("view_runtime_sessions")
-async def read_session_embedding_setting(
+def read_session_embedding_setting(
     account: Annotated[Account, Depends(get_account_for_user)],
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db_session),
@@ -83,14 +82,12 @@ async def read_session_embedding_setting(
     ``scope = summaries_only``, which is what it would get if it opted in
     without saying anything else.
     """
-
-    def _read() -> SessionEmbeddingSettingResponse:
-        setting = crud_session_embedding_setting.get_or_create(
-            db, account_id=account.id, commit=True
-        )
-        return _to_response(setting)
-
-    return await run_db_off_loop(_read)
+    # Plain def so FastAPI dispatches on the threadpool. An async def that
+    # still takes get_db_session would grow the async/sync-session ratchet.
+    setting = crud_session_embedding_setting.get_or_create(
+        db, account_id=account.id, commit=True
+    )
+    return _to_response(setting)
 
 
 @router.put(
@@ -99,7 +96,7 @@ async def read_session_embedding_setting(
     summary="Set how much of a session this account embeds",
 )
 @require_permission("manage_budgets")
-async def update_session_embedding_setting(
+def update_session_embedding_setting(
     payload: SessionEmbeddingSettingUpdate,
     account: Annotated[Account, Depends(get_account_for_user)],
     current_user: User = Depends(get_current_active_user),
@@ -111,12 +108,11 @@ async def update_session_embedding_setting(
     embedded from the next worker pass; widening to ``full`` gives the
     untouched backlog back to the worker, still under the daily cap.
     """
+    # Plain def so FastAPI dispatches on the threadpool. Changing the
+    # scope is a spending decision, not a console burst path, and must
+    # not grow the async/sync-session route ratchet.
     ensure_permission_in_oss(db, current_user, "manage_budgets")
-
-    def _write() -> SessionEmbeddingSettingResponse:
-        setting = crud_session_embedding_setting.set_scope(
-            db, account_id=account.id, scope=payload.scope, commit=True
-        )
-        return _to_response(setting)
-
-    return await run_db_off_loop(_write)
+    setting = crud_session_embedding_setting.set_scope(
+        db, account_id=account.id, scope=payload.scope, commit=True
+    )
+    return _to_response(setting)

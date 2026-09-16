@@ -22,6 +22,7 @@ from preloop.models.crud.session_search_document import (
 from preloop.models.models.session_search_document import (
     EMBEDDING_DIMENSIONS,
     REDACTION_STATE_WITHHELD,
+    SOURCE_KIND_SESSION_SUMMARY,
     SOURCE_KIND_TRANSCRIPT_MESSAGE,
 )
 
@@ -70,6 +71,7 @@ def _write(
     occurred_at=BASE_AT,
     vector=None,
     model_identity=MODEL_A,
+    source_kind=SOURCE_KIND_TRANSCRIPT_MESSAGE,
     **chunk_fields,
 ):
     """Write one chunk and, unless told otherwise, give it a vector."""
@@ -77,7 +79,7 @@ def _write(
         db_session,
         account_id=account_id,
         runtime_session_id=session.id,
-        source_kind=SOURCE_KIND_TRANSCRIPT_MESSAGE,
+        source_kind=source_kind,
         source_id=source_id,
         occurred_at=occurred_at,
         chunks=[SessionSearchChunk(content=text, role="assistant", **chunk_fields)],
@@ -319,6 +321,45 @@ def test_embedding_coverage_counts_what_a_degraded_marker_claims(db_session, tes
     assert coverage.model_vectors == 1
     assert coverage.pending == 1
     assert coverage.embedded_through == BASE_AT
+
+
+def test_embedding_coverage_pending_honours_source_kinds(db_session, test_user):
+    """Out-of-scope chunks are not the backfill the search marker talks about."""
+    session = _session(db_session, test_user.account_id, "coverage-scope")
+    _write(
+        db_session,
+        test_user.account_id,
+        session,
+        "the session summary that is in scope",
+        source_id="coverage-summary",
+        occurred_at=BASE_AT,
+        vector=_axis(21),
+        source_kind=SOURCE_KIND_SESSION_SUMMARY,
+    )
+    _write(
+        db_session,
+        test_user.account_id,
+        session,
+        "a transcript turn this account chose not to embed",
+        source_id="coverage-transcript",
+        occurred_at=BASE_AT + timedelta(hours=1),
+        source_kind=SOURCE_KIND_TRANSCRIPT_MESSAGE,
+    )
+
+    whole = crud_session_search_document.embedding_coverage(
+        db_session, account_id=test_user.account_id, embedding_model=MODEL_A
+    )
+    scoped = crud_session_search_document.embedding_coverage(
+        db_session,
+        account_id=test_user.account_id,
+        embedding_model=MODEL_A,
+        source_kinds=(SOURCE_KIND_SESSION_SUMMARY,),
+    )
+
+    assert whole.pending == 1
+    assert scoped.pending == 0
+    assert scoped.vectors == 1
+    assert scoped.model_vectors == 1
 
 
 def test_coverage_is_account_scoped(db_session, test_user):

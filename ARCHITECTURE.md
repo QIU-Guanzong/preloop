@@ -164,7 +164,9 @@ See [Supported-release vulnerability maintenance](docs/guide/flows/security-main
 Session search writes one `session_search_document` chunk per source row
 (gateway interaction, transcript, tool call, operator note, summary). Keyword
 indexing is gated by `SESSION_SEARCH_INDEX_ENABLED`. Optional vectors are a
-separate per-account opt-in (`session_embedding_setting`) plus the
+separate per-account opt-in (`session_embedding_setting`, `summaries_only` by
+default so an opt-in embeds the session's title and summary chunk unless the
+account asks for `full`) plus the
 deployment kill switch `SESSION_EMBEDDING_ENABLED`; a bounded worker posts
 batches to an OpenAI-compatible endpoint or a local model, caps spend, and
 records purpose-tagged usage. The shared API key is allow-listed.

@@ -1441,7 +1441,12 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         }
 
     def embedding_coverage(
-        self, db: Session, *, account_id: Any, embedding_model: str
+        self,
+        db: Session,
+        *,
+        account_id: Any,
+        embedding_model: str,
+        source_kinds: Optional[Sequence[str]] = None,
     ) -> EmbeddingCoverage:
         """What one account's corpus can answer with vectors of one model.
 
@@ -1450,6 +1455,12 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
         returned little. The counts are what turn "no semantic results" into
         one of "nothing is embedded", "everything is embedded with a
         different model" or "the backfill has not got there yet".
+
+        ``source_kinds`` is the account's embedding scope, applied only to the
+        ``waiting`` aggregate. A transcript chunk an account has chosen not
+        to embed is not backlog, so it must not keep the search's backfill
+        marker permanently on. ``None`` means every kind, matching
+        ``source_kinds_for_scope("full")``.
         """
         embedded = SessionSearchDocument.embedding.isnot(None)
         same_model = and_(
@@ -1460,6 +1471,10 @@ class CRUDSessionSearchDocument(CRUDBase[SessionSearchDocument]):
             SessionSearchDocument.redaction_state == REDACTION_STATE_CLEAR,
             SessionSearchDocument.content != "",
         )
+        if source_kinds is not None:
+            waiting = and_(
+                waiting, SessionSearchDocument.source_kind.in_(list(source_kinds))
+            )
         row = db.execute(
             select(
                 func.count(SessionSearchDocument.id).filter(embedded).label("vectors"),
