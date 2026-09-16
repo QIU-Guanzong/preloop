@@ -311,6 +311,8 @@
               "answered",
               "expired",
               "declined",
+              "cancelled",
+              "unroutable",
               "not_asked"
             ]
           },
@@ -394,6 +396,51 @@
                 "expires_at": {
                   "type": "string",
                   "minLength": 1
+                },
+                "answered_by": {
+                  "type": "null"
+                },
+                "answered_at": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "cancelled"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "answered_by": {
+                  "type": "null"
+                },
+                "answered_at": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "unroutable"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "expires_at": {
+                  "type": "null"
                 },
                 "answered_by": {
                   "type": "null"

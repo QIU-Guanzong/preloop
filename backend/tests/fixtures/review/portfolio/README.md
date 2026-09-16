@@ -30,6 +30,7 @@ walk has to refuse:
 | `services/notifications/node_modules/` | trap: an excluded directory inside a project, not counted in its file count |
 | `services/notifications/ui-kit/package.json` | trap: a directory inside a discovered project |
 | `platform/edge/gateway/proxy/go.mod` | trap: a manifest below the depth cap of 3 |
+| `package.json` (repository root) | trap: a workspace root manifest is never itself a project |
 
 `tools/report-cli` is the fixture behind the triage rule: it is the
 worst written project in the repository and it ranks last, because the
@@ -39,6 +40,9 @@ the code.
 `repos/two-projects` holds two projects, below the auto select threshold
 of three, so a run over it asks no question at all.
 
+`repos/zero-projects` holds documentation and no manifest, so discovery
+finds nothing. An empty discovery is never a pass.
+
 ## The scenarios
 
 | result | what it exercises |
@@ -47,6 +51,7 @@ of three, so a run over it asks no question at all.
 | `result-two-auto-selected.json` | two discovered, below the threshold: no question, both reviewed, a clean portfolio |
 | `result-first-question-expired.json` | the selection question expired: inventory only, zero reviews, zero issues, a completed run |
 | `result-second-question-expired.json` | the follow up question expired: the full report lands with every candidate unapproved |
+| `result-zero-projects.json` | no manifests anywhere: empty discovery, plan completed, never a pass |
 
 `repos/.gitignore` re-includes the `.venv`, `node_modules` and `build`
 traps: the repository root ignores those names because a real one is a

@@ -68,6 +68,7 @@ SCENARIOS = {
     "result-two-auto-selected.json": "two-projects",
     "result-first-question-expired.json": "five-projects",
     "result-second-question-expired.json": "five-projects",
+    "result-zero-projects.json": "zero-projects",
 }
 
 # The preset's closed detector list, mirrored here so the walk below is
@@ -139,6 +140,7 @@ EXCLUDED_DIRS = {
 }
 
 DEPTH_CAP = 3
+INLINE_HARD_CAP = 8
 
 # The triage rules, weights and reason names the preset documents.
 TRIAGE_RULES = (
@@ -282,7 +284,8 @@ def _walk(repo: str) -> dict:
     """Re-run the preset's discovery walk over a fixture repository.
 
     Exclusion list first, depth cap second, detector list third, and a
-    discovered project is never descended into.
+    discovered project is never descended into. The root_path directory
+    itself is never a project: discovery starts at its children.
     """
     root = REPOS_DIR / repo
     projects: list[dict] = []
@@ -294,6 +297,7 @@ def _walk(repo: str) -> dict:
         files = sorted(entry.name for entry in directory.iterdir() if entry.is_file())
         manifests = _matching_detectors(files)
         rel = directory.relative_to(root).as_posix()
+        # Root manifests describe the workspace; discovery starts at children.
         if manifests and rel != ".":
             projects.append(
                 {
@@ -370,9 +374,10 @@ def _triage(project: dict, eol_table: object) -> dict:
 def _verdict(result: dict) -> str:
     """The verdict the preset's own rules compute for a result.
 
-    fail when any project is failing; pass only when every discovered
-    project was reviewed and every one of them is healthy; everything
-    else, an unknown project included, pass_with_findings.
+    fail when any project is failing; pass only when at least one
+    project was discovered, every discovered project was reviewed, the
+    plan completed, and every one of them is healthy; an empty
+    discovery is never a pass.
     """
     projects = result["projects"]
     coverage = result["coverage"]
@@ -524,6 +529,7 @@ class TestPresetDefinition:
         assert "A truncated branch is a coverage statement" in norm
         assert "NESTING RULE" in norm
         assert "not a sixth project" in norm
+        assert "The root_path directory itself is never a project" in norm
 
     def test_discovery_records_the_named_per_project_facts(self):
         prompt = _prompt()
@@ -598,6 +604,10 @@ class TestPresetDefinition:
         norm = _norm(_prompt())
         assert "INLINE PROJECT CAP" in norm
         assert "never more than 8 in one execution whatever the payload says" in norm
+        assert (
+            "selection.inline_cap is the effective cap actually applied this "
+            "run: min(max_inline_projects, 8)" in norm
+        )
         assert 'list the rest in coverage.not_reviewed with reason "inline cap"' in norm
         assert "SAY PLAINLY IN THE REPORT THAT DELEGATION IS REQUIRED" in norm
 
@@ -642,9 +652,11 @@ class TestPresetDefinition:
         assert "Verdict, computed from LENS RESULTS AND COVERAGE ONLY" in norm
         assert '"fail" if any project\'s health is "failing"' in norm
         assert (
-            '"pass" only when every discovered project was reviewed by a lens '
-            "that ran" in norm
+            '"pass" only when at least one project was discovered, every '
+            "discovered project was reviewed by a lens that ran" in norm
         )
+        assert 'An empty discovery is never a "pass"' in norm
+        assert "coverage.plan_completed is true when the walk finished" in norm
         assert "THE REGISTER CANNOT UPGRADE THE VERDICT" in norm
         assert (
             "A project nobody reviewed is not evidence of health, an "
@@ -745,6 +757,9 @@ class TestQuestionForms:
         assert "SAFE DEFAULT ON EXPIRY: INVENTORY ONLY" in norm
         assert "NO LENS RUNS, no follow up is ranked, no issue is opened" in norm
         assert "NAMES THE DEADLINE THAT PASSED" in norm
+        assert 'a cancelled answer is "cancelled"' in norm
+        assert 'a routing failure is "unroutable"' in norm
+        assert "only for a genuine expiry" in norm
         assert (
             "Never re-ask, never assume a selection, never treat silence as "
             '"review everything"' in norm
@@ -758,6 +773,7 @@ class TestQuestionForms:
         assert 'leaves EVERY candidate with status "unapproved"' in norm
         assert "nothing is filed, nothing is opened" in norm
         assert "approval is recorded, not executed" in norm
+        assert "same closed vocabulary as PHASE 3" in norm
 
 
 class TestPresetLoadsIntoTheCatalogue:
@@ -868,6 +884,7 @@ class TestDiscovery:
             "services/notifications/node_modules/left-pad/package.json",
             "services/notifications/ui-kit/package.json",
             "platform/edge/gateway/proxy/go.mod",
+            "package.json",
         ]
         for trap in traps:
             assert (REPOS_DIR / "five-projects" / trap).is_file(), f"missing {trap}"
@@ -880,6 +897,23 @@ class TestDiscovery:
             "libs/vendor",
             "node_modules",
         }
+
+    def test_the_root_is_never_a_project(self):
+        """A workspace-root package.json describes the repo, not a project."""
+        walked = _walk("five-projects")
+        paths = [row["path"] for row in walked["projects"]]
+        assert (REPOS_DIR / "five-projects" / "package.json").is_file()
+        assert "." not in paths
+        assert "" not in paths
+        assert len(paths) == 5
+
+    def test_zero_projects_discovers_nothing(self):
+        walked = _walk("zero-projects")
+        result = _load_result("result-zero-projects.json")
+        assert walked["projects"] == []
+        assert result["discovery"]["count"] == 0
+        assert result["discovery"]["projects"] == []
+        assert result["projects"] == []
 
     def test_the_depth_cap_is_reported_not_silent(self):
         result = _load_result("result-five-selected.json")
@@ -1037,6 +1071,30 @@ class TestSelectionQuestion:
             row["path"] for row in result["discovery"]["projects"]
         ]
         assert result["coverage"]["projects_reviewed"] == 2
+
+    def test_inline_cap_is_the_effective_cap(self, scenario):
+        _, result = scenario
+        declared = result["inputs_declared"]["max_inline_projects"]
+        assert result["selection"]["inline_cap"] == min(declared, INLINE_HARD_CAP)
+
+    def test_question_status_vocabulary_names_cancelled_and_unroutable(self):
+        prompt = _prompt()
+        assert (
+            '"status": "answered" | "expired" | "declined" | "cancelled" | '
+            '"unroutable" | "not_asked"' in prompt
+        )
+        schema = json.loads(SCHEMA_FILE.read_text())
+        statuses = schema["properties"]["questions"]["items"]["properties"]["status"][
+            "enum"
+        ]
+        assert statuses == [
+            "answered",
+            "expired",
+            "declined",
+            "cancelled",
+            "unroutable",
+            "not_asked",
+        ]
 
     def test_every_result_records_both_question_phases(self, scenario):
         _, result = scenario
@@ -1224,6 +1282,14 @@ class TestCoverageAndHealth:
         assert result["verdict"] == "pass"
         assert result["coverage"]["not_reviewed"] == []
         assert result["rollup"]["by_health"]["unknown"] == 0
+
+    def test_an_empty_discovery_is_never_a_pass(self):
+        result = _load_result("result-zero-projects.json")
+        assert result["discovery"]["count"] == 0
+        assert result["coverage"]["plan_completed"] is True
+        assert result["coverage"]["not_reviewed"] == []
+        assert result["verdict"] == "pass_with_findings"
+        assert _verdict(result) == "pass_with_findings"
 
 
 class TestVerdictHonesty:

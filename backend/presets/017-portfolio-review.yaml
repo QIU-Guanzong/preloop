@@ -140,7 +140,9 @@ prompt_template: |
     coverage statement, not a silent omission.
   - NESTING RULE: once a directory is a project, do not descend into it.
     A directory inside a discovered project is part of that project, not
-    a sixth project.
+    a sixth project. The root_path directory itself is never a project;
+    discovery of projects starts at its children (the root's manifests
+    describe the workspace, not a project).
   - The list is sorted by path and that order is stable.
 
   PER PROJECT, RECORD EXACTLY THESE FACTS, all from commands:
@@ -264,20 +266,27 @@ prompt_template: |
 
   SAFE DEFAULT ON EXPIRY: INVENTORY ONLY. An expired, declined,
   cancelled, empty or unroutable answer means the selection is empty and
-  this run is an inventory. Selection source is "expired_default". NO
-  LENS RUNS, no follow up is ranked, no issue is opened, and every
-  discovered project is reported with lens_status "not_run" and health
-  "unknown". The report still lands, records that the question expired,
-  and NAMES THE DEADLINE THAT PASSED (the expires_at the platform
-  reported). Never re-ask, never assume a selection, never treat silence
-  as "review everything".
+  this run is an inventory. Selection source is "expired_default". Record
+  the question status from the closed vocabulary: a cancelled answer is
+  "cancelled"; a routing failure is "unroutable" with the failure named
+  in reason; a declined answer is "declined"; a window that closed is
+  "expired". NO LENS RUNS, no follow up is ranked, no issue is opened,
+  and every discovered project is reported with lens_status "not_run"
+  and health "unknown". The report still lands. NAMES THE DEADLINE THAT
+  PASSED only for a genuine expiry (status "expired", the expires_at the
+  platform reported). A cancelled, declined, empty or unroutable answer
+  has no deadline to name: expires_at is null and reason says why. Never
+  re-ask, never assume a selection, never treat silence as "review
+  everything".
 
   ═══════════════════════════════════════════════════════════
   PHASE 4: INLINE DOCS LENS PER SELECTED PROJECT
   ═══════════════════════════════════════════════════════════
   INLINE PROJECT CAP. This preset reviews at most max_inline_projects
   (default 5) selected projects, and never more than 8 in one execution
-  whatever the payload says. Everything runs in this one execution: no
+  whatever the payload says. selection.inline_cap is the effective cap
+  actually applied this run: min(max_inline_projects, 8). It is not the
+  hard ceiling of 8. Everything runs in this one execution: no
   child executions, no delegation. If more projects were selected than
   the cap allows, review the highest ranked ones up to the cap, list the
   rest in coverage.not_reviewed with reason "inline cap", and SAY
@@ -354,8 +363,11 @@ prompt_template: |
   expired, declined, cancelled, empty or unroutable answer leaves EVERY
   candidate with status "unapproved": nothing is filed, nothing is
   opened, and the portfolio report is written exactly as it would have
-  been. An approved follow up is one that came back in the approved
-  array, and approval is recorded, not executed.
+  been. Record the follow-up question with the same closed vocabulary as
+  PHASE 3 (cancelled, unroutable, declined, expired). NAMES THE DEADLINE
+  THAT PASSED only for a genuine expiry. An approved follow up is one
+  that came back in the approved array, and approval is recorded, not
+  executed.
 
   NOTHING IS EVER FILED BY THIS PRESET. It has no write tools: approved
   follow ups are a list in result.json for a human or a later flow to
@@ -421,8 +433,8 @@ prompt_template: |
     "inputs_declared": { "<what the payload actually delivered>": "..." },
     "runner": { "kind": null, "id": null },
     "discovery": { "root": "<root_path>", "depth_cap": <int>, "depth_cap_hit": true|false, "dirs_truncated_at_cap": [ "<dir>" ], "detectors_matched": [ "<manifest filename>" ], "excluded_dirs": [ "<dir name or prefix>" ], "eol_table": "payload" | null, "count": <int>, "projects": [ { "path": "...", "rank": <int>, "stacks": [ "..." ], "manifests": [ "..." ], "runtimes": [ { "name": "...", "version": "...", "source": "<path>" } ], "last_commit_date": "<ISO date>", "commits_12m": <int>, "file_count": <int>, "has_readme": true|false, "has_architecture_doc": true|false, "has_ci": true|false, "has_tests_dir": true|false, "has_licence": true|false, "triage": { "score": <int>, "band": "high|medium|low", "reasons": [ "<fired rule name>" ] } } ] },
-    "selection": { "source": "human" | "auto_below_threshold" | "payload" | "expired_default", "auto_select_threshold": <int>, "inline_cap": <int>, "selected": [ "<project path>" ], "over_inline_cap": [ "<project path>" ] },
-    "questions": [ { "phase": "selection" | "follow_ups", "asked": true|false, "status": "answered" | "expired" | "declined" | "not_asked", "reason": "<why it was not asked, else null>", "request_id": "<platform id or null>", "expires_at": "<ISO 8601 or null>", "answered_by": "<platform identity or null>", "answered_at": "<ISO 8601 or null>", "items": [ "<row id>" ], "selectable_ids": [ "<id the input schema offered>" ] } ],
+    "selection": { "source": "human" | "auto_below_threshold" | "payload" | "expired_default", "auto_select_threshold": <int>, "inline_cap": <int, min(max_inline_projects, 8)>, "selected": [ "<project path>" ], "over_inline_cap": [ "<project path>" ] },
+    "questions": [ { "phase": "selection" | "follow_ups", "asked": true|false, "status": "answered" | "expired" | "declined" | "cancelled" | "unroutable" | "not_asked", "reason": "<why it was not asked, else null>", "request_id": "<platform id or null>", "expires_at": "<ISO 8601 or null>", "answered_by": "<platform identity or null>", "answered_at": "<ISO 8601 or null>", "items": [ "<row id>" ], "selectable_ids": [ "<id the input schema offered>" ] } ],
     "projects": [ { "path": "...", "lens": "docs-currency-review", "lens_schema": "preloop.review.docscurrency/v1" | null, "lens_status": "ran" | "not_run", "not_run_reason": "<required when not_run, else null>", "verdict": "pass" | "pass_with_findings" | "fail" | null, "health": "healthy" | "findings" | "failing" | "unknown", "counts": { "holds": 0, "drifted": 0, "not_checkable": 0, "high": 0, "medium": 0, "low": 0 }, "result_artifact": "evidence/projects/<slug>/result.json" | null } ],
     "follow_ups": [ { "id": "portfolio:<project path>:<slug>", "project": "...", "title": "...", "severity": "high|medium|low", "evidence": "<path:line>", "rank": <int>, "status": "approved" | "unapproved", "note": "<the human's note, else null>", "approved_by": "<platform identity or null>", "approved_at": "<ISO 8601 or null>", "filed": false } ],
     "coverage": { "projects_discovered": <int>, "projects_selected": <int>, "projects_reviewed": <int>, "plan_completed": true|false, "not_reviewed": [ { "path": "...", "reason": "..." } ] },
@@ -441,12 +453,24 @@ prompt_template: |
     including the inventory-only run a question expiry produces — a
     parked run that resumed on an expiry still completed); write "error"
     (and add a "reason" field) when the review could not be completed.
+  - coverage.plan_completed is true when the walk finished, the
+    selection was resolved (human answer, payload, or
+    auto_below_threshold), every project in selection.selected that is
+    not in over_inline_cap had its lens run, and the aggregation was
+    written. An expired, declined, cancelled or unroutable selection
+    question leaves plan_completed false: the inventory still lands
+    (status success) but the review plan did not complete. An empty
+    discovery that finished the walk is plan_completed true: there was
+    nothing to select or review, and that emptiness is never a "pass".
   - Verdict, computed from LENS RESULTS AND COVERAGE ONLY: "fail" if
-    any project's health is "failing". "pass" only when every discovered
-    project was reviewed by a lens that ran, plan_completed is true,
-    not_reviewed is empty, and every project's health is "healthy".
-    Everything else, including any "unknown" project, any "findings"
-    project and any truncated coverage, is "pass_with_findings".
+    any project's health is "failing". "pass" only when at least one
+    project was discovered, every discovered project was reviewed by a
+    lens that ran, plan_completed is true (the walk, the selection,
+    every selected lens run and the aggregation all completed),
+    not_reviewed is empty, and every project's health is "healthy". An
+    empty discovery is never a "pass". Everything else, including any
+    "unknown" project, any "findings" project, any truncated coverage
+    and a repository that held no projects, is "pass_with_findings".
   - THE REGISTER CANNOT UPGRADE THE VERDICT. Healthy rows, approved
     follow ups, a high healthy-to-failing ratio and positive prose never
     raise it. A project nobody reviewed is not evidence of health, an

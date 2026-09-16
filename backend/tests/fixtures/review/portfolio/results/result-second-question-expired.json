@@ -242,7 +242,7 @@
   "selection": {
     "source": "human",
     "auto_select_threshold": 3,
-    "inline_cap": 8,
+    "inline_cap": 5,
     "selected": [
       "legacy/inventory-web",
       "services/billing-api",

@@ -74,7 +74,9 @@ Three rules keep the list honest, applied in this order:
    statement, not a silent omission.
 3. **Nesting rule.** Once a directory is a project, the walk does not
    descend into it. A `ui-kit/package.json` inside a discovered service
-   is part of that service, not another project.
+   is part of that service, not another project. The `root_path`
+   directory itself is never a project: discovery starts at its
+   children, because a root `package.json` describes the workspace.
 
 Per project the run records `path`, `stacks`, `manifests`, declared
 `runtimes` (read only out of named manifest keys, never guessed),
@@ -164,7 +166,7 @@ all fail closed, in the way each question can afford:
 
 | question | safe default |
 | --- | --- |
-| selection | **inventory only**: no lens runs, every project is `not_run` / `unknown`, no follow up is ranked, the verdict cannot be `pass`, and the report names the deadline that passed |
+| selection | **inventory only**: no lens runs, every project is `not_run` / `unknown`, no follow up is ranked, the verdict cannot be `pass`. Record `cancelled` as `cancelled` and a routing failure as `unroutable`. Name the deadline that passed only for a genuine expiry |
 | follow ups | **keep nothing**: every candidate stays `unapproved`, and the full portfolio report lands exactly as it would have |
 
 Neither question is ever re-asked, and silence is never read as "review
@@ -199,11 +201,20 @@ holds the portfolio verdict below `pass`.
 Computed from lens results and coverage only:
 
 - `fail` if any project's health is `failing`.
-- `pass` only when every discovered project was reviewed by a lens that
-  ran, `plan_completed` is true, `not_reviewed` is empty, and every
-  project is `healthy`.
-- everything else, including any `unknown` project and any truncated
-  coverage, is `pass_with_findings`.
+- `pass` only when at least one project was discovered, every discovered
+  project was reviewed by a lens that ran, `plan_completed` is true
+  (the walk, the selection, every selected lens run and the aggregation
+  all completed), `not_reviewed` is empty, and every project is
+  `healthy`. An empty discovery is never a `pass`.
+- everything else, including any `unknown` project, any truncated
+  coverage, and a repository that held no projects, is
+  `pass_with_findings`.
+
+`coverage.plan_completed` is true when the walk finished, the selection
+was resolved (human answer, payload, or auto-select), every selected
+project not over the inline cap had its lens run, and the aggregation
+was written. An expired selection question leaves it false: the
+inventory still lands, but the review plan did not complete.
 
 The family rule holds here too: **the register cannot upgrade the
 verdict.** Healthy rows, approved follow ups and a flattering
@@ -245,7 +256,7 @@ with detail moved into the evidence pack.
 | `exclude_paths` | - | extra prefixes to skip, added to the named exclusion list |
 | `auto_select_threshold` | `3` | below this many projects, nothing is asked |
 | `projects` | - | explicit selection, replaces the first question |
-| `max_inline_projects` | `5` | inline reviews this run, hard cap 8 |
+| `max_inline_projects` | `5` | inline reviews this run, hard cap 8. `selection.inline_cap` records the effective cap actually applied (`min(max_inline_projects, 8)`), not the ceiling |
 | `depth` | `standard` | passed through to each lens run |
 | `eol_runtimes` | - | the only source for `eol_runtime` triage points |
 
