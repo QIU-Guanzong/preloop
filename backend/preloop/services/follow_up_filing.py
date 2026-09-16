@@ -12,12 +12,17 @@ on the platform side, after the agent process has exited, from the control
 plane that already holds the account's tracker credential. The agent's tool
 surface is unchanged, which is the whole argument:
 
-- the rows that get filed are the ones a human approved at the gate, read
-  out of the result envelope the run wrote;
+- the rows that get filed are the ones the platform recorded as approved
+  at the gate (``ApprovalRequest.structured_answer``), not whatever the
+  agent wrote into ``result.json``; the envelope still supplies project,
+  evidence and title for those ids, and a missing or unreadable request
+  is a refusal (``gate_unresolved``), never pass-through;
 - an expired gate or an empty approval files nothing and says so;
 - a follow up that already has an issue from an earlier run is not filed
   again: the stable follow up id is the key, and the ledger is the filings
-  earlier executions of the same flow recorded;
+  earlier executions of the same flow recorded (last
+  ``LEDGER_EXECUTION_LIMIT`` executions; concurrent runs can still
+  duplicate);
 - one tracker error fails one row. The remaining rows are still filed and
   the failed row is reported as not filed with a reason from a closed
   vocabulary, never a provider error string;
@@ -31,7 +36,7 @@ tracker client and a result envelope, and the orchestrator supplies both.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -86,6 +91,7 @@ FOLLOW_UP_FILING_REASONS = frozenset(
         "duplicate_follow_up",
         "filing_disabled",
         "gate_expired",
+        "gate_unresolved",
         "invalid_row",
         "limit_reached",
         "no_follow_ups",
@@ -121,6 +127,16 @@ class FollowUpFilingPlan:
     labels: tuple[str, ...] = DEFAULT_LABELS
     max_issues: int = DEFAULT_MAX_ISSUES
     project_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class PlatformFollowUpGate:
+    """The follow-ups approval the platform recorded, not the agent's envelope."""
+
+    status: str
+    allowed_ids: frozenset[str]
+    notes: Mapping[str, str] = field(default_factory=dict)
+    titles: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -304,25 +320,107 @@ def gate_status(result: Mapping[str, Any]) -> Optional[str]:
     return status if isinstance(status, str) and status else None
 
 
-def approved_follow_ups(result: Mapping[str, Any]) -> list[FollowUpRow]:
+def follow_up_gate_request_id(result: Mapping[str, Any]) -> Optional[str]:
+    """The platform approval id the envelope claimed for the follow-ups gate."""
+    return _clean(_question(result, "follow_ups").get("request_id"), limit=64)
+
+
+def parse_platform_follow_up_gate(
+    *,
+    status: Optional[str],
+    structured_answer: Any,
+    items: Sequence[Any] | None = None,
+) -> PlatformFollowUpGate:
+    """Turn a stored approval into the ids (and notes/titles) the human saw."""
+    allowed: set[str] = set()
+    notes: dict[str, str] = {}
+    if isinstance(structured_answer, Mapping):
+        approved = structured_answer.get("approved")
+        if isinstance(approved, Sequence) and not isinstance(approved, (str, bytes)):
+            for entry in approved:
+                identifier: Optional[str] = None
+                note: Optional[str] = None
+                if isinstance(entry, Mapping):
+                    identifier = _clean(entry.get("id"), limit=200)
+                    note = _clean(entry.get("note"), limit=MAX_NOTE_LENGTH)
+                elif isinstance(entry, str):
+                    identifier = _clean(entry, limit=200)
+                if identifier:
+                    allowed.add(identifier)
+                    if note:
+                        notes[identifier] = note
+    titles: dict[str, str] = {}
+    for item in items or []:
+        if not isinstance(item, Mapping):
+            continue
+        identifier = _clean(item.get("id"), limit=200)
+        title = _clean(item.get("title"), limit=MAX_TITLE_LENGTH)
+        if identifier and title:
+            titles[identifier] = title
+    return PlatformFollowUpGate(
+        status=status or "missing",
+        allowed_ids=frozenset(allowed),
+        notes=notes,
+        titles=titles,
+    )
+
+
+def is_follow_up_gate_schema(schema: Any) -> bool:
+    """True when this ask_user schema is the follow-ups filing gate."""
+    if not isinstance(schema, Mapping):
+        return False
+    properties = schema.get("properties")
+    return isinstance(properties, Mapping) and "approved" in properties
+
+
+def approved_follow_ups(
+    result: Mapping[str, Any],
+    *,
+    allowed_ids: Optional[AbstractSet[str]] = None,
+    notes: Optional[Mapping[str, str]] = None,
+    titles: Optional[Mapping[str, str]] = None,
+) -> tuple[list[FollowUpRow], int]:
     """The approved rows, in the order they are to be filed (rank, then order).
+
+    When ``allowed_ids`` is set, that set is the source of truth (the
+    platform-recorded selection). Envelope ``status: approved`` is ignored
+    for membership; title and note prefer the question the human saw.
 
     A row missing an id, a project or a title is not filed: there is nothing
     honest to put in an issue, and inventing it would be worse than skipping.
+    Returns ``(rows, invalid_count)``.
     """
     rows: list[FollowUpRow] = []
+    invalid = 0
+    note_overrides = notes or {}
+    title_overrides = titles or {}
     follow_ups = result.get("follow_ups")
     if not isinstance(follow_ups, Sequence):
-        return rows
+        return rows, (len(allowed_ids) if allowed_ids is not None else 0)
+
+    seen: set[str] = set()
     for index, raw in enumerate(follow_ups):
-        if not isinstance(raw, Mapping) or raw.get("status") != "approved":
+        if not isinstance(raw, Mapping):
             continue
         identifier = _clean(raw.get("id"), limit=200)
+        if allowed_ids is not None:
+            if not identifier or identifier not in allowed_ids:
+                continue
+        elif raw.get("status") != "approved":
+            continue
+        if identifier:
+            seen.add(identifier)
         project = _clean(raw.get("project"))
-        title = _clean(raw.get("title"), limit=MAX_TITLE_LENGTH)
+        title = _clean(title_overrides.get(identifier or ""), limit=MAX_TITLE_LENGTH)
+        if not title:
+            title = _clean(raw.get("title"), limit=MAX_TITLE_LENGTH)
         if not identifier or not project or not title:
+            invalid += 1
             logger.warning("Skipping a follow up row with no id, project or title")
             continue
+        note = _clean(note_overrides.get(identifier), limit=MAX_NOTE_LENGTH)
+        if not note:
+            note = _clean(raw.get("note"), limit=MAX_NOTE_LENGTH)
         severity = raw.get("severity")
         rank = raw.get("rank")
         rows.append(
@@ -336,21 +434,28 @@ def approved_follow_ups(result: Mapping[str, Any]) -> list[FollowUpRow]:
                 rank=rank
                 if isinstance(rank, int) and not isinstance(rank, bool)
                 else None,
-                note=_clean(raw.get("note"), limit=MAX_NOTE_LENGTH),
+                note=note,
                 approved_by=_clean(raw.get("approved_by")),
                 approved_at=_clean(raw.get("approved_at")),
                 child_execution_id=_clean(raw.get("child_execution_id"), limit=64),
             )
         )
+    if allowed_ids is not None:
+        invalid += len(allowed_ids - seen)
     rows.sort(key=lambda row: (row.rank is None, row.rank or 0, row.index))
-    return rows
+    return rows, invalid
 
 
-def filing_blocked_reason(result: Any, rows: Sequence[FollowUpRow]) -> Optional[str]:
+def filing_blocked_reason(
+    result: Any,
+    rows: Sequence[FollowUpRow],
+    *,
+    invalid: int = 0,
+) -> Optional[str]:
     """Why this result files nothing, or None when there are rows to file.
 
-    "Nothing to file" is a reported outcome, not silence: an expired gate and
-    an empty approval are different states and the report says which one.
+    "Nothing to file" is a reported outcome, not silence: an expired gate,
+    a corrupt approved set, and an empty approval are different states.
     """
     if not isinstance(result, Mapping):
         return "not_a_portfolio_result"
@@ -362,6 +467,8 @@ def filing_blocked_reason(result: Any, rows: Sequence[FollowUpRow]) -> Optional[
         return "no_follow_ups"
     if rows:
         return None
+    if invalid:
+        return "invalid_row"
     if gate_status(result) in {"expired", "declined", "cancelled"}:
         return "gate_expired"
     return "nothing_approved"
@@ -389,8 +496,10 @@ def build_issue_request(
     a link the implementer has to be able to open.
     """
     lines: list[str] = [
-        "Follow up from a Preloop portfolio review, approved by a human at "
-        "the filing gate.",
+        (
+            "Follow up from a Preloop portfolio review, approved by a human "
+            "at the filing gate."
+        ),
         "",
         "## What to do",
         "",
@@ -434,8 +543,10 @@ def build_issue_request(
             f"- The finding above no longer holds at {row.evidence or 'the pointer recorded in the report'}.",
             "- Nothing outside this project changed.",
             "",
-            "Filed by Preloop. The review that produced it read the "
-            "repository only; this issue is the first thing it wrote.",
+            (
+                "Filed by Preloop. The review that produced it read the "
+                "repository only; this issue is the first thing it wrote."
+            ),
         ]
     )
     labels = tuple(plan.labels)
@@ -696,6 +807,9 @@ def load_filed_follow_ups(
     A portfolio is re-reviewed on a schedule, and the same unresolved follow
     up comes back with the same stable id every time. What stops a second
     issue is this: the identifiers earlier runs of the same flow recorded.
+    The window is ``LEDGER_EXECUTION_LIMIT`` executions; a finding that
+    stays unresolved past that window, or two runs that file while both
+    are still in flight, can still produce a second issue.
     """
     from preloop.models.crud import crud_flow_execution
 

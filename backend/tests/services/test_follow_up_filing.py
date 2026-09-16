@@ -147,8 +147,8 @@ async def _file(result, *, client=None, plan=None, already_filed=None):
     """File the approved rows of ``result`` and write the outcome back."""
     client = client or FakeTracker()
     plan = plan or _plan()
-    rows = approved_follow_ups(result)
-    blocked = filing_blocked_reason(result, rows)
+    rows, invalid = approved_follow_ups(result)
+    blocked = filing_blocked_reason(result, rows, invalid=invalid)
     if blocked is not None:
         outcome = blocked_outcome(blocked)
     else:
@@ -283,7 +283,7 @@ class TestApprovedRowsAreFiled:
     def test_the_issue_body_is_one_unit_of_work_for_the_implementer(self):
         """Preset 011 reads the title, the description and the url only, so
         everything an implementer needs is in the description itself."""
-        row = approved_follow_ups(_result([_follow_up(1)]))[0]
+        row = approved_follow_ups(_result([_follow_up(1)]))[0][0]
         request = build_issue_request(row, _context(), _plan())
         for heading in (
             "## What to do",
@@ -382,7 +382,53 @@ class TestNothingIsFiledWithoutApproval:
             _follow_up(2, title="   "),
             _follow_up(3, project=""),
         ]
-        assert approved_follow_ups(_result(rows)) == []
+        rows, invalid = approved_follow_ups(_result(rows))
+        assert rows == []
+        assert invalid == 3
+
+    def test_the_platform_selection_not_the_envelope_decides_what_is_filed(self):
+        """An agent that marks extra rows approved cannot add them; an agent
+        that drops an approved id cannot hide it from the invalid count."""
+        envelope = _result(
+            [
+                _follow_up(1),
+                _follow_up(2),
+                _follow_up(3, title="rewritten after the human chose it"),
+            ]
+        )
+        chosen = "portfolio:services/project-1:finding-1"
+        rows, invalid = approved_follow_ups(
+            envelope,
+            allowed_ids=frozenset({chosen, "portfolio:services/project-3:finding-3"}),
+            titles={
+                "portfolio:services/project-3:finding-3": "the title the human saw"
+            },
+        )
+        assert [row.id for row in rows] == [
+            chosen,
+            "portfolio:services/project-3:finding-3",
+        ]
+        assert rows[1].title == "the title the human saw"
+        assert invalid == 0
+        extra = _follow_up(2)
+        rows, _ = approved_follow_ups(
+            _result([extra]),
+            allowed_ids=frozenset(),
+        )
+        assert rows == []
+
+    def test_approved_but_malformed_rows_are_invalid_row_not_nothing_approved(self):
+        rows = [
+            _follow_up(1, id=""),
+            _follow_up(2, title="   "),
+            _follow_up(3, project=""),
+        ]
+        selected, invalid = approved_follow_ups(_result(rows))
+        assert selected == []
+        assert (
+            filing_blocked_reason(_result(rows), selected, invalid=invalid)
+            == "invalid_row"
+        )
 
 
 class TestTheIdentifierIsWrittenBack:
@@ -561,6 +607,7 @@ class TestOrchestratorWiring:
 
     def _orchestrator(self, monkeypatch, *, git_clone_config, ledger=None):
         from preloop.services import flow_orchestrator as module
+        from preloop.services.follow_up_filing import PlatformFollowUpGate
 
         orchestrator = module.FlowExecutionOrchestrator.__new__(
             module.FlowExecutionOrchestrator
@@ -582,6 +629,26 @@ class TestOrchestratorWiring:
         monkeypatch.setattr(
             module, "load_filed_follow_ups", lambda *a, **k: dict(ledger or {})
         )
+
+        def _gate_from_envelope(result):
+            ids = []
+            notes = {}
+            for entry in result.get("follow_ups") or []:
+                if not isinstance(entry, dict) or entry.get("status") != "approved":
+                    continue
+                ident = entry.get("id")
+                if ident:
+                    ids.append(ident)
+                    if entry.get("note"):
+                        notes[ident] = entry["note"]
+            return PlatformFollowUpGate(
+                status="approved",
+                allowed_ids=frozenset(ids),
+                notes=notes,
+                titles={},
+            )
+
+        orchestrator._follow_up_filing_platform_gate = _gate_from_envelope
         return orchestrator
 
     @pytest.mark.asyncio
@@ -730,3 +797,56 @@ class TestOrchestratorWiring:
         orchestrator.trigger_event_data = {"project_id": "p-9"}
         plan = resolve_follow_up_filing(orchestrator.flow.git_clone_config)
         assert orchestrator._follow_up_filing_project_id(plan) == "p-9"
+
+    def test_watching_two_projects_without_a_trigger_is_an_ambiguity(self, monkeypatch):
+        from preloop.services.follow_up_filing import FollowUpFilingError
+
+        orchestrator = self._orchestrator(
+            monkeypatch,
+            git_clone_config={"enabled": True, "follow_up_filing": {"enabled": True}},
+        )
+        orchestrator.flow.trigger_project_ids = ["p-1", "p-2"]
+        plan = resolve_follow_up_filing(orchestrator.flow.git_clone_config)
+        with pytest.raises(FollowUpFilingError) as error:
+            orchestrator._follow_up_filing_project_id(plan)
+        assert error.value.reason == "project_ambiguous"
+
+    @pytest.mark.asyncio
+    async def test_a_missing_platform_gate_does_not_file_envelope_approvals(
+        self, monkeypatch
+    ):
+        orchestrator = self._orchestrator(
+            monkeypatch,
+            git_clone_config={"enabled": True, "follow_up_filing": {"enabled": True}},
+        )
+        orchestrator._follow_up_filing_platform_gate = lambda result: None
+        orchestrator._follow_up_filing_target = AsyncMock(
+            side_effect=AssertionError("must not resolve a tracker")
+        )
+        result = _result()
+        await orchestrator._file_approved_follow_ups(result)
+        assert result[FOLLOW_UP_FILING_RESULT_KEY]["reason"] == "gate_unresolved"
+        assert result[FOLLOW_UP_FILING_RESULT_KEY]["filed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_an_agent_cannot_add_a_row_the_human_did_not_select(
+        self, monkeypatch
+    ):
+        from preloop.services.follow_up_filing import PlatformFollowUpGate
+
+        orchestrator = self._orchestrator(
+            monkeypatch,
+            git_clone_config={"enabled": True, "follow_up_filing": {"enabled": True}},
+        )
+        chosen = "portfolio:services/project-1:finding-1"
+        orchestrator._follow_up_filing_platform_gate = lambda result: (
+            PlatformFollowUpGate(status="approved", allowed_ids=frozenset({chosen}))
+        )
+        client = FakeTracker()
+        orchestrator._follow_up_filing_target = AsyncMock(
+            return_value=(client, "widgets", "github")
+        )
+        result = _result()
+        await orchestrator._file_approved_follow_ups(result)
+        assert len(client.calls) == 1
+        assert chosen in client.calls[0][1].description

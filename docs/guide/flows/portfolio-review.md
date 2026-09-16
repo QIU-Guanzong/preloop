@@ -510,9 +510,16 @@ runs by construction, and that is the idempotency key. Before filing,
 the platform reads the filings recorded by earlier executions of the
 same flow; a follow up already in that ledger is reported as
 `already_filed`, with the issue the earlier run created, and no tracker
-call is made for it. A portfolio reviewed every month therefore
-accumulates issues for new findings only, and an unresolved finding
-keeps pointing at the issue it already has.
+call is made for it. The ledger looks at the last 50 executions of the
+flow. A finding that stays unresolved past that window, or two runs of
+the same flow that file while both are still in flight, can still
+produce a second issue. Updating or closing the old issue is out of
+scope.
+
+The set of ids that get filed is the platform-recorded selection
+(`ApprovalRequest.structured_answer`), not the agent's `status:
+"approved"` flags. A missing or unreadable follow-ups approval is
+reported as `gate_unresolved` and files nothing.
 
 ### When nothing is filed, or filing fails
 
@@ -532,7 +539,8 @@ was rather than staying silent. The receipt lands under
 
 `outcome` is one of `filed`, `partial`, `nothing_filed` or `failed`.
 `reason` comes from a closed list, so it is a diagnosis and never a
-tracker error string: `gate_expired`, `nothing_approved`,
+tracker error string: `gate_expired`, `gate_unresolved`,
+`nothing_approved`,
 `no_follow_ups`, `not_a_portfolio_result`, `project_missing`,
 `project_ambiguous`, `tracker_unavailable`, `tracker_error`,
 `credentials_unavailable`, `already_filed`, `duplicate_follow_up`,

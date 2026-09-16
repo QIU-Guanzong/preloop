@@ -5,7 +5,7 @@ import asyncio
 import shlex
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 import re
 
 from sqlalchemy.orm import Session
@@ -91,12 +91,16 @@ from preloop.services.follow_up_filing import (
     FOLLOW_UP_FILING_RESULT_KEY,
     FilingContext,
     FollowUpFilingError,
+    PlatformFollowUpGate,
     apply_filing_to_result,
     approved_follow_ups,
     blocked_outcome,
     file_follow_ups,
     filing_blocked_reason,
+    follow_up_gate_request_id,
+    is_follow_up_gate_schema,
     load_filed_follow_ups,
+    parse_platform_follow_up_gate,
     resolve_follow_up_filing,
 )
 from preloop.services.report_publication import (
@@ -3807,11 +3811,22 @@ class FlowExecutionOrchestrator:
                 "the flow clones repositories from more than one project",
             )
 
-        trigger_project_id = (self.trigger_event_data or {}).get("project_id") or (
-            getattr(self.flow, "trigger_project_ids", None) or [None]
-        )[0]
+        trigger_project_id = (self.trigger_event_data or {}).get("project_id")
         if trigger_project_id:
             return str(trigger_project_id)
+        watched = [
+            str(pid)
+            for pid in (getattr(self.flow, "trigger_project_ids", None) or [])
+            if pid
+        ]
+        if len(watched) == 1:
+            return watched[0]
+        if len(watched) > 1:
+            raise FollowUpFilingError(
+                "project_ambiguous",
+                "this flow watches more than one project and the trigger "
+                "named none of them",
+            )
         raise FollowUpFilingError(
             "project_missing",
             "no tracker project is configured for this flow",
@@ -3876,6 +3891,51 @@ class FlowExecutionOrchestrator:
             report_path=artifacts.get("report"),
         )
 
+    def _follow_up_filing_platform_gate(
+        self, result: Mapping[str, Any]
+    ) -> Optional[PlatformFollowUpGate]:
+        """The follow-ups approval this execution actually recorded.
+
+        The agent-authored envelope is not the source of truth for *whether*
+        a row was approved. That lives on ``ApprovalRequest.structured_answer``.
+        A missing or unreadable request is ``None`` so the caller can refuse
+        with ``gate_unresolved`` instead of filing from the envelope.
+        """
+        from preloop.models.crud import crud_approval_request
+        from preloop.services.question_schema import question_form
+
+        execution_id = str(getattr(self.execution_log, "id", "") or "")
+        if not execution_id:
+            return None
+        try:
+            requests = crud_approval_request.get_multi_by_execution(
+                self.db, execution_id=execution_id, limit=100
+            )
+        except Exception:
+            logger.exception(
+                "Could not read approval requests for follow up filing on %s",
+                execution_id,
+            )
+            return None
+
+        claimed_id = follow_up_gate_request_id(result)
+        chosen = None
+        for request in requests:
+            schema, items = question_form(getattr(request, "tool_args", None))
+            if claimed_id and str(getattr(request, "id", "")) == claimed_id:
+                chosen = (request, schema, items)
+                break
+            if chosen is None and is_follow_up_gate_schema(schema):
+                chosen = (request, schema, items)
+        if chosen is None:
+            return None
+        request, _schema, items = chosen
+        return parse_platform_follow_up_gate(
+            status=getattr(request, "status", None),
+            structured_answer=getattr(request, "structured_answer", None),
+            items=items,
+        )
+
     async def _file_approved_follow_ups(self, merged_result: Any) -> None:
         """Turn the follow ups a human approved into tracker issues (#687).
 
@@ -3892,8 +3952,37 @@ class FlowExecutionOrchestrator:
             return
 
         try:
-            rows = approved_follow_ups(merged_result)
-            blocked = filing_blocked_reason(merged_result, rows)
+            platform = self._follow_up_filing_platform_gate(merged_result)
+            if platform is None:
+                envelope_rows, envelope_invalid = approved_follow_ups(merged_result)
+                if envelope_rows or envelope_invalid:
+                    blocked = "gate_unresolved"
+                else:
+                    blocked = filing_blocked_reason(merged_result, [])
+                apply_filing_to_result(
+                    merged_result, blocked_outcome(blocked or "gate_unresolved")
+                )
+                self.execution_logger.log_milestone(
+                    FOLLOW_UP_FILING_RESULT_KEY,
+                    dict(merged_result[FOLLOW_UP_FILING_RESULT_KEY]),
+                )
+                return
+
+            if platform.status in {"expired", "declined", "cancelled"}:
+                apply_filing_to_result(merged_result, blocked_outcome("gate_expired"))
+                self.execution_logger.log_milestone(
+                    FOLLOW_UP_FILING_RESULT_KEY,
+                    dict(merged_result[FOLLOW_UP_FILING_RESULT_KEY]),
+                )
+                return
+
+            rows, invalid = approved_follow_ups(
+                merged_result,
+                allowed_ids=platform.allowed_ids,
+                notes=platform.notes,
+                titles=platform.titles,
+            )
+            blocked = filing_blocked_reason(merged_result, rows, invalid=invalid)
             if blocked is not None:
                 # An expired gate and an empty approval both file nothing, and
                 # the result says which one rather than staying silent.
