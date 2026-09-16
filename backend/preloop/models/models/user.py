@@ -54,6 +54,8 @@ class User(Base):
         oauth_id: OAuth provider's user ID.
         external_id: External system's user ID (for LDAP/AD/SAML).
         last_login: When the user last logged in.
+        trial_prompt_dismissed_at: When the user answered the post-signup
+            trial offer (null while it has never been shown or answered).
         created_at: When the user was created.
         updated_at: When the user was last updated.
     """
@@ -131,6 +133,16 @@ class User(Base):
     # Timestamps
     last_login: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="When the user last logged in"
+    )
+
+    # Onboarding state. The post-signup trial offer is shown once per person,
+    # so its dismissal has to survive a new browser and a cleared cache: it
+    # belongs to the user, not to localStorage. Null means "not answered yet";
+    # the timestamp records when they chose (either Free or a checkout).
+    trial_prompt_dismissed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="When the user answered the post-signup trial offer",
     )
 
     # Relationships

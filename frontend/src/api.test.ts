@@ -16,6 +16,9 @@ import {
   uploadAvatar,
   validateTrackerToken,
   startCheckout,
+  startAnonymousCheckout,
+  getTrialPrompt,
+  dismissTrialPrompt,
   BILLING_SUBSCRIPTION_CHANGED,
 } from './api.js';
 import { customElement } from 'lit/decorators.js';
@@ -912,6 +915,117 @@ describe('api', () => {
       expect(await messageOf(startCheckout('pro', 'month'))).to.equal(
         'Pro is not available for purchase yet. Ask an administrator to sync the plan catalog.'
       );
+    });
+  });
+
+  describe('startAnonymousCheckout', () => {
+    const answer = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+    it('sends no Authorization header and never diverts to login', async () => {
+      // The whole point of the Stripe-first path: the caller has no account
+      // yet. Routing this through fetchWithAuth would read the missing token
+      // as a dead session and send the visitor to /login, which is the detour
+      // this flow removes.
+      localStorage.removeItem('accessToken');
+      localStorage.removeItem('refreshToken');
+      fetchStub.resolves(
+        answer({
+          action: 'redirect',
+          code: 'checkout_session_created',
+          url: '#stripe-anon',
+          message: 'Opening secure checkout for Pro.',
+        })
+      );
+      const originalHash = window.location.hash;
+
+      try {
+        const outcome = await startAnonymousCheckout('pro', 'year');
+        expect(outcome?.code).to.equal('checkout_session_created');
+        expect(window.location.hash).to.equal('#stripe-anon');
+        expect(routerGoStub.called, 'no redirect to login').to.equal(false);
+        const [url, options] = fetchStub.firstCall.args;
+        expect(String(url)).to.contain('/billing/create-checkout-session');
+        const headers = new Headers((options as RequestInit)?.headers);
+        expect(headers.get('Authorization')).to.equal(null);
+        expect(
+          JSON.parse(String((options as RequestInit)?.body))
+        ).to.deep.equal({ plan_id: 'pro', interval: 'year', return_to: null });
+      } finally {
+        window.location.hash = originalHash;
+      }
+    });
+
+    it('reports a refusal in the server words', async () => {
+      localStorage.removeItem('accessToken');
+      fetchStub.resolves(
+        answer(
+          {
+            detail: {
+              code: 'catalog_not_synced',
+              message: 'Pro is not available for purchase yet.',
+            },
+          },
+          503
+        )
+      );
+
+      let message = '';
+      try {
+        await startAnonymousCheckout('pro', 'month');
+      } catch (e: unknown) {
+        message = (e as Error).message;
+      }
+      expect(message).to.equal('Pro is not available for purchase yet.');
+    });
+  });
+
+  describe('trial prompt', () => {
+    it('reads the offer the server decided on', async () => {
+      fetchStub.resolves(
+        new Response(
+          JSON.stringify({
+            show: true,
+            reason: 'eligible',
+            trial_days: 14,
+            plans: [
+              {
+                id: 'pro',
+                name: 'Pro',
+                price_monthly: 12,
+                price_annually: 120,
+              },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+
+      const prompt = await getTrialPrompt();
+
+      expect(prompt.show).to.equal(true);
+      expect(prompt.trial_days).to.equal(14);
+      expect(prompt.plans[0].name).to.equal('Pro');
+    });
+
+    it('shows nothing when the instance has no billing plugin', async () => {
+      // OSS: the endpoint does not exist, so the console must simply not ask
+      // anyone to start a trial. A 404 is a normal answer here, not an error.
+      fetchStub.resolves(new Response('Not Found', { status: 404 }));
+
+      const prompt = await getTrialPrompt();
+
+      expect(prompt.show).to.equal(false);
+      expect(prompt.reason).to.equal('unavailable');
+      expect(prompt.plans).to.deep.equal([]);
+    });
+
+    it('does not throw when recording the answer fails', async () => {
+      fetchStub.rejects(new Error('offline'));
+      await dismissTrialPrompt();
     });
   });
 });

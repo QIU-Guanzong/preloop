@@ -40,9 +40,16 @@ paths:
       tags:
       - Auth
       summary: Verify Email
-      description: "Verify a user's email address.\n\nArgs:\n    verification_data:\
-        \ Email verification data with token.\n\nReturns:\n    Success message.\n\n\
-        Raises:\n    HTTPException: If the token is invalid or the user does not exist."
+      description: "Verify a user's email address and sign the user in.\n\nThe link\
+        \ in the verification email is the one thing an unverified user\ncan act on,\
+        \ so it also ends up being the sign-in: following it returns a\nsession, which\
+        \ is what makes REQUIRE_EMAIL_VERIFICATION a one-click\ndetour instead of\
+        \ \"verify, then go and find the login page\". An active\nuser gets tokens;\
+        \ ``message`` is always present, so an older client that\nonly reads it keeps\
+        \ working.\n\nArgs:\n    verification_data: Email verification data with token.\n\
+        \nReturns:\n    Success message plus access/refresh tokens for the verified\
+        \ user.\n\nRaises:\n    HTTPException: If the token is invalid or the user\
+        \ does not exist."
       operationId: verify_email_api_v1_auth_verify_email_post
       requestBody:
         content:
@@ -56,10 +63,49 @@ paths:
           content:
             application/json:
               schema:
+                additionalProperties: true
+                type: object
+                title: Response Verify Email Api V1 Auth Verify Email Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/auth/resend-verification:
+    post:
+      tags:
+      - Auth
+      summary: Resend Verification
+      description: "Send a fresh verification email for an address.\n\nAnonymous on\
+        \ purpose: the caller is someone the login page just refused\nfor an unverified\
+        \ address, so they hold no token. The answer never says\nwhether the address\
+        \ exists (same rule as forgot-password) and it never\nsays whether it was\
+        \ already verified, so this cannot be used to probe\nfor accounts. Rate limited\
+        \ per client IP and per address.\n\nArgs:\n    verification_data: Body carrying\
+        \ the address to send to.\n    background_tasks: Background tasks for sending\
+        \ the email.\n    request: The incoming request object (client IP for the\
+        \ limit).\n\nReturns:\n    The same neutral message for every address.\n\n\
+        Raises:\n    HTTPException: 429 when the resend budget for this IP or address\
+        \ is\n        exhausted."
+      operationId: resend_verification_api_v1_auth_resend_verification_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailVerificationResendRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
                 additionalProperties:
                   type: string
                 type: object
-                title: Response Verify Email Api V1 Auth Verify Email Post
+                title: Response Resend Verification Api V1 Auth Resend Verification
+                  Post
         '422':
           description: Validation Error
           content:
@@ -137,7 +183,9 @@ paths:
       description: "Login to get an access token using form data (required for OAuth2\
         \ flow).\n\nArgs:\n    request: The incoming request object.\n    form_data:\
         \ OAuth2 password request form.\n\nReturns:\n    Access token.\n\nRaises:\n\
-        \    HTTPException: If the username or password is incorrect."
+        \    HTTPException: If the username or password is incorrect, or 403\n   \
+        \     ``email_not_verified`` when the deployment requires a verified\n   \
+        \     address and this password user has not verified one yet."
       operationId: login_form_api_v1_auth_token_post
       requestBody:
         content:
@@ -166,7 +214,9 @@ paths:
       description: "Login to get an access token using JSON data.\n\nArgs:\n    http_request:\
         \ The incoming HTTP request object.\n    request: Login request with username\
         \ and password.\n\nReturns:\n    Access token.\n\nRaises:\n    HTTPException:\
-        \ If the username or password is incorrect."
+        \ If the username or password is incorrect, or 403\n        ``email_not_verified``\
+        \ when the deployment requires a verified\n        address and this password\
+        \ user has not verified one yet."
       operationId: login_json_api_v1_auth_token_json_post
       requestBody:
         content:
@@ -623,7 +673,9 @@ paths:
       summary: Complete Onboarding
       description: 'Completes the onboarding for a new user created via Stripe checkout.
 
-        Sets the password and updates the username.'
+        Sets the password, and the username and display name if they changed,
+
+        and marks the address verified (Stripe charged it).'
       operationId: complete_onboarding_api_v1_auth_complete_onboarding_post
       requestBody:
         content:
@@ -17382,6 +17434,17 @@ components:
       - token
       title: EmailVerificationRequest
       description: Model for email verification requests.
+    EmailVerificationResendRequest:
+      properties:
+        email:
+          type: string
+          format: email
+          title: Email
+      type: object
+      required:
+      - email
+      title: EmailVerificationResendRequest
+      description: Model for asking for another verification email.
     EmbeddingRawDataItem:
       properties:
         issue_id:
@@ -22553,6 +22616,11 @@ components:
         password:
           type: string
           title: Password
+        full_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Full Name
       type: object
       required:
       - email

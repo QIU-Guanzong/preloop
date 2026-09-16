@@ -400,6 +400,14 @@ environment:
   refreshTokenExpireDays: 7
   # Absolute session cap in days from the original login (MAX_SESSION_DAYS).
   maxSessionDays: 30
+  # Require a verified email address before a password user may sign in
+  # (REQUIRE_EMAIL_VERIFICATION). False is today's behaviour: an unverified
+  # user signs in normally. With true, login and token refresh answer 403
+  # with code 'email_not_verified' and the login page offers a resend; only
+  # local password users are gated, since OAuth/SSO users and users created
+  # from a completed checkout are verified by construction. Turn it on only
+  # after verifying or backfilling existing users, or they are locked out.
+  requireEmailVerification: false
 
 # Configuration for external APIs
 config:

@@ -342,6 +342,19 @@ class Settings(BaseSettings):
             "exists."
         ),
     )
+    require_email_verification: bool = Field(
+        False,
+        description=(
+            "Require a verified email address before a password user may "
+            "sign in (REQUIRE_EMAIL_VERIFICATION). Default false, which is "
+            "today's behaviour: an unverified user signs in normally. When "
+            "true, login and refresh answer 403 with code "
+            "'email_not_verified' until the address is verified, and the "
+            "login page offers a resend. Only password (local) users are "
+            "gated: OAuth/SSO users and users created from a completed "
+            "checkout are verified by construction."
+        ),
+    )
     disable_rbac: bool = Field(
         False,
         description=(
@@ -1471,6 +1484,14 @@ class Settings(BaseSettings):
             "yes",
         )
         bootstrap_token = os.getenv("PRELOOP_BOOTSTRAP_TOKEN", "")
+        require_email_verification = os.getenv(
+            "REQUIRE_EMAIL_VERIFICATION", "false"
+        ).lower() in (
+            "true",
+            "1",
+            "t",
+            "yes",
+        )
 
         # GitHub App OAuth settings (SaaS only)
         github_app = GitHubAppSettings(
@@ -1591,6 +1612,7 @@ class Settings(BaseSettings):
             PROMPTS_FILE=prompts_file,
             registration_enabled=registration_enabled,
             bootstrap_token=bootstrap_token,
+            require_email_verification=require_email_verification,
             disable_rbac=disable_rbac,
             database=database,
             security=security,

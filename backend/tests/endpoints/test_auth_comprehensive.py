@@ -807,6 +807,75 @@ class TestOnboardingFlows:
         assert "refresh_token" in data
         assert data["token_type"] == "bearer"
 
+    def test_complete_onboarding_takes_the_name_and_trusts_the_address(
+        self, db_session_mock
+    ):
+        """The welcome page collects a name; the address needs no verifying.
+
+        Only a completed Stripe checkout reaches this endpoint (it requires
+        the NEEDS_RESET placeholder password), and the payment provider
+        charged the address, so holding the new customer at a verification
+        email would be a step with no purpose.
+        """
+        mock_user = MagicMock(spec=User)
+        mock_user.id = uuid.uuid4()
+        mock_user.username = "tempuser123"
+        mock_user.email = "test@example.com"
+        mock_user.hashed_password = "NEEDS_RESET"
+        mock_user.email_verified = False
+
+        with patch("preloop.api.auth.router.crud_user") as mock_crud:
+            mock_crud.get_by_email.return_value = mock_user
+            mock_crud.get_by_username.return_value = None
+
+            response = client.post(
+                "/auth/complete-onboarding",
+                json={
+                    "email": "test@example.com",
+                    "username": "newusername",
+                    "password": "newsecurepassword123",
+                    "full_name": "  Bobbie Tables  ",
+                },
+            )
+
+            assert response.status_code == 200
+            updates = mock_crud.update.call_args.kwargs["obj_in"]
+
+        assert updates["full_name"] == "Bobbie Tables"
+        assert updates["email_verified"] is True
+        assert updates["username"] == "newusername"
+        assert updates["hashed_password"] != "NEEDS_RESET"
+
+    def test_complete_onboarding_keeps_the_name_when_none_is_sent(
+        self, db_session_mock
+    ):
+        """An older client sends no name, and nothing should be overwritten."""
+        mock_user = MagicMock(spec=User)
+        mock_user.id = uuid.uuid4()
+        mock_user.username = "tempuser123"
+        mock_user.email = "test@example.com"
+        mock_user.hashed_password = "NEEDS_RESET"
+        mock_user.email_verified = True
+
+        with patch("preloop.api.auth.router.crud_user") as mock_crud:
+            mock_crud.get_by_email.return_value = mock_user
+            mock_crud.get_by_username.return_value = None
+
+            response = client.post(
+                "/auth/complete-onboarding",
+                json={
+                    "email": "test@example.com",
+                    "username": "tempuser123",
+                    "password": "newsecurepassword123",
+                },
+            )
+
+            assert response.status_code == 200
+            updates = mock_crud.update.call_args.kwargs["obj_in"]
+
+        assert "full_name" not in updates
+        assert "email_verified" not in updates
+
     def test_complete_onboarding_user_not_found(self, db_session_mock):
         """Test onboarding fails when user not found."""
         with patch("preloop.api.auth.router.crud_user") as mock_crud:
@@ -931,7 +1000,9 @@ class TestEmailVerification:
 
         assert response.status_code == 200
         assert "Email verified successfully" in response.json()["message"]
-        assert mock_user.email_verified is True
+        # Written through the CRUD layer, which is the only path allowed to
+        # touch a row (and the only one the capacity hooks see).
+        assert mock_crud.update.call_args.kwargs["obj_in"] == {"email_verified": True}
 
     def test_verify_email_invalid_token(self, db_session_mock):
         """Test email verification with invalid token."""

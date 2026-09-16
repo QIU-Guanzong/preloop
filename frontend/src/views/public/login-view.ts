@@ -1,7 +1,12 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { Router } from '../../router';
-import { post, getFeatures } from '../../api';
+import {
+  ApiError,
+  post,
+  getFeatures,
+  resendVerificationEmail,
+} from '../../api';
 import { formStyles } from '../../styles/form-styles';
 import { getBrandConfig } from '../../brand-config';
 import '@shoelace-style/shoelace/dist/components/input/input.js';
@@ -34,6 +39,18 @@ export class LoginView extends LitElement {
   @state()
   private passkeysEnabled = false;
 
+  /**
+   * The address to resend a verification link to, set only when the server
+   * refused this sign-in with `email_not_verified`. Empty the rest of the
+   * time, so the resend action does not exist on an instance that does not
+   * require verification (that is every instance by default).
+   */
+  @state()
+  private unverifiedEmail = '';
+
+  @state()
+  private resending = false;
+
   static styles = [
     formStyles,
     css`
@@ -45,6 +62,12 @@ export class LoginView extends LitElement {
         margin-bottom: 1rem;
         border-radius: 0.25rem;
         text-align: center;
+      }
+
+      /* The resend action sits inside the refusal it answers, so there is no
+         question about which message it belongs to. */
+      .resend-row {
+        margin-top: 0.75rem;
       }
 
       .oauth-section {
@@ -193,7 +216,48 @@ export class LoginView extends LitElement {
       } else {
         this.error = 'Invalid username or password';
       }
+      // The password was right; the address is not verified yet. Say so and
+      // offer the one action that fixes it, instead of leaving the person
+      // retyping a password that already works.
+      if (error instanceof ApiError && error.code === 'email_not_verified') {
+        this.unverifiedEmail = this._resendTarget(error, username);
+      } else {
+        this.unverifiedEmail = '';
+      }
       console.error('Sign in failed', error);
+    }
+  }
+
+  /**
+   * Where to send the new link.
+   *
+   * The server echoes the account's address on the refusal, which is the
+   * reliable answer: the sign-in field may hold a username. Falling back to
+   * what was typed still works when it was an address.
+   */
+  private _resendTarget(error: ApiError, typed: string): string {
+    const fromServer = error.detail?.email;
+    if (typeof fromServer === 'string' && fromServer.trim()) {
+      return fromServer.trim();
+    }
+    return typed.includes('@') ? typed : '';
+  }
+
+  private async _handleResend() {
+    if (!this.unverifiedEmail || this.resending) return;
+    this.resending = true;
+    try {
+      this.successMessage = await resendVerificationEmail(this.unverifiedEmail);
+      this.error = '';
+      this.unverifiedEmail = '';
+    } catch (error) {
+      // Includes the rate limit: the server's sentence already says to wait.
+      this.error =
+        error instanceof Error
+          ? error.message
+          : 'Could not send another verification email. Try again shortly.';
+    } finally {
+      this.resending = false;
     }
   }
 
@@ -258,7 +322,24 @@ export class LoginView extends LitElement {
           }
           ${
             this.error
-              ? html`<div class="error-message">${this.error}</div>`
+              ? html`<div class="error-message">
+                  ${this.error}
+                  ${
+                    this.unverifiedEmail
+                      ? html`<div class="resend-row">
+                          <sl-button
+                            id="resend-verification"
+                            size="small"
+                            variant="default"
+                            ?loading=${this.resending}
+                            @click=${this._handleResend}
+                          >
+                            Send a new verification email
+                          </sl-button>
+                        </div>`
+                      : nothing
+                  }
+                </div>`
               : ''
           }
           ${this._renderOAuthButtons()}

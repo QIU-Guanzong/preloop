@@ -360,6 +360,7 @@ helm uninstall preloop
 | `environment.jwtSecret`        | JWT secret key                                        | `change-this-in-production` |
 | `environment.jwtAlgorithm`     | JWT algorithm                                         | `HS256`     |
 | `environment.jwtExpireMinutes` | JWT expiration time in minutes                        | `60`        |
+| `environment.requireEmailVerification` | Require a verified email before a password user may sign in (`REQUIRE_EMAIL_VERIFICATION`) | `false` |
 | `environment.logLevel`         | Log level                                             | `INFO`      |
 | `environment.logFormat`        | Log format                                            | `json`      |
 | `environment.skipExecutionRecovery` | Skip recovering orphaned executions on startup  | `false`     |

@@ -12,6 +12,12 @@ import '../../components/logo-component';
 export class WelcomeView extends LitElement {
   @state() private _username = '';
   @state() private _email = '';
+  /**
+   * Display name. Stripe may already have one from the card details, in which
+   * case this is prefilled and the person only confirms it. It stays editable:
+   * the name on a card is not always the name someone works under.
+   */
+  @state() private _fullName = '';
   @state() private _orgName = '';
   @state() private _needsPassword = true;
   @state() private _error = '';
@@ -23,6 +29,7 @@ export class WelcomeView extends LitElement {
     const urlParams = new URLSearchParams(window.location.search);
     this._username = urlParams.get('username') || '';
     this._email = urlParams.get('email') || '';
+    this._fullName = urlParams.get('full_name') || '';
     this._needsPassword = urlParams.get('needs_password') !== 'false';
 
     if (!this._email) {
@@ -127,6 +134,7 @@ export class WelcomeView extends LitElement {
             email: this._email,
             username: this._username,
             password: password,
+            full_name: this._fullName.trim() || null,
           }),
         }
       );
@@ -224,6 +232,16 @@ export class WelcomeView extends LitElement {
                         value=${this._email}
                         readonly
                         disabled
+                        help-text="Confirmed during checkout, so there is nothing to verify."
+                      ></sl-input>
+                    </div>
+                    <div class="form-group">
+                      <sl-input
+                        id="full-name"
+                        label="Your name"
+                        value=${this._fullName}
+                        @sl-change=${(e: any) =>
+                          (this._fullName = e.target.value)}
                       ></sl-input>
                     </div>
                     <div class="form-group">

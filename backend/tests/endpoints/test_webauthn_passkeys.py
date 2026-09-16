@@ -344,6 +344,91 @@ class TestAuthenticationCeremony:
             )
         assert response.status_code == 401
 
+    def test_verify_respects_required_email_verification(
+        self, db_session_mock, mock_user
+    ):
+        """A passkey must not be a way around REQUIRE_EMAIL_VERIFICATION.
+
+        The gate belongs wherever tokens are minted, and this endpoint mints
+        them, so an instance that requires a verified address refuses here
+        with the same code the login page already handles.
+        """
+        from preloop.config import settings
+
+        challenge_token = _issue_challenge_token(b"auth-chal", "authenticate")
+        mock_user.email_verified = False
+        mock_user.user_source = "local"
+        cred = MagicMock()
+        cred.user_id = mock_user.id
+        cred.public_key = _b64url(b"public-key-bytes")
+        cred.sign_count = 5
+
+        verification = MagicMock()
+        verification.new_sign_count = 6
+
+        with (
+            patch.object(settings, "require_email_verification", True),
+            patch(
+                "preloop.api.auth.webauthn_router.crud_webauthn_credential"
+            ) as mock_crud,
+            patch(
+                "preloop.api.auth.webauthn_router.verify_authentication_response",
+                return_value=verification,
+            ),
+            patch("preloop.api.auth.webauthn_router.crud_user") as mock_crud_user,
+        ):
+            mock_crud.get_by_credential_id.return_value = cred
+            mock_crud_user.get.return_value = mock_user
+
+            response = client.post(
+                "/auth/webauthn/authenticate/verify",
+                json={
+                    "credential": {"id": "abc", "rawId": _b64url(b"cred-id")},
+                    "challenge_token": challenge_token,
+                },
+            )
+
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "email_not_verified"
+
+    def test_verify_issues_tokens_for_unverified_user_by_default(
+        self, db_session_mock, mock_user
+    ):
+        """The OSS default is unchanged: an unverified address signs in."""
+        challenge_token = _issue_challenge_token(b"auth-chal", "authenticate")
+        mock_user.email_verified = False
+        mock_user.user_source = "local"
+        cred = MagicMock()
+        cred.user_id = mock_user.id
+        cred.public_key = _b64url(b"public-key-bytes")
+        cred.sign_count = 5
+
+        verification = MagicMock()
+        verification.new_sign_count = 6
+
+        with (
+            patch(
+                "preloop.api.auth.webauthn_router.crud_webauthn_credential"
+            ) as mock_crud,
+            patch(
+                "preloop.api.auth.webauthn_router.verify_authentication_response",
+                return_value=verification,
+            ),
+            patch("preloop.api.auth.webauthn_router.crud_user") as mock_crud_user,
+        ):
+            mock_crud.get_by_credential_id.return_value = cred
+            mock_crud_user.get.return_value = mock_user
+
+            response = client.post(
+                "/auth/webauthn/authenticate/verify",
+                json={
+                    "credential": {"id": "abc", "rawId": _b64url(b"cred-id")},
+                    "challenge_token": challenge_token,
+                },
+            )
+
+        assert response.status_code == 200
+
     def test_stale_challenge_rejected(self, db_session_mock):
         """An expired challenge token is rejected."""
         import jwt
