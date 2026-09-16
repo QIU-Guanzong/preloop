@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `run-flow` composite GitHub Action (`.github/actions/run-flow`) and a
+  guide, `docs/guide/flows/github-actions.md`. The action installs a
+  pinned CLI, triggers a flow with the payload piped through stdin, and
+  fails the job on the execution's verdict, writing `execution-id`,
+  `execution-url` and `status` outputs first so a later step can still
+  post the link. With `mode: runner` it starts a one-shot ephemeral
+  runner on the job's own VM, pins the execution to it with a per-run
+  label, and stops it on the way out. The guide covers both modes, token
+  setup, the double-review trap when a webhook already drives the same
+  flow, and what changes on self-hosted GitHub runners.
+
 - One-shot ephemeral runner mode for CI: `preloop runner fg --once
   --ephemeral [--labels ...] [--wait-for-job 15m]` registers a runner that
   belongs to a single process, runs exactly one execution, prints its
