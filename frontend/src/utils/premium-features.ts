@@ -52,11 +52,10 @@ export function premiumFeatureLabel(feature: string): string {
  * Where "see the plans" goes.
  *
  * One constant because three surfaces (the upgrade dialog, the account page's
- * "Choose a plan", any future nudge) have to agree on it, and because the
- * dedicated plan page lands in a later change: moving the page means editing
- * this line, not hunting for string literals.
+ * "Choose a plan", any future nudge) have to agree on it: moving the page
+ * means editing this line, not hunting for string literals.
  */
-export const PLAN_PAGE_PATH = '/console/settings/account';
+export const PLAN_PAGE_PATH = '/console/settings/plan';
 
 /**
  * The plan page URL for a gated feature.

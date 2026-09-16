@@ -246,4 +246,33 @@ describe('PricingCard', () => {
       'Contact us'
     );
   });
+
+  it('lets a page that knows the account rewrite the button', async () => {
+    // The public page prints "Get Pro". The console knows this account is
+    // already on Pro, and a card that offers to sell it again is a lie.
+    const el = (await fixture(
+      html`<pricing-card
+        .plan=${BASE}
+        .ctaLabel=${'Your plan'}
+        .ctaDisabled=${true}
+        .ctaNote=${'Renews on March 1, 2030.'}
+      ></pricing-card>`
+    )) as PricingCard;
+    await el.updateComplete;
+
+    const button = el.shadowRoot?.querySelector('sl-button.cta');
+    expect(button?.textContent?.trim()).to.equal('Your plan');
+    expect(button?.hasAttribute('disabled')).to.equal(true);
+    expect(
+      el.shadowRoot?.querySelector('.cta-note')?.textContent?.trim()
+    ).to.equal('Renews on March 1, 2030.');
+  });
+
+  it('keeps its own label and stays enabled when no page overrides it', async () => {
+    const el = await renderCard(BASE);
+    const button = el.shadowRoot?.querySelector('sl-button.cta');
+    expect(button?.textContent?.trim()).to.equal('Get Pro');
+    expect(button?.hasAttribute('disabled')).to.equal(false);
+    expect(el.shadowRoot?.querySelector('.cta-note')).to.not.exist;
+  });
 });

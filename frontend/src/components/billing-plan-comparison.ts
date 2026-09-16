@@ -76,6 +76,11 @@ export class BillingPlanComparison extends LitElement {
   @state() private pendingConfirmation: string | null = null;
   @state() private operatorRecovery = false;
   private recoveryKey: string | null = null;
+  /** A plan asked for from outside while the options were still loading. */
+  private pendingSelection: {
+    plan: string;
+    interval: 'month' | 'year';
+  } | null = null;
   private revision = 0;
   private expiryTimer?: number;
 
@@ -93,6 +98,28 @@ export class BillingPlanComparison extends LitElement {
    */
   openPicker(): void {
     this.changing = true;
+  }
+
+  /**
+   * Open the picker on one named plan: the plan page's card buttons.
+   *
+   * The cards state the offer and nothing else. The price, the consequences
+   * and the confirmation stay here, in the one place that holds a server
+   * quote, so a card click selects a plan rather than starting a change.
+   * Calling it before the options have loaded is harmless: the plan is kept
+   * and `refresh` discards it only if the account cannot move there.
+   */
+  startChange(planId: string, interval?: 'month' | 'year'): void {
+    this.changing = true;
+    const wanted = interval ?? this.interval;
+    if (this.loading) {
+      // The options are still arriving. Selecting now would cancel that load
+      // in flight, so record the request and let `refresh` apply it once it
+      // knows whether this account can move to that plan at all.
+      this.pendingSelection = { plan: planId, interval: wanted };
+      return;
+    }
+    this.choose(planId, wanted);
   }
 
   disconnectedCallback(): void {
@@ -304,6 +331,11 @@ export class BillingPlanComparison extends LitElement {
           this.changing = true;
       }
       this.refreshRequired = false;
+      if (this.pendingSelection) {
+        this.selectedPlan = this.pendingSelection.plan;
+        this.interval = this.pendingSelection.interval;
+        this.pendingSelection = null;
+      }
       if (
         !options.plans.some(
           (p) =>

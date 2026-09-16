@@ -404,6 +404,37 @@ describe('Billing plan comparison', () => {
     });
   });
 
+  it('opens on the plan a card asked for', async () => {
+    // The plan page's cards state the offer; the quote and the confirmation
+    // stay here, so a card click selects a plan rather than buying one.
+    data.plans.unshift(
+      plan('free', { name: 'Free', price_monthly: 0, price_annually: 0 })
+    );
+    const el = await mount();
+    el.startChange('pro', 'year');
+    await el.updateComplete;
+
+    expect((el as any).changing).to.be.true;
+    expect((el as any).selectedPlan).to.equal('pro');
+    expect((el as any).interval).to.equal('year');
+    expect(calls('/plan-change-preview')).to.have.length(0);
+  });
+
+  it('waits for the options before applying a plan asked for during the load', async () => {
+    const el = await fixture<BillingPlanComparison>(
+      html`<billing-plan-comparison></billing-plan-comparison>`
+    );
+    // Asked while the first read is still in flight. Selecting now would
+    // cancel that read and leave the section loading forever.
+    el.startChange('pro', 'year');
+    await waitUntil(() => !(el as any).loading, 'options never arrived');
+    await el.updateComplete;
+
+    expect((el as any).selectedPlan).to.equal('pro');
+    expect((el as any).interval).to.equal('year');
+    expect(el.shadowRoot!.querySelector('[data-testid="plan"]')).to.exist;
+  });
+
   it('opens the picker for the account page when Free has no portal to manage', async () => {
     data.current_subscription = null;
     data.current_plan = plan('free', {

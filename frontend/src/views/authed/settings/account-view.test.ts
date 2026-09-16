@@ -6,6 +6,7 @@ import {
   BILLING_SUBSCRIPTION_CHANGED,
   invalidateApiCaches,
 } from '../../../api';
+import { Router } from '../../../router';
 import './account-view';
 import type { AccountView } from './account-view';
 
@@ -232,30 +233,23 @@ describe('AccountView', () => {
     invalidateApiCaches();
   });
 
-  it('includes the operator recovery reason in the deactivation request', async () => {
-    fetchStub = createFetchStub();
+  it('leaves the emergency controls to the page that owns them', async () => {
+    // The kill switch moved to /console/settings/emergency. A page that asks
+    // about a subscription is not where an operator halts an account.
+    fetchStub = createFetchStub({ billing: true });
     const element = await fixture<AccountView>(
       html`<account-view></account-view>`
     );
-    await waitUntil(() => !(element as any)._loading);
-    (element as any)._haltStatus = {
-      active: true,
-      scopes: [{ scope: 'flows', reason: 'Inspect active runtimes' }],
-    };
+    await waitUntil(() => !(element as any)._loading, 'load');
     await element.updateComplete;
+
+    expect(copy(element)).to.not.contain('Emergency Controls');
+    expect(copy(element)).to.not.contain('Block new agent requests');
     expect(
-      element.shadowRoot?.querySelectorAll('sl-input[label="Recovery reason"]')
-    ).to.have.length(1);
-    (element as any)._haltReason = 'Runtime termination verified';
-    await (element as any)._handleResume(['flows']);
-    const request = fetchStub
-      .getCalls()
-      .find((call) => String(call.args[0]).includes('/kill-switch/deactivate'));
-    expect(request).to.exist;
-    expect(JSON.parse(request!.args[1].body)).to.deep.equal({
-      scopes: ['flows'],
-      reason: 'Runtime termination verified',
-    });
+      fetchStub
+        .getCalls()
+        .some((call) => String(call.args[0]).includes('/kill-switch'))
+    ).to.equal(false);
   });
 
   it('renders organization details after load (non-billing edition)', async () => {
@@ -312,7 +306,7 @@ describe('AccountView', () => {
     expect(choose?.hasAttribute('disabled')).to.be.false;
   });
 
-  it('opens the plan picker where the plans already are', async () => {
+  it('sends "Choose a plan" to the plan page', async () => {
     fetchStub = createFetchStub({ billing: true, freeTier: true });
     const element = (await fixture(
       html`<account-view></account-view>`
@@ -321,21 +315,65 @@ describe('AccountView', () => {
     await waitUntil(() => !(element as any)._loading, 'load');
     await element.updateComplete;
 
-    const comparison = element.shadowRoot?.querySelector(
-      'billing-plan-comparison'
-    ) as HTMLElement & { openPicker?: () => void };
-    expect(comparison, 'expected the plan section').to.exist;
-    const openPicker = sinon.stub(comparison, 'openPicker');
-    const scroll = sinon.stub(comparison, 'scrollIntoView');
-    (
-      element.shadowRoot?.querySelector(
-        '[data-testid="choose-a-plan"]'
-      ) as HTMLElement
-    ).click();
+    const go = sinon.stub(Router, 'go').returns(true);
+    try {
+      (
+        element.shadowRoot?.querySelector(
+          '[data-testid="choose-a-plan"]'
+        ) as HTMLElement
+      ).click();
+      await element.updateComplete;
+      expect(go.lastCall.args[0]).to.equal('/console/settings/plan');
+    } finally {
+      go.restore();
+    }
+  });
+
+  it('offers a subscribed account the plan page beside the portal', async () => {
+    fetchStub = createFetchStub({ billing: true });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+
+    await waitUntil(() => !(element as any)._loading, 'load');
     await element.updateComplete;
 
-    expect(openPicker, 'picker opened').to.have.been.calledOnce;
-    expect(scroll, 'brought into view').to.have.been.calledOnce;
+    const go = sinon.stub(Router, 'go').returns(true);
+    try {
+      (
+        element.shadowRoot?.querySelector(
+          '[data-testid="view-plans"]'
+        ) as HTMLElement
+      ).click();
+      await element.updateComplete;
+      expect(go.lastCall.args[0]).to.equal('/console/settings/plan');
+    } finally {
+      go.restore();
+    }
+  });
+
+  it('falls back to a full page load where no router claimed the path', async () => {
+    fetchStub = createFetchStub({ billing: true, freeTier: true });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const go = sinon.stub(Router, 'go').returns(false);
+    const navigate = sinon.stub(element as any, '_navigate');
+    try {
+      (
+        element.shadowRoot?.querySelector(
+          '[data-testid="choose-a-plan"]'
+        ) as HTMLElement
+      ).click();
+      await element.updateComplete;
+      expect(navigate).to.have.been.calledWith('/console/settings/plan');
+    } finally {
+      go.restore();
+    }
   });
 
   it('keeps the portal button for a subscription, disabled only without the permission', async () => {
@@ -635,7 +673,9 @@ describe('AccountView', () => {
     expect(element.shadowRoot?.querySelector('.plans-grid')).to.not.exist;
   });
 
-  it('uses the explicit comparison panel instead of an immediate upgrade grid', async () => {
+  it('keeps the plan picker off the account page', async () => {
+    // The picker, the quote and the confirmation live on the plan page now.
+    // This page states which plan is current and links to the rest.
     fetchStub = createFetchStub({ billing: true });
     const element = (await fixture(
       html`<account-view></account-view>`
@@ -644,9 +684,11 @@ describe('AccountView', () => {
     await waitUntil(() => !(element as any)._loading, 'load');
     await element.updateComplete;
 
-    expect(element.shadowRoot?.querySelector('billing-plan-comparison')).to
+    expect(element.shadowRoot?.querySelector('billing-plan-comparison')).to.not
       .exist;
     expect(element.shadowRoot?.querySelector('pricing-card')).not.to.exist;
+    expect(element.shadowRoot?.querySelector('[data-testid="view-plans"]')).to
+      .exist;
   });
 
   it('never offers an opt-in for extra usage that does not exist (D13)', async () => {
@@ -958,7 +1000,9 @@ describe('AccountView', () => {
 
     expect(copy(element)).to.not.contain('included users');
   });
-  it('explains grandfathering without automatically changing a legacy plan', async () => {
+  it('names the legacy plan a per-seat account is on', async () => {
+    // The panel that explains grandfathering moved to the plan page; what
+    // this page owes a legacy account is the name of the plan it holds.
     fetchStub = createFetchStub({
       billing: true,
       subscription: {
@@ -966,31 +1010,15 @@ describe('AccountView', () => {
         status: 'active',
         current_period_end: '2026-12-31T00:00:00Z',
       },
+      summaryPlan: { id: 'teams', name: 'Legacy Teams', features: {} },
+      effectivePlan: { id: 'teams', name: 'Legacy Teams' },
     });
     const element = (await fixture(
       html`<account-view></account-view>`
     )) as AccountView;
     await waitUntil(() => !(element as any)._loading, 'load');
     await element.updateComplete;
-    const panel = element.shadowRoot!.querySelector(
-      'billing-plan-comparison'
-    ) as any;
-    await waitUntil(() => !panel.loading);
-    await panel.updateComplete;
-    const collapsed = (panel.shadowRoot.textContent ?? '').replace(/\s+/g, ' ');
-    // Collapsed, the panel states the plan and offers one action.
-    expect(collapsed).to.contain('Legacy Teams');
-    expect(collapsed).to.not.contain('What changes');
-    expect(collapsed).to.not.contain('Would this plan cover your usage?');
-    panel.shadowRoot.querySelector('[data-testid="change-plan"]').click();
-    await panel.updateComplete;
-    const comparison = (panel.shadowRoot.textContent ?? '').replace(
-      /\s+/g,
-      ' '
-    );
-    expect(comparison).to.contain('Legacy Teams');
-    expect(comparison).to.contain('$29.00 per user');
-    expect(comparison).to.contain('grandfathered per-user rate stays');
+    expect(copy(element)).to.contain('Legacy Teams');
     expect(
       fetchStub
         .getCalls()
@@ -1070,28 +1098,30 @@ describe('AccountView', () => {
     expect(summaryGets()).to.equal(before + 1);
   });
 
-  it('ignores a composed child event so the template binding is the only extra fetch', async () => {
+  it('ignores a composed child event: only a window dispatch refreshes', async () => {
     fetchStub = createFetchStub({ billing: true });
     const element = await fixture<AccountView>(
       html`<account-view></account-view>`
     );
     await waitUntil(() => !(element as any)._loading, 'load');
     await element.updateComplete;
-    const comparison = element.shadowRoot!.querySelector(
-      'billing-plan-comparison'
-    );
-    expect(comparison, 'expected the plan comparison').to.exist;
+    const card = element.shadowRoot!.querySelector('.current-plan');
+    expect(card, 'expected the current plan card').to.exist;
     const before = summaryGets();
 
-    comparison!.dispatchEvent(
+    card!.dispatchEvent(
       new CustomEvent(BILLING_SUBSCRIPTION_CHANGED, {
         bubbles: true,
         composed: true,
       })
     );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(summaryGets(), 'a child event fetches nothing').to.equal(before);
+
+    window.dispatchEvent(new Event(BILLING_SUBSCRIPTION_CHANGED));
     await waitUntil(
       () => summaryGets() === before + 1,
-      'template binding should fetch summary once'
+      'the window dispatch should fetch summary once'
     );
     expect(summaryGets()).to.equal(before + 1);
   });

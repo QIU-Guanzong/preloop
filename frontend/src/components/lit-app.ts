@@ -388,6 +388,8 @@ export class LitApp extends LitElement {
           },
           { path: 'settings/appearance', component: 'appearance-view' },
           { path: 'settings/account', component: 'account-view' },
+          { path: 'settings/plan', component: 'plan-view' },
+          { path: 'settings/emergency', component: 'emergency-view' },
           { path: 'settings/users', component: 'user-management-view' },
           { path: 'settings/teams', component: 'team-management-view' },
           {
@@ -401,11 +403,11 @@ export class LitApp extends LitElement {
           {
             // No 'pricing-view' element exists (the public page is
             // 'public-pricing-view'), so this route rendered a blank frame.
-            // Plans live on the account page, where the current subscription
-            // is shown next to them.
+            // The plan page shows the same cards as the public one, with the
+            // account's current plan marked on them.
             path: 'pricing',
             action: (_context, commands) =>
-              commands.redirect('/console/settings/account'),
+              commands.redirect('/console/settings/plan'),
           },
           { path: 'approvals', component: 'approvals-view' },
           { path: 'approval/:requestId', component: 'approval-view' },

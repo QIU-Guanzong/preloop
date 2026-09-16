@@ -38,6 +38,19 @@ export class PricingCard extends LitElement {
     (value: any) => string | null
   > = {};
   @property({ type: Boolean }) dark = false;
+  /**
+   * What the button says, where the page knows better than the card.
+   *
+   * The public page knows only the price, so the card names itself ("Get
+   * Pro"). The console page knows which plan the account is on and whether a
+   * change is an upgrade, a downgrade or nothing at all, so it says that
+   * instead. Empty keeps the card's own label.
+   */
+  @property({ type: String }) ctaLabel = '';
+  /** The account's current plan is not something to buy again. */
+  @property({ type: Boolean }) ctaDisabled = false;
+  /** One short line under the button: when a change applies, or why not. */
+  @property({ type: String }) ctaNote = '';
 
   /**
    * Render the one headline number.
@@ -315,6 +328,20 @@ export class PricingCard extends LitElement {
       font-weight: 600;
     }
 
+    /* The line under the button: when the change applies, in the words of
+       whichever page owns the decision. */
+    .cta-note {
+      margin: 0.5rem 0 0 0;
+      text-align: center;
+      font-size: 0.8rem;
+      line-height: 1.35;
+      color: var(--sl-color-text-secondary);
+    }
+
+    .plan-card.popular .cta-note {
+      color: rgba(255, 255, 255, 0.85);
+    }
+
     /* Default outlined button style */
     .cta::part(base) {
       background-color: transparent;
@@ -343,6 +370,7 @@ export class PricingCard extends LitElement {
 
   /** Default CTA label when the plan config does not supply one. */
   private _ctaLabel(): string {
+    if (this.ctaLabel) return this.ctaLabel;
     if (this.plan.cta_text) return this.plan.cta_text;
     switch (this.plan.id) {
       case 'enterprise':
@@ -423,10 +451,12 @@ export class PricingCard extends LitElement {
           class="cta"
           size="large"
           variant="default"
+          ?disabled=${this.ctaDisabled}
           @click=${this._handleSignUp}
         >
           ${this._ctaLabel()}
         </sl-button>
+        ${this.ctaNote ? html`<p class="cta-note">${this.ctaNote}</p>` : null}
       </div>
     `;
   }

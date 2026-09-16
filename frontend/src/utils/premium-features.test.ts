@@ -40,16 +40,16 @@ describe('premium features (the 402 upgrade contract)', () => {
 
   it('carries the capability to the plan page, and nothing when there is none', () => {
     expect(planPageUrl('session_titles')).to.equal(
-      '/console/settings/account?feature=ai_optimization'
+      '/console/settings/plan?feature=ai_optimization'
     );
-    expect(planPageUrl('')).to.equal('/console/settings/account');
-    expect(planPageUrl(null)).to.equal('/console/settings/account');
-    expect(planPageUrl(undefined)).to.equal('/console/settings/account');
+    expect(planPageUrl('')).to.equal('/console/settings/plan');
+    expect(planPageUrl(null)).to.equal('/console/settings/plan');
+    expect(planPageUrl(undefined)).to.equal('/console/settings/plan');
   });
 
   it('escapes what it puts in the query', () => {
     expect(planPageUrl('a b&c')).to.equal(
-      '/console/settings/account?feature=a%20b%26c'
+      '/console/settings/plan?feature=a%20b%26c'
     );
   });
 });

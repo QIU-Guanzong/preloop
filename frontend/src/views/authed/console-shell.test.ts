@@ -668,6 +668,70 @@ describe('ConsoleShell', () => {
     ).to.exist;
   });
 
+  it('offers the plan page only where something is sold', async () => {
+    // Default stub: no billing plugin, so the console sells nothing and the
+    // link would lead to a page with nothing to say.
+    const el = (await fixture(
+      html`<console-shell></console-shell>`
+    )) as ConsoleShell;
+    await waitUntil(
+      () =>
+        el.shadowRoot?.querySelector('a[href="/console/settings/api-keys"]') !==
+        null,
+      'Settings links did not render'
+    );
+
+    expect(el.shadowRoot?.querySelector('a[href="/console/settings/plan"]')).to
+      .not.exist;
+    // The kill switch is core, so its page is offered either way.
+    expect(
+      el.shadowRoot?.querySelector('a[href="/console/settings/emergency"]')
+    ).to.exist;
+  });
+
+  it('shows the plan page when the billing plugin is present', async () => {
+    invalidateApiCaches();
+    fetchStub.callsFake(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.endsWith('/api/v1/features')) {
+        return new Response(
+          JSON.stringify({
+            plugins: ['billing'],
+            features: { billing: true, user_management: true },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.endsWith('/api/v1/auth/users/me')) {
+        return new Response(
+          JSON.stringify({
+            username: 'test',
+            email: 'test@example.com',
+            email_verified: true,
+            permissions: null,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const el = (await fixture(
+      html`<console-shell></console-shell>`
+    )) as ConsoleShell;
+    await waitUntil(
+      () =>
+        el.shadowRoot?.querySelector('a[href="/console/settings/plan"]') !==
+        null,
+      'Plan link did not render'
+    );
+    expect(el.shadowRoot?.querySelector('a[href="/console/settings/plan"]')).to
+      .exist;
+  });
+
   it('shows All events under Audit when audit_logs is enabled', async () => {
     invalidateApiCaches();
     fetchStub.callsFake(async (input: RequestInfo | URL) => {
@@ -920,7 +984,7 @@ describe('ConsoleShell', () => {
       // page looks the feature up in each plan's capability list, so the
       // caller-facing name would match no plan at all.
       expect(go.lastCall.args[0]).to.equal(
-        '/console/settings/account?feature=ai_optimization'
+        '/console/settings/plan?feature=ai_optimization'
       );
     });
 
@@ -932,7 +996,7 @@ describe('ConsoleShell', () => {
 
       // Reading the list is not the same act as buying the thing that was
       // refused, so this one preselects nothing.
-      expect(go.lastCall.args[0]).to.equal('/console/settings/account');
+      expect(go.lastCall.args[0]).to.equal('/console/settings/plan');
     });
 
     it('starts no checkout of its own: the plan page owns the decision', async () => {
@@ -969,7 +1033,7 @@ describe('ConsoleShell', () => {
       await el.updateComplete;
       footer(el, 'upgrade-now').click();
       await el.updateComplete;
-      expect(go.lastCall.args[0]).to.equal('/console/settings/account');
+      expect(go.lastCall.args[0]).to.equal('/console/settings/plan');
     });
 
     it('falls back to a full page load where no router is mounted', async () => {
@@ -979,7 +1043,7 @@ describe('ConsoleShell', () => {
       footer(el, 'upgrade-now').click();
       await el.updateComplete;
       expect(assign).to.have.been.calledWith(
-        '/console/settings/account?feature=price_overrides'
+        '/console/settings/plan?feature=price_overrides'
       );
     });
   });
