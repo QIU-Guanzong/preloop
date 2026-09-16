@@ -249,6 +249,39 @@ class TestReaperLease:
             first.close()
             second.close()
 
+    def test_a_commit_mid_pass_does_not_strand_the_lease(self, db_engine):
+        """Unlock must not ride a different checkout after Session.commit()."""
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        engine = create_engine(
+            db_engine.url,
+            pool_use_lifo=True,
+            pool_size=5,
+            max_overflow=10,
+        )
+        factory = sessionmaker(bind=engine)
+        first = factory()
+        second = factory()
+        extra = engine.connect()
+        try:
+            with crud_flow_execution.stale_claim_reaper_lease(
+                first, holder="worker-commit"
+            ) as leased:
+                assert leased is True
+                first.commit()
+                extra.execute(text("SELECT 1"))
+                extra.commit()
+            with crud_flow_execution.stale_claim_reaper_lease(
+                second, holder="worker-next"
+            ) as leased:
+                assert leased is True
+        finally:
+            first.close()
+            second.close()
+            extra.close()
+            engine.dispose()
+
     @pytest.mark.asyncio
     async def test_only_the_lease_holder_re_dispatches(
         self, db_session: Session, db_engine

@@ -2067,19 +2067,23 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         error: the pass runs on a timer and the holder is doing the same
         work.
 
-        A session-scoped ``pg_try_advisory_lock``, not a leased row: it is
+        A session-level ``pg_try_advisory_lock``, not a leased row: it is
         released by ``pg_advisory_unlock`` on the way out, and by Postgres
         itself if the holder's connection dies, so a crashed reaper cannot
         wedge every replica the way an expiring row lease would until its
-        deadline passed. Unlock always rolls back first: a session lock
-        survives ``ROLLBACK``, and an aborted pass would otherwise raise
-        ``PendingRollbackError`` on unlock, return the still-locked
-        connection to the pool, and starve every replica until recycle.
+        deadline passed. The lock is pinned to a dedicated checkout from
+        the bind, not the Session's connection. ``record_redispatch``
+        commits mid-pass; SQLAlchemy 2 then returns the Session checkout
+        to the pool, so unlocking on ``db`` can land on a different
+        connection, return false, and strand the lock until recycle.
+        Unlock still rolls the Session back first so an aborted pass
+        cannot raise ``PendingRollbackError`` on later Session use.
         Non-Postgres dialects (single-process dev, SQLite tests) always
         win the lease: there is no second reaper to exclude.
 
         Args:
-            db: Database session; the lock lives on its connection.
+            db: Database session for the pass. The lock lives on a
+                dedicated connection from the same bind.
             holder: Optional worker id, logged so "who is reaping?" has an
                 answer.
 
@@ -2087,47 +2091,59 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             True when this caller may run the pass.
         """
         from sqlalchemy import text
+        from sqlalchemy.engine import Engine
 
         from preloop.services.execution_reaper import STALE_CLAIM_REAPER_LOCK_KEY
 
-        bind = db.bind
-        if bind is None or bind.dialect.name != "postgresql":
+        bind = db.get_bind() if hasattr(db, "get_bind") else db.bind
+        dialect = getattr(getattr(bind, "dialect", None), "name", None)
+        if bind is None or dialect != "postgresql":
             yield True
             return
 
-        acquired = bool(
-            db.execute(
-                text("SELECT pg_try_advisory_lock(hashtextextended(:key, 0))"),
-                {"key": STALE_CLAIM_REAPER_LOCK_KEY},
-            ).scalar()
-        )
-        if not acquired:
-            logger.debug(
-                "Stale-claim reaper lease is held elsewhere; %s skips this pass",
-                holder or "this worker",
-            )
-            yield False
-            return
-        try:
-            yield True
-        finally:
-            try:
-                # A session-level advisory lock survives rollback; this only
-                # clears the aborted state a failed pass can leave so the
-                # unlock below reaches the server instead of stranding the
-                # lock on the pooled connection.
-                db.rollback()
-                db.execute(
-                    text("SELECT pg_advisory_unlock(hashtextextended(:key, 0))"),
+        engine = bind if isinstance(bind, Engine) else bind.engine
+        with engine.connect() as lock_conn:
+            acquired = bool(
+                lock_conn.execute(
+                    text("SELECT pg_try_advisory_lock(hashtextextended(:key, 0))"),
                     {"key": STALE_CLAIM_REAPER_LOCK_KEY},
+                ).scalar()
+            )
+            # Session-level lock survives commit. End autobegin so this
+            # checkout is not idle-in-transaction across the pass.
+            lock_conn.commit()
+            if not acquired:
+                logger.debug(
+                    "Stale-claim reaper lease is held elsewhere; %s skips this pass",
+                    holder or "this worker",
                 )
-                db.commit()
-            except Exception:  # noqa: BLE001 - the lock dies with the connection
-                logger.warning(
-                    "Failed to release the stale-claim reaper lease; it is "
-                    "released when this connection closes",
-                    exc_info=True,
-                )
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                try:
+                    db.rollback()
+                    released = bool(
+                        lock_conn.execute(
+                            text(
+                                "SELECT pg_advisory_unlock(hashtextextended(:key, 0))"
+                            ),
+                            {"key": STALE_CLAIM_REAPER_LOCK_KEY},
+                        ).scalar()
+                    )
+                    lock_conn.commit()
+                    if not released:
+                        logger.error(
+                            "Stale-claim reaper lease unlock returned false; "
+                            "the lock is stranded until this connection closes"
+                        )
+                except Exception:  # noqa: BLE001 - the lock dies with the connection
+                    logger.warning(
+                        "Failed to release the stale-claim reaper lease; it is "
+                        "released when this connection closes",
+                        exc_info=True,
+                    )
 
     def record_redispatch(
         self,
