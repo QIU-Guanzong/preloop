@@ -1680,17 +1680,30 @@ export class RuntimeSessionsView extends LitElement {
   /**
    * The matched sessions as list rows for the observer, so opening a snippet
    * can show a session the current list page never carried.
+   *
+   * Prefer the list summary when we already have it: that row carries the
+   * ledger the observer toolbar prints. A reconstructed identity row would
+   * render as "0 tokens · $0.00" for a session that spent real money.
    */
   private searchResultSessions(): Array<Record<string, unknown>> {
-    return (this.searchResults?.results ?? []).map((result) => ({
-      id: result.runtime_session_id,
-      session_source_type: result.session_source_type,
-      session_source_id: result.session_source_id,
-      session_reference: result.session_reference,
-      title: result.title,
-      started_at: result.started_at,
-      last_activity_at: result.last_activity_at,
-    }));
+    const listedById = new Map(
+      (this.sessions?.items ?? []).map((row) => [row.id, row])
+    );
+    return (this.searchResults?.results ?? []).map((result) => {
+      const listed = listedById.get(result.runtime_session_id);
+      if (listed) {
+        return listed as unknown as Record<string, unknown>;
+      }
+      return {
+        id: result.runtime_session_id,
+        session_source_type: result.session_source_type,
+        session_source_id: result.session_source_id,
+        session_reference: result.session_reference,
+        title: result.title,
+        started_at: result.started_at,
+        last_activity_at: result.last_activity_at,
+      };
+    });
   }
 
   private renderObserver(sessions: Array<Record<string, unknown>> | unknown[]) {

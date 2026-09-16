@@ -854,6 +854,16 @@ describe('RuntimeSessionsView', () => {
       expect(
         JSON.parse(String((request.args[1] as RequestInit).body))
       ).to.deep.include({ query: 'rollout plan', mode: 'keyword' });
+      const searchBody = JSON.parse(
+        String((request.args[1] as RequestInit).body)
+      ) as Record<string, unknown>;
+      expect(searchBody).to.not.have.property('session_source_type');
+      expect(
+        (searchBody.filters as Record<string, unknown> | undefined) || {}
+      ).to.not.have.property('session_source_type');
+      expect(
+        (searchBody.filters as Record<string, unknown> | undefined) || {}
+      ).to.not.have.property('source_kind');
       // The list endpoint never sees the query.
       expect(listCalls().length).to.equal(listsBefore);
       expect(
@@ -1131,6 +1141,27 @@ describe('RuntimeSessionsView', () => {
       expect((reloaded as any).selectedSessionId).to.equal('runtime-session-2');
       expect((reloaded as any).focusTurnId).to.equal('tool-7');
       expect(snippetButtons(reloaded)).to.have.length(2);
+    });
+
+    it('keeps list ledger numbers when a snippet opens a listed session', async () => {
+      const element = await renderedSearch();
+      snippetButtons(element)[0].click();
+      await element.updateComplete;
+
+      const observer = element.shadowRoot!.querySelector(
+        'preloop-session-observer'
+      ) as HTMLElement & { updateComplete: Promise<unknown> };
+      await observer.updateComplete;
+      await waitUntil(() => {
+        const meta = observer.shadowRoot?.querySelector('.toolbar .meta');
+        return Boolean(meta && meta.textContent?.includes('tokens'));
+      }, 'Observer toolbar never showed session ledger numbers');
+
+      const meta = observer.shadowRoot!.querySelector('.toolbar .meta')!;
+      const text = (meta.textContent || '').replace(/\s+/g, ' ').trim();
+      expect(text).to.not.equal('0 tokens · $0.00');
+      expect(text).to.contain('700 tokens');
+      expect(text).to.contain('$0.11');
     });
 
     it('restores the list behaviour when the query is emptied', async () => {

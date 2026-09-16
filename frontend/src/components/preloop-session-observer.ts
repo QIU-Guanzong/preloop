@@ -1760,6 +1760,23 @@ export class PreloopSessionObserver extends LitElement {
   }
 
   /**
+   * Whether the row carried real ledger fields, not just identity.
+   *
+   * Normalizing a reconstructed search hit fills tokens and cost with zero.
+   * The toolbar must not print that as a measured $0.00.
+   */
+  private sessionRowHasLedger(session: ObservedSession): boolean {
+    const raw = session.raw;
+    if (!raw || typeof raw !== 'object') return false;
+    const row = raw as Record<string, unknown>;
+    return (
+      row.token_usage != null ||
+      typeof row.estimated_cost === 'number' ||
+      typeof row.total_requests === 'number'
+    );
+  }
+
+  /**
    * Whether the session is over. The rule lives in the shared registry
    * (src/actions/runtime-session-actions.ts) so this toolbar and any list
    * offering End session cannot drift apart.
@@ -1829,7 +1846,7 @@ export class PreloopSessionObserver extends LitElement {
                 : nothing
             }
             ${
-              session
+              session && this.sessionRowHasLedger(session)
                 ? html`
                     <span class="meta">
                       ${formatNumber(session.tokenUsage.total_tokens)} tokens ·

@@ -83,6 +83,11 @@ const TRANSCRIPT_FILTERS: Array<{ id: TranscriptFilter; label: string }> = [
   { id: 'costly', label: 'Costly first' },
 ];
 
+// Cap on auto-paging while hunting a deep linked turn. 40 pages of the
+// observer's 25-event window is 1,000 turns: enough for a long session,
+// not enough to walk an unbounded transcript on a miss.
+const FOCUS_JUMP_MAX_PAGES = 40;
+
 // --- Unified sortable chat (turn/delta model) ---------------------------------
 //
 // Each gateway request is rendered as one "turn". Consecutive agentic requests
@@ -380,6 +385,13 @@ export class SessionReplayPanel extends LitElement {
       display: flex;
       flex-direction: column;
       gap: var(--sl-spacing-small);
+    }
+
+    /* Deep-link jump status. Meta colour, no filled box: the transcript
+       already sits on the surface, and a tinted banner would be a third rung. */
+    .focus-jump-hint {
+      color: var(--console-meta-color, var(--sl-color-neutral-600));
+      font-size: var(--console-text-meta, 13px);
     }
 
     .empty,
@@ -1565,7 +1577,12 @@ export class SessionReplayPanel extends LitElement {
     if (changed.has('replayMode')) {
       this.handleReplayModeChange();
     }
-    if (changed.has('focusEventId') || changed.has('events')) {
+    if (
+      changed.has('focusEventId') ||
+      changed.has('events') ||
+      changed.has('hasMoreEvents') ||
+      changed.has('loadingMoreEvents')
+    ) {
       this.jumpToFocusedTurn();
     }
     if (changed.has('timelineEvents') && this.replayViewActive) {
@@ -4585,6 +4602,12 @@ export class SessionReplayPanel extends LitElement {
   // who has since scrolled somewhere else.
   private jumpedFocusEventId: string | null = null;
 
+  // Auto-page requests issued while hunting for a deep linked turn. Reset
+  // when the focus id changes. Bounded so a miss cannot walk a huge session.
+  private focusJumpPageRequests = 0;
+  private focusJumpTarget: string | null = null;
+  private focusJumpRequestedForCount: number | null = null;
+
   /**
    * Resolve the deep linked turn and jump to it once.
    *
@@ -4592,6 +4615,10 @@ export class SessionReplayPanel extends LitElement {
    * call or transcript message by the activity row id, which is also the
    * gateway event id. Both are accepted; the payload's api usage id is the
    * bridge for model calls.
+   *
+   * The transcript holds one page at a time. A match past the first page is
+   * not in `events` yet, so this asks the observer for further pages until
+   * the turn appears, the session is exhausted, or the page bound is hit.
    */
   private eventMatchesFocus(event: FlowGatewayEvent, focusId: string): boolean {
     if (event.id === focusId) return true;
@@ -4607,25 +4634,79 @@ export class SessionReplayPanel extends LitElement {
     const focusId = this.focusEventId;
     if (!focusId) {
       this.jumpedFocusEventId = null;
+      this.focusJumpTarget = null;
+      this.focusJumpPageRequests = 0;
+      this.focusJumpRequestedForCount = null;
       return;
     }
+    if (this.focusJumpTarget !== focusId) {
+      this.focusJumpTarget = focusId;
+      this.focusJumpPageRequests = 0;
+      this.focusJumpRequestedForCount = null;
+    }
     if (this.jumpedFocusEventId === focusId) return;
-    const match = (this.events || []).find((event) =>
+    const events = this.events || [];
+    const match = events.find((event) =>
       this.eventMatchesFocus(event, focusId)
     );
-    if (!match) {
-      // An empty list is "not loaded yet". Once this page of events is
-      // complete and none of them is the turn, latch so later re-renders do
-      // not keep looking. Extra pages still retry until hasMoreEvents is
-      // false.
-      if ((this.events || []).length > 0 && !this.hasMoreEvents) {
-        this.jumpedFocusEventId = focusId;
+    if (match) {
+      this.jumpedFocusEventId = focusId;
+      // After the turns for these events have painted.
+      void this.updateComplete.then(() => this.jumpToTurn(match.id));
+      return;
+    }
+    // An empty list is "not loaded yet".
+    if (events.length === 0) {
+      return;
+    }
+    if (
+      this.hasMoreEvents &&
+      this.focusJumpPageRequests < FOCUS_JUMP_MAX_PAGES
+    ) {
+      if (
+        !this.loadingMoreEvents &&
+        this.focusJumpRequestedForCount !== events.length
+      ) {
+        this.focusJumpRequestedForCount = events.length;
+        this.focusJumpPageRequests += 1;
+        this.requestMoreEvents();
       }
       return;
     }
+    // Either the session is fully loaded or the page bound was hit. Latch
+    // so later re-renders do not keep looking. Request a follow-up update
+    // so the missing-turn hint can render without writing state mid-update.
     this.jumpedFocusEventId = focusId;
-    // After the turns for these events have painted.
-    void this.updateComplete.then(() => this.jumpToTurn(match.id));
+    void this.updateComplete.then(() => this.requestUpdate());
+  }
+
+  private currentFocusJumpHint(): 'paging' | 'keep-paging' | 'missing' | null {
+    const focusId = this.focusEventId;
+    if (!focusId) return null;
+    const events = this.events || [];
+    const match = events.find((event) =>
+      this.eventMatchesFocus(event, focusId)
+    );
+    if (match) return null;
+    if (this.jumpedFocusEventId === focusId) {
+      return this.hasMoreEvents ? 'keep-paging' : 'missing';
+    }
+    if (events.length > 0 && this.hasMoreEvents) return 'paging';
+    return null;
+  }
+
+  private renderFocusJumpHint() {
+    const hint = this.currentFocusJumpHint();
+    if (!hint) return nothing;
+    const text =
+      hint === 'paging'
+        ? 'Loading earlier turns to reach this match.'
+        : hint === 'keep-paging'
+          ? 'This match is on a turn not yet loaded. Keep paging to reach it.'
+          : 'This match is not in the loaded transcript.';
+    return html`
+      <div class="focus-jump-hint" data-testid="focus-jump-hint">${text}</div>
+    `;
   }
 
   private jumpToTurn(eventId: string): void {
@@ -5371,7 +5452,7 @@ export class SessionReplayPanel extends LitElement {
     const mostExpensiveTurnId = this.getMostExpensiveTurnId();
     return html`
       <div class="panel">
-        ${this.renderChatSummaryBar()}
+        ${this.renderFocusJumpHint()} ${this.renderChatSummaryBar()}
         ${this.renderChatControlBar(turns.length)}
         ${
           turns.length

@@ -1315,7 +1315,6 @@ export interface SessionSearchParams {
   mode?: SessionSearchMode;
   startDate?: string;
   endDate?: string;
-  sessionSourceType?: string;
   limit?: number;
   offset?: number;
   maxSnippetsPerSession?: number;
@@ -1332,7 +1331,7 @@ export interface SessionSearchParams {
  * The filter block rejects unknown keys server side, so only the filters the
  * contract names are sent. The list page's source type filter is not one of
  * them (the corpus carries source kinds of turns, not of sessions), so it is
- * deliberately not forwarded.
+ * not a field on this params type and is never forwarded.
  */
 export async function searchRuntimeSessions(
   params: SessionSearchParams

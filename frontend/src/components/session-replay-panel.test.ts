@@ -1222,6 +1222,10 @@ describe('SessionReplayPanel', () => {
     expect(
       element.shadowRoot?.querySelector('.chat-turn.jump-highlight')
     ).to.equal(null);
+    expect(
+      element.shadowRoot?.querySelector('[data-testid="focus-jump-hint"]')
+        ?.textContent
+    ).to.contain('not in the loaded transcript');
 
     element.events = [
       ...events,
@@ -1232,6 +1236,69 @@ describe('SessionReplayPanel', () => {
     await element.updateComplete;
     expect(
       element.shadowRoot?.querySelector('.chat-turn.jump-highlight')
+    ).to.equal(null);
+  });
+
+  it('pages forward when the focused turn is not on the first page', async () => {
+    // The transcript only holds one page. A search hit past that page used
+    // to land at the top with no hint and no further request.
+    const firstPage: FlowGatewayEvent[] = [
+      previewEvent('e1', '2026-06-07T12:00:00Z', [
+        { role: 'user', text: 'FIRST_TURN' },
+      ]),
+    ];
+    const later = previewEvent(
+      'e-late',
+      '2026-06-07T12:40:00Z',
+      [{ role: 'user', text: 'LATER_TURN' }],
+      { api_usage_id: 'usage-late' }
+    );
+    let pageRequests = 0;
+    const element = await fixture<SessionReplayPanel>(html`
+      <session-replay-panel
+        replayMode="timeline"
+        .session=${SESSION}
+        .events=${firstPage}
+        .hasMoreEvents=${true}
+        .focusEventId=${'usage-late'}
+        @session-events-page-requested=${() => {
+          pageRequests += 1;
+        }}
+      ></session-replay-panel>
+    `);
+    await waitUntil(
+      () => pageRequests > 0,
+      'The panel never asked for the next page of events'
+    );
+    expect(
+      element.shadowRoot?.querySelector('.chat-turn.jump-highlight')
+    ).to.equal(null);
+    await waitUntil(
+      () =>
+        Boolean(
+          element.shadowRoot?.querySelector('[data-testid="focus-jump-hint"]')
+        ),
+      'The not-yet-loaded hint never appeared'
+    );
+    const hint = element.shadowRoot!.querySelector(
+      '[data-testid="focus-jump-hint"]'
+    )!;
+    expect(hint.textContent).to.contain('Loading earlier turns');
+
+    element.events = [...firstPage, later];
+    element.hasMoreEvents = false;
+    await element.updateComplete;
+    await waitUntil(
+      () =>
+        Boolean(element.shadowRoot?.querySelector('.chat-turn.jump-highlight')),
+      'The paged-in turn was never jumped to'
+    );
+    const highlighted = element.shadowRoot!.querySelector(
+      '.chat-turn.jump-highlight'
+    )!;
+    expect(highlighted.getAttribute('data-event-id')).to.equal('e-late');
+    expect(
+      element.shadowRoot?.querySelector('[data-testid="focus-jump-hint"]')
     ).to.equal(null);
   });
 });
