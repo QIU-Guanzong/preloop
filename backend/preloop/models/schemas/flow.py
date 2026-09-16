@@ -19,6 +19,10 @@ from preloop.models.schemas.verification import (
     ResolvedVerificationPolicy,
     VerificationPolicy,
 )
+from preloop.services.report_publication import (
+    MAX_COMMIT_MESSAGE_LENGTH,
+    MAX_PATH_LENGTH,
+)
 from preloop.utils.schedule_text import (
     WEEKDAYS,
     describe_cron,
@@ -74,7 +78,7 @@ class ReportPublication(BaseModel):
     )
     source_path: Optional[str] = Field(
         default=None,
-        max_length=255,
+        max_length=MAX_PATH_LENGTH,
         description=(
             "Workspace relative path of the generated document, for example "
             "evidence/portfolio-report.md"
@@ -82,14 +86,14 @@ class ReportPublication(BaseModel):
     )
     destination_path: Optional[str] = Field(
         default=None,
-        max_length=255,
+        max_length=MAX_PATH_LENGTH,
         description=(
             "Repository relative path the document lands at, for example PORTFOLIO.md"
         ),
     )
     branch: Optional[str] = Field(
         default=None,
-        max_length=255,
+        max_length=MAX_PATH_LENGTH,
         description=(
             "Branch the document is maintained on. Defaults to "
             "preloop/report/<document slug>, which is stable across runs so a "
@@ -98,7 +102,7 @@ class ReportPublication(BaseModel):
     )
     commit_message: Optional[str] = Field(
         default=None,
-        max_length=512,
+        max_length=MAX_COMMIT_MESSAGE_LENGTH,
         description="Commit subject. Defaults to 'Update <destination_path>'",
     )
 

@@ -23,6 +23,8 @@ from preloop.services.flow_artifacts import (
     sanitize_captured_result,
 )
 from preloop.services.report_publication import (
+    MAX_COMMIT_MESSAGE_LENGTH,
+    MAX_PATH_LENGTH,
     OUTCOME_FAILED,
     OUTCOME_PUBLISHED,
     OUTCOME_UNCHANGED,
@@ -272,6 +274,39 @@ class TestSchema:
             ReportPublication.model_validate(
                 {"enabled": True, "destination_path": "R.md", "repositories": ["other"]}
             )
+
+    def test_schema_limits_match_the_runtime_constants(self):
+        """Field caps must be the same integers the runtime validator uses."""
+        with pytest.raises(ValidationError):
+            ReportPublication.model_validate(
+                {"enabled": False, "source_path": "a" * (MAX_PATH_LENGTH + 1)}
+            )
+        with pytest.raises(ValidationError):
+            ReportPublication.model_validate(
+                {"enabled": False, "destination_path": "a" * (MAX_PATH_LENGTH + 1)}
+            )
+        with pytest.raises(ValidationError):
+            ReportPublication.model_validate(
+                {"enabled": False, "branch": "a" * (MAX_PATH_LENGTH + 1)}
+            )
+        with pytest.raises(ValidationError):
+            ReportPublication.model_validate(
+                {
+                    "enabled": False,
+                    "commit_message": "m" * (MAX_COMMIT_MESSAGE_LENGTH + 1),
+                }
+            )
+        accepted = ReportPublication.model_validate(
+            {
+                "enabled": False,
+                "source_path": "a" * MAX_PATH_LENGTH,
+                "destination_path": "b" * MAX_PATH_LENGTH,
+                "branch": "c" * MAX_PATH_LENGTH,
+                "commit_message": "m" * MAX_COMMIT_MESSAGE_LENGTH,
+            }
+        )
+        assert accepted.source_path == "a" * MAX_PATH_LENGTH
+        assert accepted.commit_message == "m" * MAX_COMMIT_MESSAGE_LENGTH
 
 
 class TestShell:
@@ -628,6 +663,16 @@ class TestContainerWiring:
         commands = self._executor()._prepare_git_post_execution_commands(context)
         assert REPORT_PUBLICATION_MARKER in commands
         assert "invalid_configuration" in commands
+        assert "git bundle create" in commands
+        assert "git worktree add" not in commands
+
+    def test_readonly_checkout_evidence_discloses_a_refusal_marker(self):
+        context = self._context()
+        context["git_clone_config"]["create_pull_request"] = False
+        context["git_clone_config"]["checkout_evidence"] = True
+        commands = self._executor()._prepare_git_post_execution_commands(context)
+        assert REPORT_PUBLICATION_MARKER in commands
+        assert "pull_request_disabled" in commands
         assert "git bundle create" in commands
         assert "git worktree add" not in commands
 

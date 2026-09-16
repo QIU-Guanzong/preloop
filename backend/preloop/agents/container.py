@@ -5000,7 +5000,20 @@ true
                 return isolated_prefix + "".join(parts)
 
             if self._wants_readonly_checkout_evidence(execution_context):
-                return self._readonly_checkout_evidence_commands(repositories)
+                evidence_commands = self._readonly_checkout_evidence_commands(
+                    repositories
+                )
+                if publishes_report:
+                    # Leftover config: an enabled report block with
+                    # create_pull_request off still prints a marker instead of
+                    # skipping into evidence-only silence.
+                    return (
+                        self._report_publication_refusal_prefix(
+                            git_config, "pull_request_disabled"
+                        )
+                        + evidence_commands
+                    )
+                return evidence_commands
 
             # Report publication (issue #648): the agent holds no write tools,
             # so there are no agent commits to push. The document it produced
