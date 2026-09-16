@@ -69,7 +69,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional, Sequence
 
-from sqlalchemy import ColumnElement, or_, select
+from sqlalchemy import ColumnElement, func, or_, select
 
 # Statuses that grant premium access, including Stripe's dunning window.
 ENTITLED_STATUSES: tuple[str, ...] = ("active", "trialing", "past_due")
@@ -230,6 +230,29 @@ def grandfathers_withdrawn_plan(
         True when the plan is still on sale (grandfathering does not apply and
         ordinary entitlement decides alone), when the plan is withdrawn and
         somebody is paying for it, or while a trial of it is still running.
+
+    Note:
+        Payment is inferred from the provider subscription id, so a row on a
+        withdrawn plan that was provisioned by hand, with no id, resolves to
+        the default plan once this rule ships. That is deliberate and its
+        blast radius is small: the rule only reads rows whose *plan row* is
+        marked ``is_active = False``, which is the catalog's
+        withdrawn-from-sale flag. A negotiated or enterprise grant is a plan
+        row that is still on sale (``Plan.is_active`` defaults to True and
+        custom rows are created that way), so it short-circuits on the first
+        branch here and is never subject to this rule at all. The only rows
+        affected are hand-written subscriptions pointing at a plan somebody
+        explicitly withdrew.
+
+        To re-establish such a grant, do one of these rather than weakening
+        the rule: reconcile the subscription against the provider so the row
+        carries its real subscription id, or give the account a custom plan
+        row carrying the promised terms, which is on sale by construction and
+        is how negotiated contracts are already modelled. Before deploying
+        this rule to an environment, count the exposed rows first: newest
+        subscription per account, status in (active, past_due), plan row
+        with ``is_active = False``, ``stripe_subscription_id`` null or blank.
+        Zero means no account changes plan.
     """
     if plan is not None and bool(getattr(plan, "is_active", False)):
         return True
@@ -261,13 +284,22 @@ def grandfather_clause(
         running. A subscription whose plan row does not exist at all matches
         no plan still on sale, so it too needs one of those, matching
         :func:`grandfathers_withdrawn_plan` with ``plan=None``.
+
+    Note:
+        The provider-id half is emitted as "not null and not blank after
+        trimming", so it accepts exactly what :func:`is_paid_subscription`
+        accepts. A NULL-only test would let an empty or whitespace id pass in
+        SQL while the in-memory form rejected it, which is the drift this
+        module exists to prevent.
     """
     moment = _as_utc(now) or datetime.now(timezone.utc)
     plans_on_sale = select(plan_model.id).where(plan_model.is_active.is_(True))
+    provider_backed = subscription_model.stripe_subscription_id.isnot(None) & (
+        func.length(func.trim(subscription_model.stripe_subscription_id)) > 0
+    )
     return or_(
         subscription_model.plan_id.in_(plans_on_sale),
-        subscription_model.status.in_(PAID_STATUSES)
-        & subscription_model.stripe_subscription_id.isnot(None),
+        subscription_model.status.in_(PAID_STATUSES) & provider_backed,
         (subscription_model.status == TRIALING_STATUS)
         & (subscription_model.current_period_end >= moment),
     )

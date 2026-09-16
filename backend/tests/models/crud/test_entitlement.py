@@ -349,6 +349,12 @@ def test_grandfather_sql_clause_names_every_half_of_the_rule():
     assert "subscription.current_period_end >=" in clause
 
 
+def test_grandfather_sql_clause_rejects_a_blank_provider_id_like_the_helper():
+    """The two forms of the rule must agree on a blank id, not only on NULL."""
+    clause = str(grandfather_clause(models.Subscription, models.Plan))
+    assert "length(trim(subscription.stripe_subscription_id)) >" in clause
+
+
 @pytest.mark.parametrize(
     "status, offset_days, stripe_id, entitled",
     [
@@ -364,6 +370,9 @@ def test_grandfather_sql_clause_names_every_half_of_the_rule():
         ("past_due", 13, "sub_dunning", True),
         # Locally written "active" with no provider subscription behind it.
         ("active", 13, None, False),
+        # Same thing written as a blank id: SQL must agree with the helper.
+        ("active", 13, "", False),
+        ("active", 13, "   ", False),
     ],
 )
 def test_withdrawn_plan_resolution(
@@ -402,6 +411,45 @@ def test_the_same_row_on_a_plan_still_on_sale_stays_entitled(db_session, test_us
 
     assert found is not None
     assert found.plan_id == on_sale.id
+
+
+def test_a_hand_provisioned_grant_on_a_custom_plan_keeps_its_plan(
+    db_session, test_user
+):
+    """The payment test only reaches rows whose plan was withdrawn from sale.
+
+    A negotiated or enterprise grant is modelled as a custom plan row, and a
+    plan row is on sale unless somebody set ``is_active = False`` on it. Such
+    a grant therefore resolves with no provider subscription id behind it,
+    exactly as it did before this rule, and the withdrawn-plan branch is
+    never reached for it.
+    """
+    custom = crud_plan.create(
+        db_session,
+        obj_in={
+            "id": "custom_negotiated",
+            "name": "Acme contract",
+            "price_monthly": 0.0,
+            "price_annually": 0.0,
+            "features": {"max_users": 300},
+            "is_custom": True,
+        },
+    )
+    assert custom.is_active is True
+
+    _seed_on(
+        db_session,
+        test_user.account_id,
+        custom.id,
+        status="active",
+        offset_days=13,
+        stripe_id=None,
+    )
+
+    found = billing.entitled_subscription(db_session, str(test_user.account_id))
+
+    assert found is not None
+    assert found.plan_id == custom.id
 
 
 def test_an_unpaid_withdrawn_row_does_not_block_a_new_purchase(db_session, test_user):
