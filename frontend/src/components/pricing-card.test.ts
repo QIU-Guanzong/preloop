@@ -57,24 +57,62 @@ describe('PricingCard', () => {
     expect(text).to.contain('billed annually ($1,200/yr)');
   });
 
-  it('leads with the annual total when the monthly rate is not a round number', async () => {
+  it('renders Business exactly like every other plan, never as an annual total', async () => {
     const el = await renderCard(
       {
         ...BASE,
         id: 'business',
         name: 'Business',
         price_monthly: 350,
-        price_annually: 3500,
+        price_annually: 3600,
       },
       'year'
     );
     const text = el.shadowRoot?.textContent || '';
-    // $3,500 / 12 is $291.67: an ugly headline, and rounding it silently
-    // would misstate what is charged. The annual total leads instead.
-    expect(text).to.contain('$3,500');
-    expect(text).to.contain('/yr');
-    expect(text).to.contain('about $292/mo, billed annually');
+    // $3,600 / 12 is exactly $300. One rule for every card: the monthly rate
+    // leads and the annual total is stated in the note.
+    expect(text).to.contain('$300');
+    expect(text).to.contain('/mo');
+    expect(text).to.contain('billed annually ($3,600/yr)');
+    expect(text).to.not.contain('$3,600 /yr');
+    expect(text).to.not.contain('$3,500');
+    expect(text).to.not.contain('$292');
+  });
+
+  it('still leads with a monthly rate when the year does not divide exactly', async () => {
+    const el = await renderCard(
+      { ...BASE, price_monthly: 350, price_annually: 3500 },
+      'year'
+    );
+    const text = el.shadowRoot?.textContent || '';
+    // $3,500 / 12 is $291.67. The headline stays a monthly rate so the ladder
+    // reads consistently, and the note says the rate is rounded and prints
+    // the exact annual amount charged.
+    expect(text).to.contain('$292');
+    expect(text).to.contain('/mo');
+    expect(text).to.contain(
+      'billed annually ($3,500/yr), monthly rate rounded'
+    );
     expect(text).to.not.contain('291.67');
+  });
+
+  it('prints a subtitle under the name only when the plan declares one', async () => {
+    const plain = await renderCard(BASE);
+    expect(plain.shadowRoot?.querySelector('.plan-subtitle')).to.not.exist;
+
+    const licensed = await renderCard({
+      ...BASE,
+      id: 'business-selfhosted',
+      name: 'Business',
+      subtitle: 'Self-hosted license',
+      price_monthly: null,
+      price_annually: null,
+      price_label: '$6,000/yr',
+    });
+    const subtitle = licensed.shadowRoot?.querySelector('.plan-subtitle');
+    expect(subtitle, 'subtitle renders').to.exist;
+    expect(subtitle?.textContent?.trim()).to.equal('Self-hosted license');
+    expect(licensed.shadowRoot?.textContent).to.contain('$6,000/yr');
   });
 
   it('lets a configured note override the derived one', async () => {

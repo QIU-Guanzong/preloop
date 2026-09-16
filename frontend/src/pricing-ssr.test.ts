@@ -18,6 +18,7 @@ const CONFIG = {
     pricing: {
       title: 'Pricing',
       lead: 'USD prices exclude tax; annual plans are prepaid.',
+      cloud_lead: 'Hosted by Preloop. Start free, upgrade when you need to.',
       billing_toggle: true,
       plans: [
         {
@@ -35,7 +36,7 @@ const CONFIG = {
           name: 'Pro',
           price_monthly: 12,
           price_annually: 120,
-          tagline: 'You and all your agents.',
+          tagline: 'One person, up to 10 agents.',
           cta_text: 'Get Pro',
           cta_url: '/register',
           features: [],
@@ -45,7 +46,7 @@ const CONFIG = {
           name: 'Team',
           price_monthly: 120,
           price_annually: 1200,
-          tagline: 'Up to 5 people, every agent governed.',
+          tagline: 'Up to 5 people, up to 100 agents.',
           cta_text: 'Get Team',
           cta_url: '/register',
           features: [],
@@ -54,8 +55,8 @@ const CONFIG = {
           id: 'business',
           name: 'Business',
           price_monthly: 350,
-          price_annually: 3500,
-          tagline: 'Up to 20 people, scale usage.',
+          price_annually: 3600,
+          tagline: 'Up to 20 people, every agent governed.',
           cta_text: 'Get Business',
           cta_url: '/register',
           features: [],
@@ -77,6 +78,24 @@ const CONFIG = {
                   business: 'Up to 20',
                 },
               },
+              {
+                label: 'Agents',
+                values: {
+                  free: '3',
+                  pro: '10',
+                  team: '100',
+                  business: 'Unlimited',
+                },
+              },
+              {
+                label: 'BYOK analysis quota / month',
+                values: {
+                  free: '100M tokens',
+                  pro: '1B tokens',
+                  team: '5B tokens',
+                  business: '20B tokens',
+                },
+              },
             ],
           },
           {
@@ -96,8 +115,8 @@ const CONFIG = {
         ],
       },
       dedicated: {
-        label: 'Dedicated',
-        lead: 'Self-hosted and dedicated editions.',
+        label: 'Self-hosted',
+        lead: 'Run Preloop on your own infrastructure, or on a dedicated instance we operate for you.',
         plans: [
           {
             id: 'opensource',
@@ -113,10 +132,11 @@ const CONFIG = {
           {
             id: 'business-selfhosted',
             name: 'Business',
+            subtitle: 'Self-hosted license',
             price_monthly: null,
             price_annually: null,
-            price_label: 'Contact us',
-            tagline: 'A limited introduction for teams that self-operate.',
+            price_label: '$6,000/yr',
+            tagline: 'Up to 25 users on your infrastructure.',
             cta_text: 'Contact us',
             cta_url: '/request-demo',
             features: [],
@@ -127,14 +147,15 @@ const CONFIG = {
             price_monthly: null,
             price_annually: null,
             price_label: 'from $30k/yr',
-            tagline: 'Dedicated or self-hosted, up to 100 users.',
+            tagline:
+              'Self-hosted, or a dedicated instance run by us. Up to 100 users.',
             cta_text: 'Contact us',
             cta_url: '/request-demo',
             features: [],
           },
         ],
         comparison: {
-          title: 'Compare dedicated editions',
+          title: 'Compare self-hosted editions',
           note: 'Preloop core is Apache 2.0 and free to self-host.',
           groups: [
             {
@@ -157,7 +178,7 @@ const CONFIG = {
                   label: 'Price',
                   values: {
                     opensource: 'Free',
-                    'business-selfhosted': 'Contact us',
+                    'business-selfhosted': '$6,000 per year',
                     enterprise: 'From $30,000 per year',
                   },
                 },
@@ -199,7 +220,52 @@ describe('Server-rendered pricing (light DOM)', () => {
       expect(text, name).to.contain(name);
     }
     expect(text).to.contain('Cloud');
-    expect(text).to.contain('Dedicated');
+    // The second tab is named Self-hosted everywhere a visitor can read it.
+    expect(text).to.contain('Self-hosted');
+    expect(text).to.not.contain('>Dedicated<');
+  });
+
+  it('carries the per-tab leads a crawler reads without clicking a tab', () => {
+    const { text } = render();
+    expect(text).to.contain(
+      'Hosted by Preloop. Start free, upgrade when you need to.'
+    );
+    expect(text).to.contain(
+      'Run Preloop on your own infrastructure, or on a dedicated instance we operate for you.'
+    );
+  });
+
+  it('prints the self-hosted Business subtitle and its licence price', () => {
+    const { doc, text } = render();
+    const card = doc.querySelector('[data-plan-id="business-selfhosted"]');
+    expect(card, 'self-hosted Business card').to.exist;
+    expect(card?.querySelector('.plan-subtitle')?.textContent?.trim()).to.equal(
+      'Self-hosted license'
+    );
+    expect(text).to.contain('Self-hosted license');
+    expect(text).to.contain('$6,000/yr');
+    expect(text).to.contain('$6,000 per year');
+    // No other card invents one.
+    expect(doc.querySelectorAll('.plan-subtitle').length).to.equal(1);
+  });
+
+  it('states the cloud agent caps and the BYOK quotas in the table', () => {
+    const { doc } = render();
+    const cloudTable = doc.querySelectorAll('table')[0];
+    const rowText = (label: string) =>
+      Array.from(cloudTable.querySelectorAll('tr'))
+        .find((tr) => tr.querySelector('th')?.textContent?.trim() === label)
+        ?.textContent?.replace(/\s+/g, ' ')
+        .trim() || '';
+    const agents = rowText('Agents');
+    expect(agents).to.contain('10');
+    expect(agents).to.contain('100');
+    expect(agents).to.contain('Unlimited');
+    const quota = rowText('BYOK analysis quota / month');
+    expect(quota).to.contain('100M');
+    expect(quota).to.contain('1B');
+    expect(quota).to.contain('5B');
+    expect(quota).to.contain('20B');
   });
 
   it('prints both billing periods so neither price needs a click', () => {
@@ -209,16 +275,23 @@ describe('Server-rendered pricing (light DOM)', () => {
     expect(text).to.contain('$10');
     expect(text).to.contain('$120');
     expect(text).to.contain('$1,200');
-    expect(text).to.contain('$3,500');
+    expect(text).to.contain('$350');
+    expect(text).to.contain('$300');
+    expect(text).to.contain('$3,600');
     expect(text).to.contain('billed monthly');
     expect(text).to.contain('billed annually ($120/yr)');
-    expect(text).to.contain('about $292/mo, billed annually');
+    expect(text).to.contain('billed annually ($3,600/yr)');
+    // The old Business-only rendering is gone: no annual headline, no
+    // rounded "about" line.
+    expect(text).to.not.contain('$3,500');
+    expect(text).to.not.contain('$292');
   });
 
   it('renders both comparison tables as real tables', () => {
     const { doc, text } = render();
     expect(text).to.contain('Compare cloud plans');
-    expect(text).to.contain('Compare dedicated editions');
+    expect(text).to.contain('Compare self-hosted editions');
+    expect(text).to.not.contain('Compare dedicated editions');
 
     const tables = Array.from(doc.querySelectorAll('table'));
     expect(tables.length).to.equal(2);
@@ -256,7 +329,7 @@ describe('Server-rendered pricing (light DOM)', () => {
     expect(text).to.contain('Not included');
   });
 
-  it('keeps the Cloud section before the Dedicated section', () => {
+  it('keeps the Cloud section before the Self-hosted section', () => {
     const { html } = render();
     expect(html.indexOf('pricing-tab-cloud')).to.be.greaterThan(-1);
     expect(html.indexOf('pricing-tab-cloud')).to.be.lessThan(
@@ -338,7 +411,7 @@ describe('Server-rendered pricing (light DOM)', () => {
     } as unknown as BrandConfig;
     const { text } = render(untitled);
     expect(text).to.contain('Compare cloud plans');
-    expect(text).to.contain('Compare dedicated editions');
+    expect(text).to.contain('Compare self-hosted editions');
   });
 
   it('renders nothing dedicated for a cloud-only brand', () => {
@@ -349,6 +422,6 @@ describe('Server-rendered pricing (light DOM)', () => {
     } as unknown as BrandConfig;
     const { doc, text } = render(cloudOnly);
     expect(doc.querySelectorAll('table').length).to.equal(1);
-    expect(text).to.not.contain('Compare dedicated editions');
+    expect(text).to.not.contain('Compare self-hosted editions');
   });
 });

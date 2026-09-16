@@ -152,6 +152,14 @@ export function applyPricingCatalog(
       )
         throw new Error(`Public plan ${p.id} has invalid pricing`);
       const users = number(entry, 'max_users');
+      const agents = number(entry, 'max_agents');
+      // Agent caps are catalog values, so the card line is derived from them
+      // rather than written by hand: a cap change in plans.yaml can never
+      // leave the card claiming something the plan no longer allows.
+      const agentPhrase =
+        agents === -1 || agents === null
+          ? 'every agent governed'
+          : `up to ${agents} agents`;
       return {
         ...p,
         deployment: deploymentOf(p, entry),
@@ -168,10 +176,10 @@ export function applyPricingCatalog(
           entry.id === 'free'
             ? 'Start with your own provider keys.'
             : entry.id === 'pro'
-              ? 'One person, unlimited agents.'
+              ? `One person, ${agentPhrase}.`
               : entry.id === 'enterprise'
-                ? `Dedicated or self-hosted, up to ${users} users.`
-                : `Up to ${users} people, every agent governed.`,
+                ? `Self-hosted, or a dedicated instance run by us. Up to ${users} users.`
+                : `Up to ${users} people, ${agentPhrase}.`,
         cta_text: isContact
           ? 'Contact us'
           : entry.id === 'free'

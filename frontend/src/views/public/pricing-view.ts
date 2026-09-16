@@ -8,12 +8,17 @@ import '../../components/deployment-toggle';
 import '../../components/pricing-card';
 import {
   CLOUD_COMPARISON_FALLBACK_TITLE,
+  CLOUD_LEAD_FALLBACK,
+  CLOUD_TAB_FALLBACK_LABEL,
   DEDICATED_COMPARISON_FALLBACK_TITLE,
+  DEDICATED_TAB_FALLBACK_LABEL,
 } from '../../pricing-ssr';
 
 interface Plan {
   id: string;
   name: string;
+  /** Small line under the name; only the plans that declare one get it. */
+  subtitle?: string;
   price_monthly: number | null;
   price_annually: number | null;
   features: string[];
@@ -54,10 +59,16 @@ interface Comparison {
 /**
  * The public pricing page.
  *
- * Cloud versus Dedicated is the TOP-LEVEL axis and it is the only thing that
- * changes which cards and which table rows are on screen. Monthly versus
- * Yearly sits below it and changes nothing but the numbers printed on the
- * cards. Both tabs render through the same two methods (`_renderCards` and
+ * Cloud versus Self-hosted is the TOP-LEVEL axis and it is the only thing that
+ * changes which cards and which table rows are on screen, so it renders as a
+ * tab bar directly under the page heading with its own one-line lead.
+ *
+ * Monthly versus Yearly is an option INSIDE the Cloud tab: a small pill above
+ * the card row that rewrites nothing but the printed numbers. It does not
+ * exist on Self-hosted, where nothing is priced per month, but its row keeps
+ * its height there so the cards do not jump when the visitor switches tabs.
+ *
+ * Both tabs render through the same two methods (`_renderCards` and
  * `_renderComparison`), so the layout is identical and only the columns
  * differ.
  */
@@ -72,12 +83,17 @@ export class PublicPricingView extends LitElement {
 
   @state() private _plans: Plan[] = [];
   @state() private _comparison: Comparison | null = null;
-  /** The Dedicated tab's cards; editions, not subscriptions. */
+  /** The Self-hosted tab's cards; editions, not subscriptions. */
   @state() private _dedicatedPlans: Plan[] = [];
   @state() private _dedicatedComparison: Comparison | null = null;
   @state() private _faqs: PricingFaq[] = [];
   @state() private _title = 'Pricing';
   @state() private _lead = 'Start free with your own keys.';
+  /** Tab labels and the per-tab leads. The brand names both tabs. */
+  @state() private _cloudLabel = CLOUD_TAB_FALLBACK_LABEL;
+  @state() private _dedicatedLabel = DEDICATED_TAB_FALLBACK_LABEL;
+  @state() private _cloudLead = CLOUD_LEAD_FALLBACK;
+  @state() private _dedicatedLead = '';
   @state() private _billingToggle = true;
   @state() private _loaded = false;
 
@@ -121,11 +137,19 @@ export class PublicPricingView extends LitElement {
     if (heading) {
       this._title = heading.getAttribute('data-title') || this._title;
       this._lead = heading.getAttribute('data-lead') || this._lead;
+      this._cloudLabel =
+        heading.getAttribute('data-cloud-label') || this._cloudLabel;
+      this._dedicatedLabel =
+        heading.getAttribute('data-dedicated-label') || this._dedicatedLabel;
+      this._cloudLead =
+        heading.getAttribute('data-cloud-lead') || this._cloudLead;
+      this._dedicatedLead =
+        heading.getAttribute('data-dedicated-lead') || this._dedicatedLead;
       this._billingToggle =
         heading.getAttribute('data-billing-toggle') !== 'false';
     }
     const plans = this._plansFromSlots(children, 'plan');
-    // The Dedicated tab is server-rendered as its own set of slots so the
+    // The Self-hosted tab is server-rendered as its own set of slots so the
     // crawler sees both tabs' cards. Falling back to the tagged plans keeps a
     // brand that only marks a plan `dedicated` working unchanged.
     const dedicated = this._plansFromSlots(children, 'dedicated-plan');
@@ -183,6 +207,7 @@ export class PublicPricingView extends LitElement {
         price_note: el.getAttribute('data-price-note') || undefined,
         price_note_annual:
           el.getAttribute('data-price-note-annual') || undefined,
+        subtitle: el.getAttribute('data-subtitle') || undefined,
         tagline: el.getAttribute('data-tagline') || undefined,
         badge: el.getAttribute('data-badge') || undefined,
         highlight: el.getAttribute('data-highlight') === 'true',
@@ -231,12 +256,18 @@ export class PublicPricingView extends LitElement {
     const pricing = content.pricing || {};
     if (pricing.title) this._title = pricing.title;
     if (pricing.lead) this._lead = pricing.lead;
+    if (pricing.cloud_label) this._cloudLabel = pricing.cloud_label;
+    if (pricing.cloud_lead) this._cloudLead = pricing.cloud_lead;
+    if (pricing.dedicated?.label)
+      this._dedicatedLabel = pricing.dedicated.label;
+    if (pricing.dedicated?.lead) this._dedicatedLead = pricing.dedicated.lead;
     if (typeof pricing.billing_toggle === 'boolean') {
       this._billingToggle = pricing.billing_toggle;
     }
     const toPlan = (p: any, fallback?: 'cloud' | 'dedicated'): Plan => ({
       id: p.id,
       name: p.name,
+      subtitle: p.subtitle,
       price_monthly: p.price_monthly ?? null,
       price_annually: p.price_annually ?? null,
       price_label: p.price_label,
@@ -300,7 +331,7 @@ export class PublicPricingView extends LitElement {
   private async _handleSignUp(planId: string) {
     const plan = this._planById(planId);
 
-    // Nothing on the Dedicated tab is a subscription a visitor can buy: every
+    // Nothing on the Self-hosted tab is a subscription a visitor can buy: every
     // edition there is quoted or downloaded, so its CTA is the only route.
     // Shape, not plan id: opensource and enterprise are dedicated in every
     // path that reaches here, so a per-id branch would disagree with this one
@@ -325,14 +356,39 @@ export class PublicPricingView extends LitElement {
     unsafeCSS(pricingStyles),
     unsafeCSS(landingStyles),
     css`
-      /* Two segmented controls side by side on a laptop, stacked on a phone.
-         Wrapping is what keeps a narrow screen from squashing either one. */
-      .pricing-toggles {
+      /* The top-level axis. Full width so the tab bar's rule spans the card
+         row underneath it and the two tabs read as the page's navigation. */
+      .pricing-tabs {
+        display: block;
+      }
+
+      /* One line per tab, directly under the bar. Centred and quiet: it
+         explains the tab, it does not compete with the heading. */
+      .tab-lead {
+        margin: 0.75rem auto 0 auto;
+        text-align: center;
+        font-size: 1rem;
+        color: var(--sl-color-text-secondary);
+        max-width: 46rem;
+      }
+
+      /* The period pill's row. Right-aligned above the cards on a laptop and
+         ALWAYS this tall, including on Self-hosted where the pill is not
+         rendered, so switching tabs never moves the card row. */
+      .period-row {
         display: flex;
-        flex-wrap: wrap;
         align-items: center;
-        justify-content: center;
-        column-gap: 1.5rem;
+        justify-content: flex-end;
+        min-height: 3rem;
+        margin: 1.25rem 0 0.5rem 0;
+      }
+
+      /* Phone: the pill is centred over the cards rather than pinned to an
+         edge the eye has no reason to look at. */
+      @media (max-width: 640px) {
+        .period-row {
+          justify-content: center;
+        }
       }
 
       .loading,
@@ -434,7 +490,7 @@ export class PublicPricingView extends LitElement {
   ];
 
   /**
-   * A brand with no dedicated edition gets no tab selector at all, so a
+   * A brand with no self-hosted edition gets no tab bar at all, so a
    * cloud-only page still renders exactly as before.
    */
   private _hasDedicated(): boolean {
@@ -456,13 +512,20 @@ export class PublicPricingView extends LitElement {
   }
 
   /**
-   * The Dedicated tab's cards. The brand's own `dedicated` block wins; a plan
+   * The Self-hosted tab's cards. The brand's own `dedicated` block wins; a plan
    * the catalog tagged `dedicated` is the fallback, so a brand that never
    * configures editions still gets a second tab rather than nothing.
    */
   private _dedicatedCards(): Plan[] {
     if (this._dedicatedPlans.length) return this._dedicatedPlans;
     return this._plans.filter((p) => p.deployment === 'dedicated');
+  }
+
+  /** The one-line lead for whichever tab is on screen. */
+  private _activeLead(): string {
+    return this._activeDeployment() === 'cloud'
+      ? this._cloudLead
+      : this._dedicatedLead;
   }
 
   /** The cards for whichever tab is on screen. */
@@ -518,7 +581,7 @@ export class PublicPricingView extends LitElement {
    * split live here, keeping every card to one number plus one line.
    *
    * Both tabs use this method: Cloud compares Free/Pro/Team/Business, and
-   * Dedicated compares the editions. Only the columns and the rows differ,
+   * Self-hosted compares the editions. Only the columns and the rows differ,
    * never the shape of the table.
    */
   private _renderComparison(
@@ -658,28 +721,42 @@ export class PublicPricingView extends LitElement {
           </div>
 
           <div class="section-container">
-            <div class="pricing-toggles">
-              ${
-                // The tab choice governs everything below it, so it leads.
-                // Keeping it leftmost also means the row does not reflow when
-                // the period toggle disappears on the Dedicated tab.
-                this._hasDedicated()
-                  ? html`<deployment-toggle
+            ${
+              // The top-level axis: it governs every card and every table row
+              // below it, so it renders as a tab bar under the heading rather
+              // than as one of two equal-looking controls in a row.
+              this._hasDedicated()
+                ? html`<div class="pricing-tabs">
+                    <deployment-toggle
                       .dark=${true}
+                      .tabs=${true}
+                      .cloudLabel=${this._cloudLabel}
+                      .dedicatedLabel=${this._dedicatedLabel}
                       .deployment=${deployment}
                       @deployment-change=${(e: CustomEvent) =>
                         (this._deployment = e.detail.value)}
-                    ></deployment-toggle>`
-                  : ''
-              }
+                    ></deployment-toggle>
+                  </div>`
+                : ''
+            }
+            ${
+              // One line per tab. Each tab is a different product, so each
+              // gets its own sentence instead of a single lead that has to
+              // hedge across both.
+              this._activeLead()
+                ? html`<p class="tab-lead">${this._activeLead()}</p>`
+                : ''
+            }
+            <div class="period-row">
               ${
-                // The billing period only exists for hosted subscriptions:
-                // an open-source edition is free and a quoted one is agreed
-                // per year, so on Dedicated the toggle is removed rather than
-                // left inert. It never changes which cards or rows are shown.
+                // The billing period only exists for hosted subscriptions: an
+                // open-source edition is free and a quoted one is agreed per
+                // year, so on Self-hosted the pill is not rendered. The row
+                // keeps its height either way, so the cards stay put.
                 this._billingToggle && deployment === 'cloud'
                   ? html`<billing-toggle
                       .dark=${true}
+                      .compact=${true}
                       .interval=${this._interval}
                       @interval-change=${(e: CustomEvent) =>
                         (this._interval = e.detail.value)}

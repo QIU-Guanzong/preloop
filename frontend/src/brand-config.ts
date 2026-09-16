@@ -107,6 +107,13 @@ export interface BrandGetStarted {
 export interface PricingPlan {
   id: string;
   name: string;
+  /**
+   * A small line printed directly under the plan name. Used where the name
+   * alone is ambiguous because the same name exists on both tabs (the
+   * self-hosted Business licence versus the cloud Business subscription).
+   * Only a plan that sets it gets one; every other card is unchanged.
+   */
+  subtitle?: string;
   price_monthly: number | null;
   price_annually: number | null;
   price_label?: string;
@@ -133,7 +140,7 @@ export interface PricingPlan {
    * Which pricing tab the plan belongs to. `cloud` plans are the hosted
    * subscriptions shown with the billing period toggle and the comparison
    * table; `dedicated` plans are quoted (self-managed or dedicated) and
-   * belong on the Dedicated tab. An explicit value is
+   * belong on the Self-hosted tab. An explicit value is
    * honoured so EE brands.yaml can route a plan without a catalog change.
    * When unset, a configured `catalog_path` tags the plan from the billing
    * catalog; otherwise the tab defaults to `cloud`.
@@ -150,7 +157,7 @@ export interface PricingFAQ {
 /**
  * One row of the below-the-fold comparison table. `values` is keyed by plan
  * id; a missing key renders as an empty cell rather than a false claim.
- * Values are either free text ("Up to 5", "500M tokens") or the booleans
+ * Values are either free text ("Up to 5", "5B tokens") or the booleans
  * `true`/`false` which render as an included/excluded mark.
  */
 export interface PricingComparisonRow {
@@ -170,7 +177,7 @@ export interface PricingComparison {
 }
 
 /**
- * The Dedicated tab: self-managed and quoted editions.
+ * The Self-hosted tab: self-managed and quoted editions.
  *
  * These are not subscriptions in `plans.yaml`, so there is no catalog to
  * generate them from and the brand states them directly. The shape is
@@ -187,9 +194,9 @@ export interface PricingComparison {
  * this block in brands.yaml; the EE Preloop brand already ships it.
  */
 export interface PricingDedicated {
-  /** Tab and section label. Defaults to "Dedicated". */
+  /** Tab and section label. Defaults to "Self-hosted". */
   label?: string;
-  /** Optional one-line intro under the section heading. */
+  /** The one-line lead printed under the tab bar while this tab is open. */
   lead?: string;
   plans: PricingPlan[];
   comparison?: PricingComparison;
@@ -203,11 +210,17 @@ export interface PricingConfig {
   lead?: string;
   /** Tab and section label for the hosted ladder. Defaults to "Cloud". */
   cloud_label?: string;
+  /**
+   * The one-line lead printed under the tab bar while the Cloud tab is open.
+   * The page `lead` sits under the H1 and covers both tabs; this one belongs
+   * to the Cloud tab alone, exactly as `dedicated.lead` belongs to the other.
+   */
+  cloud_lead?: string;
   billing_toggle?: boolean;
   plans: PricingPlan[];
   comparison?: PricingComparison;
   /**
-   * Dedicated tab (cards plus one comparison table). Replaces
+   * Self-hosted tab (cards plus one comparison table). Replaces
    * `deployment_options`. Omit only for a cloud-only brand; a leftover
    * `deployment_options` key is ignored and will not render.
    */

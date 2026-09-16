@@ -11,7 +11,7 @@ import { formatPlanPriceText } from './pricing-format';
  * Everything a search engine needs has to be readable with JavaScript
  * disabled: both tabs, every card, both comparison tables, and the prices for
  * both billing periods. So this emits two plain sections, Cloud then
- * Dedicated, as ordinary `<h2>/<table>/<p>` markup. `<public-pricing-view>`
+ * Self-hosted, as ordinary `<h2>/<table>/<p>` markup. `<public-pricing-view>`
  * projects the same data through named slots once it hydrates and hides the
  * inactive tab; nothing here is shadow-DOM-only.
  *
@@ -33,8 +33,17 @@ const escapeAttr = escapeHtml;
 
 /** Heading when a brand ships comparison groups but no `comparison.title`. */
 export const CLOUD_COMPARISON_FALLBACK_TITLE = 'Compare cloud plans';
-/** Heading when a brand ships dedicated comparison groups but no title. */
-export const DEDICATED_COMPARISON_FALLBACK_TITLE = 'Compare dedicated editions';
+/** Heading when a brand ships self-hosted comparison groups but no title. */
+export const DEDICATED_COMPARISON_FALLBACK_TITLE =
+  'Compare self-hosted editions';
+
+/** Tab label for the hosted ladder when the brand does not name it. */
+export const CLOUD_TAB_FALLBACK_LABEL = 'Cloud';
+/** Tab label for the self-managed editions when the brand does not name it. */
+export const DEDICATED_TAB_FALLBACK_LABEL = 'Self-hosted';
+/** Cloud tab lead when the brand does not write one. */
+export const CLOUD_LEAD_FALLBACK =
+  'Hosted by Preloop. Start free, upgrade when you need to.';
 
 interface PricingSsrBrand {
   name?: string;
@@ -63,6 +72,11 @@ function planBlock(plan: PricingPlan, slot: string): string {
   const tagline = plan.tagline
     ? `<p class="plan-tagline">${escapeHtml(plan.tagline)}</p>`
     : '';
+  // Only a plan that declares one gets a subtitle; every other card keeps the
+  // name as its only heading line.
+  const subtitle = plan.subtitle
+    ? `<p class="plan-subtitle">${escapeHtml(plan.subtitle)}</p>`
+    : '';
   const badge = plan.badge
     ? `<span class="badge">${escapeHtml(plan.badge)}</span>`
     : '';
@@ -84,6 +98,7 @@ function planBlock(plan: PricingPlan, slot: string): string {
              data-price-label="${escapeAttr(plan.price_label || '')}"
              data-price-note="${escapeAttr(plan.price_note || '')}"
              data-price-note-annual="${escapeAttr(plan.price_note_annual || '')}"
+             data-subtitle="${escapeAttr(plan.subtitle || '')}"
              data-tagline="${escapeAttr(plan.tagline || '')}"
              data-badge="${escapeAttr(plan.badge || '')}"
              data-highlight="${plan.highlight ? 'true' : 'false'}"
@@ -94,6 +109,7 @@ function planBlock(plan: PricingPlan, slot: string): string {
              data-features="${escapeAttr((plan.features || []).join('|'))}">
           ${badge}
           <h3>${escapeHtml(plan.name)}</h3>
+          ${subtitle}
           <p class="price">
           ${priceLines}
           </p>
@@ -222,8 +238,12 @@ export function generatePricingSlottedContent(config: PricingSsrBrand): string {
     DEDICATED_COMPARISON_FALLBACK_TITLE
   );
 
-  const cloudLabel = pricing.cloud_label || 'Cloud';
-  const dedicatedLabel = pricing.dedicated?.label || 'Dedicated';
+  const cloudLabel = pricing.cloud_label || CLOUD_TAB_FALLBACK_LABEL;
+  const dedicatedLabel =
+    pricing.dedicated?.label || DEDICATED_TAB_FALLBACK_LABEL;
+  // Each tab carries its own one-line lead under the tab bar. The page lead
+  // stays under the H1 and describes both.
+  const cloudLead = pricing.cloud_lead || CLOUD_LEAD_FALLBACK;
 
   const faqBlocks = faqs
     .map(
@@ -243,7 +263,8 @@ export function generatePricingSlottedContent(config: PricingSsrBrand): string {
       <section class="pricing-tab pricing-tab-dedicated"
                slot="dedicated-tab"
                data-deployment="dedicated"
-               data-label="${escapeAttr(dedicatedLabel)}">
+               data-label="${escapeAttr(dedicatedLabel)}"
+               data-lead="${escapeAttr(pricing.dedicated?.lead || '')}">
         <h2>${escapeHtml(dedicatedLabel)}</h2>
         ${pricing.dedicated?.lead ? `<p class="lead">${escapeHtml(pricing.dedicated.lead)}</p>` : ''}
         ${dedicatedCards}
@@ -253,13 +274,14 @@ export function generatePricingSlottedContent(config: PricingSsrBrand): string {
 
   return `
     <article class="pricing-content">
-      <header class="pricing-header" slot="pricing-heading" data-title="${escapeAttr(title)}" data-lead="${escapeAttr(lead)}" data-billing-toggle="${pricing.billing_toggle !== false}" data-cloud-label="${escapeAttr(cloudLabel)}" data-dedicated-label="${escapeAttr(dedicatedLabel)}">
+      <header class="pricing-header" slot="pricing-heading" data-title="${escapeAttr(title)}" data-lead="${escapeAttr(lead)}" data-billing-toggle="${pricing.billing_toggle !== false}" data-cloud-label="${escapeAttr(cloudLabel)}" data-cloud-lead="${escapeAttr(cloudLead)}" data-dedicated-label="${escapeAttr(dedicatedLabel)}" data-dedicated-lead="${escapeAttr(pricing.dedicated?.lead || '')}">
         <h1>${escapeHtml(title)}</h1>
         <p class="lead">${escapeHtml(lead)}</p>
       </header>
 
-      <section class="pricing-tab pricing-tab-cloud" data-deployment="cloud" data-label="${escapeAttr(cloudLabel)}">
+      <section class="pricing-tab pricing-tab-cloud" data-deployment="cloud" data-label="${escapeAttr(cloudLabel)}" data-lead="${escapeAttr(cloudLead)}">
         <h2>${escapeHtml(cloudLabel)}</h2>
+        <p class="lead">${escapeHtml(cloudLead)}</p>
         ${cloudCards}
         ${cloudComparison}
       </section>
