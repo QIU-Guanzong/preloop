@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so `TestClient` lifespan seeds via `next(get_db_session()).query`,
   and a contextmanager-only stub made those client tests ERROR at
   setup with `Database setup failed`.
+- The log-persistence backpressure test waits long enough for a
+  saturated sqlite pool inside a self-hosted job container. Overflow
+  shards run there; a 5s/10s budget passed on `ubuntu-latest` and
+  timed out on the VMs.
 
 ### Added
 

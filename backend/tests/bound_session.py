@@ -26,7 +26,7 @@ class BoundSession:
     """
 
     def __init__(self, session: Session) -> None:
-        object.__setattr__(self, "_session", session)
+        self._session = session
 
     def __enter__(self) -> Session:
         return self._session
