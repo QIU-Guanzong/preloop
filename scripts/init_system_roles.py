@@ -213,6 +213,20 @@ SYSTEM_PERMISSIONS: Dict[str, List[Dict[str, str]]] = {
             "name": "view_runtime_sessions",
             "description": "View runtime sessions and activity timelines",
         },
+        # Deliberately separate from view_runtime_sessions, and deliberately
+        # absent from _READ_CORE. Opening a session someone pointed you at is
+        # not the same act as asking every transcript in the account a
+        # question: a content search surfaces prompts, responses, tool calls
+        # and operator notes the searcher did not know existed, across teams
+        # they were never part of. Adding it to the read bundle would hand
+        # that reach to every read role on the next upgrade.
+        {
+            "name": "search_session_content",
+            "description": (
+                "Search the content of runtime sessions, including prompt, "
+                "response, tool call, and note snippets"
+            ),
+        },
         {
             "name": "manage_runtime_sessions",
             "description": "End, pause, or otherwise control runtime sessions",
@@ -385,6 +399,12 @@ SYSTEM_ROLES: Dict[str, Dict[str, any]] = {
             *_READ_CORE,
             "view_cost",
             "view_audit_logs",
+            # Analyst is the one non-administrative role seeded with session
+            # content search: it already carries the compliance and audit
+            # reach that makes "find every session that mentions X" part of
+            # the job. Editor, executor, tracker_manager and viewer opt in
+            # through a custom role or an explicit grant.
+            "search_session_content",
             "run_compliance",
             "detect_duplicates",
             "manage_dependencies",
