@@ -42,6 +42,51 @@ export interface PlanAssessment {
     hosted_status: string;
   }[];
 }
+/** One reason a plan does not fit, or one consequence of choosing it. */
+export interface PlanBlocker {
+  kind: 'members' | 'agents' | 'ingest' | 'retention';
+  current: number | string | null;
+  limit: number | null;
+  message: string;
+}
+/** What the target plan's analytics history window does to existing records. */
+export interface PlanRetention {
+  oldest_record_at: string | null;
+  oldest_record_class: string | null;
+  target_days: number | null;
+  cutoff_at: string | null;
+  affected: boolean;
+  protected_by_floor: boolean;
+  floor_days: number | null;
+  legal_hold: boolean;
+  message: string | null;
+  benefit_message: string | null;
+}
+/**
+ * The server's answer for one candidate plan. Every sentence shown to the
+ * reader is composed server side, where the catalog limits and the account's
+ * measured state both live; the console decides only where to put them.
+ *
+ * One named carve-out: the contact line for a quote-only plan. The server
+ * composes it in `contact_message` when it has an opinion, and the console
+ * composes "X is priced per deployment." only when that field is absent,
+ * which is what a deployment without the billing plugin sends. `contact_url`
+ * is a destination rather than a sentence, and the console restricts it to a
+ * same-origin path or an http(s) URL before it reaches an `href`.
+ */
+export interface PlanEligibility {
+  plan_id: string;
+  name: string;
+  eligible: boolean;
+  purchasable: boolean;
+  contact_url: string | null;
+  contact_message?: string | null;
+  requires_period: boolean;
+  is_current: boolean;
+  blockers: PlanBlocker[];
+  warnings: PlanBlocker[];
+  retention: PlanRetention;
+}
 export interface BillingSubscription {
   id: string;
   plan_id: string;
@@ -76,6 +121,18 @@ export interface PlanChangeOptions {
     historical_agent_peak: number | null;
   };
   assessments: PlanAssessment[];
+  plan_eligibility?: PlanEligibility[];
+  account_state?: {
+    members: number | null;
+    active_users: number | null;
+    pending_invitations: number | null;
+    active_agents: number | null;
+    ingest_tokens_this_month: number | null;
+    oldest_record_at: string | null;
+    oldest_record_class: string | null;
+    retention_floor_days: number | null;
+    legal_hold: boolean;
+  };
   storage_retention: {
     source: string;
     minimum_days: number | null;

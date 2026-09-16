@@ -1,7 +1,11 @@
 import { html, fixture, expect, waitUntil } from '@open-wc/testing';
 import sinon from 'sinon';
 import { invalidateApiCaches } from '../api';
-import type { PlanChangeOptions, PlanChangePreview } from '../types/billing';
+import type {
+  PlanChangeOptions,
+  PlanChangePreview,
+  PlanEligibility,
+} from '../types/billing';
 import './billing-plan-comparison';
 import type { BillingPlanComparison } from './billing-plan-comparison';
 
@@ -25,6 +29,38 @@ const plan = (id: string, extra = {}) => ({
     byok_ingest_tokens_monthly: 100000000,
     hosted_models_monthly_limit_usd: 2,
     retention_days: 365,
+  },
+  ...extra,
+});
+/**
+ * One server verdict. The console composes no sentence of its own, so a test
+ * that wants a refusal or a consequence on screen has to put the server's
+ * words here, exactly as the backend builds them.
+ */
+const verdict = (
+  id: string,
+  extra: Partial<PlanEligibility> = {}
+): PlanEligibility => ({
+  plan_id: id,
+  name: id === 'pro' ? 'Pro' : id === 'free' ? 'Free' : 'Enterprise',
+  eligible: true,
+  purchasable: true,
+  contact_url: null,
+  requires_period: true,
+  is_current: false,
+  blockers: [],
+  warnings: [],
+  retention: {
+    oldest_record_at: null,
+    oldest_record_class: null,
+    target_days: 365,
+    cutoff_at: null,
+    affected: false,
+    protected_by_floor: false,
+    floor_days: null,
+    legal_hold: false,
+    message: null,
+    benefit_message: null,
   },
   ...extra,
 });
@@ -86,6 +122,14 @@ function options(): PlanChangeOptions {
     },
     assessments: [
       { plan_id: 'pro', fit: 'fits', blockers: [], advisories: [], months: [] },
+    ],
+    plan_eligibility: [
+      verdict('pro'),
+      verdict('enterprise', {
+        purchasable: false,
+        requires_period: false,
+        contact_url: '/request-demo',
+      }),
     ],
     storage_retention: {
       source: 'account_policy',
@@ -302,10 +346,22 @@ describe('Billing plan comparison', () => {
     expect(el.shadowRoot!.querySelector('[data-testid="warnings"]')).to.exist;
     expect(text(el)).to.include('Not yet verified.');
   });
-  it('states a fit in one line and only offers the months behind a link', async () => {
+  it('says nothing about fit when nothing is blocked and nothing is affected', async () => {
     const el = await mount();
     await open(el);
-    expect(text(el)).to.include('Your current usage fits this plan.');
+    for (const id of [
+      'plan-blockers',
+      'plan-warnings',
+      'plan-benefit',
+      'retention-protected',
+      'unavailable-plans',
+    ])
+      expect(el.shadowRoot!.querySelector(`[data-testid="${id}"]`), id).to.not
+        .exist;
+    expect(text(el))
+      .to.not.include('Not enough evidence')
+      .and.not.include('historical peaks')
+      .and.not.include('fits this plan');
     expect(el.shadowRoot!.querySelector('table')).to.not.exist;
     await showUsage(el);
     expect(text(el)).to.include('June 2030');
@@ -317,12 +373,13 @@ describe('Billing plan comparison', () => {
     ];
     const el = await mount();
     await open(el);
-    const summary = el.shadowRoot!.querySelector('[data-testid="fit-summary"]');
-    expect(summary?.textContent).to.include('Exceeds one or more observed');
-    expect(summary?.textContent).to.include(
+    const warnings = el.shadowRoot!.querySelector(
+      '[data-testid="plan-warnings"]'
+    );
+    expect(warnings?.textContent).to.include(
       'Built-in model spend exceeds this plan.'
     );
-    expect(text(el)).to.not.include('Your current usage fits this plan.');
+    expect(text(el)).to.not.include('Not enough evidence');
     expect(el.shadowRoot!.querySelector('table')).to.not.exist;
   });
   it('reconciles with the provider only when the reader asks for a refresh', async () => {
@@ -346,12 +403,9 @@ describe('Billing plan comparison', () => {
       .to.include('June 2030')
       .and.include('August 2030')
       .and.include('Current partial month');
-    expect(text(el)).to.include('Within the recorded monthly limits');
-    expect(text(el))
-      .to.include('Historical user peak: Unknown')
-      .and.include('Current counts do not establish past peaks');
+    expect(text(el)).to.not.include('Historical user peak');
   });
-  it('does not turn partial or missing history into a fit even if assessment says fits', async () => {
+  it('states what the months show without turning an incomplete one into a warning', async () => {
     data.monthly_usage[0].coverage = 'unknown';
     data.monthly_usage[0].coverage_reasons = ['account_created_during_period'];
     data.monthly_usage[0].observed_byok_tokens = null;
@@ -359,9 +413,13 @@ describe('Billing plan comparison', () => {
     const el = await mount();
     await open(el);
     await showUsage(el);
-    expect(text(el)).to.include('Not enough evidence to confirm a fit');
     expect(text(el)).to.include('account was created during this month');
     expect(text(el)).to.include('Missing records are not zero usage');
+    expect(text(el))
+      .to.not.include('Not enough evidence to confirm a fit')
+      .and.not.include('historical peaks are unavailable');
+    expect(el.shadowRoot!.querySelector('[data-testid="plan-warnings"]')).to.not
+      .exist;
   });
   it('shows observed overage even when the full month is incomplete', async () => {
     data.monthly_usage[0].coverage = 'unknown';
@@ -877,5 +935,275 @@ describe('Billing plan comparison', () => {
     expect(button(el, 'preview').disabled).to.equal(false);
     expect(el.shadowRoot!.querySelector('[data-testid="recover"]')).not.to
       .exist;
+  });
+  /**
+   * The four states a reader can land in. Every sentence below is the
+   * server's, rendered verbatim; the console decides only where it goes and
+   * what stays selectable.
+   */
+  describe('what the server says about each candidate plan', () => {
+    function optionFor(el: BillingPlanComparison, id: string) {
+      return el.shadowRoot!.querySelector(
+        `[data-testid="plan"] option[value="${id}"]`
+      ) as HTMLOptionElement | null;
+    }
+    it('disables a plan the account cannot hold and repeats the reason with both numbers', async () => {
+      data.plan_eligibility![0] = verdict('pro', {
+        eligible: false,
+        blockers: [
+          {
+            kind: 'members',
+            current: 4,
+            limit: 1,
+            message:
+              'You have 4 members; Pro includes 1. Remove 3 members to switch.',
+          },
+        ],
+      });
+      data.plans.unshift(
+        plan('free', { name: 'Free', price_monthly: 0, price_annually: 0 })
+      );
+      data.plan_eligibility!.unshift(
+        verdict('free', { requires_period: false })
+      );
+      const el = await mount();
+      await open(el);
+      expect(optionFor(el, 'pro')!.disabled).to.equal(true);
+      expect(optionFor(el, 'pro')!.textContent).to.include('(not available)');
+      expect(optionFor(el, 'free')!.disabled).to.equal(false);
+      const listed = el.shadowRoot!.querySelector(
+        '[data-testid="unavailable-plans"]'
+      );
+      expect(listed?.textContent).to.include(
+        'You have 4 members; Pro includes 1. Remove 3 members to switch.'
+      );
+      expect((el as any).selectedPlan).to.equal('free');
+    });
+    it('refuses to act on a blocked plan even when it is selected directly', async () => {
+      data.plan_eligibility![0] = verdict('pro', {
+        eligible: false,
+        blockers: [
+          {
+            kind: 'agents',
+            current: 12,
+            limit: 3,
+            message:
+              'You have 12 active agents; Pro includes 3. Deactivate 9 agents to switch. A plan change never deletes an agent.',
+          },
+        ],
+      });
+      const el = await mount();
+      await open(el);
+      (el as any).choose('pro');
+      await el.updateComplete;
+      expect(button(el, 'preview').disabled).to.equal(true);
+      expect(
+        el.shadowRoot!.querySelector('[data-testid="plan-blockers"]')
+          ?.textContent
+      ).to.include('Deactivate 9 agents to switch');
+      await (el as any).requestPreview();
+      expect(calls('/plan-change-preview')).to.have.length(0);
+    });
+    it('refuses a cancellation to Free while the server blocks Free', async () => {
+      data.plans.unshift(
+        plan('free', { name: 'Free', price_monthly: 0, price_annually: 0 })
+      );
+      data.plan_eligibility!.unshift(
+        verdict('free', {
+          requires_period: false,
+          eligible: false,
+          blockers: [
+            {
+              kind: 'members',
+              current: 4,
+              limit: 1,
+              message:
+                'You have 4 members; Free includes 1. Remove 3 members to switch.',
+            },
+          ],
+        })
+      );
+      const el = await mount();
+      await open(el);
+      expect(data.current_subscription).to.not.equal(null);
+      expect((el as any).selectedPlan).to.equal('pro');
+      expect(optionFor(el, 'free')!.disabled).to.equal(true);
+      (el as any).choose('free');
+      await el.updateComplete;
+      expect(button(el, 'preview').disabled).to.equal(true);
+      await (el as any).requestPreview();
+      expect(calls('/plan-change-preview')).to.have.length(0);
+      expect(
+        el.shadowRoot!.querySelector('[data-testid="unavailable-plans"]')
+          ?.textContent
+      ).to.include(
+        'You have 4 members; Free includes 1. Remove 3 members to switch.'
+      );
+    });
+    it('opens on no plan at all rather than on one it has just refused', async () => {
+      data.plan_eligibility![0] = verdict('pro', {
+        eligible: false,
+        blockers: [
+          {
+            kind: 'members',
+            current: 4,
+            limit: 1,
+            message:
+              'You have 4 members; Pro includes 1. Remove 3 members to switch.',
+          },
+        ],
+      });
+      const el = await mount();
+      await open(el);
+      expect((el as any).selectedPlan).to.equal('');
+      expect(el.shadowRoot!.querySelector('[data-testid="preview"]')).to.not
+        .exist;
+      expect(
+        el.shadowRoot!.querySelector('[data-testid="unavailable-plans"]')
+          ?.textContent
+      ).to.include(
+        'You have 4 members; Pro includes 1. Remove 3 members to switch.'
+      );
+    });
+    it('sends a contact link nowhere but a path or an http(s) address', async () => {
+      const el = await mount();
+      await open(el);
+      const href = () =>
+        el
+          .shadowRoot!.querySelector('[data-testid="contact-plans"] a')!
+          .getAttribute('href');
+      expect(href()).to.equal('/request-demo');
+      for (const hostile of [
+        'javascript:alert(1)',
+        'jav\tascript:alert(1)',
+        ' javascript:alert(1)',
+        'data:text/html,<script></script>',
+        '//evil.example.com/quote',
+      ]) {
+        (el as any).options.plan_eligibility[1].contact_url = hostile;
+        (el as any).requestUpdate();
+        await el.updateComplete;
+        expect(href(), hostile).to.equal('/request-demo');
+      }
+      (el as any).options.plan_eligibility[1].contact_url =
+        'https://sales.example.com/enterprise';
+      (el as any).requestUpdate();
+      await el.updateComplete;
+      expect(href()).to.equal('https://sales.example.com/enterprise');
+    });
+    it('prefers the contact sentence the server composes', async () => {
+      data.plan_eligibility![1] = verdict('enterprise', {
+        purchasable: false,
+        requires_period: false,
+        contact_url: '/request-demo',
+        contact_message:
+          'Enterprise is scoped per deployment and installed with our team.',
+      });
+      const el = await mount();
+      await open(el);
+      const contact = el.shadowRoot!.querySelector(
+        '[data-testid="contact-plans"]'
+      );
+      expect(contact?.textContent).to.include(
+        'Enterprise is scoped per deployment and installed with our team.'
+      );
+      expect(contact?.textContent).to.not.include('priced per deployment');
+    });
+    it('keeps a quote-only plan out of the picker and offers contact instead', async () => {
+      const el = await mount();
+      await open(el);
+      expect(optionFor(el, 'enterprise')).to.not.exist;
+      expect(optionFor(el, 'pro')).to.exist;
+      const contact = el.shadowRoot!.querySelector(
+        '[data-testid="contact-plans"]'
+      );
+      expect(contact?.textContent).to.include(
+        'Enterprise is priced per deployment.'
+      );
+      expect(contact?.querySelector('a')?.getAttribute('href')).to.equal(
+        '/request-demo'
+      );
+    });
+    it('offers no billing period for a plan with nothing to bill', async () => {
+      data.plans.unshift(
+        plan('free', { name: 'Free', price_monthly: 0, price_annually: 0 })
+      );
+      data.plan_eligibility!.unshift(
+        verdict('free', { requires_period: false })
+      );
+      const el = await mount();
+      await open(el);
+      expect(el.shadowRoot!.querySelector('[data-testid="interval"]')).to.exist;
+      (el as any).choose('free');
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelector('[data-testid="interval"]')).to.not
+        .exist;
+      expect((el as any).interval).to.equal('month');
+      const price = (
+        el.shadowRoot!.querySelector('[data-testid="price"]')?.textContent ?? ''
+      ).replace(/\s+/g, ' ');
+      expect(price).to.include('Free: $0.00.');
+      expect(price).to.not.include('/ month');
+    });
+    it('says which records a shorter history deletes and when', async () => {
+      data.plan_eligibility![0] = verdict('pro', {
+        warnings: [
+          {
+            kind: 'retention',
+            current: '2025-02-11T00:00:00+00:00',
+            limit: 365,
+            message:
+              'Your usage records go back to 2025-02-11. Pro keeps 365 days, so records before 2025-09-16 will be deleted after the switch.',
+          },
+        ],
+        retention: {
+          ...verdict('pro').retention,
+          oldest_record_at: '2025-02-11T00:00:00+00:00',
+          oldest_record_class: 'usage',
+          cutoff_at: '2025-09-16T00:00:00+00:00',
+          affected: true,
+          message:
+            'Your usage records go back to 2025-02-11. Pro keeps 365 days, so records before 2025-09-16 will be deleted after the switch.',
+        },
+      });
+      const el = await mount();
+      await open(el);
+      expect(
+        el.shadowRoot!.querySelector('[data-testid="plan-warnings"]')
+          ?.textContent
+      ).to.include(
+        'Your usage records go back to 2025-02-11. Pro keeps 365 days, so records before 2025-09-16 will be deleted after the switch.'
+      );
+      expect(optionFor(el, 'pro')!.disabled).to.equal(false);
+      expect(button(el, 'preview').disabled).to.equal(false);
+    });
+    it('states a longer history as a benefit and a protected one as safe, never as a warning', async () => {
+      data.plan_eligibility![0] = verdict('pro', {
+        retention: {
+          ...verdict('pro').retention,
+          benefit_message:
+            'Analytics history extends from 183 to 365 days. Records already deleted are not restored.',
+        },
+      });
+      const el = await mount();
+      await open(el);
+      expect(
+        el.shadowRoot!.querySelector('[data-testid="plan-benefit"]')
+          ?.textContent
+      ).to.include('Analytics history extends from 183 to 365 days.');
+      expect(el.shadowRoot!.querySelector('[data-testid="plan-warnings"]')).to
+        .not.exist;
+    });
+    it('renders nothing of its own when the server sends no verdicts', async () => {
+      delete data.plan_eligibility;
+      const el = await mount();
+      await open(el);
+      expect(el.shadowRoot!.querySelector('[data-testid="plan"]')).to.exist;
+      expect(optionFor(el, 'enterprise')).to.not.exist;
+      expect(el.shadowRoot!.querySelector('[data-testid="plan-blockers"]')).to
+        .not.exist;
+      expect(el.shadowRoot!.querySelector('[data-testid="unavailable-plans"]'))
+        .to.not.exist;
+    });
   });
 });
