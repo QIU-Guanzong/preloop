@@ -75,7 +75,11 @@ def test_backend_coverage_job_combines_shards_before_floor() -> None:
     """The 60% floor applies only to the combined coverage data."""
     jobs = _load_ci_jobs()
     coverage = jobs["test-backend-coverage"]
-    assert coverage["needs"] == ["changes", "test-backend"]
+    # pick-runner is a routing dependency, guarded separately in
+    # test_github_ci_self_hosted_runner.py. What matters here is that the floor
+    # job waits for every shard.
+    assert "changes" in coverage["needs"]
+    assert "test-backend" in coverage["needs"]
 
     install = _step_script(coverage, "Install coverage")
     assert ".github/requirements/coverage.txt" in install
