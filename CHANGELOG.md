@@ -49,6 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GitHub expressions reject minus, so `matrix.group - 1` made the
   workflow file invalid and no GitHub CI job could start. The plan
   array is 1-based (dummy `null` at index 0).
+- Issues similar-duplicates tests drop coalesced GETs between cases,
+  so a later spec cannot join an earlier in-flight `/issue-duplicates`
+  response and render zero rows.
 - The upgrade e2e checks out the 2026 `pro` plan, not the withdrawn
   `teams` id. Free accounts see the AI-titles upsell hint on the
   sessions list again. Custom-agent e2e opens the wizard from
