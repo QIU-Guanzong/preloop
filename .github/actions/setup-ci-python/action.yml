@@ -1,0 +1,27 @@
+name: Set up CI Python
+description: >-
+  Use a matching system interpreter in a venv when one exists and can
+  venv. Otherwise install via actions/setup-python. Debian 12 is not in
+  the python-versions manifest, so setup-python fails there even when
+  python3.11 is already installed.
+
+inputs:
+  python-version:
+    description: Major.minor (for example 3.11).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Prefer system Python
+      id: system
+      shell: bash
+      env:
+        PYTHON_VERSION: ${{ inputs.python-version }}
+      run: bash "${{ github.action_path }}/prefer-system-python.sh"
+
+    - name: Set up Python
+      if: steps.system.outputs.use_setup == 'true'
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: ${{ inputs.python-version }}
