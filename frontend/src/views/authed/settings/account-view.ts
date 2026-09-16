@@ -850,9 +850,16 @@ export class AccountView extends LitElement {
     // the expired trial's cap as an allowance is the mis-sell to avoid.
     const staleTrialFigures =
       trialExpired && hostedSummary?.one_time_credit_usd == null;
-    const displayPlanName = trialExpired
-      ? (this._billingSummary?.effective_plan?.name ?? 'Free')
-      : currentPlanName;
+    // `effective_plan.name` is the server's answer, resolved from the plan
+    // catalog: the catalog is the only place that knows a plan has been
+    // renamed, and the legacy per-seat plan was renamed to "Legacy Teams"
+    // when it was withdrawn. The persisted plan row deliberately keeps the
+    // name it was sold under so a catalog sync can never rewrite a
+    // grandfathered contract, which makes `plan.name` a stale display source
+    // and a fallback only, for a server that predates this field.
+    const displayPlanName =
+      this._billingSummary?.effective_plan?.name ??
+      (trialExpired ? 'Free' : currentPlanName);
 
     return html`
       <view-header headerText="Account" width="narrow"></view-header>

@@ -359,6 +359,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A plan withdrawn from sale (`plan.is_active = False`) is grandfathered
+  only for a subscription somebody is paying for, or for a trial of it that
+  is still running. An ended or cancelled trial, a cancelled subscription,
+  and an `active` row with no provider subscription id behind it all resolve
+  to the default plan instead of keeping the withdrawn plan's terms and
+  name. The rule lives once, in `preloop.models.crud.entitlement`, and is
+  applied by `entitled_subscription`, `get_active_for_account` and the
+  billing preflight aggregates, so console, checkout and operator counts
+  agree. Operator note: a grant hand-provisioned on a withdrawn plan without
+  a provider subscription id stops resolving when this ships. Count those
+  rows before deploying (newest subscription per account, status `active` or
+  `past_due`, plan row with `is_active = False`, provider id null or blank);
+  re-establish any that are real by reconciling them against the provider,
+  or by moving the account onto a custom plan row, which is on sale by
+  construction and never subject to this rule.
+
 - The console upgrade modal repeats what the server said instead of
   "Unexpected checkout response". `startCheckout` resolves a `refresh`
   answer (asking the billing views to re-read the subscription summary and

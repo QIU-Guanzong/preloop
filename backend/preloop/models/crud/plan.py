@@ -7,7 +7,11 @@ from sqlalchemy.orm import Session
 
 from ..models.plan import Plan, Subscription, MonthlyUsage
 from .base import CRUDBase
-from .entitlement import ACTIVE_STATUSES, entitlement_clause
+from .entitlement import (
+    ACTIVE_STATUSES,
+    entitlement_clause,
+    grandfather_clause,
+)
 
 
 class CRUDPlan(CRUDBase[Plan]):
@@ -63,12 +67,20 @@ class CRUDSubscription(CRUDBase[Subscription]):
         returns None, so those callers fall back to Free. The expiry rule is
         shared with every other entitlement lookup; see
         :mod:`preloop.models.crud.entitlement`.
+
+        The withdrawn-plan grandfathering rule applies here too, and it has
+        to: this lookup also decides whether a second checkout is refused. An
+        account holding an unpaid row on a retired plan resolves to Free, so
+        refusing its purchase would leave it on Free with no way off. With
+        the rule applied, the row that no longer grants the retired plan's
+        terms also stops blocking the sale.
         """
         return (
             db.query(Subscription)
             .filter(
                 Subscription.account_id == account_id,
                 entitlement_clause(Subscription, statuses=ACTIVE_STATUSES),
+                grandfather_clause(Subscription, Plan),
             )
             .order_by(Subscription.created_at.desc())
             .first()

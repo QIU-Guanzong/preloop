@@ -27,6 +27,30 @@ dunning turns a billing hiccup into churn. Only ``trialing`` carries the date
 check, because only a trial has a hard provider-side expiry that grants free
 access until it passes.
 
+Withdrawn plans and grandfathering
+----------------------------------
+A plan row with ``is_active == False`` has been withdrawn from sale. Nobody
+can buy it, it is hidden from the plan list, and the only reason the row still
+exists is that live subscriptions resolve their terms through it. Keeping such
+a plan is a *grandfathering* promise, and a promise made to paying customers:
+:func:`grandfathers_withdrawn_plan` requires a provider-backed paid row
+(``active`` or ``past_due`` with a ``stripe_subscription_id``) before a
+withdrawn plan's terms are handed out.
+
+Status alone is not enough here either, and for a different reason than
+above. An *ended* trial of a plan that has since been withdrawn is not a
+grandfathered customer: it is someone who was evaluating a product we no
+longer sell. Letting that row keep resolving the withdrawn plan hands out
+its terms and its *name* to an account that never paid for it, and that is
+what left a staging account on the withdrawn "teams" plan instead of Free
+after its legacy per-seat trial ended. A trial that is still *running* is
+kept, because it is a promise already made and it expires by itself.
+
+Grandfathering is therefore two independent tests, both of which must hold:
+the subscription entitles (:func:`is_entitled_subscription`) and, when the
+plan is withdrawn, somebody is paying for it or the trial has not ended yet
+(:func:`grandfathers_withdrawn_plan`).
+
 Two status sets exist on purpose:
 
 ``ENTITLED_STATUSES``
@@ -45,13 +69,18 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional, Sequence
 
-from sqlalchemy import ColumnElement, or_
+from sqlalchemy import ColumnElement, func, or_, select
 
 # Statuses that grant premium access, including Stripe's dunning window.
 ENTITLED_STATUSES: tuple[str, ...] = ("active", "trialing", "past_due")
 
 # Statuses that mean "a live subscription exists right now", excluding dunning.
 ACTIVE_STATUSES: tuple[str, ...] = ("active", "trialing")
+
+# Statuses that mean money is actually moving for this subscription. A trial
+# is not among them: it is free by construction. These are the only statuses
+# that grandfather an account onto a plan that is no longer sold.
+PAID_STATUSES: tuple[str, ...] = ("active", "past_due")
 
 TRIALING_STATUS = "trialing"
 
@@ -152,6 +181,130 @@ def is_entitled_subscription(
     return not is_expired_trial(subscription, now=now)
 
 
+def is_paid_subscription(subscription: Any) -> bool:
+    """Whether the provider is charging for this subscription right now.
+
+    Args:
+        subscription: A Subscription row, or None.
+
+    Returns:
+        True for an ``active`` or ``past_due`` row that carries a provider
+        subscription id. A trial is never paid, however far in the future its
+        period end sits, and a row with no ``stripe_subscription_id`` is a
+        local artefact (a seeded row, or a plan change that was written
+        locally and never completed at the provider) rather than evidence of
+        a paying customer.
+    """
+    if subscription is None:
+        return False
+    if getattr(subscription, "status", None) not in PAID_STATUSES:
+        return False
+    provider_id = getattr(subscription, "stripe_subscription_id", None)
+    return bool(str(provider_id or "").strip())
+
+
+def grandfathers_withdrawn_plan(
+    subscription: Any, *, plan: Any, now: Optional[datetime] = None
+) -> bool:
+    """Whether this subscription may keep resolving a withdrawn plan.
+
+    Applied on top of :func:`is_entitled_subscription`, never instead of it.
+
+    A trial that is still running is the one unpaid case that keeps the
+    withdrawn plan. It is a promise already made, it cannot be renewed (a
+    withdrawn plan is not purchasable, so no new trial can start on one), and
+    it ends by itself on a date the provider set, after which the expiry rule
+    resolves the account to the default plan with no operator action. An
+    *ended* trial is the opposite: nothing bounds it, which is how one sat at
+    ``trialing`` for seven weeks and kept a retired plan's terms and name.
+
+    Args:
+        subscription: A Subscription row, or None.
+        plan: The Plan row the subscription points at, or None when it cannot
+            be loaded. An unknown plan is treated as withdrawn: resolving the
+            terms of a row we cannot see is exactly the case that should fall
+            back to the default plan.
+        now: Comparison instant, defaulting to the current UTC time.
+
+    Returns:
+        True when the plan is still on sale (grandfathering does not apply and
+        ordinary entitlement decides alone), when the plan is withdrawn and
+        somebody is paying for it, or while a trial of it is still running.
+
+    Note:
+        Payment is inferred from the provider subscription id, so a row on a
+        withdrawn plan that was provisioned by hand, with no id, resolves to
+        the default plan once this rule ships. That is deliberate and its
+        blast radius is small: the rule only reads rows whose *plan row* is
+        marked ``is_active = False``, which is the catalog's
+        withdrawn-from-sale flag. A negotiated or enterprise grant is a plan
+        row that is still on sale (``Plan.is_active`` defaults to True and
+        custom rows are created that way), so it short-circuits on the first
+        branch here and is never subject to this rule at all. The only rows
+        affected are hand-written subscriptions pointing at a plan somebody
+        explicitly withdrew.
+
+        To re-establish such a grant, do one of these rather than weakening
+        the rule: reconcile the subscription against the provider so the row
+        carries its real subscription id, or give the account a custom plan
+        row carrying the promised terms, which is on sale by construction and
+        is how negotiated contracts are already modelled. Before deploying
+        this rule to an environment, count the exposed rows first: newest
+        subscription per account, status in (active, past_due), plan row
+        with ``is_active = False``, ``stripe_subscription_id`` null or blank.
+        Zero means no account changes plan.
+    """
+    if plan is not None and bool(getattr(plan, "is_active", False)):
+        return True
+    if is_live_trial(subscription, now=now):
+        return True
+    return is_paid_subscription(subscription)
+
+
+def grandfather_clause(
+    subscription_model: Any, plan_model: Any, *, now: Optional[datetime] = None
+) -> ColumnElement[bool]:
+    """SQL form of :func:`grandfathers_withdrawn_plan`, for use in a filter.
+
+    Emitted as a single clause over the subscription table, with the plan
+    lookup as a scalar subquery rather than a join. Callers therefore keep
+    their existing query shape and add one more ``.filter()`` argument: a
+    join would change the row shape of every caller, and the plan table is
+    the size of the price list.
+
+    Args:
+        subscription_model: The Subscription mapped class or alias.
+        plan_model: The Plan mapped class, whose ``id`` and ``is_active``
+            columns say which plans are still sold.
+        now: Comparison instant, defaulting to the current UTC time.
+
+    Returns:
+        A boolean clause that passes plans still on sale, and withdrawn plans
+        only for a provider-backed paid subscription or a trial that is still
+        running. A subscription whose plan row does not exist at all matches
+        no plan still on sale, so it too needs one of those, matching
+        :func:`grandfathers_withdrawn_plan` with ``plan=None``.
+
+    Note:
+        The provider-id half is emitted as "not null and not blank after
+        trimming", so it accepts exactly what :func:`is_paid_subscription`
+        accepts. A NULL-only test would let an empty or whitespace id pass in
+        SQL while the in-memory form rejected it, which is the drift this
+        module exists to prevent.
+    """
+    moment = _as_utc(now) or datetime.now(timezone.utc)
+    plans_on_sale = select(plan_model.id).where(plan_model.is_active.is_(True))
+    provider_backed = subscription_model.stripe_subscription_id.isnot(None) & (
+        func.length(func.trim(subscription_model.stripe_subscription_id)) > 0
+    )
+    return or_(
+        subscription_model.plan_id.in_(plans_on_sale),
+        subscription_model.status.in_(PAID_STATUSES) & provider_backed,
+        (subscription_model.status == TRIALING_STATUS)
+        & (subscription_model.current_period_end >= moment),
+    )
+
+
 def entitlement_clause(
     subscription_model: Any,
     *,
@@ -214,9 +367,13 @@ def is_stale_subscription(
 __all__ = [
     "ACTIVE_STATUSES",
     "ENTITLED_STATUSES",
+    "PAID_STATUSES",
     "TRIALING_STATUS",
     "entitlement_clause",
+    "grandfather_clause",
+    "grandfathers_withdrawn_plan",
     "is_entitled_subscription",
+    "is_paid_subscription",
     "is_expired_trial",
     "is_live_trial",
     "is_stale_subscription",
