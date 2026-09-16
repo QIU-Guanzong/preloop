@@ -216,8 +216,9 @@ class OpenHandsAgent(ContainerAgentExecutor):
         the prompt cannot close the shell string.
 
         The inner ``python -m openhands.core.main -t "$(cat ...)"`` still
-        expands the prompt into that process's argv. That residual is the
-        same class as issue #692 for gemini/opencode and is left alone.
+        expands the prompt into that process's argv. Gemini and OpenCode
+        no longer do that (issue #692); this OpenHands residual is left
+        alone.
         """
         prompt = execution_context["prompt"]
         max_iterations = execution_context.get("max_iterations", 10)

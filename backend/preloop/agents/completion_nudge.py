@@ -142,10 +142,12 @@ def build_completion_nudge_block(
         resume_probe: Shell condition that succeeds when the installed CLI
             can resume the session it just ran.
         resume_command: Shell command that re-invokes the harness on the
-            previous session with ``"$(cat {NUDGE_PROMPT_PATH})"`` as its
-            prompt. It may use ``$PRELOOP_NUDGE_TIMEOUT`` as a command
-            prefix; the block sets it to ``timeout <n>`` when coreutils
-            ``timeout`` exists and to the empty string otherwise.
+            previous session. Some harnesses interpolate
+            ``"$(cat {NUDGE_PROMPT_PATH})"`` as an argv element (codex).
+            Others redirect that file onto stdin. It may use
+            ``$PRELOOP_NUDGE_TIMEOUT`` as a command prefix; the block sets
+            it to ``timeout <n>`` when coreutils ``timeout`` exists and to
+            the empty string otherwise.
         timeout_seconds: Wall clock for the round.
         output_log_path: Where the harness output was tee'd (overridable so
             the shell block can be exercised end to end in tests).

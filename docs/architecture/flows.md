@@ -74,9 +74,12 @@ the same way (`base64 -d`, then `wc -c` against `_BYTES`). Do not require
 `AGENT_PROMPT` for prompts above 64 KiB.
 
 OpenHands (the default `agent_type`) uses this prompt transport on Docker
-and Kubernetes. Gemini and OpenCode still expand the materialized file into
-an inner CLI argv (`--prompt "$(cat ...)"` / `-- "$(cat ...)"`); that inner
-`execve` residual is tracked as issue #692 and is not part of this contract.
+and Kubernetes. Gemini and OpenCode feed the materialized file to the CLI
+on stdin, so the prompt is not an argv element (issue #692). Residuals
+that still expand the file into argv are aider
+(`--message "$(cat ...)"`), OpenHands (`-t "$(cat ...)"`), and Codex
+nudge/recovery (`"$(cat ...)"` as a positional). Those are not part of
+this contract.
 
 ## Model stream recovery
 
