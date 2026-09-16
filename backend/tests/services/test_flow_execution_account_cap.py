@@ -520,6 +520,7 @@ class TestTheCapIsHostedOnly:
         assert {row.id for row in kept} == {leased.id, extra.id}
         assert summary.skipped_account_cap == 0
 
+class TestRunnerNaksCappedWork:
     """A refused claim returns the message to the stream instead of acking."""
 
     @pytest.mark.asyncio
