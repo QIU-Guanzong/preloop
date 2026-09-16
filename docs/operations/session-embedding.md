@@ -51,6 +51,10 @@ sweeper.
 | `SESSION_EMBEDDING_QUEUE_WORKER_ENABLED` | true | Background thread; `TESTING=true` disables it |
 | `SESSION_EMBEDDING_MAX_ATTEMPTS` | 3 | Retries before a chunk is retired as failed |
 | `SESSION_EMBEDDING_TIMEOUT_SECONDS` | 30 | One embeddings HTTP call |
+| `SESSION_SEARCH_QUERY_EMBEDDING_TTL_SECONDS` | 300 | How long a search query's vector stays in the process cache. Zero disables the cache. A cached vector can serve paging for up to the TTL after the daily cap is reached. Consent is checked before the cache is read, so opt-out cannot start a semantic search from a leftover entry. |
+| `SESSION_SEARCH_QUERY_EMBEDDING_CACHE_SIZE` | 256 | Query vectors one process may cache. The entry closest to expiry is evicted when the cache is full. |
+
+Semantic search also raises `hnsw.ef_search` to at least 200 (`VECTOR_CANDIDATE_CHUNKS`) for each ANN statement. The HNSW index cannot carry account / model / redaction filters, so that depth is approximate under selective filtering rather than "the closest N".
 
 Helm documents the same names next to the gateway search-index queue comments
 in `helm/preloop/values.yaml`.

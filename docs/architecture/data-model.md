@@ -50,7 +50,7 @@ The detailed schema is defined using SQLAlchemy models within the `preloop.model
 *   **Trackers:** Holds specific tracker instance details and encrypted credentials.
 *   **Issues:** Stores core issue data (ID, title, description, status, labels, etc.) synchronized from trackers.
 *   **Issue Embeddings:** Contains vector embeddings (using PGVector `vector` type) linked to issues, used for similarity search.
-*   **Session search corpus:** `session_search_document` stores one chunk per slice of session content (gateway interaction, transcript message, tool call, operator note, session summary) with a stored `tsvector` plus an optional 1536-dimension embedding and partial HNSW index. `MODEL_GATEWAY_CAPTURE_CONTENT` gates stored text; `SESSION_SEARCH_INDEX_ENABLED` disables writes. `session_embedding_setting` is the per-account opt-in for the embedding worker. No search endpoint yet.
+*   **Session search corpus:** `session_search_document` stores one chunk per slice of session content (gateway interaction, transcript message, tool call, operator note, session summary) with a stored `tsvector` plus an optional 1536-dimension embedding and partial HNSW index. `MODEL_GATEWAY_CAPTURE_CONTENT` gates stored text; `SESSION_SEARCH_INDEX_ENABLED` disables writes. `session_embedding_setting` is the per-account opt-in for the embedding worker. `POST /api/v1/runtime-sessions/search` reads the corpus in `keyword`, `semantic` or `hybrid` mode; the vector half only scores chunks stamped with the model that embedded the query, and anything that narrows coverage is named in the response's degraded block.
 *   **Other Metadata:** Tables for comments, users, API keys, etc., as needed.
 
 Schema migrations are managed using Alembic within `preloop.models`.
@@ -161,3 +161,13 @@ transaction. Vectors live on the same row (`embedding`, `embedding_model`,
 is one row per account, off by default; enabling names the provider, model and
 https endpoint. The shared `SESSION_EMBEDDING_API_KEY` is sent only to URLs on
 `SESSION_EMBEDDING_API_KEY_BASE_URLS`.
+
+Reads go through `POST /api/v1/runtime-sessions/search`. `keyword` ranks on the
+tsvector alone and touches no provider. `semantic` and `hybrid` embed the query
+under the same opt-in, kill switch and daily cap as the worker, and fuse the two
+candidate lists with reciprocal rank fusion (`RRF_K = 60`, both weights `1.0`,
+ties broken on session id). A query is only ever compared with vectors carrying
+its own `embedding_model`, so a model change degrades to keyword rather than
+scoring across two spaces. Query vectors are cached per process for a short
+window, keyed by a digest of account, model identity and query, so paging a
+result set does not re-embed it.

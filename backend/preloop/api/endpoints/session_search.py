@@ -1,4 +1,4 @@
-"""Ranked keyword search across runtime session content.
+"""Ranked keyword, semantic and hybrid search across session content.
 
 ``POST``, not ``GET``, and deliberately so. The two search surfaces that
 already exist (``GET /account/gateway-usage/search`` and ``GET /search``) put
@@ -11,6 +11,11 @@ keeps it out.
 The permission is ``view_runtime_sessions``: this reads session content, so it
 takes the permission that already guards reading sessions rather than the cost
 permission the older account wide search happens to sit behind.
+
+The semantic half embeds the query, which spends money under the account's own
+opt in and daily cap. It is still one route and one body: a mode the account
+cannot serve is answered with what it can serve plus a marker saying what is
+missing, so a client never has to ask which modes this deployment supports.
 """
 
 from __future__ import annotations
@@ -50,10 +55,11 @@ async def search_runtime_sessions(
 ) -> SessionSearchResponse:
     """Rank the caller's runtime sessions by relevance to a query.
 
-    Returns sessions ordered by a fused relevance score, each with snippets
-    that name the turn the match came from. A mode other than ``keyword`` is
-    answered with keyword results and a degraded marker rather than an error,
-    so a client written against the eventual hybrid contract works today.
+    Returns sessions ordered by relevance, each with snippets that name the
+    turn the match came from and a reason saying whether the words, the
+    vector or both put it there. ``semantic`` and ``hybrid`` embed the query
+    and search the corpus vectors; when that half cannot run, the answer is
+    keyword results with a degraded marker naming the cause, never an error.
     """
     return await run_db_off_loop(
         lambda: session_search.search_sessions(
