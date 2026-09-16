@@ -296,8 +296,12 @@ export class BillingPlanComparison extends LitElement {
         ? plan.price_monthly
         : Number.POSITIVE_INFINITY;
     const targets = options.plans.filter((p) => this.isTarget(p));
-    const fitting = targets.filter((p) => this.eligible(p));
-    const selectable = fitting.length ? fitting : targets;
+    // A plan the server blocked is never the default, not even as a last
+    // resort: the picker has just labelled it "(not available)" and the action
+    // under it is disabled, so opening on it offers a choice that cannot be
+    // taken. When nothing fits, the selection stays empty and the reasons
+    // under the picker are the whole screen.
+    const selectable = targets.filter((p) => this.eligible(p));
     const currentPlan = this.effectiveCurrentPlan(options);
     const currentId = currentPlan?.id;
     const ladder = selectable
@@ -322,7 +326,7 @@ export class BillingPlanComparison extends LitElement {
       // this account can move to. Opening on it is a poor offer, but an empty
       // picker is worse: it hides the one plan that is left. With nothing
       // blocked, Free stays off the default as before.
-      (fitting.length < targets.length
+      (targets.some((p) => !this.eligible(p))
         ? selectable.find((p) => p.id !== currentId)?.id
         : undefined) ??
       ''
@@ -391,10 +395,22 @@ export class BillingPlanComparison extends LitElement {
       !this.pendingConfirmation &&
       !!this.target &&
       !this.salesLed &&
-      // Cancelling down to Free must never be trapped by the caps of the plan
-      // being left: existing users and agents are kept, only growth stops.
-      ((!!this.options.current_subscription && this.selectedPlan === 'free') ||
-        (this.eligible(this.target) && !this.assessment()?.blockers?.length)) &&
+      // The per-plan verdict decides, with no exemption for a cancellation
+      // down to Free. The console used to let a Free downgrade through on the
+      // theory that the caps of the plan being left cannot trap it, but the
+      // server blocks Free on the account's own member and agent counts and
+      // the picker says "(not available)" about it. Two answers on one screen
+      // are worse than one strict answer, so the exemption, if it is wanted,
+      // belongs in ``evaluate_plan`` where the sentence the reader reads is
+      // written.
+      this.eligible(this.target) &&
+      // The older fit assessment keeps the exemption it shipped with. It is
+      // an opinion formed from observed months, not a measurement of the
+      // account as it is now, and the confirm endpoint accepts a cancellation
+      // to Free that the assessment calls blocked.
+      (!this.assessment()?.blockers?.length ||
+        (!!this.options.current_subscription &&
+          this.selectedPlan === 'free')) &&
       (!this.options.current_subscription ||
         (!!this.options.current_subscription.revision &&
           Number.isFinite(
@@ -1121,6 +1137,41 @@ export class BillingPlanComparison extends LitElement {
     </div>`;
   }
 
+  /**
+   * Where a contact link may point.
+   *
+   * `contact_url` reaches an `href`, and lit escapes an attribute value but
+   * does not judge its scheme: `javascript:` and `data:` in an `href` execute
+   * on click. The field comes from the plugin catalog today, and a catalog
+   * entry is the kind of thing an operator is given to edit tomorrow, so the
+   * console accepts only a same-origin path or an absolute http(s) URL and
+   * falls back to the demo request page for anything else. Control characters
+   * and spaces are dropped first, because a browser drops them before it
+   * reads the scheme and "jav\tascript:alert(1)" would otherwise pass.
+   */
+  private contactHref(url: string | null | undefined): string {
+    const candidate = (url ?? '').replace(/[\u0000-\u0020\u007f]/g, '');
+    if (!candidate) return '/request-demo';
+    // "//host" is another origin written as a path, not a path.
+    if (candidate.startsWith('//')) return '/request-demo';
+    if (candidate.startsWith('/')) return candidate;
+    return /^https?:\/\//i.test(candidate) ? candidate : '/request-demo';
+  }
+
+  /**
+   * One contact line: the server's sentence when it sends one, the console's
+   * fallback when it does not, and the link, composed in one place so the two
+   * callers cannot drift apart.
+   */
+  private renderContactLine(plan: BillingPlan, fallback: string) {
+    const verdict = this.verdict(plan.id);
+    const sentence = verdict?.contact_message?.trim() || fallback;
+    return html`${sentence}
+      <a class="contact" href=${this.contactHref(verdict?.contact_url)}
+        >Contact us about ${plan.name}</a
+      >`;
+  }
+
   /** Quote-only plans: named, with the contact link, never a checkout. */
   private renderContactPlans() {
     const plans = this.contactPlans;
@@ -1128,12 +1179,10 @@ export class BillingPlanComparison extends LitElement {
     return html`<p data-testid="contact-plans">
       ${plans.map(
         (p) =>
-          html`${p.name} is priced per deployment.
-            <a
-              class="contact"
-              href=${this.verdict(p.id)?.contact_url ?? '/request-demo'}
-              >Contact us about ${p.name}</a
-            >.`
+          html`${this.renderContactLine(
+            p,
+            `${p.name} is priced per deployment.`
+          )}.`
       )}
     </p>`;
   }
@@ -1178,14 +1227,11 @@ export class BillingPlanComparison extends LitElement {
               ${
                 this.salesLed
                   ? html`<p data-testid="sales-led">
-                        ${target.name} is priced per deployment and is not
-                        bought from the console.
-                      </p>
-                      <a
-                        class="contact"
-                        href=${this.verdict(target.id)?.contact_url ?? '/request-demo'}
-                        >Contact us about ${target.name}</a
-                      >`
+                      ${this.renderContactLine(
+                        target,
+                        `${target.name} is priced per deployment and is not bought from the console.`
+                      )}
+                    </p>`
                   : html`
                       <p data-testid="price">
                         ${target.name}:

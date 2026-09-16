@@ -1004,6 +1004,111 @@ describe('Billing plan comparison', () => {
       await (el as any).requestPreview();
       expect(calls('/plan-change-preview')).to.have.length(0);
     });
+    it('refuses a cancellation to Free while the server blocks Free', async () => {
+      data.plans.unshift(
+        plan('free', { name: 'Free', price_monthly: 0, price_annually: 0 })
+      );
+      data.plan_eligibility!.unshift(
+        verdict('free', {
+          requires_period: false,
+          eligible: false,
+          blockers: [
+            {
+              kind: 'members',
+              current: 4,
+              limit: 1,
+              message:
+                'You have 4 members; Free includes 1. Remove 3 members to switch.',
+            },
+          ],
+        })
+      );
+      const el = await mount();
+      await open(el);
+      expect(data.current_subscription).to.not.equal(null);
+      expect((el as any).selectedPlan).to.equal('pro');
+      expect(optionFor(el, 'free')!.disabled).to.equal(true);
+      (el as any).choose('free');
+      await el.updateComplete;
+      expect(button(el, 'preview').disabled).to.equal(true);
+      await (el as any).requestPreview();
+      expect(calls('/plan-change-preview')).to.have.length(0);
+      expect(
+        el.shadowRoot!.querySelector('[data-testid="unavailable-plans"]')
+          ?.textContent
+      ).to.include(
+        'You have 4 members; Free includes 1. Remove 3 members to switch.'
+      );
+    });
+    it('opens on no plan at all rather than on one it has just refused', async () => {
+      data.plan_eligibility![0] = verdict('pro', {
+        eligible: false,
+        blockers: [
+          {
+            kind: 'members',
+            current: 4,
+            limit: 1,
+            message:
+              'You have 4 members; Pro includes 1. Remove 3 members to switch.',
+          },
+        ],
+      });
+      const el = await mount();
+      await open(el);
+      expect((el as any).selectedPlan).to.equal('');
+      expect(el.shadowRoot!.querySelector('[data-testid="preview"]')).to.not
+        .exist;
+      expect(
+        el.shadowRoot!.querySelector('[data-testid="unavailable-plans"]')
+          ?.textContent
+      ).to.include(
+        'You have 4 members; Pro includes 1. Remove 3 members to switch.'
+      );
+    });
+    it('sends a contact link nowhere but a path or an http(s) address', async () => {
+      const el = await mount();
+      await open(el);
+      const href = () =>
+        el
+          .shadowRoot!.querySelector('[data-testid="contact-plans"] a')!
+          .getAttribute('href');
+      expect(href()).to.equal('/request-demo');
+      for (const hostile of [
+        'javascript:alert(1)',
+        'jav\tascript:alert(1)',
+        ' javascript:alert(1)',
+        'data:text/html,<script></script>',
+        '//evil.example.com/quote',
+      ]) {
+        (el as any).options.plan_eligibility[1].contact_url = hostile;
+        (el as any).requestUpdate();
+        await el.updateComplete;
+        expect(href(), hostile).to.equal('/request-demo');
+      }
+      (el as any).options.plan_eligibility[1].contact_url =
+        'https://sales.example.com/enterprise';
+      (el as any).requestUpdate();
+      await el.updateComplete;
+      expect(href()).to.equal('https://sales.example.com/enterprise');
+    });
+    it('prefers the contact sentence the server composes', async () => {
+      data.plan_eligibility![1] = verdict('enterprise', {
+        purchasable: false,
+        requires_period: false,
+        contact_url: '/request-demo',
+        contact_message:
+          'Enterprise is scoped per deployment and installed with our team.',
+      });
+      const el = await mount();
+      await open(el);
+      const contact = el.shadowRoot!.querySelector(
+        '[data-testid="contact-plans"]'
+      );
+      expect(contact?.textContent).to.include(
+        'Enterprise is scoped per deployment and installed with our team.'
+      );
+      expect(contact?.textContent).to.not.include('priced per deployment');
+    });
     it('keeps a quote-only plan out of the picker and offers contact instead', async () => {
       const el = await mount();
       await open(el);
