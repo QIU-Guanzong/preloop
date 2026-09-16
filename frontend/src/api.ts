@@ -3,6 +3,7 @@ import { Router } from './router';
 import { DEFAULT_SIMILARITY_THRESHOLD } from './config';
 import { PermissionError, permissionErrorFromResponse } from './permissions';
 import { ATTENTION_SUMMARY_STORAGE_KEY } from './utils/attention-summary';
+import { historyUnavailableError } from './utils/history-window';
 import type {
   ApprovalBypass,
   ApprovalBypassMode,
@@ -621,6 +622,44 @@ export async function getEntitlements(): Promise<Entitlements> {
   return response.json();
 }
 
+/**
+ * One plan limit the account is close to, as the billing plugin sees it.
+ *
+ * `ratio` is used/limit clamped to [0, 1]; `limit` is always a real number
+ * because unlimited items are dropped server-side. `unlocks_at_plan` is the
+ * cheapest plan that raises the limit, or null when nothing does.
+ */
+export interface UsageNudge {
+  key: string;
+  ratio: number;
+  used: number;
+  limit: number;
+  unit: string;
+  plan_id: string;
+  unlocks_at_plan: string | null;
+}
+
+/**
+ * Usage against plan limits, for the nudge banner.
+ *
+ * Advisory only, fetched in the background, so every failure is "no
+ * nudges": OSS has no billing plugin and answers 404, a server older than
+ * this endpoint answers 404 or 405, and a network error must never take a
+ * console page down over chrome.
+ */
+export async function getUsageNudges(): Promise<UsageNudge[]> {
+  try {
+    const response = await fetchWithAuth('/api/v1/billing/nudges');
+    if (!response.ok) {
+      return [];
+    }
+    const data = await response.json();
+    return Array.isArray(data) ? (data as UsageNudge[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 export type {
   AIModel,
   DuplicatePair,
@@ -868,6 +907,10 @@ export async function getAccountGatewayUsageSummary(
     `/api/v1/account/gateway-usage/summary${buildGatewayUsageQuery(params)}`
   );
   if (!response.ok) {
+    // A period outside the plan's analytics window is a plan fact, not a
+    // failure, and the caller has to be able to tell them apart.
+    const refused = await historyUnavailableError(response);
+    if (refused) throw refused;
     throw new Error('Failed to fetch account gateway usage summary');
   }
   return response.json();
@@ -963,6 +1006,8 @@ export async function getCostAnalyticsSummary(
     `/api/v1/cost/summary${buildGatewayUsageQuery(params)}`
   );
   if (!response.ok) {
+    const refused = await historyUnavailableError(response);
+    if (refused) throw refused;
     throw new Error('Failed to fetch cost analytics summary');
   }
   return response.json();
@@ -1818,6 +1863,8 @@ export async function getAccountRuntimeSessionDetail(
     `/api/v1/runtime-sessions/${runtimeSessionId}`
   );
   if (!response.ok) {
+    const refused = await historyUnavailableError(response);
+    if (refused) throw refused;
     throw new Error('Failed to fetch session detail');
   }
   return response.json();

@@ -48,6 +48,10 @@ import type {
 } from '../../types';
 import consoleStyles from '../../styles/console-styles.css?inline';
 import { unifiedWebSocketManager } from '../../services/unified-websocket-manager';
+import {
+  isHistoryUnavailable,
+  requestHistoryUpgrade,
+} from '../../utils/history-window';
 
 type DateRangePreset = 'last-7' | 'last-30' | 'last-90' | 'all' | 'custom';
 
@@ -1028,6 +1032,12 @@ export class RuntimeSessionsView extends LitElement {
       // );
     } catch (error) {
       console.error('Failed to load session detail:', error);
+      if (isHistoryUnavailable(error)) {
+        // Opening a session older than the plan's analytics window is the
+        // person asking to see older, which is the user action the upgrade
+        // modal exists for. The sentence is the server's own.
+        requestHistoryUpgrade();
+      }
       if (!isSoftRefresh) {
         this.error =
           error instanceof Error

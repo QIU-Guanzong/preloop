@@ -14,10 +14,12 @@ import '@shoelace-style/shoelace/dist/components/spinner/spinner.js';
 import '../../components/view-header.ts';
 import '../../components/token-figures.ts';
 import '../../components/time-range-select.ts';
+import '../../components/history-cutoff-row.ts';
 import {
   getAccountGatewayUsageSearch,
   getAccountGatewayUsageSummary,
   getAccountRateLimitReport,
+  getUsageNudges,
   type GatewayUsageSummaryParams,
 } from '../../api';
 import type {
@@ -35,6 +37,11 @@ import type {
 } from '../../types';
 import consoleStyles from '../../styles/console-styles.css?inline';
 import { shortExecutionId } from '../../utils/execution-subject';
+import {
+  isHistoryUnavailable,
+  requestHistoryUpgrade,
+} from '../../utils/history-window';
+import { analyticsWindowDays } from '../../utils/usage-nudges';
 import {
   formatTimeRangeWindow,
   resolvePreviousTimeRange,
@@ -82,6 +89,10 @@ export class ApiUsageView extends LitElement {
 
   @state()
   private selectedRange: TimeRangeKey = 'last-30';
+
+  /** The plan's analytics window in days, or null when there is none. */
+  @state()
+  private historyWindowDays: number | null = null;
 
   @state()
   private searchQuery = '';
@@ -496,7 +507,16 @@ export class ApiUsageView extends LitElement {
     if (!this.initialized) {
       this.initialized = true;
       void this.loadSummary();
+      void this.loadHistoryWindow();
     }
+  }
+
+  /**
+   * How far back this plan shows analytics, so the day list can say where it
+   * stops instead of simply stopping. No plugin, no window, no row.
+   */
+  private async loadHistoryWindow() {
+    this.historyWindowDays = analyticsWindowDays(await getUsageNudges());
   }
 
   disconnectedCallback() {
@@ -567,6 +587,11 @@ export class ApiUsageView extends LitElement {
       this.previousSummary = previousSummary;
     } catch (error) {
       console.error('Failed to load account gateway usage summary:', error);
+      if (isHistoryUnavailable(error)) {
+        // The person picked a window their plan does not show. That is a
+        // user action, so it is the one case that may open the modal.
+        requestHistoryUpgrade();
+      }
       this.error =
         error instanceof Error
           ? error.message
@@ -1103,6 +1128,11 @@ export class ApiUsageView extends LitElement {
 
     return html`
       <div class="daily-list">
+        <!-- Days run oldest first, so the plan's cutoff belongs above the
+             first row: that is where the missing history would have been. -->
+        <history-cutoff-row
+          .days=${this.historyWindowDays}
+        ></history-cutoff-row>
         ${days.map(
           (day) => html`
             <div class="daily-row">

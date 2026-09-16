@@ -19,6 +19,7 @@ import '../../components/global-notice';
 import '../../components/console-header';
 import '../../components/approval-bypass-banner';
 import '../../components/kill-switch-banner';
+import '../../components/usage-nudge-banner';
 import consoleStyles from '../../styles/console-styles.css?inline';
 import {
   getFeatures,
@@ -83,6 +84,12 @@ const PREMIUM_FEATURE_LABELS: Record<string, string> = {
   session_optimization: 'AI session optimization',
   replay_verification: 'replay verification',
   session_titles: 'AI session titles',
+  // The three gates a person reaches by doing something: setting a price,
+  // running an analysis on a built-in model, asking for older data. Without
+  // a label the modal prints the raw capability key at the reader.
+  price_overrides: 'custom model prices',
+  ai_optimization: 'analysis with built-in models',
+  analytics_window_days: 'analytics history beyond your plan window',
 };
 
 /**
@@ -255,7 +262,7 @@ export class ConsoleShell extends LitElement {
       .main-view {
         flex-grow: 1;
         display: grid;
-        grid-template-rows: auto auto auto 1fr; /* Header, banners, content */
+        grid-template-rows: auto auto auto auto 1fr; /* Header, banners, content */
         overflow-y: hidden;
         background-color: var(--console-page);
       }
@@ -954,7 +961,11 @@ export class ConsoleShell extends LitElement {
                   <!-- The kill-switch banner sits above the bypass banner: a
                        halted account is the most severe state and must be
                        impossible to miss on any console page (#157). -->
-                  <kill-switch-banner></kill-switch-banner>`
+                  <kill-switch-banner></kill-switch-banner>
+                  <!-- Usage sits under both governance banners: it is
+                       information, not a fault, and it renders nothing at
+                       all on OSS, where the endpoint does not exist. -->
+                  <usage-nudge-banner></usage-nudge-banner>`
           }
           <div
             class="main-content ${
