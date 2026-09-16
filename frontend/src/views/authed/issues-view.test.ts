@@ -1,5 +1,6 @@
 import { html, fixture, expect, waitUntil } from '@open-wc/testing';
 import sinon from 'sinon';
+import { invalidateApiCaches } from '../../api';
 import '../../components/view-header.ts';
 import './issues-view';
 import { IssuesView } from './issues-view';
@@ -79,10 +80,14 @@ describe('IssuesView', () => {
   beforeEach(() => {
     localStorage.setItem('accessToken', 'test-access-token');
     localStorage.setItem('refreshToken', 'test-refresh-token');
+    // GET coalescing is process-wide. A previous spec can leave an in-flight
+    // /issue-duplicates request; the next one must not join that response.
+    invalidateApiCaches();
   });
 
   afterEach(() => {
     fetchStub?.restore();
+    invalidateApiCaches();
     localStorage.clear();
   });
 
@@ -113,8 +118,13 @@ describe('IssuesView', () => {
       duplicates: [makePair(1), makePair(2)],
     });
     const el = (await fixture(html`<issues-view></issues-view>`)) as IssuesView;
-    await tick();
-    await el.updateComplete;
+    await waitUntil(
+      () =>
+        (el.shadowRoot?.querySelectorAll('tbody tr.clickable-row').length ||
+          0) === 2,
+      'duplicate pair rows did not render',
+      { timeout: 4000 }
+    );
     const rows = el.shadowRoot?.querySelectorAll('tbody tr.clickable-row');
     expect(rows?.length).to.equal(2);
     expect(el.shadowRoot?.textContent).to.contain('PRJ-1A');
