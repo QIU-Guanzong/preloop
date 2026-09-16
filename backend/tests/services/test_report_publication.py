@@ -9,6 +9,7 @@ protected origin, a provider that keeps pull request state) lives in
 """
 
 import json
+import logging
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -501,7 +502,29 @@ class TestOrchestratorRecordsTheOutcome:
             "branch": "preloop/report/portfolio",
             "document": "PORTFOLIO.md",
         }
-        orchestrator.execution_logger.log_milestone.assert_called_once()
+        orchestrator.execution_logger.log_milestone.assert_called_once_with(
+            "report_publication",
+            {"outcome": "published", "reason": ""},
+        )
+
+    def test_publication_logs_only_the_closed_vocabulary_outcome(self, caplog):
+        orchestrator = self._orchestrator()
+        line = (
+            f'{REPORT_PUBLICATION_MARKER} {{"outcome": "published", "reason": "", '
+            f'"branch": "preloop/report/portfolio", "document": "PORTFOLIO.md", '
+            f'"log": "secret-looking-path"}}'
+        )
+        with caplog.at_level(logging.INFO):
+            orchestrator._note_report_publication(line)
+        joined = " ".join(record.getMessage() for record in caplog.records)
+        assert "preloop/report/portfolio" not in joined
+        assert "PORTFOLIO.md" not in joined
+        assert "secret-looking-path" not in joined
+        assert "Report publication outcome: published" in joined
+        orchestrator.execution_logger.log_milestone.assert_called_once_with(
+            "report_publication",
+            {"outcome": "published", "reason": ""},
+        )
 
     def test_a_dropped_stream_is_recovered_from_the_stored_output(self):
         line = (

@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   managed; the venv is what makes `pip install` legal. Needs
   `python3.11-venv` on Debian. Public `ubuntu-latest` jobs are
   unchanged: they have no system 3.11, so they still use setup-python.
+- Self-hosted backend shards run in a `python:<version>-bookworm` job
+  container and reach Postgres by service hostname, so they do not bind
+  host 5432. Two runner processes on one VM can run shards together.
+  Public `ubuntu-latest` backend jobs stay on the VM with
+  `localhost:5432`.
 - Self-hosted GitHub runners are extra CI capacity, not a replacement
   pool. Frontend, plugins, and coverage stay on `ubuntu-latest`. Backend
   keeps its eight hosted shards by default; idle self-hosted Linux/X64
@@ -394,6 +399,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-establish any that are real by reconciling them against the provider,
   or by moving the account onto a custom plan row, which is on sale by
   construction and never subject to this rule.
+- Code scanning and Code Quality findings on main: report-publication
+  logs only closed-vocabulary outcomes, session-search credential
+  redaction uses length-bounded patterns that still consume a labelled
+  value past 4096 characters so it cannot leave a plaintext tail, the
+  in-repo flow-trigger workflow checks out the default branch and
+  installs a checksum-verified CLI from that tree's `scripts/install-cli.sh`
+  instead of piping curl to sh, and the remaining CodeQL quality notes
+  (unclosed publication fds, lock-file Close, unused locals/imports,
+  mixed returns, test lambdas) are cleared.
 
 - The console upgrade modal repeats what the server said instead of
   "Unexpected checkout response". `startCheckout` resolves a `refresh`

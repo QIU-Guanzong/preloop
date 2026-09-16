@@ -523,7 +523,7 @@ def _frozen_checkout_shas(
                 db, account_id=account_id, execution=execution
             )
         except EvidenceUnavailableError:
-            archive = None
+            pass
         else:
             policy = checkout_observation_policy(flow, execution)
             if archive is not None and policy is not None:

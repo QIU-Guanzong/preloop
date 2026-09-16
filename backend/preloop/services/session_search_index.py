@@ -60,8 +60,9 @@ MAX_CHUNKS_PER_SOURCE = 64
 REDACTED_VALUE = GatewayUsageSearchService.REDACTED_VALUE
 
 _CREDENTIAL_PATTERN = re.compile(
-    r"(?i)\b([\w.-]*(?:api[_-]?key|authorization|secret|token|password)"
-    r"[\w.-]*)\s*[:=]\s*(\"[^\"]*\"|'[^']*'|\S+)"
+    r"(?i)\b([\w.-]{0,64}(?:api[_-]?key|authorization|secret|token|password)"
+    r"[\w.-]{0,64})\s*[:=]\s*"
+    r"(\"[^\"]{0,4096}+[^\"]*\"|'[^']{0,4096}+[^']*'|\S{1,4096}\S*)"
 )
 #: PEM private-key blocks pasted into transcript, notes, or tool summaries.
 _PEM_PRIVATE_KEY_PATTERN = re.compile(
@@ -141,6 +142,21 @@ def redact_text(text: str) -> tuple[str, bool]:
     payload sanitiser.
 
     Labelled pairs (``api_key: value`` / ``secret=value``) are masked first.
+    The value alternatives consume the rest of a matching run
+    (``\\S{1,4096}\\S*``, and the quoted forms
+    ``"[^"]{0,4096}+[^"]*"`` / ``'[^']{0,4096}+[^']*'``) so a value
+    longer than 4096 characters is fully masked, not truncated. The
+    bounded quoted parts are possessive so an unclosed quote cannot
+    re-scan the run once per split point. Nothing follows those
+    alternatives in the pattern, so per-start cost stays bounded by
+    the first quantifier.
+
+    A labelled key whose prefix before the keyword exceeds 64 characters
+    does not match: there is no word boundary before the keyword inside a
+    longer ``[\\w.-]`` run, so a 70-character prefix plus ``api_key=...``
+    is not labelled-redacted. Provider-shaped values in that leftover are
+    still scrubbed by :func:`scrub_secrets`.
+
     Known provider key prefixes, URL userinfo, query-parameter secrets and
     auth headers are masked next via :func:`scrub_secrets`. PEM private key
     blocks are masked last. Generic high-entropy blobs with no known prefix

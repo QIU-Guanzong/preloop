@@ -91,7 +91,7 @@ def register_thread(
         )
     except (ValueError, TypeError, AttributeError):
         logger.warning("Cannot bind feedback: tracker or session id is not a UUID")
-        return
+        return None
     if (
         not repository_id
         or tracker_uuid is None
@@ -99,7 +99,7 @@ def register_thread(
         or not parts[-1].isdigit()
     ):
         logger.warning("Cannot bind feedback: missing provider repository identity")
-        return
+        return None
     now = datetime.now(UTC).replace(tzinfo=None)
     # Account and flow come from the execution's DB ownership, never webhook JSON.
     context = {

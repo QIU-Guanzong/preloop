@@ -11,7 +11,10 @@
 # triggers and waits. See docs/guide/flows/ci-trigger.md.
 #
 # Required repository settings:
-#   secret   PRELOOP_TOKEN  account API token for the account that owns the flow
+#   secret   PRELOOP_TOKEN  least-privilege account API token scoped to the
+#                           review flow (not a personal admin token). This job
+#                           cannot rotate the secret; keep the account's grants
+#                           narrow enough that a mis-applied label is recoverable.
 #   variable PRELOOP_URL    optional, defaults to https://preloop.ai
 #   variable PRELOOP_FLOW   optional, flow id or name, defaults to "Pull Request Reviewer"
 name: Preloop flow trigger
@@ -40,10 +43,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      # This job only needs scripts/install-cli.sh. Check out the default
+      # branch so a labeled PR cannot supply the installer (or a replacement
+      # preloop binary) that then runs with PRELOOP_TOKEN.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
       - name: Install the Preloop CLI
+        env:
+          # Pin the downloaded release. install-cli.sh from the default
+          # branch already fetches SHA256SUMS; the check below fails the
+          # job on a mismatch because the installer only warns.
+          PRELOOP_VERSION: "0.15.0"
+          INSTALL_DIR: ${{ runner.temp }}/preloop-bin
         run: |
-          curl -fsSL https://preloop.ai/install/cli | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          set -euo pipefail
+          mkdir -p "$INSTALL_DIR"
+          sh scripts/install-cli.sh
+          echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+          os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64|amd64) arch=amd64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) echo "unsupported arch ${arch}" >&2; exit 1 ;;
+          esac
+          asset="preloop-${os}-${arch}"
+          sums="${RUNNER_TEMP}/SHA256SUMS"
+          curl -fsSL "https://github.com/preloop/preloop/releases/download/v${PRELOOP_VERSION}/SHA256SUMS" -o "$sums"
+          expected="$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset { print $1; exit }' "$sums")"
+          actual="$(sha256sum "${INSTALL_DIR}/preloop" | awk '{print $1}')"
+          if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+            echo "SHA256 mismatch for ${asset}: expected ${expected:-missing}, got ${actual}" >&2
+            exit 1
+          fi
 
       - name: Resolve PR head SHA
         env:
