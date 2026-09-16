@@ -92,7 +92,7 @@ export class PublicPricingView extends LitElement {
   /** Tab labels and the per-tab leads. The brand names both tabs. */
   @state() private _cloudLabel = CLOUD_TAB_FALLBACK_LABEL;
   @state() private _dedicatedLabel = DEDICATED_TAB_FALLBACK_LABEL;
-  @state() private _cloudLead = CLOUD_LEAD_FALLBACK;
+  @state() private _cloudLead = '';
   @state() private _dedicatedLead = '';
   @state() private _billingToggle = true;
   @state() private _loaded = false;
@@ -528,9 +528,8 @@ export class PublicPricingView extends LitElement {
 
   /** The one-line lead for whichever tab is on screen. */
   private _activeLead(): string {
-    return this._activeDeployment() === 'cloud'
-      ? this._cloudLead
-      : this._dedicatedLead;
+    if (this._activeDeployment() === 'dedicated') return this._dedicatedLead;
+    return this._cloudLead || (this._hasDedicated() ? CLOUD_LEAD_FALLBACK : '');
   }
 
   /** The cards for whichever tab is on screen. */
@@ -745,14 +744,13 @@ export class PublicPricingView extends LitElement {
                 : ''
             }
             ${
-              // One line per tab. Each tab is a different product, so each
-              // gets its own sentence instead of a single lead that has to
-              // hedge across both. On a two-tab page the element is rendered
-              // even when a brand leaves one lead empty ("dedicated.lead" is
-              // optional), because a vanishing line would move the card row
-              // by two lines, which is the jump .period-row already prevents
-              // one level down.
-              this._hasDedicated() || this._activeLead()
+              // Two-tab only. Each tab is a different product, so each gets
+              // its own sentence instead of a single lead that has to hedge
+              // across both. The element is always rendered on a two-tab page
+              // (even when a brand leaves dedicated.lead empty) so a vanishing
+              // line cannot move the card row. A cloud-only page already has
+              // the page lead under the H1 and must not grow a second one.
+              this._hasDedicated()
                 ? html`<p class="tab-lead">${this._activeLead()}</p>`
                 : ''
             }

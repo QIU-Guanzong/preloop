@@ -2,6 +2,7 @@ import { html, fixture, expect, waitUntil } from '@open-wc/testing';
 import sinon from 'sinon';
 import './pricing-view';
 import { PublicPricingView } from './pricing-view';
+import { CLOUD_LEAD_FALLBACK } from '../../pricing-ssr';
 
 const tick = (ms = 150) => new Promise((r) => setTimeout(r, ms));
 
@@ -351,6 +352,23 @@ describe('PublicPricingView', () => {
     expect(el.shadowRoot?.querySelectorAll('pricing-card').length).to.equal(2);
   });
 
+  it('does not render a tab lead on a cloud-only page', async () => {
+    fetchStub = stubFetch();
+    const el = (await fixture(
+      html`<public-pricing-view></public-pricing-view>`
+    )) as PublicPricingView;
+    await tick();
+    await el.updateComplete;
+    // The page lead under the H1 is the only lead. `.tab-lead` is the
+    // two-tab reservation row; inventing it here would duplicate the H1
+    // line and, with the old fallback, print a Preloop hosting claim.
+    expect(el.shadowRoot?.querySelector('.tab-lead')).to.not.exist;
+    expect(el.shadowRoot?.querySelector('deployment-toggle')).to.not.exist;
+    expect(el.shadowRoot?.textContent).to.not.contain('Hosted by Preloop');
+    expect(el.shadowRoot?.textContent).to.not.contain(CLOUD_LEAD_FALLBACK);
+    expect(el.shadowRoot?.textContent).to.contain('Pick a plan that fits.');
+  });
+
   it('renders the FAQ section from JSON', async () => {
     fetchStub = stubFetch();
     const el = (await fixture(
@@ -658,6 +676,31 @@ describe('PublicPricingView', () => {
     expect(leadRow()?.textContent?.trim()).to.equal('');
     expect(leadRow()?.getBoundingClientRect().height).to.equal(cloudHeight);
     expect(cardsTop()).to.equal(cloudTop);
+  });
+
+  it('fills a missing cloud lead with a brand-neutral fallback on two-tab pages', async () => {
+    const withoutCloudLead = JSON.parse(JSON.stringify(LADDER_CONTENT));
+    delete withoutCloudLead.pricing.cloud_lead;
+    fetchStub = sinon
+      .stub(window, 'fetch')
+      .callsFake(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/landing-content.json')) {
+          return new Response(JSON.stringify(withoutCloudLead), {
+            status: 200,
+          });
+        }
+        return new Response(JSON.stringify({ features: {} }), { status: 200 });
+      });
+    const el = (await fixture(
+      html`<public-pricing-view></public-pricing-view>`
+    )) as PublicPricingView;
+    await tick();
+    await el.updateComplete;
+    const lead = el.shadowRoot?.querySelector('.tab-lead');
+    expect(lead, 'two-tab pages still reserve the lead row').to.exist;
+    expect(lead?.textContent?.trim()).to.equal(CLOUD_LEAD_FALLBACK);
+    expect(lead?.textContent).to.not.contain('Preloop');
   });
 
   it('keeps the period pill inside Cloud and reserves its row on Self-hosted', async () => {

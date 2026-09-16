@@ -1,5 +1,8 @@
 import { expect } from '@open-wc/testing';
-import { generatePricingSlottedContent } from './pricing-ssr';
+import {
+  CLOUD_LEAD_FALLBACK,
+  generatePricingSlottedContent,
+} from './pricing-ssr';
 import type { BrandConfig } from './brand-config';
 
 /**
@@ -423,5 +426,34 @@ describe('Server-rendered pricing (light DOM)', () => {
     const { doc, text } = render(cloudOnly);
     expect(doc.querySelectorAll('table').length).to.equal(1);
     expect(text).to.not.contain('Compare self-hosted editions');
+  });
+
+  it('does not invent a hosting claim for a cloud-only brand that omits cloud_lead', () => {
+    const pricing = (CONFIG as any).landing.pricing;
+    const { cloud_lead: _omitted, dedicated: _dedicated, ...rest } = pricing;
+    const cloudOnly = {
+      ...CONFIG,
+      name: 'Acme',
+      landing: { pricing: { ...rest, dedicated: undefined } },
+    } as unknown as BrandConfig;
+    const { doc, text } = render(cloudOnly);
+    expect(text).to.not.contain('Hosted by Preloop');
+    expect(text).to.not.contain(CLOUD_LEAD_FALLBACK);
+    // The page lead under the H1 is the only lead a crawler sees.
+    expect(doc.querySelectorAll('p.lead').length).to.equal(1);
+    expect(text).to.contain(
+      'USD prices exclude tax; annual plans are prepaid.'
+    );
+  });
+
+  it('uses a brand-neutral cloud lead when a two-tab brand omits cloud_lead', () => {
+    const pricing = (CONFIG as any).landing.pricing;
+    const { cloud_lead: _omitted, ...rest } = pricing;
+    const { text } = render({
+      ...CONFIG,
+      landing: { pricing: rest },
+    } as unknown as BrandConfig);
+    expect(text).to.contain(CLOUD_LEAD_FALLBACK);
+    expect(text).to.not.contain('Hosted by Preloop');
   });
 });
