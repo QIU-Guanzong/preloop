@@ -9,8 +9,9 @@ When a deployment turns it on, one rule applies wherever a token is minted:
 a local password user with an unverified address gets a 403 carrying
 ``code: email_not_verified``, and the login page can act on that code. OAuth
 and SSO identities never reach the gate, because the provider asserted the
-address; neither do users created from a completed checkout, because the
-payment provider charged it.
+address; neither do users created from a completed checkout, because that
+checkout attached a payment method to the address and the claim token proves
+the person setting the password is the person who completed it.
 """
 
 import uuid
@@ -251,16 +252,16 @@ class TestResendVerification:
             anon_client.post(
                 "/api/v1/auth/resend-verification", json={"email": user.email}
             ).status_code
-            for _ in range(email_verification.RESEND_MAX_PER_WINDOW + 1)
+            for _ in range(email_verification.resend_max_per_window() + 1)
         ]
 
-        assert statuses[:-1] == [200] * email_verification.RESEND_MAX_PER_WINDOW
+        assert statuses[:-1] == [200] * email_verification.resend_max_per_window()
         assert statuses[-1] == 429
 
     def test_a_refused_request_charges_nothing(self):
         # Charging a refused request would let a caller starve one bucket by
         # hammering another, and the limit would never recover.
-        for _ in range(email_verification.RESEND_MAX_PER_WINDOW):
+        for _ in range(email_verification.resend_max_per_window()):
             email_verification.check_resend_rate_limit("1.2.3.4", "a@example.com")
 
         with pytest.raises(HTTPException) as refused:
@@ -306,3 +307,38 @@ class TestVerifyLinkSignsIn:
 
         assert response.status_code == 200, response.text
         assert "access_token" not in response.json()
+
+
+class TestResendBudgetIsConfigured:
+    """The two resend knobs are settings, not import-time env reads.
+
+    A malformed rate-limit value used to raise while importing a module that
+    the router imports, which means the whole server refused to start over a
+    tuning typo. They now go through the same forgiving env factory as every
+    other int setting.
+    """
+
+    def test_defaults_match_the_documented_budget(self):
+        assert settings.email_verification_resend_limit == 3
+        assert settings.email_verification_resend_window_seconds == 900
+
+    def test_the_limiter_reads_the_setting_at_call_time(self, monkeypatch):
+        monkeypatch.setattr(settings, "email_verification_resend_limit", 1)
+        email_verification.reset_resend_rate_limit()
+
+        email_verification.check_resend_rate_limit("9.9.9.9")
+        with pytest.raises(HTTPException) as refused:
+            email_verification.check_resend_rate_limit("9.9.9.9")
+
+        assert refused.value.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+
+    def test_a_malformed_env_value_falls_back_instead_of_crashing(self, monkeypatch):
+        from preloop.config import Settings
+
+        monkeypatch.setenv("EMAIL_VERIFICATION_RESEND_LIMIT", "three")
+        monkeypatch.setenv("EMAIL_VERIFICATION_RESEND_WINDOW", "")
+
+        parsed = Settings.from_env()
+
+        assert parsed.email_verification_resend_limit == 3
+        assert parsed.email_verification_resend_window_seconds == 900

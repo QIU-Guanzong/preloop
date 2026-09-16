@@ -10,9 +10,10 @@ turns it on (Cloud does) gets one rule, applied where tokens are minted:
   ``code: email_not_verified`` so the login page can offer a resend instead
   of printing "incorrect password" at someone whose password was right.
 - everyone else is unaffected. OAuth/SSO identities are asserted by the
-  provider, and a user created from a completed checkout had the address
-  confirmed by the payment provider, so both are verified by construction
-  and never reach this gate.
+  provider, and a user created from a completed checkout attached a payment
+  method to the address and proved possession of the welcome link that
+  claimed the account, so both are verified by construction and never reach
+  this gate.
 
 The resend endpoint is rate limited here rather than in the router because
 the limit protects the mail sender, not one handler: the same budget covers
@@ -20,7 +21,6 @@ anonymous resends from the login page.
 """
 
 import logging
-import os
 import time
 from typing import Dict, Optional
 
@@ -37,15 +37,35 @@ EMAIL_NOT_VERIFIED_MESSAGE = (
     "you, or ask for a new one."
 )
 
-# Per-window budget for verification resends, keyed by both client IP and
-# target address so neither one alone can drain the mail sender.
-RESEND_MAX_PER_WINDOW = int(os.getenv("EMAIL_VERIFICATION_RESEND_LIMIT", "3"))
-RESEND_WINDOW_SECONDS = int(os.getenv("EMAIL_VERIFICATION_RESEND_WINDOW", "900"))
 RESEND_RATE_LIMITED_MESSAGE = (
     "Too many verification emails requested. Wait a few minutes and try again."
 )
 
 _resend_buckets: dict[str, list[float]] = {}
+
+
+def resend_max_per_window() -> int:
+    """Per-window budget for verification resends.
+
+    Keyed by both client IP and target address, so neither one alone can
+    drain the mail sender. Read from settings on each call rather than frozen
+    at import: a tuning value should not be baked into module state, and
+    ``preloop.config`` is where every other env knob is parsed (forgivingly,
+    so a typo falls back to the default instead of stopping the server).
+
+    Returns:
+        The number of resends one bucket may spend per window.
+    """
+    return settings.email_verification_resend_limit
+
+
+def resend_window_seconds() -> int:
+    """Length of the resend budget window, in seconds.
+
+    Returns:
+        The window length from settings.
+    """
+    return settings.email_verification_resend_window_seconds
 
 
 def verification_required(user: UserModel) -> bool:
@@ -125,14 +145,15 @@ def check_resend_rate_limit(*keys: str) -> None:
             when one refuses, so a refused request does not eat the budget.
     """
     now = time.monotonic()
-    window_start = now - RESEND_WINDOW_SECONDS
+    max_per_window = resend_max_per_window()
+    window_start = now - resend_window_seconds()
     live = {
         key: [t for t in _resend_buckets.get(key, []) if t > window_start]
         for key in keys
         if key
     }
     for key, bucket in live.items():
-        if len(bucket) >= RESEND_MAX_PER_WINDOW:
+        if len(bucket) >= max_per_window:
             _resend_buckets[key] = bucket
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,

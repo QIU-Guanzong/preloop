@@ -671,11 +671,22 @@ paths:
       tags:
       - Auth
       summary: Complete Onboarding
-      description: 'Completes the onboarding for a new user created via Stripe checkout.
-
-        Sets the password, and the username and display name if they changed,
-
-        and marks the address verified (Stripe charged it).'
+      description: "Claim the account a completed checkout created.\n\nThe caller\
+        \ must present the single-use claim token from the welcome link.\nThat token\
+        \ is what proves the person setting the first password is the\nperson who\
+        \ completed the checkout: it is signed by this instance, expires,\nis bound\
+        \ to this account and to the Stripe checkout session that created\nit, and\
+        \ is spent here so the link works exactly once. The ``NEEDS_RESET``\nplaceholder\
+        \ password is checked too, but only as a second guard: on its\nown it is not\
+        \ a credential, because an anonymous caller who merely knows\nthe address\
+        \ would satisfy it.\n\nAn account whose claim token was never minted or has\
+        \ expired is recovered\nthrough the ordinary password reset email, which proves\
+        \ the same thing\nthis token proves and costs the customer one click.\n\n\
+        Args:\n    request: Address, username, password, optional name and the claim\n\
+        \        token from the welcome link.\n    db: Database session.\n\nReturns:\n\
+        \    Access and refresh tokens for the claimed account.\n\nRaises:\n    HTTPException:\
+        \ 400 with one indistinguishable message for every\n        failed claim,\
+        \ or 400 when the chosen username is taken."
       operationId: complete_onboarding_api_v1_auth_complete_onboarding_post
       requestBody:
         content:
@@ -22621,6 +22632,11 @@ components:
           - type: string
           - type: 'null'
           title: Full Name
+        claim_token:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Claim Token
       type: object
       required:
       - email

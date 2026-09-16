@@ -56,6 +56,9 @@ class User(Base):
         last_login: When the user last logged in.
         trial_prompt_dismissed_at: When the user answered the post-signup
             trial offer (null while it has never been shown or answered).
+        onboarding_claim_hash: SHA-256 of the outstanding single-use token
+            that claims a checkout-created account (null when none is
+            outstanding).
         created_at: When the user was created.
         updated_at: When the user was last updated.
     """
@@ -143,6 +146,17 @@ class User(Base):
         DateTime(timezone=True),
         nullable=True,
         comment="When the user answered the post-signup trial offer",
+    )
+
+    # SHA-256 of the single-use claim token minted when a completed checkout
+    # creates this account. It is the credential the welcome page presents to
+    # set the first password, so only a fingerprint is stored and it is
+    # cleared the moment it is spent. Null means there is no claim
+    # outstanding, which is the state of every ordinary user.
+    onboarding_claim_hash: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="SHA-256 of the outstanding single-use onboarding claim token",
     )
 
     # Relationships

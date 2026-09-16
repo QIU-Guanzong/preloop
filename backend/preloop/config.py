@@ -355,6 +355,21 @@ class Settings(BaseSettings):
             "checkout are verified by construction."
         ),
     )
+    email_verification_resend_limit: int = Field(
+        3,
+        description=(
+            "Verification emails a single client IP or a single address may "
+            "request per window (EMAIL_VERIFICATION_RESEND_LIMIT). Protects "
+            "the mail sender, not one handler."
+        ),
+    )
+    email_verification_resend_window_seconds: int = Field(
+        900,
+        description=(
+            "Length of the verification resend budget window in seconds "
+            "(EMAIL_VERIFICATION_RESEND_WINDOW)."
+        ),
+    )
     disable_rbac: bool = Field(
         False,
         description=(
@@ -1573,6 +1588,16 @@ class Settings(BaseSettings):
         session_embedding_batch_size = min(
             512, _positive_int("SESSION_EMBEDDING_BATCH_SIZE", 32)
         )
+        # Verification resend budget. Parsed through the same forgiving
+        # helper as every other int knob: a typo in a rate-limit value falls
+        # back to the default instead of refusing to start the server.
+        email_verification_resend_limit = _positive_int(
+            "EMAIL_VERIFICATION_RESEND_LIMIT", 3
+        )
+        email_verification_resend_window_seconds = _positive_int(
+            "EMAIL_VERIFICATION_RESEND_WINDOW", 900
+        )
+
         session_embedding_queue_max_pending = _positive_int(
             "SESSION_EMBEDDING_QUEUE_MAX_PENDING", 128
         )
@@ -1613,6 +1638,10 @@ class Settings(BaseSettings):
             registration_enabled=registration_enabled,
             bootstrap_token=bootstrap_token,
             require_email_verification=require_email_verification,
+            email_verification_resend_limit=email_verification_resend_limit,
+            email_verification_resend_window_seconds=(
+                email_verification_resend_window_seconds
+            ),
             disable_rbac=disable_rbac,
             database=database,
             security=security,

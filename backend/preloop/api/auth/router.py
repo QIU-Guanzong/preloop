@@ -70,6 +70,8 @@ from preloop.utils.tokens import (
     TokenError,
     create_email_verification_token,
     create_password_reset_token,
+    hash_onboarding_claim_token,
+    verify_onboarding_claim_token,
     verify_token,
 )
 from preloop.models.crud import (
@@ -462,6 +464,22 @@ class OnboardingRequest(BaseModel):
     #: Optional: Stripe may already have supplied one on the card details, in
     #: which case the welcome page prefills it and sends it back unchanged.
     full_name: Optional[str] = None
+    #: The single-use claim token from the welcome link. Declared optional so
+    #: a request without one is refused by the handler with the same answer as
+    #: a request with a bad one, rather than by the schema with a 422 that
+    #: tells an anonymous caller which field it is missing.
+    claim_token: Optional[str] = None
+
+
+#: One answer for every way a claim can fail: no token, a forged or expired
+#: token, a token for another account, a token already spent, an address that
+#: has no account, or an account that already has a password. They are
+#: deliberately indistinguishable, so this endpoint cannot be used to discover
+#: which addresses have a checkout account waiting to be claimed.
+INVALID_ONBOARDING_CLAIM_MESSAGE = (
+    "This signup link is no longer valid. Use 'Forgot password' on the sign "
+    "in page to set your password."
+)
 
 
 @router.post(
@@ -1810,22 +1828,74 @@ async def complete_onboarding(
     request: OnboardingRequest,
     db: Session = Depends(get_db_session),
 ) -> Dict[str, str]:
-    """
-    Completes the onboarding for a new user created via Stripe checkout.
-    Sets the password, and the username and display name if they changed,
-    and marks the address verified (Stripe charged it).
+    """Claim the account a completed checkout created.
+
+    The caller must present the single-use claim token from the welcome link.
+    That token is what proves the person setting the first password is the
+    person who completed the checkout: it is signed by this instance, expires,
+    is bound to this account and to the Stripe checkout session that created
+    it, and is spent here so the link works exactly once. The ``NEEDS_RESET``
+    placeholder password is checked too, but only as a second guard: on its
+    own it is not a credential, because an anonymous caller who merely knows
+    the address would satisfy it.
+
+    An account whose claim token was never minted or has expired is recovered
+    through the ordinary password reset email, which proves the same thing
+    this token proves and costs the customer one click.
+
+    Args:
+        request: Address, username, password, optional name and the claim
+            token from the welcome link.
+        db: Database session.
+
+    Returns:
+        Access and refresh tokens for the claimed account.
+
+    Raises:
+        HTTPException: 400 with one indistinguishable message for every
+            failed claim, or 400 when the chosen username is taken.
     """
     session = db
-    # Find user using CRUD layer
+
+    # Validate the credential before touching the database, and answer every
+    # failure identically. Nothing below this point discloses whether an
+    # address exists.
+    def _refuse_claim() -> HTTPException:
+        return HTTPException(status_code=400, detail=INVALID_ONBOARDING_CLAIM_MESSAGE)
+
+    if not request.claim_token:
+        raise _refuse_claim()
+    try:
+        claims = verify_onboarding_claim_token(request.claim_token)
+    except TokenError:
+        raise _refuse_claim()
+
     user = crud_user.get_by_email(session, email=request.email)
     if not user:
-        raise HTTPException(status_code=404, detail="User not found.")
-
+        raise _refuse_claim()
+    # The token names the account it opens, so one customer's link cannot
+    # claim another customer's account even if both are pending.
+    if (claims["email"] or "").lower() != (user.email or "").lower():
+        raise _refuse_claim()
+    if claims["account_id"] != str(user.account_id):
+        raise _refuse_claim()
+    # Single use: the stored fingerprint is cleared below, so a replay of the
+    # same link finds nothing to compare against.
+    stored_hash = user.onboarding_claim_hash
+    if not stored_hash or not secrets.compare_digest(
+        stored_hash, hash_onboarding_claim_token(request.claim_token)
+    ):
+        raise _refuse_claim()
     if user.hashed_password != "NEEDS_RESET":
-        raise HTTPException(status_code=400, detail="Onboarding already completed.")
+        raise _refuse_claim()
 
     # Check if the new username is taken by someone else using CRUD layer
-    updates: Dict[str, Any] = {"hashed_password": get_password_hash(request.password)}
+    updates: Dict[str, Any] = {
+        "hashed_password": get_password_hash(request.password),
+        # Spend the token. Everything below is one update, so the claim is
+        # consumed in the same transaction that sets the password.
+        "onboarding_claim_hash": None,
+    }
     if user.username != request.username:
         existing_user = crud_user.get_by_username(session, username=request.username)
         if existing_user:
@@ -1835,11 +1905,11 @@ async def complete_onboarding(
         full_name = request.full_name.strip()
         if full_name:
             updates["full_name"] = full_name
-    # Only a completed Stripe checkout can reach this endpoint: it requires
-    # the "NEEDS_RESET" placeholder password that nothing but checkout
-    # account creation writes, and Stripe charged the address it gave us. The
-    # address is verified by construction, so an instance that requires
-    # verification must not hold this paying account at the login page.
+    # The address came off a completed checkout and the claim token proves
+    # this caller is the one who completed it, so an instance that requires
+    # verification must not hold the new customer at the login page. Note the
+    # narrow scope of the guarantee: the payment provider collected a card for
+    # the address, it did not verify the address.
     if not user.email_verified:
         updates["email_verified"] = True
     user = crud_user.update(session, db_obj=user, obj_in=updates)
