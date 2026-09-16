@@ -108,8 +108,14 @@ interface BillingSummary {
     billing_period_end: string;
     included_limit_usd: number | null;
     active_limit_usd: number | null;
-    current_usage_usd: number;
+    /** null when the server has no verified spend figure, not zero spend. */
+    current_usage_usd: number | null;
     remaining_limit_usd: number | null;
+    /**
+     * Sent by the server, deliberately not rendered: there is no way to buy
+     * extra usage yet, so the price would advertise a feature that does not
+     * exist. Kept here because it describes the payload.
+     */
     extra_credit_price_per_usd: number;
     models: HostedModelUsageRow[];
     /** One-time credit granted to card-free free accounts. Never resets. */
@@ -347,16 +353,69 @@ export class AccountView extends LitElement {
     }).format(value);
   }
 
-  private _formatExtraCreditPrice(value: number | null | undefined) {
-    if (value === null || value === undefined) {
+  /**
+   * What happens past the allowance, today.
+   *
+   * There is no opt-in for extra usage: nothing in the product sells, grants
+   * or meters credit beyond the allowance, so every sentence that offered one
+   * ("billed at cost only when you opt in") promised a feature that does not
+   * exist. Until prepaid credits ship, the only true statement is that usage
+   * stops. `extra_credit_price_per_usd` is deliberately not rendered: a price
+   * for something no one can buy is a quote, not a fact.
+   */
+  private get _extraCreditsLabel() {
+    return 'Usage stops at the allowance.';
+  }
+
+  /**
+   * Usage so far, where an absent figure on a capped plan means nothing was
+   * spent yet. `_formatUsd` alone prints "Not configured" for null, which
+   * reads as a broken plan on a brand new account that simply has not run
+   * anything. Zero is only claimed when the plan does carry a limit; a plan
+   * with neither an allowance nor a cap still says "Not configured", because
+   * there the null describes the plan and not the spend.
+   */
+  private _formatUsageSoFar(hosted: BillingSummary['hosted_models']) {
+    const spent = hosted.current_usage_usd;
+    if (spent === null || spent === undefined) {
+      return this._hasConfiguredLimit(hosted)
+        ? this._formatUsd(0)
+        : 'Not configured';
+    }
+    return this._formatUsd(spent);
+  }
+
+  /**
+   * Room left before the cap. The server leaves this null when it has no cap
+   * to subtract from, and also on a capped plan that has recorded no spend at
+   * all; in the second case the whole cap is what remains, so print it rather
+   * than "Not configured". Nothing is inferred when usage is already non-zero:
+   * that subtraction belongs to the server, which knows about holds.
+   */
+  private _formatRemainingBeforeCap(hosted: BillingSummary['hosted_models']) {
+    const remaining = hosted.remaining_limit_usd;
+    const cap = hosted.active_limit_usd;
+    if (remaining === null || remaining === undefined) {
+      const unspent = !hosted.current_usage_usd;
+      if (cap !== null && cap !== undefined && unspent) {
+        return this._formatUsd(cap);
+      }
       return 'Not configured';
     }
-    // "$1.00 per additional $1.00 of built-in model usage" says a dollar costs
-    // a dollar. At a 1:1 rate the honest sentence is that there is no markup.
-    if (value === 1) {
-      return 'Additional usage is billed at cost only when you opt in';
-    }
-    return `${this._formatUsd(value)} per $1.00 of additional usage when you opt in`;
+    return this._formatUsd(remaining);
+  }
+
+  /**
+   * True when the plan carries a spendable limit of any kind: the recurring
+   * cap, the allowance it comes from, or the Free tier's one-time credit.
+   * Only a plan with none of the three has nothing to measure spend against.
+   */
+  private _hasConfiguredLimit(hosted: BillingSummary['hosted_models']) {
+    return [
+      hosted.active_limit_usd,
+      hosted.included_limit_usd,
+      hosted.one_time_credit_usd,
+    ].some((limit) => limit !== null && limit !== undefined);
   }
 
   /** "Jul 27", or "Jul 27, 2025" when the year is not the current one. */
@@ -1187,9 +1246,7 @@ export class AccountView extends LitElement {
                               <div class="usage-metric">
                                 <div class="usage-label">Usage so far</div>
                                 <div class="usage-value">
-                                  ${this._formatUsd(
-                                    hostedSummary.current_usage_usd
-                                  )}
+                                  ${this._formatUsageSoFar(hostedSummary)}
                                 </div>
                               </div>
                               ${
@@ -1201,8 +1258,8 @@ export class AccountView extends LitElement {
                                           Remaining before cap
                                         </div>
                                         <div class="usage-value">
-                                          ${this._formatUsd(
-                                            hostedSummary.remaining_limit_usd
+                                          ${this._formatRemainingBeforeCap(
+                                            hostedSummary
                                           )}
                                         </div>
                                       </div>
@@ -1211,9 +1268,7 @@ export class AccountView extends LitElement {
                               <div class="usage-metric">
                                 <div class="usage-label">Extra credits</div>
                                 <div class="usage-value">
-                                  ${this._formatExtraCreditPrice(
-                                    hostedSummary.extra_credit_price_per_usd
-                                  )}
+                                  ${this._extraCreditsLabel}
                                 </div>
                               </div>
                             </div>
