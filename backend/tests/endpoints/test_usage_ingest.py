@@ -864,6 +864,41 @@ class TestRuntimeSessions:
         db_session.refresh(session)
         assert session.title == "Count the Go files in cli"
 
+        # An identical summary push must not move summary_updated_at or
+        # rewrite the search chunk.
+        before_updated_at = session.summary_updated_at
+        before_chunk = chunks[0]
+        same_summary = self._lifecycle(
+            "response",
+            "conv-live",
+            "stop:gen-3:0",
+            3,
+            input_tokens=4,
+            output_tokens=6,
+            metadata={
+                "hook_event_name": "stop",
+                "session_title": "Count the Go files in cli",
+                "session_summary": "That is the whole count; nothing else changed.",
+            },
+        )
+        assert (
+            client.post(INGEST_URL, json=_payload([same_summary])).json()["accepted"]
+            == 1
+        )
+        db_session.refresh(session)
+        db_session.refresh(before_chunk)
+        assert session.summary == "That is the whole count; nothing else changed."
+        assert session.summary_updated_at == before_updated_at
+        after_chunks = crud_session_search_document.list_for_source(
+            db_session,
+            source_kind=SOURCE_KIND_SESSION_SUMMARY,
+            source_id=str(session.id),
+        )
+        assert len(after_chunks) == 1
+        assert after_chunks[0].id == before_chunk.id
+        assert after_chunks[0].content_hash == before_chunk.content_hash
+        assert after_chunks[0].occurred_at == before_chunk.occurred_at
+
     def test_session_end_closes_and_session_start_reopens(
         self, client, db_session, test_user
     ):

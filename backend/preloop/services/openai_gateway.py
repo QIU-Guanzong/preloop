@@ -9544,19 +9544,29 @@ class OpenAIGatewayService:
             return
 
         stored_summary = summary[:1000]
-        self.db.execute(
-            text(
-                "UPDATE runtime_session "
-                "SET summary = :summary, summary_updated_at = :summary_updated_at "
-                "WHERE id = :runtime_session_id"
-            ),
-            {
-                "summary": stored_summary,
-                "summary_updated_at": observed_at,
-                "runtime_session_id": runtime_session.id,
-            },
+        existing_updated_at = summary_state.get("summary_updated_at")
+        summary_changed = (
+            stored_summary != existing_summary or existing_updated_at is None
         )
-        self.db.commit()
+        if summary_changed:
+            self.db.execute(
+                text(
+                    "UPDATE runtime_session "
+                    "SET summary = :summary, summary_updated_at = :summary_updated_at "
+                    "WHERE id = :runtime_session_id"
+                ),
+                {
+                    "summary": stored_summary,
+                    "summary_updated_at": observed_at,
+                    "runtime_session_id": runtime_session.id,
+                },
+            )
+            self.db.commit()
+            occurred_at = observed_at
+        else:
+            # Same sentence as the stored one: keep summary_updated_at so
+            # the search chunk is not deleted and reinserted unchanged.
+            occurred_at = existing_updated_at or observed_at
         try:
             index_session_summary(
                 self.db,
@@ -9564,7 +9574,7 @@ class OpenAIGatewayService:
                 runtime_session_id=runtime_session.id,
                 title=getattr(runtime_session, "title", None),
                 summary=stored_summary,
-                occurred_at=observed_at,
+                occurred_at=occurred_at,
                 meta_data={
                     "session_source_type": getattr(
                         runtime_session, "session_source_type", None

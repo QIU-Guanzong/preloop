@@ -478,7 +478,10 @@ def sync_runtime_session_for_record(
     summary = _metadata_text(
         record.metadata, "session_summary", MAX_SESSION_SUMMARY_CHARS
     )
-    if summary:
+    if summary and (summary != session.summary or session.summary_updated_at is None):
+        # Only a changed summary moves the timestamp. An identical metadata
+        # push must not rewrite the search chunk or stop the column meaning
+        # "when the text changed".
         session.summary = summary
         session.summary_updated_at = observed_at
         description_changed = True

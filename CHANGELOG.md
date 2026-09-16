@@ -71,8 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gateway auto-summary) writes one `session_summary` chunk into the search
   corpus, so a search for the words that describe what a session was about
   matches the summary sentence and not only the transcript. Regenerating the
-  title rewrites that one chunk, an identical regeneration changes nothing,
-  and a session left with neither a title nor a summary keeps no chunk.
+  title rewrites that one chunk, and an identical regeneration (plugin title
+  hook, usage-import metadata, or gateway auto-summary) changes nothing:
+  `summary_updated_at` moves only when the text changes, so the corpus does
+  not delete and reinsert an unchanged chunk. A session left with neither a
+  title nor a summary keeps no chunk.
   Indexing failures are logged and never fail the title write.
 - Callable-flows picker on the flow editor. When the delegation tool is
   on, the form lists the account's other flows (paging past the 100-row

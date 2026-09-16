@@ -106,6 +106,79 @@ def test_runtime_session_summary_refreshes_when_missing():
     index_summary.assert_called_once()
     assert index_summary.call_args.kwargs["summary"] == "Agent reviewed pricing changes"
     assert index_summary.call_args.kwargs["runtime_session_id"] == runtime_session.id
+    assert index_summary.call_args.kwargs["occurred_at"] == observed_at
+
+
+def test_runtime_session_summary_identical_refresh_keeps_timestamp():
+    """An identical cadence refresh must not move summary_updated_at."""
+    stored_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+    observed_at = datetime.now(timezone.utc)
+    existing = "Agent reviewed pricing changes"
+    runtime_session = SimpleNamespace(
+        id=uuid4(),
+        summary=existing,
+        summary_updated_at=stored_at,
+        title="Pricing review",
+        session_source_type="model_gateway",
+    )
+    usage = SimpleNamespace(
+        model_alias="openai/gpt-test",
+        provider_name="openai",
+        status_code=200,
+        prompt_tokens=10,
+        completion_tokens=5,
+        total_tokens=15,
+        estimated_cost=0.01,
+    )
+    service = OpenAIGatewayService(
+        db=MagicMock(),
+        auth_context=ModelGatewayAuthContext(
+            token="token",
+            user=SimpleNamespace(id=uuid4(), account_id=uuid4()),
+        ),
+    )
+
+    with (
+        patch(
+            "preloop.services.openai_gateway.crud_api_usage.count_successful_gateway_calls_for_session",
+            return_value=10,
+        ),
+        patch(
+            "preloop.services.openai_gateway.crud_ai_model.get_default_active_model",
+            return_value=SimpleNamespace(name="Default model"),
+        ),
+        patch.object(
+            service,
+            "_runtime_session_summary_columns_available",
+            return_value=True,
+        ),
+        patch.object(
+            service,
+            "_runtime_session_summary_state",
+            return_value={"summary": existing, "summary_updated_at": stored_at},
+        ),
+        patch.object(
+            service,
+            "_generate_runtime_session_summary",
+            return_value=existing,
+        ),
+        patch(
+            "preloop.services.openai_gateway.index_session_summary",
+        ) as index_summary,
+    ):
+        service._maybe_refresh_runtime_session_summary(
+            runtime_session=runtime_session,
+            usage=usage,
+            request_payload={"messages": [{"role": "user", "content": "hello"}]},
+            response_payload={"choices": []},
+            observed_at=observed_at,
+        )
+
+    service.db.execute.assert_not_called()
+    service.db.commit.assert_not_called()
+    index_summary.assert_called_once()
+    assert index_summary.call_args.kwargs["summary"] == existing
+    assert index_summary.call_args.kwargs["occurred_at"] == stored_at
 
 
 def test_runtime_session_summary_skips_recent_refresh():
