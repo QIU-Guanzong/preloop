@@ -152,7 +152,7 @@ test.describe('T2 upgrade flow (mocked Stripe boundary)', () => {
     await page.waitForURL(`**${gatePath}`, { timeout: 15_000 });
     expect(checkoutBody).not.toBeNull();
     expect(String(checkoutBody!.return_to)).toContain(gatePath);
-    expect(checkoutBody!.plan_id).toBe('teams');
+    expect(checkoutBody!.plan_id).toBe('pro');
   });
 
   test('free accounts see the AI-titles upsell hint on the sessions list', async ({

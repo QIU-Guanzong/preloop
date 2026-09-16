@@ -198,23 +198,37 @@ async function measureLoad(page: Page, cold: boolean): Promise<RunResult> {
   });
 
   if (cold) {
-    await page.evaluate(() => sessionStorage.clear());
+    await page.evaluate(() => {
+      sessionStorage.clear();
+      // Get-started takes the whole Overview on a new account. Dismiss it so
+      // this spec measures the gateway card, which is what the budgets are
+      // for.
+      localStorage.setItem('dashboard_welcome_dismissed', 'true');
+    });
     await page.goto('/console');
   } else {
     await page.reload();
   }
 
-  // First usable: the gateway card shows a request count instead of a
-  // skeleton. Read the page's own clock so navigation is the zero point.
+  // First usable: the gateway card left its skeleton. A brand-new account
+  // has no traffic, so the Overview shows "Connect your first agent" or
+  // "No traffic yet" instead of "N requests"; both are settled UI.
   const firstUsableMs = await page
     .waitForFunction(
       () => {
         const view = document
           .querySelector('lit-app')
           ?.shadowRoot?.querySelector('dashboard-view');
-        const stats = view?.shadowRoot?.querySelector('.plane-stats');
-        const text = stats?.textContent || '';
-        return /\d[\d.,KM]*\s+requests/.test(text) ? performance.now() : false;
+        const root = view?.shadowRoot;
+        if (!root) return false;
+        if (root.querySelector('.connect-first')) return performance.now();
+        if (root.querySelector('.welcome-container')) return performance.now();
+        const stats = root.querySelector('.plane-stats');
+        if (!stats || stats.getAttribute('aria-busy') === 'true') return false;
+        const text = stats.textContent || '';
+        return /\d[\d.,KM]*\s+requests/.test(text) || /No traffic yet/.test(text)
+          ? performance.now()
+          : false;
       },
       undefined,
       { timeout: 30_000 }
@@ -227,10 +241,14 @@ async function measureLoad(page: Page, cold: boolean): Promise<RunResult> {
         const view = document
           .querySelector('lit-app')
           ?.shadowRoot?.querySelector('dashboard-view');
-        const card = view?.shadowRoot?.querySelector('inventory-card');
-        const rows =
-          card?.shadowRoot?.querySelectorAll('tbody tr:not(.skeleton-row)') ||
-          [];
+        const root = view?.shadowRoot;
+        if (!root) return false;
+        if (root.querySelector('.welcome-container')) return performance.now();
+        const card = root.querySelector('inventory-card');
+        const cardRoot = card?.shadowRoot;
+        if (!cardRoot) return false;
+        if (cardRoot.querySelector('.empty')) return performance.now();
+        const rows = cardRoot.querySelectorAll('tbody tr:not(.skeleton-row)');
         return rows.length > 0 ? performance.now() : false;
       },
       undefined,

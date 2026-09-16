@@ -16,15 +16,12 @@ the suite. Two properties matter enough to pin down here:
 
 from __future__ import annotations
 
-import json
-import shutil
-import subprocess
 from typing import Any
 
 from tests.ci_workflow import load_ci_jobs
 from tests.test_github_ci_backend_shards import BACKEND_TEST_SPLITS
 
-BACKEND_SHARD = "[matrix.group - 1]"
+BACKEND_SHARD = "[matrix.group]"
 HOSTED_JOBS = (
     "test-backend-coverage",
     "test-frontend",
@@ -54,25 +51,42 @@ def _pick_script() -> str:
     raise AssertionError("pick-runner has no step with id 'pick'")
 
 
-def _plan_from_jq(idle: int) -> list[dict[str, Any]]:
-    """Run the workflow's jq program against an idle-runner count."""
-    jq = shutil.which("jq")
-    if jq is None:
-        raise AssertionError("jq is required to check backend_plan")
-    script = _pick_script()
-    start = script.index("jq -cn '") + len("jq -cn '")
-    end = script.index("') || plan=\"\"", start)
-    program = script[start:end]
-    completed = subprocess.run(
-        [jq, "-cn", program],
-        check=True,
-        capture_output=True,
-        text=True,
-        env={"IDLE": str(idle), "PYVER": "3.11"},
+def _hosted_slot() -> dict[str, Any]:
+    """Public ubuntu-latest shard: host Postgres, no job container."""
+    return {
+        "runner": "ubuntu-latest",
+        "container": None,
+        "db_host": "localhost",
+        "postgres_ports": ["5432:5432"],
+    }
+
+
+def _overflow_slot(pyver: str = "3.11") -> dict[str, Any]:
+    """Idle self-hosted shard: bookworm job container, service hostname Postgres."""
+    return {
+        "runner": ["self-hosted", "Linux", "X64"],
+        "container": {"image": f"python:{pyver}-bookworm"},
+        "db_host": "postgres",
+        "postgres_ports": [],
+    }
+
+
+def _backend_plan(idle: int, pyver: str = "3.11") -> list[dict[str, Any] | None]:
+    """Hosted-first overflow: last ``idle`` of eight shards go to private VMs.
+
+    GitHub expressions cannot subtract, so the array is 1-based: a dummy
+    ``null`` at index 0 lets ``[matrix.group]`` address groups 1-8. Mirrors
+    pick-runner's jq in Python so GitLab's unit image (no ``jq``) can still
+    pin the routing.
+    """
+    idle = max(0, min(int(idle), BACKEND_TEST_SPLITS))
+    threshold = BACKEND_TEST_SPLITS - idle
+    shards: list[dict[str, Any] | None] = [None]
+    shards.extend(
+        _overflow_slot(pyver) if index >= threshold else _hosted_slot()
+        for index in range(BACKEND_TEST_SPLITS)
     )
-    plan = json.loads(completed.stdout)
-    assert isinstance(plan, list)
-    return plan
+    return shards
 
 
 def test_backend_shards_route_through_pick_runner_plan() -> None:
@@ -85,6 +99,9 @@ def test_backend_shards_route_through_pick_runner_plan() -> None:
         "${{ fromJSON(needs.pick-runner.outputs.backend_plan)"
         f"{BACKEND_SHARD}.container }}}}"
     )
+    # GitHub expressions have no arithmetic. `matrix.group - 1` makes the
+    # workflow file invalid and no job starts.
+    assert "matrix.group - 1" not in str(backend)
 
 
 def test_extra_suites_stay_on_hosted_and_do_not_wait() -> None:
@@ -108,9 +125,7 @@ def test_pick_runner_decides_on_a_public_runner() -> None:
     """The chooser cannot depend on the thing it is choosing."""
     pick = load_ci_jobs()["pick-runner"]
     assert pick["runs-on"] == "ubuntu-latest"
-    assert pick["outputs"]["backend_plan"] == (
-        "${{ steps.pick.outputs.backend_plan }}"
-    )
+    assert pick["outputs"]["backend_plan"] == ("${{ steps.pick.outputs.backend_plan }}")
     assert "timeout-minutes" in pick
     assert "test_runner" not in pick["outputs"]
 
@@ -149,14 +164,18 @@ def test_pick_runner_requires_an_idle_matching_runner() -> None:
     # Hosted first; idle VMs take the tail of the matrix.
     assert "range(0;8)" in script
     assert ". >= (8 - $idle)" in script
+    # Dummy at [0] so YAML can index with matrix.group (no minus).
+    assert "[null] +" in script
+    assert "[null,{" in script
 
 
 def test_three_idle_runners_only_overflow_the_last_three_shards() -> None:
     """Three VMs take shards 6-8; groups 1-5 (including the long pole) stay hosted."""
-    plan = _plan_from_jq(3)
-    assert len(plan) == BACKEND_TEST_SPLITS
-    hosted = plan[:5]
-    overflow = plan[5:]
+    plan = _backend_plan(3)
+    assert plan[0] is None
+    assert len(plan) == BACKEND_TEST_SPLITS + 1
+    hosted = plan[1:6]
+    overflow = plan[6:]
     assert all(slot["runner"] == "ubuntu-latest" for slot in hosted)
     assert all(slot["container"] is None for slot in hosted)
     assert all(slot["db_host"] == "localhost" for slot in hosted)
@@ -171,10 +190,14 @@ def test_three_idle_runners_only_overflow_the_last_three_shards() -> None:
 
 def test_zero_idle_runners_keeps_every_shard_on_hosted() -> None:
     """No private capacity means the matrix matches pre-self-hosted CI."""
-    plan = _plan_from_jq(0)
-    assert len(plan) == BACKEND_TEST_SPLITS
-    assert all(slot["runner"] == "ubuntu-latest" for slot in plan)
-    assert all(slot["container"] is None for slot in plan)
+    plan = _backend_plan(0)
+    assert plan[0] is None
+    assert len(plan) == BACKEND_TEST_SPLITS + 1
+    shards = plan[1:]
+    assert all(
+        slot is not None and slot["runner"] == "ubuntu-latest" for slot in shards
+    )
+    assert all(slot is not None and slot["container"] is None for slot in shards)
 
 
 def test_ci_aggregator_fails_when_pick_runner_fails() -> None:
@@ -220,9 +243,7 @@ def test_test_jobs_are_bounded_and_start_clean() -> None:
 def test_backend_postgres_network_follows_the_shard_plan() -> None:
     """Hosted shards keep localhost:5432; overflow shards do not bind the host port."""
     pick = load_ci_jobs()["pick-runner"]
-    assert pick["outputs"]["backend_plan"] == (
-        "${{ steps.pick.outputs.backend_plan }}"
-    )
+    assert pick["outputs"]["backend_plan"] == ("${{ steps.pick.outputs.backend_plan }}")
     script = _pick_script()
     assert "python:" in script and "-bookworm" in script
     assert 'postgres_ports:["5432:5432"]' in script

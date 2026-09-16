@@ -14,10 +14,13 @@ import '@shoelace-style/shoelace/dist/components/spinner/spinner.js';
 import '../../components/view-header.ts';
 import '../../components/token-figures.ts';
 import '../../components/time-range-select.ts';
+import '../../components/history-cutoff-row.ts';
 import {
   getAccountGatewayUsageSearch,
   getAccountGatewayUsageSummary,
   getAccountRateLimitReport,
+  getUsageNudges,
+  type AnalyticsWindow,
   type GatewayUsageSummaryParams,
 } from '../../api';
 import type {
@@ -35,6 +38,11 @@ import type {
 } from '../../types';
 import consoleStyles from '../../styles/console-styles.css?inline';
 import { shortExecutionId } from '../../utils/execution-subject';
+import {
+  isHistoryUnavailable,
+  requestHistoryUpgrade,
+} from '../../utils/history-window';
+import { analyticsWindow } from '../../utils/usage-nudges';
 import {
   formatTimeRangeWindow,
   resolvePreviousTimeRange,
@@ -82,6 +90,21 @@ export class ApiUsageView extends LitElement {
 
   @state()
   private selectedRange: TimeRangeKey = 'last-30';
+
+  /** The plan's analytics window, or null when there is none. */
+  @state()
+  private historyWindow: AnalyticsWindow | null = null;
+
+  /**
+   * Whether the window on screen is one the person picked.
+   *
+   * The paywall modal follows a user action and nothing else, and
+   * `loadSummary()` runs for both the automatic first load and a chosen
+   * range. Keeping the answer in a flag means the invariant holds because
+   * the code says so, not because today's default range happens to sit
+   * inside every plan's window.
+   */
+  private rangeChosenByUser = false;
 
   @state()
   private searchQuery = '';
@@ -496,7 +519,16 @@ export class ApiUsageView extends LitElement {
     if (!this.initialized) {
       this.initialized = true;
       void this.loadSummary();
+      void this.loadHistoryWindow();
     }
+  }
+
+  /**
+   * How far back this plan shows analytics, so the day list can say where it
+   * stops instead of simply stopping. No plugin, no window, no row.
+   */
+  private async loadHistoryWindow() {
+    this.historyWindow = analyticsWindow(await getUsageNudges());
   }
 
   disconnectedCallback() {
@@ -567,6 +599,13 @@ export class ApiUsageView extends LitElement {
       this.previousSummary = previousSummary;
     } catch (error) {
       console.error('Failed to load account gateway usage summary:', error);
+      if (isHistoryUnavailable(error) && this.rangeChosenByUser) {
+        // The person picked a window their plan does not show. That is a
+        // user action, so it is the one case that may open the modal. The
+        // first load of the page is not, however far back it reaches: it
+        // says so in the row where the data stops and leaves it there.
+        requestHistoryUpgrade();
+      }
       this.error =
         error instanceof Error
           ? error.message
@@ -587,6 +626,7 @@ export class ApiUsageView extends LitElement {
       return;
     }
     this.selectedRange = value;
+    this.rangeChosenByUser = true;
     // An in-flight search still carries the old window. Bump so its answer
     // cannot overwrite the results this range is about to load.
     this.searchRequestId++;
@@ -1103,6 +1143,12 @@ export class ApiUsageView extends LitElement {
 
     return html`
       <div class="daily-list">
+        <!-- Days run oldest first, so the plan's cutoff belongs above the
+             first row: that is where the missing history would have been. -->
+        <history-cutoff-row
+          .days=${this.historyWindow?.days ?? null}
+          .unlocksAtPlanName=${this.historyWindow?.unlocks_at_plan_name ?? null}
+        ></history-cutoff-row>
         ${days.map(
           (day) => html`
             <div class="daily-row">

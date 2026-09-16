@@ -136,6 +136,7 @@ describe('ConsoleShell', () => {
         expect(el.shadowRoot!.querySelector('console-header')).to.not.exist;
         expect(el.shadowRoot!.querySelector('approval-bypass-banner')).to.not
           .exist;
+        expect(el.shadowRoot!.querySelector('usage-nudge-banner')).to.not.exist;
         // The popup content is the only row and it fills the window.
         expect(el.shadowRoot!.querySelector('.main-view.window-mode')).to.exist;
         expect(el.shadowRoot!.querySelector('.main-content.full-bleed')).to
@@ -161,6 +162,9 @@ describe('ConsoleShell', () => {
           'Header did not render'
         );
         expect(el.shadowRoot!.querySelector('.sidebar-wrapper')).to.exist;
+        // Usage sits with the other banners under the header. It paints
+        // nothing of its own until the endpoint answers with a limit.
+        expect(el.shadowRoot!.querySelector('usage-nudge-banner')).to.exist;
       } finally {
         window.history.replaceState({}, '', originalUrl);
       }
@@ -889,6 +893,21 @@ describe('ConsoleShell', () => {
       // "Teams" is the grandfathered legacy plan and is no longer sold, so
       // promising the feature under that name sends buyers to a dead plan.
       expect(text).to.not.contain('Teams feature');
+    });
+
+    it('names the gates a person reaches by doing something', async () => {
+      // Price overrides, built-in model analysis and asking for older data
+      // are the three user actions that hit a 402/403 gate. The modal has
+      // to say what was refused, not print a capability key.
+      expect(copy(await openGate('price_overrides'))).to.contain(
+        'custom model prices is a paid feature'
+      );
+      expect(copy(await openGate('ai_optimization'))).to.contain(
+        'analysis with built-in models is a paid feature'
+      );
+      expect(copy(await openGate('analytics_window_days'))).to.contain(
+        'analytics history beyond your plan window is a paid feature'
+      );
     });
 
     it('uses no em dash in the upgrade copy (founder ruling)', async () => {

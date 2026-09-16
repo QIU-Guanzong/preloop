@@ -200,13 +200,13 @@ jobs:
                  container:{image:("python:"+$ENV.PYVER+"-bookworm")},
                  db_host:"postgres",postgres_ports:[]};
               ($ENV.IDLE|tonumber) as $idle
-              | [range(0;8) | if . >= (8 - $idle) then private else public end]
+              | [null] + [range(0;8) | if . >= (8 - $idle) then private else public end]
             ') || plan=""
 
             if [ -z "$plan" ]; then
               idle=0
               reason="$reason (plan fallback: all public)"
-              plan='[{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]}]'
+              plan='[null,{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]}]'
             fi
 
             {
@@ -395,8 +395,8 @@ jobs:
   # user in the docker group.
   test-backend:
     name: Backend Tests (${{ matrix.group }}/8)
-    runs-on: ${{ fromJSON(needs.pick-runner.outputs.backend_plan)[matrix.group - 1].runner }}
-    container: ${{ fromJSON(needs.pick-runner.outputs.backend_plan)[matrix.group - 1].container }}
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.backend_plan)[matrix.group].runner }}
+    container: ${{ fromJSON(needs.pick-runner.outputs.backend_plan)[matrix.group].container }}
     needs: [changes, pick-runner]
     if: needs.changes.outputs.backend == 'true'
     timeout-minutes: 45
@@ -411,7 +411,7 @@ jobs:
           POSTGRES_DB: test_db
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
-        ports: ${{ fromJSON(needs.pick-runner.outputs.backend_plan)[matrix.group - 1].postgres_ports }}
+        ports: ${{ fromJSON(needs.pick-runner.outputs.backend_plan)[matrix.group].postgres_ports }}
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -419,7 +419,7 @@ jobs:
           --health-retries 5
 
     env:
-      DATABASE_URL: postgresql://test_user:test_password@${{ fromJSON(needs.pick-runner.outputs.backend_plan)[matrix.group - 1].db_host }}:5432/test_db
+      DATABASE_URL: postgresql://test_user:test_password@${{ fromJSON(needs.pick-runner.outputs.backend_plan)[matrix.group].db_host }}:5432/test_db
       OPENAI_API_KEY: mock_key
       ANTHROPIC_API_KEY: mock_key
       PRELOOP_DISABLE_TELEMETRY: "true"

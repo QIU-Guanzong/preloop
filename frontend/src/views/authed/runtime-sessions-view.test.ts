@@ -653,6 +653,66 @@ describe('RuntimeSessionsView', () => {
     );
   });
 
+  it('shows the AI-titles upsell hint for free accounts and opens the upgrade modal', async () => {
+    fetchStub.callsFake(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/api/v1/billing/entitlements')) {
+        return new Response(
+          JSON.stringify({ premium: false, reason: 'none' }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        );
+      }
+      if (url.startsWith('/api/v1/runtime-sessions?')) {
+        return new Response(
+          JSON.stringify({
+            period_start: '2026-02-08T00:00:00Z',
+            period_end: '2026-03-09T23:59:59Z',
+            query: null,
+            session_source_type: null,
+            status: 'all',
+            total: 0,
+            limit: 50,
+            offset: 0,
+            items: [],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({ features: {} }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const opened: string[] = [];
+    const onUpgrade = (event: Event) => {
+      opened.push(String((event as CustomEvent).detail?.feature || ''));
+    };
+    window.addEventListener('show-upgrade-modal', onUpgrade);
+
+    const element = (await fixture(
+      html`<runtime-sessions-view></runtime-sessions-view>`
+    )) as RuntimeSessionsView;
+
+    try {
+      await waitUntil(
+        () => Boolean(element.shadowRoot?.querySelector('.titles-upsell-hint')),
+        'titles upsell hint did not render'
+      );
+      const hint = element.shadowRoot!.querySelector(
+        '.titles-upsell-hint'
+      ) as HTMLButtonElement;
+      expect(hint.textContent).to.contain('AI titles');
+      hint.click();
+      expect(opened).to.deep.equal(['session_titles']);
+    } finally {
+      window.removeEventListener('show-upgrade-modal', onUpgrade);
+    }
+  });
+
   it('renders runtime session list without blocking on session detail', async () => {
     const element = (await fixture(
       html`<runtime-sessions-view></runtime-sessions-view>`

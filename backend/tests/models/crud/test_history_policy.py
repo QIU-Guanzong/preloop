@@ -7,6 +7,8 @@ import pytest
 from preloop.models import models
 from preloop.models.crud.history_policy import (
     HISTORY_RETENTION_KEY,
+    analytics_plan_retention,
+    analytics_read_window,
     preserve_history_retention,
 )
 
@@ -193,3 +195,37 @@ def test_reconciliation_separates_audit_and_preserves_materialized_floor(
     )
     assert account.subscription_history_retention_days == expected
     assert account.meta_data[HISTORY_RETENTION_KEY] == expected
+
+
+@pytest.mark.parametrize(
+    "features, expected",
+    [
+        # Stated window wins, and it may be shorter than what is stored.
+        ({"retention_days": 183, "analytics_window_days": 90}, 90),
+        ({"retention_days": 730, "analytics_window_days": -1}, -1),
+        # No window stated: show everything the plan keeps.
+        ({"retention_days": 730}, 730),
+        ({"audit_logs_retention_days": 900}, 900),
+        # Nonsense is ignored rather than allowed to blank the view.
+        ({"retention_days": 365, "analytics_window_days": 0}, 365),
+        ({"retention_days": 365, "analytics_window_days": -5}, 365),
+        ({"retention_days": 365, "analytics_window_days": True}, 365),
+        ({"retention_days": 365, "analytics_window_days": "90"}, 365),
+        ({}, None),
+        (None, None),
+    ],
+)
+def test_read_window_defaults_to_what_the_plan_stores(features, expected):
+    assert analytics_read_window(features) == expected
+
+
+@pytest.mark.parametrize(
+    "features",
+    [
+        {"retention_days": 183, "analytics_window_days": 90},
+        {"retention_days": 730, "analytics_window_days": -1},
+    ],
+)
+def test_the_read_window_is_invisible_to_the_purge_input(features):
+    """Physical deletion follows retention_days alone, whatever is displayed."""
+    assert analytics_plan_retention(features) == features["retention_days"]
