@@ -19,10 +19,10 @@ surface is unchanged, which is the whole argument:
   is a refusal (``gate_unresolved``), never pass-through;
 - an expired gate or an empty approval files nothing and says so;
 - a follow up that already has an issue from an earlier run is not filed
-  again: the stable follow up id is the key, and the ledger is the filings
-  earlier executions of the same flow recorded (last
-  ``LEDGER_EXECUTION_LIMIT`` executions; concurrent runs can still
-  duplicate);
+  again: the stable follow up id is the key, and the ledger is the reserved
+  ``follow_up_filing`` receipts earlier executions of the same flow recorded
+  (last ``LEDGER_EXECUTION_LIMIT`` executions; concurrent runs can still
+  duplicate). Row-level ``filed`` claims are not a record of a tracker write;
 - one tracker error fails one row. The remaining rows are still filed and
   the failed row is reported as not filed with a reason from a closed
   vocabulary, never a provider error string;
@@ -137,6 +137,8 @@ class PlatformFollowUpGate:
     allowed_ids: frozenset[str]
     notes: Mapping[str, str] = field(default_factory=dict)
     titles: Mapping[str, str] = field(default_factory=dict)
+    approved_by: Optional[str] = None
+    approved_at: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -334,6 +336,8 @@ def parse_platform_follow_up_gate(
     """Turn a stored approval into the ids (and notes/titles) the human saw."""
     allowed: set[str] = set()
     notes: dict[str, str] = {}
+    approved_by: Optional[str] = None
+    approved_at: Optional[str] = None
     if isinstance(structured_answer, Mapping):
         approved = structured_answer.get("approved")
         if isinstance(approved, Sequence) and not isinstance(approved, (str, bytes)):
@@ -349,6 +353,8 @@ def parse_platform_follow_up_gate(
                     allowed.add(identifier)
                     if note:
                         notes[identifier] = note
+        approved_by = _clean(structured_answer.get("author"))
+        approved_at = _clean(structured_answer.get("date"))
     titles: dict[str, str] = {}
     for item in items or []:
         if not isinstance(item, Mapping):
@@ -362,6 +368,8 @@ def parse_platform_follow_up_gate(
         allowed_ids=frozenset(allowed),
         notes=notes,
         titles=titles,
+        approved_by=approved_by,
+        approved_at=approved_at,
     )
 
 
@@ -379,12 +387,16 @@ def approved_follow_ups(
     allowed_ids: Optional[AbstractSet[str]] = None,
     notes: Optional[Mapping[str, str]] = None,
     titles: Optional[Mapping[str, str]] = None,
+    approved_by: Optional[str] = None,
+    approved_at: Optional[str] = None,
 ) -> tuple[list[FollowUpRow], int]:
     """The approved rows, in the order they are to be filed (rank, then order).
 
     When ``allowed_ids`` is set, that set is the source of truth (the
     platform-recorded selection). Envelope ``status: approved`` is ignored
     for membership; title and note prefer the question the human saw.
+    Attribution prefers the gate's autofilled ``author`` / ``date`` and
+    falls back to unrecorded, never to envelope ``approved_by``.
 
     A row missing an id, a project or a title is not filed: there is nothing
     honest to put in an issue, and inventing it would be worse than skipping.
@@ -421,6 +433,12 @@ def approved_follow_ups(
         note = _clean(note_overrides.get(identifier), limit=MAX_NOTE_LENGTH)
         if not note:
             note = _clean(raw.get("note"), limit=MAX_NOTE_LENGTH)
+        if allowed_ids is not None:
+            row_approved_by = _clean(approved_by)
+            row_approved_at = _clean(approved_at)
+        else:
+            row_approved_by = _clean(raw.get("approved_by"))
+            row_approved_at = _clean(raw.get("approved_at"))
         severity = raw.get("severity")
         rank = raw.get("rank")
         rows.append(
@@ -435,8 +453,8 @@ def approved_follow_ups(
                 if isinstance(rank, int) and not isinstance(rank, bool)
                 else None,
                 note=note,
-                approved_by=_clean(raw.get("approved_by")),
-                approved_at=_clean(raw.get("approved_at")),
+                approved_by=row_approved_by,
+                approved_at=row_approved_at,
                 child_execution_id=_clean(raw.get("child_execution_id"), limit=64),
             )
         )
@@ -758,38 +776,27 @@ def collect_filed_follow_ups(
 ) -> dict[str, dict[str, Any]]:
     """The ledger: follow up id -> the issue an earlier run filed for it.
 
-    Reads both the receipt and the follow up rows, because either can be the
-    surviving record: a result restored from an older run may carry the rows
-    without the receipt this module writes today. ``results`` is read newest
-    first, and the first identifier seen for an id wins.
+    Only the platform-reserved ``follow_up_filing`` receipt counts. Row-level
+    ``filed`` / ``filed_issue`` claims are agent-writable and are not a
+    record of a tracker write. ``apply_filing_to_result`` writes the receipt
+    and the rows in the same pass, so a platform filing always has both.
+    ``results`` is read newest first, and the first identifier seen for an
+    id wins.
     """
     ledger: dict[str, dict[str, Any]] = {}
     for result in results:
         if not isinstance(result, Mapping):
             continue
         receipt = result.get(FOLLOW_UP_FILING_RESULT_KEY)
-        if isinstance(receipt, Mapping):
-            for row in receipt.get("rows") or []:
-                if not isinstance(row, Mapping):
-                    continue
-                if row.get("outcome") not in {ROW_FILED, ROW_ALREADY_FILED}:
-                    continue
-                identifier = _clean(row.get("id"), limit=200)
-                issue = row.get("issue")
-                if (
-                    identifier
-                    and isinstance(issue, Mapping)
-                    and identifier not in ledger
-                ):
-                    ledger[identifier] = _issue_record(issue)
-        follow_ups = result.get("follow_ups")
-        if not isinstance(follow_ups, Sequence):
+        if not isinstance(receipt, Mapping):
             continue
-        for entry in follow_ups:
-            if not isinstance(entry, Mapping) or entry.get("filed") is not True:
+        for row in receipt.get("rows") or []:
+            if not isinstance(row, Mapping):
                 continue
-            identifier = _clean(entry.get("id"), limit=200)
-            issue = entry.get("filed_issue")
+            if row.get("outcome") not in {ROW_FILED, ROW_ALREADY_FILED}:
+                continue
+            identifier = _clean(row.get("id"), limit=200)
+            issue = row.get("issue")
             if identifier and isinstance(issue, Mapping) and identifier not in ledger:
                 ledger[identifier] = _issue_record(issue)
     return {key: value for key, value in ledger.items() if value}

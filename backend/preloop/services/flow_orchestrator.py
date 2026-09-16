@@ -3981,6 +3981,8 @@ class FlowExecutionOrchestrator:
                 allowed_ids=platform.allowed_ids,
                 notes=platform.notes,
                 titles=platform.titles,
+                approved_by=platform.approved_by,
+                approved_at=platform.approved_at,
             )
             blocked = filing_blocked_reason(merged_result, rows, invalid=invalid)
             if blocked is not None:

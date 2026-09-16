@@ -496,7 +496,8 @@ Each issue is one unit of work, shaped so the
 preset (`backend/presets/011-automated-issue-implementation.yaml`) can
 pick it up without following a link: the title is
 `<project path>: <follow up title>`, and the body carries the priority,
-the note the human typed at the gate, the project path inside the
+the note the human typed at the gate, the human the platform recorded
+at the gate (not agent-authored `approved_by`), the project path inside the
 portfolio, the repository and commit the review read, the evidence
 pointer, the originating execution (the child execution when a
 delegating run produced the row, `none` for an inline run), the stable
@@ -507,11 +508,12 @@ follow up id, and a "Done when" section. Labels default to `preloop`,
 
 The follow up id (`portfolio:<project path>:<slug>`) is stable across
 runs by construction, and that is the idempotency key. Before filing,
-the platform reads the filings recorded by earlier executions of the
-same flow; a follow up already in that ledger is reported as
-`already_filed`, with the issue the earlier run created, and no tracker
-call is made for it. The ledger looks at the last 50 executions of the
-flow. A finding that stays unresolved past that window, or two runs of
+the platform reads the reserved `follow_up_filing` receipts recorded by
+earlier executions of the same flow; a follow up already in that ledger
+is reported as `already_filed`, with the issue the earlier run created,
+and no tracker call is made for it. Row-level `filed` flags are not a
+record of a tracker write. The ledger looks at the last 50 executions of
+the flow. A finding that stays unresolved past that window, or two runs of
 the same flow that file while both are still in flight, can still
 produce a second issue. Updating or closing the old issue is out of
 scope.
