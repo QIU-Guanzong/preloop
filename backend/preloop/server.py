@@ -10,10 +10,13 @@ import uvicorn
 
 import preloop.logging as preloop_logging
 
-# Add project root to sys.path to ensure SpaceModels can be imported
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+# Add backend/ so SpaceModels can be imported, and the OSS repo root so
+# ``INIT_TEST_DATA`` can import ``scripts.init_test_data`` when cwd is backend/.
+_backend_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_repo_root = os.path.abspath(os.path.join(_backend_root, ".."))
+for _path in (_backend_root, _repo_root):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 # Resolve stdlib logging without `import logging`, which CodeQL flags as a
 # self-import relative to preloop.logging.

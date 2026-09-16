@@ -6,6 +6,7 @@ of issue tracking systems.
 
 import logging
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +47,18 @@ pin_local_litellm_cost_map()
 
 
 logger = logging.getLogger(__name__)
+
+# ``scripts/`` lives at the OSS repo root. ``python -m preloop.server`` from
+# ``backend/`` (CI e2e, local compose) only puts ``backend/`` on sys.path, so
+# ``from scripts.init_test_data`` fails unless we add the repo root.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _ensure_repo_root_on_sys_path() -> None:
+    """Make ``scripts.init_test_data`` importable when cwd is ``backend/``."""
+    root = str(_REPO_ROOT)
+    if root not in sys.path:
+        sys.path.insert(0, root)
 
 
 class PyinstrumentMiddleware(BaseHTTPMiddleware):
@@ -249,6 +262,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             # asyncio.run(), which raises inside this already-running lifespan
             # loop. Schema setup is the INIT_DB branch's job (or the caller's,
             # e.g. CI's init_db.py); seeding legitimately assumes it happened.
+            _ensure_repo_root_on_sys_path()
             from scripts.init_test_data import create_test_data  # type: ignore
 
             await create_test_data()
