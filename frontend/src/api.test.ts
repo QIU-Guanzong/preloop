@@ -16,6 +16,7 @@ import {
   uploadAvatar,
   validateTrackerToken,
   startCheckout,
+  coalesceKey,
   BILLING_SUBSCRIPTION_CHANGED,
 } from './api.js';
 import { customElement } from 'lit/decorators.js';
@@ -454,6 +455,60 @@ describe('api', () => {
 
       expect(fetchStub.callCount, 'two separate requests').to.equal(2);
       expect(seen, 'one dialog, for the caller who asked').to.have.length(1);
+    });
+
+    it('namespaces the passive key with printable characters only', () => {
+      // An invisible separator (a NUL or any other control byte) works at
+      // runtime and passes type checking, but it makes this file "binary" for
+      // grep, ripgrep, git grep and editor search. Keep the separator
+      // readable, and fail here if anyone retypes it as something invisible.
+      const key = coalesceKey('/api/v1/billing/cost/pricing-overrides', true);
+
+      expect(key).to.equal('passive|/api/v1/billing/cost/pricing-overrides');
+      // eslint-disable-next-line no-control-regex
+      expect(
+        /[\x00-\x1f\x7f]/.test(key),
+        `control byte in ${JSON.stringify(key)}`
+      ).to.be.false;
+      expect(key).to.match(/^[\x20-\x7e]+$/);
+      // The active key is the bare URL, so a passive read can never take an
+      // active caller's slot.
+      expect(coalesceKey('/api/v1/agents')).to.equal('/api/v1/agents');
+      expect(coalesceKey('/api/v1/agents', false)).to.equal('/api/v1/agents');
+      expect(coalesceKey('/api/v1/agents', true)).to.not.equal(
+        coalesceKey('/api/v1/agents')
+      );
+    });
+
+    it('does not coalesce passive reads of two different gated features', async () => {
+      // Two background legs of the same boot-time `Promise.allSettled` ask
+      // about different features: one answer must never be handed to the
+      // other, whatever the separator in the key is.
+      fetchStub.callsFake(
+        async (input: RequestInfo | URL) =>
+          new Response(JSON.stringify({ url: String(input) }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+      );
+
+      const [overrides, analytics] = await Promise.all([
+        fetchWithAuth('/api/v1/billing/cost/pricing-overrides', {
+          passive: true,
+        }),
+        fetchWithAuth('/api/v1/analytics/summary', { passive: true }),
+      ]);
+
+      expect(fetchStub.callCount, 'one request per feature').to.equal(2);
+      expect(await overrides.json()).to.eql({
+        url: '/api/v1/billing/cost/pricing-overrides',
+      });
+      expect(await analytics.json()).to.eql({
+        url: '/api/v1/analytics/summary',
+      });
+      expect(
+        coalesceKey('/api/v1/billing/cost/pricing-overrides', true)
+      ).to.not.equal(coalesceKey('/api/v1/analytics/summary', true));
     });
 
     it('changes nothing where no plan gate exists (self-hosted default)', async () => {

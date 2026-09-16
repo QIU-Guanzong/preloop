@@ -362,6 +362,21 @@ export interface AuthFetchOptions extends RequestInit {
   passive?: boolean;
 }
 
+/**
+ * Key under which an in-flight GET is shared with other callers.
+ *
+ * A passive read is namespaced with a printable `passive|` prefix so it never
+ * shares a slot with the active read of the same URL. The separator must stay
+ * a visible ASCII character: an invisible one (a NUL, a control byte) survives
+ * type checking and tests but turns this file into "binary" for grep, ripgrep
+ * and editor search. `|` cannot start a request URL, so `passive|<url>` can
+ * never collide with a plain URL key, and `api.test.ts` asserts the key holds
+ * printable characters only, so a later invisible edit fails the suite.
+ */
+export function coalesceKey(url: string, passive?: boolean): string {
+  return passive === true ? `passive|${url}` : url;
+}
+
 export async function fetchWithAuth(
   url: string,
   options: AuthFetchOptions = {}
@@ -382,7 +397,7 @@ export async function fetchWithAuth(
     // background load would either swallow the modal a click deserves or pop
     // one nobody asked for, depending on which request happened to start
     // first.
-    const key = options.passive ? `passive ${url}` : url;
+    const key = coalesceKey(url, options.passive);
     const pending = inFlightGets.get(key);
     if (pending) {
       return (await pending).clone();
