@@ -220,6 +220,19 @@ def test_one_author_cannot_reuse_a_name(db_session, test_user):
         _save(db_session, account_id=test_user.account_id, owner_user_id=test_user.id)
 
 
+def test_a_raced_duplicate_name_is_still_a_conflict(db_session, test_user, monkeypatch):
+    """The unique constraint, not the check-then-insert, is the source of truth."""
+    _save(db_session, account_id=test_user.account_id, owner_user_id=test_user.id)
+
+    monkeypatch.setattr(
+        type(crud_session_saved_search),
+        "name_taken",
+        lambda self, *args, **kwargs: False,
+    )
+    with pytest.raises(SessionSavedSearchNameConflictError):
+        _save(db_session, account_id=test_user.account_id, owner_user_id=test_user.id)
+
+
 def test_two_authors_may_use_the_same_name(db_session, test_user):
     """Names are unique per author, not per account."""
     colleague = _user(db_session, test_user.account_id, email="colleague@example.com")
@@ -247,6 +260,32 @@ def test_renaming_onto_an_existing_name_is_refused(db_session, test_user):
         account_id=test_user.account_id,
         owner_user_id=test_user.id,
         name="free",
+    )
+
+    with pytest.raises(SessionSavedSearchNameConflictError):
+        crud_session_saved_search.update_owned(
+            db_session, saved=other, values={"name": "taken"}
+        )
+
+
+def test_a_raced_rename_is_still_a_conflict(db_session, test_user, monkeypatch):
+    """A concurrent rename onto a taken name is a 409-shaped conflict too."""
+    _save(
+        db_session,
+        account_id=test_user.account_id,
+        owner_user_id=test_user.id,
+        name="taken",
+    )
+    other = _save(
+        db_session,
+        account_id=test_user.account_id,
+        owner_user_id=test_user.id,
+        name="free",
+    )
+    monkeypatch.setattr(
+        type(crud_session_saved_search),
+        "name_taken",
+        lambda self, *args, **kwargs: False,
     )
 
     with pytest.raises(SessionSavedSearchNameConflictError):

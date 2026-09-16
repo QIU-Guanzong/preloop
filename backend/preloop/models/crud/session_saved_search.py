@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..models.session_saved_search import (
@@ -121,7 +122,7 @@ class CRUDSessionSavedSearch(CRUDBase[SessionSavedSearch]):
             run_count=0,
         )
         db.add(saved)
-        db.flush()
+        self._flush_unique_name(db, name=name)
         if commit:
             db.commit()
             db.refresh(saved)
@@ -272,11 +273,26 @@ class CRUDSessionSavedSearch(CRUDBase[SessionSavedSearch]):
         for key, value in values.items():
             setattr(saved, key, value)
         db.add(saved)
-        db.flush()
+        self._flush_unique_name(db, name=str(new_name or saved.name))
         if commit:
             db.commit()
             db.refresh(saved)
         return saved
+
+    def _flush_unique_name(self, db: Session, *, name: str) -> None:
+        """Flush, turning a unique-name race into the sequential conflict.
+
+        ``name_taken`` catches the sequential case. Two concurrent saves of
+        the same name both pass that check and the unique constraint
+        ``uq_session_saved_search_owner_name`` is what actually serializes
+        them. Translate that IntegrityError so the caller still gets a 409
+        rather than a 500.
+        """
+        try:
+            with db.begin_nested():
+                db.flush()
+        except IntegrityError as exc:
+            raise SessionSavedSearchNameConflictError(name) from exc
 
     def delete_owned(
         self, db: Session, *, saved: SessionSavedSearch, commit: bool = False

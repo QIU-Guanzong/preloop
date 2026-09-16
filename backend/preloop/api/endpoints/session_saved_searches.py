@@ -29,7 +29,6 @@ from sqlalchemy.orm import Session
 
 from preloop.api.auth import get_current_active_user
 from preloop.api.common import get_account_for_user
-from preloop.api.loop_safety import run_db_off_loop
 from preloop.models.crud import crud_session_saved_search
 from preloop.models.crud.session_saved_search import SessionSavedSearchNameConflictError
 from preloop.models.db.session import get_db_session
@@ -236,7 +235,7 @@ def _run(
     summary="Save a session search under a name",
 )
 @require_permission("view_runtime_sessions")
-async def create_saved_session_search(
+def create_saved_session_search(
     payload: SessionSavedSearchCreate,
     account: Annotated[Account, Depends(get_account_for_user)],
     current_user: User = Depends(get_current_active_user),
@@ -247,9 +246,7 @@ async def create_saved_session_search(
     The filters are validated here, so a saved search that cannot run cannot
     be stored. Visibility defaults to private; sharing is a separate edit.
     """
-    return await run_db_off_loop(
-        lambda: _create(db, account=account, user=current_user, payload=payload)
-    )
+    return _create(db, account=account, user=current_user, payload=payload)
 
 
 @router.get(
@@ -258,7 +255,7 @@ async def create_saved_session_search(
     summary="List saved session searches",
 )
 @require_permission("view_runtime_sessions")
-async def list_saved_session_searches(
+def list_saved_session_searches(
     account: Annotated[Account, Depends(get_account_for_user)],
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db_session),
@@ -270,26 +267,22 @@ async def list_saved_session_searches(
     Most recently run first, so the searches somebody actually repeats are at
     the top of the list.
     """
-
-    def _list() -> SessionSavedSearchList:
-        rows, total = crud_session_saved_search.list_visible(
-            db,
-            account_id=account.id,
-            user_id=current_user.id,
-            limit=limit,
-            offset=offset,
-        )
-        return SessionSavedSearchList(
-            items=[
-                saved_search_service.to_read(row, caller_user_id=current_user.id)
-                for row in rows
-            ],
-            total=total,
-            limit=limit,
-            offset=offset,
-        )
-
-    return await run_db_off_loop(_list)
+    rows, total = crud_session_saved_search.list_visible(
+        db,
+        account_id=account.id,
+        user_id=current_user.id,
+        limit=limit,
+        offset=offset,
+    )
+    return SessionSavedSearchList(
+        items=[
+            saved_search_service.to_read(row, caller_user_id=current_user.id)
+            for row in rows
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get(
@@ -298,23 +291,21 @@ async def list_saved_session_searches(
     summary="Read one saved session search",
 )
 @require_permission("view_runtime_sessions")
-async def get_saved_session_search(
+def get_saved_session_search(
     saved_search_id: UUID,
     account: Annotated[Account, Depends(get_account_for_user)],
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db_session),
 ) -> SessionSavedSearchRead:
     """Return one saved search the caller may see."""
-    return await run_db_off_loop(
-        lambda: saved_search_service.to_read(
-            _load_visible(
-                db,
-                account=account,
-                user=current_user,
-                saved_search_id=saved_search_id,
-            ),
-            caller_user_id=current_user.id,
-        )
+    return saved_search_service.to_read(
+        _load_visible(
+            db,
+            account=account,
+            user=current_user,
+            saved_search_id=saved_search_id,
+        ),
+        caller_user_id=current_user.id,
     )
 
 
@@ -324,7 +315,7 @@ async def get_saved_session_search(
     summary="Rename, edit or share a saved session search",
 )
 @require_permission("view_runtime_sessions")
-async def update_saved_session_search(
+def update_saved_session_search(
     saved_search_id: UUID,
     payload: SessionSavedSearchUpdate,
     account: Annotated[Account, Depends(get_account_for_user)],
@@ -337,14 +328,12 @@ async def update_saved_session_search(
     one thing: this saved question is not what it was. Only the author may do
     any of them.
     """
-    return await run_db_off_loop(
-        lambda: _update(
-            db,
-            account=account,
-            user=current_user,
-            saved_search_id=saved_search_id,
-            payload=payload,
-        )
+    return _update(
+        db,
+        account=account,
+        user=current_user,
+        saved_search_id=saved_search_id,
+        payload=payload,
     )
 
 
@@ -354,20 +343,18 @@ async def update_saved_session_search(
     summary="Delete a saved session search",
 )
 @require_permission("view_runtime_sessions")
-async def delete_saved_session_search(
+def delete_saved_session_search(
     saved_search_id: UUID,
     account: Annotated[Account, Depends(get_account_for_user)],
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db_session),
 ) -> None:
     """Delete a saved search the caller wrote. The sessions are untouched."""
-    await run_db_off_loop(
-        lambda: _delete(
-            db,
-            account=account,
-            user=current_user,
-            saved_search_id=saved_search_id,
-        )
+    _delete(
+        db,
+        account=account,
+        user=current_user,
+        saved_search_id=saved_search_id,
     )
     return None
 
@@ -378,7 +365,7 @@ async def delete_saved_session_search(
     summary="Run a saved session search",
 )
 @require_permission("view_runtime_sessions")
-async def run_saved_session_search(
+def run_saved_session_search(
     saved_search_id: UUID,
     account: Annotated[Account, Depends(get_account_for_user)],
     current_user: User = Depends(get_current_active_user),
@@ -399,14 +386,12 @@ async def run_saved_session_search(
     # An absent body is an empty body: the defaults on the paging model are
     # the first page.
     requested = paging or SessionSavedSearchRunRequest.model_validate({})
-    return await run_db_off_loop(
-        lambda: _run(
-            db,
-            account=account,
-            user=current_user,
-            saved_search_id=saved_search_id,
-            paging=requested,
-        )
+    return _run(
+        db,
+        account=account,
+        user=current_user,
+        saved_search_id=saved_search_id,
+        paging=requested,
     )
 
 
