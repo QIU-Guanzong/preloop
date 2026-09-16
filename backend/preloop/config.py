@@ -342,6 +342,34 @@ class Settings(BaseSettings):
             "exists."
         ),
     )
+    require_email_verification: bool = Field(
+        False,
+        description=(
+            "Require a verified email address before a password user may "
+            "sign in (REQUIRE_EMAIL_VERIFICATION). Default false, which is "
+            "today's behaviour: an unverified user signs in normally. When "
+            "true, login and refresh answer 403 with code "
+            "'email_not_verified' until the address is verified, and the "
+            "login page offers a resend. Only password (local) users are "
+            "gated: OAuth/SSO users and users created from a completed "
+            "checkout are verified by construction."
+        ),
+    )
+    email_verification_resend_limit: int = Field(
+        3,
+        description=(
+            "Verification emails a single client IP or a single address may "
+            "request per window (EMAIL_VERIFICATION_RESEND_LIMIT). Protects "
+            "the mail sender, not one handler."
+        ),
+    )
+    email_verification_resend_window_seconds: int = Field(
+        900,
+        description=(
+            "Length of the verification resend budget window in seconds "
+            "(EMAIL_VERIFICATION_RESEND_WINDOW)."
+        ),
+    )
     disable_rbac: bool = Field(
         False,
         description=(
@@ -1471,6 +1499,14 @@ class Settings(BaseSettings):
             "yes",
         )
         bootstrap_token = os.getenv("PRELOOP_BOOTSTRAP_TOKEN", "")
+        require_email_verification = os.getenv(
+            "REQUIRE_EMAIL_VERIFICATION", "false"
+        ).lower() in (
+            "true",
+            "1",
+            "t",
+            "yes",
+        )
 
         # GitHub App OAuth settings (SaaS only)
         github_app = GitHubAppSettings(
@@ -1552,6 +1588,16 @@ class Settings(BaseSettings):
         session_embedding_batch_size = min(
             512, _positive_int("SESSION_EMBEDDING_BATCH_SIZE", 32)
         )
+        # Verification resend budget. Parsed through the same forgiving
+        # helper as every other int knob: a typo in a rate-limit value falls
+        # back to the default instead of refusing to start the server.
+        email_verification_resend_limit = _positive_int(
+            "EMAIL_VERIFICATION_RESEND_LIMIT", 3
+        )
+        email_verification_resend_window_seconds = _positive_int(
+            "EMAIL_VERIFICATION_RESEND_WINDOW", 900
+        )
+
         session_embedding_queue_max_pending = _positive_int(
             "SESSION_EMBEDDING_QUEUE_MAX_PENDING", 128
         )
@@ -1591,6 +1637,11 @@ class Settings(BaseSettings):
             PROMPTS_FILE=prompts_file,
             registration_enabled=registration_enabled,
             bootstrap_token=bootstrap_token,
+            require_email_verification=require_email_verification,
+            email_verification_resend_limit=email_verification_resend_limit,
+            email_verification_resend_window_seconds=(
+                email_verification_resend_window_seconds
+            ),
             disable_rbac=disable_rbac,
             database=database,
             security=security,

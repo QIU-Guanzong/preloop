@@ -29,6 +29,7 @@ import {
   type UserPermissions,
 } from '../../api';
 import '../../components/permission-denied';
+import '../../components/trial-prompt';
 import { consoleDialogStyles } from '../../styles/console-dialog';
 import { LOCATION_CHANGED, Router } from '../../router';
 import { planPageUrl, premiumFeatureLabel } from '../../utils/premium-features';
@@ -667,6 +668,12 @@ export class ConsoleShell extends LitElement {
           Upgrade now
         </sl-button>
       </sl-dialog>
+
+      <!-- The one-time post-signup trial offer. Gated on the billing feature,
+           so an OSS console never renders it and never asks the server. -->
+      <trial-prompt
+        .enabled=${this._featuresLoaded && this.features['billing'] === true}
+      ></trial-prompt>
 
       <global-notice></global-notice>
 

@@ -9,6 +9,7 @@ These tests cover:
 6. Error handling paths
 """
 
+import jwt
 import pytest
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -28,8 +29,13 @@ from preloop.api.auth.jwt import (
     verify_password,
     get_password_hash,
 )
+from preloop.config import settings
 from preloop.models.models.user import User
-from preloop.utils.tokens import TokenError
+from preloop.utils.tokens import (
+    TokenError,
+    create_onboarding_claim_token,
+    hash_onboarding_claim_token,
+)
 
 
 # Set up test app
@@ -778,15 +784,36 @@ class TestRegistrationFlows:
 
 
 class TestOnboardingFlows:
-    """Tests for onboarding flows (Stripe checkout completion)."""
+    """Tests for onboarding flows (Stripe checkout completion).
 
-    def test_complete_onboarding_success(self, db_session_mock):
-        """Test successful onboarding completion."""
+    The credential this endpoint checks is the single-use claim token minted
+    by checkout success, not the NEEDS_RESET placeholder password: knowing an
+    address must never be enough to take over a pending account.
+    """
+
+    ACCOUNT_ID = uuid.uuid4()
+    SESSION_ID = "cs_test_onboarding"
+
+    def _pending_user(self, *, email="test@example.com", username="tempuser123"):
+        """A checkout-created user with an outstanding claim, plus its token."""
+        token = create_onboarding_claim_token(
+            email=email,
+            account_id=str(self.ACCOUNT_ID),
+            checkout_session_id=self.SESSION_ID,
+        )
         mock_user = MagicMock(spec=User)
         mock_user.id = uuid.uuid4()
-        mock_user.username = "tempuser123"
-        mock_user.email = "test@example.com"
+        mock_user.account_id = self.ACCOUNT_ID
+        mock_user.username = username
+        mock_user.email = email
         mock_user.hashed_password = "NEEDS_RESET"
+        mock_user.email_verified = False
+        mock_user.onboarding_claim_hash = hash_onboarding_claim_token(token)
+        return mock_user, token
+
+    def test_complete_onboarding_success(self, db_session_mock):
+        """A valid claim token sets the password and returns a session."""
+        mock_user, token = self._pending_user()
 
         with patch("preloop.api.auth.router.crud_user") as mock_crud:
             mock_crud.get_by_email.return_value = mock_user
@@ -798,6 +825,7 @@ class TestOnboardingFlows:
                     "email": "test@example.com",
                     "username": "newusername",
                     "password": "newsecurepassword123",
+                    "claim_token": token,
                 },
             )
 
@@ -807,32 +835,41 @@ class TestOnboardingFlows:
         assert "refresh_token" in data
         assert data["token_type"] == "bearer"
 
-    def test_complete_onboarding_user_not_found(self, db_session_mock):
-        """Test onboarding fails when user not found."""
+    def test_complete_onboarding_refuses_without_a_claim_token(self, db_session_mock):
+        """The whole point: an address alone claims nothing.
+
+        This is the pre-fix attack. An anonymous caller who knows a pending
+        account's address posts a password of their choosing and walks away
+        with a session. It must fail, and it must fail without writing.
+        """
+        mock_user, _token = self._pending_user()
+
         with patch("preloop.api.auth.router.crud_user") as mock_crud:
-            mock_crud.get_by_email.return_value = None
+            mock_crud.get_by_email.return_value = mock_user
 
             response = client.post(
                 "/auth/complete-onboarding",
                 json={
-                    "email": "nonexistent@example.com",
-                    "username": "newusername",
-                    "password": "newsecurepassword123",
+                    "email": "test@example.com",
+                    "username": "attacker",
+                    "password": "attackerpassword123",
                 },
             )
 
-        assert response.status_code == 404
-        assert "User not found" in response.json()["detail"]
+        assert response.status_code == 400
+        assert "no longer valid" in response.json()["detail"]
+        mock_crud.update.assert_not_called()
 
-    def test_complete_onboarding_already_completed(self, db_session_mock):
-        """Test onboarding fails when already completed."""
-        mock_user = MagicMock(spec=User)
-        mock_user.id = uuid.uuid4()
-        mock_user.username = "existinguser"
-        mock_user.email = "test@example.com"
-        mock_user.hashed_password = get_password_hash(
-            "existingpassword"
-        )  # Not NEEDS_RESET
+    def test_complete_onboarding_refuses_a_token_for_another_account(
+        self, db_session_mock
+    ):
+        """A real, unexpired token does not travel between accounts."""
+        mock_user, _token = self._pending_user()
+        other_account_token = create_onboarding_claim_token(
+            email="test@example.com",
+            account_id=str(uuid.uuid4()),
+            checkout_session_id="cs_test_other",
+        )
 
         with patch("preloop.api.auth.router.crud_user") as mock_crud:
             mock_crud.get_by_email.return_value = mock_user
@@ -843,19 +880,277 @@ class TestOnboardingFlows:
                     "email": "test@example.com",
                     "username": "newusername",
                     "password": "newsecurepassword123",
+                    "claim_token": other_account_token,
                 },
             )
 
         assert response.status_code == 400
-        assert "Onboarding already completed" in response.json()["detail"]
+        mock_crud.update.assert_not_called()
+
+    def test_complete_onboarding_refuses_a_token_for_another_address(
+        self, db_session_mock
+    ):
+        """Nor does it travel between addresses on the same account."""
+        mock_user, _token = self._pending_user()
+        wrong_subject = create_onboarding_claim_token(
+            email="someone-else@example.com",
+            account_id=str(self.ACCOUNT_ID),
+            checkout_session_id=self.SESSION_ID,
+        )
+
+        with patch("preloop.api.auth.router.crud_user") as mock_crud:
+            mock_crud.get_by_email.return_value = mock_user
+
+            response = client.post(
+                "/auth/complete-onboarding",
+                json={
+                    "email": "test@example.com",
+                    "username": "newusername",
+                    "password": "newsecurepassword123",
+                    "claim_token": wrong_subject,
+                },
+            )
+
+        assert response.status_code == 400
+        mock_crud.update.assert_not_called()
+
+    def test_complete_onboarding_refuses_an_expired_token(self, db_session_mock):
+        """An abandoned checkout stops being claimable when the link expires."""
+        mock_user, _token = self._pending_user()
+        expired = jwt.encode(
+            {
+                "sub": "test@example.com",
+                "exp": datetime.now(timezone.utc) - timedelta(minutes=1),
+                "type": "onboarding_claim",
+                "account_id": str(self.ACCOUNT_ID),
+                "checkout_session_id": self.SESSION_ID,
+                "jti": "expired",
+            },
+            settings.security.secret_key,
+            algorithm="HS256",
+        )
+        mock_user.onboarding_claim_hash = hash_onboarding_claim_token(expired)
+
+        with patch("preloop.api.auth.router.crud_user") as mock_crud:
+            mock_crud.get_by_email.return_value = mock_user
+
+            response = client.post(
+                "/auth/complete-onboarding",
+                json={
+                    "email": "test@example.com",
+                    "username": "newusername",
+                    "password": "newsecurepassword123",
+                    "claim_token": expired,
+                },
+            )
+
+        assert response.status_code == 400
+        mock_crud.update.assert_not_called()
+
+    def test_complete_onboarding_refuses_a_forged_token(self, db_session_mock):
+        """A token signed with someone else's key is not a token."""
+        mock_user, _token = self._pending_user()
+        forged = jwt.encode(
+            {
+                "sub": "test@example.com",
+                "exp": datetime.now(timezone.utc) + timedelta(minutes=30),
+                "type": "onboarding_claim",
+                "account_id": str(self.ACCOUNT_ID),
+                "checkout_session_id": self.SESSION_ID,
+                "jti": "forged",
+            },
+            "not-the-instance-secret-but-long-enough-for-hs256",
+            algorithm="HS256",
+        )
+
+        with patch("preloop.api.auth.router.crud_user") as mock_crud:
+            mock_crud.get_by_email.return_value = mock_user
+
+            response = client.post(
+                "/auth/complete-onboarding",
+                json={
+                    "email": "test@example.com",
+                    "username": "newusername",
+                    "password": "newsecurepassword123",
+                    "claim_token": forged,
+                },
+            )
+
+        assert response.status_code == 400
+        mock_crud.update.assert_not_called()
+
+    def test_complete_onboarding_token_is_single_use(self, db_session_mock):
+        """The claim is spent on use, so replaying the link buys nothing."""
+        mock_user, token = self._pending_user()
+        body = {
+            "email": "test@example.com",
+            "username": "tempuser123",
+            "password": "newsecurepassword123",
+            "claim_token": token,
+        }
+
+        with patch("preloop.api.auth.router.crud_user") as mock_crud:
+            mock_crud.get_by_email.return_value = mock_user
+            mock_crud.get_by_username.return_value = None
+
+            first = client.post("/auth/complete-onboarding", json=body)
+            assert first.status_code == 200
+            # The successful claim clears the stored fingerprint in the same
+            # update that sets the password.
+            assert (
+                mock_crud.update.call_args.kwargs["obj_in"]["onboarding_claim_hash"]
+                is None
+            )
+
+            # Replay the identical link against the now-claimed account.
+            mock_user.onboarding_claim_hash = None
+            mock_user.hashed_password = get_password_hash("newsecurepassword123")
+            mock_crud.update.reset_mock()
+
+            replay = client.post("/auth/complete-onboarding", json=body)
+
+            assert replay.status_code == 400
+            mock_crud.update.assert_not_called()
+
+    def test_complete_onboarding_refuses_a_preexisting_needs_reset_account(
+        self, db_session_mock
+    ):
+        """NEEDS_RESET on its own is never a credential.
+
+        Accounts created before claim tokens existed have the placeholder
+        password and no stored claim. They recover through the ordinary
+        password reset email, not through this endpoint.
+        """
+        mock_user, token = self._pending_user()
+        mock_user.onboarding_claim_hash = None
+
+        with patch("preloop.api.auth.router.crud_user") as mock_crud:
+            mock_crud.get_by_email.return_value = mock_user
+
+            response = client.post(
+                "/auth/complete-onboarding",
+                json={
+                    "email": "test@example.com",
+                    "username": "newusername",
+                    "password": "newsecurepassword123",
+                    "claim_token": token,
+                },
+            )
+
+        assert response.status_code == 400
+        mock_crud.update.assert_not_called()
+
+    def test_complete_onboarding_takes_the_name_and_trusts_the_address(
+        self, db_session_mock
+    ):
+        """The welcome page collects a name; the address needs no verifying.
+
+        The claim token proves this caller is the one who completed the
+        checkout, and that checkout attached a payment method to the address,
+        so holding the new customer at a verification email would be a step
+        with no purpose.
+        """
+        mock_user, token = self._pending_user()
+
+        with patch("preloop.api.auth.router.crud_user") as mock_crud:
+            mock_crud.get_by_email.return_value = mock_user
+            mock_crud.get_by_username.return_value = None
+
+            response = client.post(
+                "/auth/complete-onboarding",
+                json={
+                    "email": "test@example.com",
+                    "username": "newusername",
+                    "password": "newsecurepassword123",
+                    "full_name": "  Bobbie Tables  ",
+                    "claim_token": token,
+                },
+            )
+
+            assert response.status_code == 200
+            updates = mock_crud.update.call_args.kwargs["obj_in"]
+
+        assert updates["full_name"] == "Bobbie Tables"
+        assert updates["email_verified"] is True
+        assert updates["username"] == "newusername"
+        assert updates["hashed_password"] != "NEEDS_RESET"
+
+    def test_complete_onboarding_keeps_the_name_when_none_is_sent(
+        self, db_session_mock
+    ):
+        """An older client sends no name, and nothing should be overwritten."""
+        mock_user, token = self._pending_user()
+        mock_user.email_verified = True
+
+        with patch("preloop.api.auth.router.crud_user") as mock_crud:
+            mock_crud.get_by_email.return_value = mock_user
+            mock_crud.get_by_username.return_value = None
+
+            response = client.post(
+                "/auth/complete-onboarding",
+                json={
+                    "email": "test@example.com",
+                    "username": "tempuser123",
+                    "password": "newsecurepassword123",
+                    "claim_token": token,
+                },
+            )
+
+            assert response.status_code == 200
+            updates = mock_crud.update.call_args.kwargs["obj_in"]
+
+        assert "full_name" not in updates
+        assert "email_verified" not in updates
+
+    def test_complete_onboarding_user_not_found(self, db_session_mock):
+        """An unknown address gets the same answer as every other refusal.
+
+        Identical wording and status on purpose: this endpoint must not tell
+        an anonymous caller which addresses have a checkout account pending.
+        """
+        _mock_user, token = self._pending_user()
+
+        with patch("preloop.api.auth.router.crud_user") as mock_crud:
+            mock_crud.get_by_email.return_value = None
+
+            response = client.post(
+                "/auth/complete-onboarding",
+                json={
+                    "email": "nonexistent@example.com",
+                    "username": "newusername",
+                    "password": "newsecurepassword123",
+                    "claim_token": token,
+                },
+            )
+
+        assert response.status_code == 400
+        assert "no longer valid" in response.json()["detail"]
+
+    def test_complete_onboarding_already_completed(self, db_session_mock):
+        """An account that already has a password is not claimable."""
+        mock_user, token = self._pending_user()
+        mock_user.hashed_password = get_password_hash("existingpassword")
+
+        with patch("preloop.api.auth.router.crud_user") as mock_crud:
+            mock_crud.get_by_email.return_value = mock_user
+
+            response = client.post(
+                "/auth/complete-onboarding",
+                json={
+                    "email": "test@example.com",
+                    "username": "newusername",
+                    "password": "newsecurepassword123",
+                    "claim_token": token,
+                },
+            )
+
+        assert response.status_code == 400
+        assert "no longer valid" in response.json()["detail"]
+        mock_crud.update.assert_not_called()
 
     def test_complete_onboarding_username_taken(self, db_session_mock):
         """Test onboarding fails when new username is taken."""
-        mock_user = MagicMock(spec=User)
-        mock_user.id = uuid.uuid4()
-        mock_user.username = "tempuser123"
-        mock_user.email = "test@example.com"
-        mock_user.hashed_password = "NEEDS_RESET"
+        mock_user, token = self._pending_user()
 
         existing_user = MagicMock(spec=User)
         existing_user.id = uuid.uuid4()
@@ -871,6 +1166,7 @@ class TestOnboardingFlows:
                     "email": "test@example.com",
                     "username": "takenusername",
                     "password": "newsecurepassword123",
+                    "claim_token": token,
                 },
             )
 
@@ -879,11 +1175,7 @@ class TestOnboardingFlows:
 
     def test_complete_onboarding_keep_same_username(self, db_session_mock):
         """Test onboarding succeeds when keeping the same username."""
-        mock_user = MagicMock(spec=User)
-        mock_user.id = uuid.uuid4()
-        mock_user.username = "sameusername"
-        mock_user.email = "test@example.com"
-        mock_user.hashed_password = "NEEDS_RESET"
+        mock_user, token = self._pending_user(username="sameusername")
 
         with patch("preloop.api.auth.router.crud_user") as mock_crud:
             mock_crud.get_by_email.return_value = mock_user
@@ -895,6 +1187,7 @@ class TestOnboardingFlows:
                     "email": "test@example.com",
                     "username": "sameusername",  # Same as current
                     "password": "newsecurepassword123",
+                    "claim_token": token,
                 },
             )
 
@@ -931,7 +1224,9 @@ class TestEmailVerification:
 
         assert response.status_code == 200
         assert "Email verified successfully" in response.json()["message"]
-        assert mock_user.email_verified is True
+        # Written through the CRUD layer, which is the only path allowed to
+        # touch a row (and the only one the capacity hooks see).
+        assert mock_crud.update.call_args.kwargs["obj_in"] == {"email_verified": True}
 
     def test_verify_email_invalid_token(self, db_session_mock):
         """Test email verification with invalid token."""

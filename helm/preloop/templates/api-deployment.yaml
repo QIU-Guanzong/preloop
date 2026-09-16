@@ -112,6 +112,10 @@ spec:
             - name: MAX_SESSION_DAYS
               value: {{ .Values.environment.maxSessionDays | quote }}
             {{- end }}
+            {{- if hasKey .Values.environment "requireEmailVerification" }}
+            - name: REQUIRE_EMAIL_VERIFICATION
+              value: {{ .Values.environment.requireEmailVerification | quote }}
+            {{- end }}
             - name: LOG_LEVEL
               value: "INFO"
             - name: LOG_FORMAT

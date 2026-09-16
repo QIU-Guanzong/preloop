@@ -132,6 +132,12 @@ class EmailVerificationRequest(BaseModel):
     token: str
 
 
+class EmailVerificationResendRequest(BaseModel):
+    """Model for asking for another verification email."""
+
+    email: EmailStr
+
+
 class PasswordResetRequest(BaseModel):
     """Model for password reset requests."""
 

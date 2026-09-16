@@ -209,6 +209,16 @@ export function extractErrorMessage(
         .map((item: any) => item.msg || JSON.stringify(item))
         .join(', ');
     } else if (typeof errorData.detail === 'object') {
+      // The house refusal shape is {code, message}: a sentence written for
+      // the person who clicked, plus a machine-readable case. Print the
+      // sentence. JSON.stringify used to put the whole envelope on screen,
+      // braces and all.
+      if (
+        typeof errorData.detail.message === 'string' &&
+        errorData.detail.message.trim()
+      ) {
+        return errorData.detail.message;
+      }
       return JSON.stringify(errorData.detail);
     }
     return String(errorData.detail);
@@ -583,21 +593,48 @@ export async function startCheckout(
   interval: 'month' | 'year',
   returnTo?: string
 ): Promise<CheckoutOutcome | null> {
+  return runCheckout(planId, interval, returnTo, false);
+}
+
+/**
+ * Start a Stripe checkout for a visitor who has no account yet.
+ *
+ * Stripe collects the email, the card and the username, and
+ * `checkout-success` creates the account from the completed session, so
+ * signing up and subscribing are one step instead of two. The one difference
+ * from {@link startCheckout} is the transport: this call must not go through
+ * `fetchWithAuth`, which treats a missing token as a dead session and sends
+ * the browser to the login page, which is exactly the detour this flow
+ * exists to remove. Backing out at Stripe returns to the pricing page.
+ */
+export async function startAnonymousCheckout(
+  planId: string,
+  interval: 'month' | 'year'
+): Promise<CheckoutOutcome | null> {
+  return runCheckout(planId, interval, undefined, true);
+}
+
+async function runCheckout(
+  planId: string,
+  interval: 'month' | 'year',
+  returnTo: string | undefined,
+  anonymous: boolean
+): Promise<CheckoutOutcome | null> {
   if (_checkoutInFlight) return null; // double-click guard: one Stripe tab
   _checkoutInFlight = true;
   try {
-    const response = await fetchWithAuth(
-      '/api/v1/billing/create-checkout-session',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          plan_id: planId,
-          interval,
-          return_to: returnTo ?? null,
-        }),
-      }
-    );
+    const request: RequestInit = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        plan_id: planId,
+        interval,
+        return_to: returnTo ?? null,
+      }),
+    };
+    const response = anonymous
+      ? await fetchPublic('/api/v1/billing/create-checkout-session', request)
+      : await fetchWithAuth('/api/v1/billing/create-checkout-session', request);
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
       const detail = body.detail;
@@ -666,6 +703,83 @@ export async function getEntitlements(): Promise<Entitlements> {
     return { premium: true, reason: 'unavailable' };
   }
   return response.json();
+}
+
+/** One plan the post-signup trial offer can start. */
+export interface TrialPromptPlan {
+  id: string;
+  name: string;
+  price_monthly: number | null;
+  price_annually: number | null;
+}
+
+/**
+ * The one-time trial offer for the signed-in user.
+ *
+ * `show` is the server's decision, not a hint the client re-derives:
+ * eligibility depends on the account's subscription history and the person's
+ * billing rights, neither of which the console can see. `reason` names the
+ * case for support and tests.
+ */
+export interface TrialPrompt {
+  show: boolean;
+  reason: string;
+  trial_days: number;
+  plans: TrialPromptPlan[];
+}
+
+const NO_TRIAL_PROMPT: TrialPrompt = {
+  show: false,
+  reason: 'unavailable',
+  trial_days: 0,
+  plans: [],
+};
+
+/**
+ * Ask whether to show the post-signup trial step.
+ *
+ * The endpoint lives on the billing plugin, so an instance without billing
+ * answers 404 and this resolves to "do not show". Never throws: an offer is
+ * not worth an error state in the console shell.
+ *
+ * Passive, like every other question the console asks on its own behalf: the
+ * shell asks this on load, and a rate limit or a gate on an offer nobody
+ * requested must not interrupt the page with a dialog.
+ */
+export async function getTrialPrompt(): Promise<TrialPrompt> {
+  try {
+    const response = await fetchWithAuth('/api/v1/billing/trial-prompt', {
+      passive: true,
+    });
+    if (!response.ok) return NO_TRIAL_PROMPT;
+    const body = await response.json();
+    return {
+      show: body?.show === true,
+      reason: typeof body?.reason === 'string' ? body.reason : 'unavailable',
+      trial_days: Number(body?.trial_days) || 0,
+      plans: Array.isArray(body?.plans) ? body.plans : [],
+    };
+  } catch {
+    return NO_TRIAL_PROMPT;
+  }
+}
+
+/**
+ * Record that the user answered the trial offer, so it is asked once.
+ *
+ * Called for both answers, including before opening Stripe: cancelling there
+ * leaves the account on Free and must not bring the step back. The answer is
+ * stored on the user server-side, so a new browser does not re-ask.
+ */
+export async function dismissTrialPrompt(): Promise<void> {
+  try {
+    await fetchWithAuth('/api/v1/billing/trial-prompt/dismiss', {
+      method: 'POST',
+    });
+  } catch {
+    // The offer is optional; failing to record the answer must not block the
+    // console. The worst case is the step being offered once more.
+  }
 }
 
 /**
@@ -2706,6 +2820,34 @@ export async function searchIssues(
   return data.results.map((r: any) => r.item);
 }
 
+/**
+ * An HTTP refusal, carrying the server's own case name.
+ *
+ * Some refusals need more than a sentence: a login blocked by
+ * `email_not_verified` has to grow a "resend the email" action, and only the
+ * code tells the caller which refusal it is. The message is unchanged, so
+ * existing `error.message` handling keeps working.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  /** The refusal body as sent, for the few callers that need a field. */
+  readonly detail?: Record<string, unknown>;
+
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    detail?: Record<string, unknown>
+  ) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
 export async function post(url: string, body: any) {
   const response = await window.fetch(url, {
     method: 'POST',
@@ -2718,17 +2860,40 @@ export async function post(url: string, body: any) {
   if (!response.ok) {
     // Try to extract error detail from response body
     let errorMessage = `HTTP error! status: ${response.status}`;
+    let code: string | undefined;
+    let detail: Record<string, unknown> | undefined;
     try {
       const errorData = await response.json();
       if (errorData.detail) {
         errorMessage = extractErrorMessage(errorData, errorMessage);
+        if (errorData.detail && typeof errorData.detail === 'object') {
+          detail = errorData.detail as Record<string, unknown>;
+          if (typeof detail.code === 'string') {
+            code = detail.code;
+          }
+        }
       }
     } catch (e) {
       // If JSON parsing fails, use the default error message
     }
-    throw new Error(errorMessage);
+    throw new ApiError(errorMessage, response.status, code, detail);
   }
   return response.json();
+}
+
+/**
+ * Ask for another verification email.
+ *
+ * Deliberately anonymous and deliberately vague: the endpoint answers the
+ * same way whether or not the address exists, so this cannot be used to
+ * discover who has an account. It is rate limited server-side, and a 429
+ * comes back as its own sentence.
+ */
+export async function resendVerificationEmail(email: string): Promise<string> {
+  const data = await post('/api/v1/auth/resend-verification', { email });
+  return typeof data?.message === 'string'
+    ? data.message
+    : 'If that address needs verifying, a new link is on its way.';
 }
 
 export async function detectIssueDependencies(

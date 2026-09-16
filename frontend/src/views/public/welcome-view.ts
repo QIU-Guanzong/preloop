@@ -12,8 +12,20 @@ import '../../components/logo-component';
 export class WelcomeView extends LitElement {
   @state() private _username = '';
   @state() private _email = '';
+  /**
+   * Display name. Stripe may already have one from the card details, in which
+   * case this is prefilled and the person only confirms it. It stays editable:
+   * the name on a card is not always the name someone works under.
+   */
+  @state() private _fullName = '';
   @state() private _orgName = '';
   @state() private _needsPassword = true;
+  /**
+   * The single-use claim token from the welcome link. It is what proves this
+   * browser is the one that completed the checkout, so without it there is
+   * nothing to post: knowing the address is not a credential.
+   */
+  @state() private _claimToken = '';
   @state() private _error = '';
   @state() private _loading = false;
   @query('#password') private _passwordInput?: HTMLInputElement;
@@ -23,10 +35,18 @@ export class WelcomeView extends LitElement {
     const urlParams = new URLSearchParams(window.location.search);
     this._username = urlParams.get('username') || '';
     this._email = urlParams.get('email') || '';
+    this._fullName = urlParams.get('full_name') || '';
     this._needsPassword = urlParams.get('needs_password') !== 'false';
+    this._claimToken = urlParams.get('claim_token') || '';
 
     if (!this._email) {
       this._error = 'Could not retrieve your details. Please contact support.';
+    } else if (this._needsPassword && !this._claimToken) {
+      // An expired or hand-typed link. The recovery is the ordinary password
+      // reset email, which proves the same thing the claim token proves.
+      this._error =
+        "This signup link is no longer valid. Use 'Forgot password' on the " +
+        'sign in page to set your password.';
     }
 
     if (!this._needsPassword) {
@@ -117,6 +137,14 @@ export class WelcomeView extends LitElement {
       return;
     }
 
+    if (!this._claimToken) {
+      this._error =
+        "This signup link is no longer valid. Use 'Forgot password' on the " +
+        'sign in page to set your password.';
+      this._loading = false;
+      return;
+    }
+
     try {
       const response = await api.fetchPublic(
         '/api/v1/auth/complete-onboarding',
@@ -127,6 +155,8 @@ export class WelcomeView extends LitElement {
             email: this._email,
             username: this._username,
             password: password,
+            full_name: this._fullName.trim() || null,
+            claim_token: this._claimToken,
           }),
         }
       );
@@ -224,6 +254,16 @@ export class WelcomeView extends LitElement {
                         value=${this._email}
                         readonly
                         disabled
+                        help-text="Confirmed during checkout, so there is nothing to verify."
+                      ></sl-input>
+                    </div>
+                    <div class="form-group">
+                      <sl-input
+                        id="full-name"
+                        label="Your name"
+                        value=${this._fullName}
+                        @sl-change=${(e: any) =>
+                          (this._fullName = e.target.value)}
                       ></sl-input>
                     </div>
                     <div class="form-group">
