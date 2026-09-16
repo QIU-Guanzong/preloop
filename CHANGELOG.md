@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   host 5432. Two runner processes on one VM can run shards together.
   Public `ubuntu-latest` backend jobs stay on the VM with
   `localhost:5432`.
+- The setup-ci-python composite invokes its helper via
+  `GITHUB_WORKSPACE`, not `github.action_path`. The latter is a host
+  path and does not exist inside the self-hosted job container.
 
 ### Added
 
