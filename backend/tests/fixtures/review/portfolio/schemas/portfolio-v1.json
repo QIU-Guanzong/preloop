@@ -14,11 +14,13 @@
     "runner",
     "discovery",
     "selection",
+    "budget",
     "questions",
     "projects",
     "follow_ups",
     "coverage",
     "rollup",
+    "publication",
     "verdict",
     "checks",
     "assessments",
@@ -243,7 +245,9 @@
         "auto_select_threshold",
         "inline_cap",
         "selected",
-        "over_inline_cap"
+        "over_inline_cap",
+        "depth",
+        "depth_source"
       ],
       "properties": {
         "source": {
@@ -274,8 +278,100 @@
           "items": {
             "type": "string"
           }
+        },
+        "depth": {
+          "enum": [
+            "quick",
+            "standard",
+            "deep"
+          ]
+        },
+        "depth_source": {
+          "enum": [
+            "human",
+            "payload",
+            "default"
+          ]
         }
       }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_cost_usd",
+        "ceiling_source",
+        "measurement",
+        "spent_usd",
+        "ceiling_hit",
+        "stopped_after"
+      ],
+      "properties": {
+        "max_cost_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0
+        },
+        "ceiling_source": {
+          "enum": [
+            "human",
+            "payload",
+            null
+          ]
+        },
+        "measurement": {
+          "enum": [
+            "execution_cost",
+            "unavailable"
+          ]
+        },
+        "spent_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "ceiling_hit": {
+          "type": "boolean"
+        },
+        "stopped_after": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "ceiling_hit": {
+                "const": true
+              }
+            },
+            "required": [
+              "ceiling_hit"
+            ]
+          },
+          "then": {
+            "properties": {
+              "max_cost_usd": {
+                "type": "number"
+              },
+              "spent_usd": {
+                "type": "number"
+              },
+              "measurement": {
+                "const": "execution_cost"
+              }
+            }
+          }
+        }
+      ]
     },
     "questions": {
       "type": "array",
@@ -468,7 +564,8 @@
           "verdict",
           "health",
           "counts",
-          "result_artifact"
+          "result_artifact",
+          "lens_payload"
         ],
         "properties": {
           "path": {
@@ -555,6 +652,30 @@
               "string",
               "null"
             ]
+          },
+          "lens_payload": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "project_path",
+              "depth"
+            ],
+            "properties": {
+              "project_path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "depth": {
+                "enum": [
+                  "quick",
+                  "standard",
+                  "deep"
+                ]
+              }
+            }
           }
         },
         "allOf": [
@@ -579,6 +700,9 @@
                   "const": "unknown"
                 },
                 "lens_schema": {
+                  "type": "null"
+                },
+                "lens_payload": {
                   "type": "null"
                 }
               }
@@ -610,6 +734,9 @@
                 },
                 "not_run_reason": {
                   "type": "null"
+                },
+                "lens_payload": {
+                  "type": "object"
                 }
               }
             }
@@ -743,7 +870,8 @@
         "projects_selected",
         "projects_reviewed",
         "plan_completed",
-        "not_reviewed"
+        "not_reviewed",
+        "projects_not_reviewed"
       ],
       "properties": {
         "projects_discovered": {
@@ -780,6 +908,13 @@
                 "minLength": 1
               }
             }
+          }
+        },
+        "projects_not_reviewed": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
           }
         }
       }
@@ -856,6 +991,39 @@
         },
         "issues_filed": {
           "const": 0
+        }
+      }
+    },
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "open_portfolio_readme_pr",
+        "source",
+        "pr_opened",
+        "pr_url",
+        "reason"
+      ],
+      "properties": {
+        "open_portfolio_readme_pr": {
+          "type": "boolean"
+        },
+        "source": {
+          "enum": [
+            "human",
+            "default",
+            "expired_default"
+          ]
+        },
+        "pr_opened": {
+          "const": false
+        },
+        "pr_url": {
+          "type": "null"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
         }
       }
     },

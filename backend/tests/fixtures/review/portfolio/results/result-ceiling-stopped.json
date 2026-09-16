@@ -18,7 +18,6 @@
     "max_depth": 3,
     "auto_select_threshold": 3,
     "max_inline_projects": 5,
-    "depth": "standard",
     "eol_runtimes": [
       {
         "runtime": "java",
@@ -240,32 +239,38 @@
     ]
   },
   "selection": {
-    "source": "expired_default",
+    "source": "human",
     "auto_select_threshold": 3,
-    "inline_cap": 5,
-    "selected": [],
+    "inline_cap": 8,
+    "selected": [
+      "legacy/inventory-web",
+      "services/billing-api",
+      "services/notifications",
+      "libs/shared-utils",
+      "tools/report-cli"
+    ],
     "over_inline_cap": [],
-    "depth": "standard",
-    "depth_source": "default"
+    "depth": "deep",
+    "depth_source": "human"
   },
   "budget": {
-    "max_cost_usd": null,
-    "ceiling_source": null,
+    "max_cost_usd": 1.5,
+    "ceiling_source": "human",
     "measurement": "execution_cost",
-    "spent_usd": 0.34,
-    "ceiling_hit": false,
-    "stopped_after": null
+    "spent_usd": 1.1,
+    "ceiling_hit": true,
+    "stopped_after": "legacy/inventory-web"
   },
   "questions": [
     {
       "phase": "selection",
       "asked": true,
-      "status": "expired",
+      "status": "answered",
       "reason": null,
-      "request_id": "9d2a4f61-0c3b-4a27-9d61-1f0e5b7c2a34",
+      "request_id": "7c51d2a8-3e64-4b09-8f71-6d2a0c4e9b13",
       "expires_at": "2026-09-19T09:02:00Z",
-      "answered_by": null,
-      "answered_at": null,
+      "answered_by": "user-2f0b1d4c",
+      "answered_at": "2026-09-16T10:38:00Z",
       "items": [
         "legacy/inventory-web",
         "services/billing-api",
@@ -283,43 +288,52 @@
     },
     {
       "phase": "follow_ups",
-      "asked": false,
-      "status": "not_asked",
-      "reason": "no follow up candidates: no lens ran",
-      "request_id": null,
-      "expires_at": null,
-      "answered_by": null,
-      "answered_at": null,
-      "items": [],
-      "selectable_ids": []
+      "asked": true,
+      "status": "answered",
+      "reason": null,
+      "request_id": "2f8b6c14-9a70-4d55-b3e1-8c05f7a2d941",
+      "expires_at": "2026-09-19T10:59:00Z",
+      "answered_by": "user-2f0b1d4c",
+      "answered_at": "2026-09-16T11:04:00Z",
+      "items": [
+        "portfolio:legacy/inventory-web:mvn-tomcat-run",
+        "portfolio:legacy/inventory-web:inventory-db-url"
+      ],
+      "selectable_ids": [
+        "portfolio:legacy/inventory-web:mvn-tomcat-run",
+        "portfolio:legacy/inventory-web:inventory-db-url"
+      ]
     }
   ],
   "projects": [
     {
       "path": "legacy/inventory-web",
       "lens": "docs-currency-review",
-      "lens_schema": null,
-      "lens_status": "not_run",
-      "not_run_reason": "the selection question expired at 2026-09-19T09:02:00Z",
-      "verdict": null,
-      "health": "unknown",
+      "lens_schema": "preloop.review.docscurrency/v1",
+      "lens_status": "ran",
+      "not_run_reason": null,
+      "verdict": "fail",
+      "health": "failing",
       "counts": {
-        "holds": 0,
-        "drifted": 0,
+        "holds": 1,
+        "drifted": 2,
         "not_checkable": 0,
-        "high": 0,
-        "medium": 0,
+        "high": 1,
+        "medium": 1,
         "low": 0
       },
-      "result_artifact": null,
-      "lens_payload": null
+      "result_artifact": "evidence/projects/legacy-inventory-web/result.json",
+      "lens_payload": {
+        "project_path": "legacy/inventory-web",
+        "depth": "deep"
+      }
     },
     {
       "path": "services/billing-api",
       "lens": "docs-currency-review",
       "lens_schema": null,
       "lens_status": "not_run",
-      "not_run_reason": "the selection question expired at 2026-09-19T09:02:00Z",
+      "not_run_reason": "run ceiling",
       "verdict": null,
       "health": "unknown",
       "counts": {
@@ -338,7 +352,7 @@
       "lens": "docs-currency-review",
       "lens_schema": null,
       "lens_status": "not_run",
-      "not_run_reason": "the selection question expired at 2026-09-19T09:02:00Z",
+      "not_run_reason": "run ceiling",
       "verdict": null,
       "health": "unknown",
       "counts": {
@@ -357,7 +371,7 @@
       "lens": "docs-currency-review",
       "lens_schema": null,
       "lens_status": "not_run",
-      "not_run_reason": "the selection question expired at 2026-09-19T09:02:00Z",
+      "not_run_reason": "run ceiling",
       "verdict": null,
       "health": "unknown",
       "counts": {
@@ -376,7 +390,7 @@
       "lens": "docs-currency-review",
       "lens_schema": null,
       "lens_status": "not_run",
-      "not_run_reason": "the selection question expired at 2026-09-19T09:02:00Z",
+      "not_run_reason": "run ceiling",
       "verdict": null,
       "health": "unknown",
       "counts": {
@@ -391,36 +405,58 @@
       "lens_payload": null
     }
   ],
-  "follow_ups": [],
+  "follow_ups": [
+    {
+      "id": "portfolio:legacy/inventory-web:mvn-tomcat-run",
+      "project": "legacy/inventory-web",
+      "title": "INSTALL.md documents 'mvn tomcat:run'; the pom declares no tomcat plugin",
+      "severity": "high",
+      "evidence": "legacy/inventory-web/INSTALL.md:11",
+      "rank": 1,
+      "status": "approved",
+      "note": "Ship a working run command before the next handover.",
+      "approved_by": "user-2f0b1d4c",
+      "approved_at": "2026-09-16T11:04:00Z",
+      "filed": false
+    },
+    {
+      "id": "portfolio:legacy/inventory-web:inventory-db-url",
+      "project": "legacy/inventory-web",
+      "title": "INSTALL.md names INVENTORY_DB_URL; the code reads INVENTORY_DATABASE_URL",
+      "severity": "medium",
+      "evidence": "legacy/inventory-web/INSTALL.md:15",
+      "rank": 2,
+      "status": "unapproved",
+      "note": null,
+      "approved_by": null,
+      "approved_at": null,
+      "filed": false
+    }
+  ],
   "coverage": {
     "projects_discovered": 5,
-    "projects_selected": 0,
-    "projects_reviewed": 0,
+    "projects_selected": 5,
+    "projects_reviewed": 1,
     "plan_completed": false,
     "not_reviewed": [
       {
-        "path": "legacy/inventory-web",
-        "reason": "inventory only: the selection question expired at 2026-09-19T09:02:00Z"
-      },
-      {
         "path": "services/billing-api",
-        "reason": "inventory only: the selection question expired at 2026-09-19T09:02:00Z"
+        "reason": "run ceiling"
       },
       {
         "path": "services/notifications",
-        "reason": "inventory only: the selection question expired at 2026-09-19T09:02:00Z"
+        "reason": "run ceiling"
       },
       {
         "path": "libs/shared-utils",
-        "reason": "inventory only: the selection question expired at 2026-09-19T09:02:00Z"
+        "reason": "run ceiling"
       },
       {
         "path": "tools/report-cli",
-        "reason": "inventory only: the selection question expired at 2026-09-19T09:02:00Z"
+        "reason": "run ceiling"
       }
     ],
     "projects_not_reviewed": [
-      "legacy/inventory-web",
       "services/billing-api",
       "services/notifications",
       "libs/shared-utils",
@@ -431,44 +467,50 @@
     "by_health": {
       "healthy": 0,
       "findings": 0,
-      "failing": 0,
-      "unknown": 5
+      "failing": 1,
+      "unknown": 4
     },
     "by_severity": {
-      "high": 0,
-      "medium": 0,
+      "high": 1,
+      "medium": 1,
       "low": 0
     },
-    "follow_ups_total": 0,
-    "follow_ups_approved": 0,
+    "follow_ups_total": 2,
+    "follow_ups_approved": 1,
     "issues_filed": 0
   },
   "publication": {
     "open_portfolio_readme_pr": false,
-    "source": "default",
+    "source": "human",
     "pr_opened": false,
     "pr_url": null,
     "reason": "toggle off"
   },
-  "verdict": "pass_with_findings",
+  "verdict": "fail",
   "checks": [
     {
       "name": "discovery_deterministic",
       "passed": true,
       "skipped": false,
-      "details": "5 projects from the detector list, depth cap 3"
+      "details": "5 projects from the detector list, depth cap 3, 4 directories excluded, 1 branch truncated at the cap"
     },
     {
       "name": "selection_question_answered",
-      "passed": false,
+      "passed": true,
       "skipped": false,
-      "details": "expired at 2026-09-19T09:02:00Z with no answer: safe default applied, inventory only"
+      "details": "1 batched question, 5 rows, answered at 2026-09-16T10:38:00Z, depth deep, ceiling 1.5 USD"
     },
     {
-      "name": "lenses_run",
+      "name": "run_ceiling_respected",
       "passed": true,
-      "skipped": true,
-      "details": "0 of 5: no project was selected"
+      "skipped": false,
+      "details": "ceiling 1.5 USD, measured spend 1.1 USD after legacy/inventory-web, most expensive lens run 0.8 USD: fan out stopped before services/billing-api and 4 selected projects were not reached"
+    },
+    {
+      "name": "follow_up_question_answered",
+      "passed": true,
+      "skipped": false,
+      "details": "1 batched question, 2 rows, 1 approved, portfolio README pull request not requested"
     },
     {
       "name": "issues_filed",
@@ -479,8 +521,8 @@
   ],
   "assessments": [
     {
-      "topic": "portfolio",
-      "judgment": "Agent judgment: this run is an inventory. Nothing here says any of these five projects is healthy."
+      "topic": "coverage",
+      "judgment": "Agent judgment: one of five selected projects was reviewed before the ceiling stopped the run, so this report describes a fifth of the portfolio and the four unreached projects are unknown, not healthy."
     }
   ],
   "artifacts": {

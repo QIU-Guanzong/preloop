@@ -69,6 +69,7 @@ SCENARIOS = {
     "result-first-question-expired.json": "five-projects",
     "result-second-question-expired.json": "five-projects",
     "result-zero-projects.json": "zero-projects",
+    "result-ceiling-stopped.json": "five-projects",
 }
 
 # The preset's closed detector list, mirrored here so the walk below is
@@ -206,6 +207,62 @@ def _required_shape_keys() -> list[str]:
         index += 1
     assert keys, "Required shape had no top-level keys"
     return keys
+
+
+def _json_block_after(marker: str) -> str:
+    """The first balanced {...} block following ``marker`` in the prompt."""
+    prompt = _prompt()
+    start = prompt.find(marker)
+    assert start != -1, f"prompt missing {marker!r}"
+    index = prompt.find("{", start)
+    assert index != -1, f"no JSON block after {marker!r}"
+    begin = index
+    depth = 0
+    in_str = False
+    while index < len(prompt):
+        char = prompt[index]
+        if in_str:
+            if char == "\\":
+                index += 2
+                continue
+            if char == '"':
+                in_str = False
+        elif char == '"':
+            in_str = True
+        elif char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+            if depth == 0:
+                return prompt[begin : index + 1]
+        index += 1
+    raise AssertionError(f"unbalanced JSON block after {marker!r}")
+
+
+def _input_schema(marker: str, item_ids: list[str]) -> dict:
+    """One of the preset's two question forms, as JSON the console sees.
+
+    The preset writes the schema with ``[<the item ids>]`` where the run
+    substitutes the rows it discovered; this does the same substitution
+    so the form can be handed to the platform's own grammar.
+    """
+    block = _json_block_after(marker)
+    assert "[<the item ids>]" in block, f"no item id placeholder after {marker!r}"
+    return json.loads(block.replace("[<the item ids>]", json.dumps(item_ids)))
+
+
+def _selection_schema(item_ids: list[str] | None = None) -> dict:
+    return _input_schema(
+        "and pass this input_schema (verbatim shape, ids drawn from items):",
+        item_ids if item_ids is not None else ["apps/checkout", "apps/pricing"],
+    )
+
+
+def _follow_up_schema(item_ids: list[str] | None = None) -> dict:
+    return _input_schema(
+        "and this input_schema:",
+        item_ids if item_ids is not None else ["portfolio:apps/checkout:readme"],
+    )
 
 
 def _load_result(name: str) -> dict:
@@ -448,20 +505,25 @@ class TestPresetDefinition:
         assert DISCLAIMER in data["prompt_template"]
 
     def test_declares_no_write_tools(self):
-        """The only platform tool is the built-in question channel: no
+        """The only platform tools are the built-in question channel and
+        the built-in read-only meter the run ceiling is measured with: no
         MCP server, no write tool, and a prompt that forbids every write
         path including opening a pull request."""
         data = _load_preset()
         assert data["allowed_mcp_servers"] == []
-        assert data["allowed_mcp_tools"] == [{"name": "ask_user"}]
+        assert data["allowed_mcp_tools"] == [
+            {"name": "ask_user"},
+            {"name": "get_execution"},
+        ]
         norm = _norm(data["prompt_template"])
         assert "NO write tools" in norm
         assert "do not create issues, post comments, push commits" in norm
         assert "never run git commit or git push" in norm
         assert "Never modify tracked files" in norm
         assert (
-            "The ONLY platform tool on your allowlist is the built-in "
-            "ask_user, which is a question channel, not a write tool" in norm
+            "The ONLY platform tools on your allowlist are the built-in "
+            "ask_user, which is a question channel, not a write tool, and "
+            "the built-in get_execution, which is a read-only meter" in norm
         )
         assert "you never open a pull request" in norm
 
@@ -1149,6 +1211,22 @@ class TestFirstQuestionExpired:
         assert follow_ups["asked"] is False
         assert follow_ups["reason"] == "no follow up candidates: no lens ran"
 
+    def test_the_new_knobs_do_not_touch_the_safe_default(self, result):
+        """An expired selection is still an inventory: no depth was
+        chosen, no ceiling was set, no lens payload was built and
+        nothing was published."""
+        assert result["selection"]["depth_source"] == "default"
+        assert result["selection"]["depth"] == "standard"
+        assert result["budget"]["max_cost_usd"] is None
+        assert result["budget"]["ceiling_source"] is None
+        assert result["budget"]["ceiling_hit"] is False
+        assert all(row["lens_payload"] is None for row in result["projects"])
+        assert result["publication"]["open_portfolio_readme_pr"] is False
+        assert result["publication"]["pr_opened"] is False
+        norm = _norm(_prompt())
+        assert "The two new fields change nothing about that default" in norm
+        assert "with NO LENS RUNS neither is ever applied to anything" in norm
+
 
 class TestSecondQuestionExpired:
     """The report still lands, with nothing approved and nothing filed."""
@@ -1169,6 +1247,17 @@ class TestSecondQuestionExpired:
 
     def test_nothing_is_filed(self, result):
         assert result["rollup"]["issues_filed"] == 0
+
+    def test_nothing_is_opened_either(self, result):
+        """File nothing and open nothing: the toggle an expired gate
+        never answered stays off, and no publishing step ran."""
+        assert result["publication"] == {
+            "open_portfolio_readme_pr": False,
+            "source": "expired_default",
+            "pr_opened": False,
+            "pr_url": None,
+            "reason": "toggle off: the filing gate expired",
+        }
 
     def test_the_full_report_still_lands(self, result):
         assert result["status"] == "success"
@@ -1436,3 +1525,476 @@ class TestSizeBudget:
         for row in result["follow_ups"]:
             per_project[row["project"]] = per_project.get(row["project"], 0) + 1
         assert all(count <= 5 for count in per_project.values()), per_project
+
+
+# ---------------------------------------------------------------------------
+# The two knobs on the selection form and the one on the filing gate (#690).
+# ---------------------------------------------------------------------------
+
+
+def _fan_out(
+    *,
+    projects: list[str],
+    lens_costs: dict[str, float],
+    spent_before: float,
+    ceiling: float | None,
+    measured: bool = True,
+) -> dict:
+    """The preset's stop rule, re-implemented from the prompt.
+
+    Reads before and after every lens run, the first selected project
+    always runs while the ceiling has not been reached, and every later
+    project starts only when the spend so far plus the most expensive
+    completed lens run still fits under the ceiling. Returns what the
+    coverage block of a run with these measurements has to say.
+    """
+    spent = spent_before
+    reviewed: list[str] = []
+    worst = 0.0
+    stopped_before: str | None = None
+    for path in projects:
+        enforcing = ceiling is not None and measured
+        if enforcing:
+            assert ceiling is not None  # narrowing, for mypy readers
+            if spent >= ceiling or (reviewed and spent + worst > ceiling):
+                stopped_before = path
+                break
+        cost = lens_costs[path]
+        spent += cost
+        worst = max(worst, cost)
+        reviewed.append(path)
+    not_reached = projects[len(reviewed) :]
+    return {
+        "reviewed": reviewed,
+        "not_reviewed": not_reached,
+        "stopped_before": stopped_before,
+        "stopped_after": reviewed[-1] if reviewed and stopped_before else None,
+        "spent_usd": round(spent, 6),
+        "ceiling_hit": stopped_before is not None,
+        "plan_completed": stopped_before is None,
+    }
+
+
+class TestSelectionFormCarriesDepthAndTheCeiling:
+    """The first form asks what to review, how deep, and for how much."""
+
+    def test_the_schema_offers_the_three_depths_and_a_ceiling(self):
+        schema = _selection_schema(["apps/checkout", "apps/pricing"])
+        depth = schema["properties"]["depth"]
+        assert depth["type"] == "string"
+        assert depth["title"] == "Review depth"
+        assert depth["enum"] == ["quick", "standard", "deep"]
+        assert depth["default"] == "standard"
+        ceiling = schema["properties"]["max_cost_usd"]
+        assert ceiling["type"] == "number"
+        assert ceiling["title"] == "Ceiling for this run, USD"
+        assert ceiling["minimum"] == 0
+        # Selecting projects is still the point of the form.
+        assert schema["properties"]["selected"]["items"]["enum"] == [
+            "apps/checkout",
+            "apps/pricing",
+        ]
+
+    def test_the_platform_can_draw_the_form_the_preset_asks_for(self):
+        """The console renders what question_schema accepts, so the form
+        is checked against that grammar rather than against prose."""
+        from preloop.services.question_schema import normalize_input_schema
+
+        stored = normalize_input_schema(_selection_schema(["apps/checkout"]))
+        assert stored is not None
+        assert stored["properties"]["depth"]["enum"] == ["quick", "standard", "deep"]
+        assert stored["properties"]["depth"]["default"] == "standard"
+        assert stored["properties"]["max_cost_usd"]["type"] == "number"
+        assert stored["required"] == []
+
+    def test_an_answer_that_omits_both_is_still_a_valid_answer(self):
+        from preloop.services.question_schema import (
+            normalize_input_schema,
+            validate_answer,
+        )
+
+        schema = normalize_input_schema(_selection_schema(["apps/checkout"]))
+        assert schema is not None
+        cleaned = validate_answer(schema, {"selected": ["apps/checkout"]})
+        assert cleaned["selected"] == ["apps/checkout"]
+        assert "depth" not in cleaned or cleaned["depth"] is None
+        assert "max_cost_usd" not in cleaned or cleaned["max_cost_usd"] is None
+        # An answer with neither the projects nor the knobs is valid too:
+        # the safe default handles it, the form never refuses it.
+        assert validate_answer(schema, {}) == {}
+
+    def test_an_answer_that_sets_both_is_accepted(self):
+        from preloop.services.question_schema import (
+            normalize_input_schema,
+            validate_answer,
+        )
+
+        schema = normalize_input_schema(_selection_schema(["apps/checkout"]))
+        assert schema is not None
+        cleaned = validate_answer(
+            schema,
+            {"selected": ["apps/checkout"], "depth": "deep", "max_cost_usd": 12.5},
+        )
+        assert cleaned["depth"] == "deep"
+        assert cleaned["max_cost_usd"] == 12.5
+
+    def test_a_fourth_depth_and_a_negative_ceiling_are_refused(self):
+        from preloop.services.question_schema import (
+            AnswerValidationError,
+            normalize_input_schema,
+            validate_answer,
+        )
+
+        schema = normalize_input_schema(_selection_schema(["apps/checkout"]))
+        assert schema is not None
+        with pytest.raises(AnswerValidationError):
+            validate_answer(schema, {"depth": "exhaustive"})
+        with pytest.raises(AnswerValidationError):
+            validate_answer(schema, {"max_cost_usd": -1})
+
+    def test_the_preset_states_that_both_fields_are_optional(self):
+        norm = _norm(_prompt())
+        assert (
+            "DEPTH AND THE CEILING ARE OPTIONAL, AND AN ANSWER THAT OMITS "
+            "BOTH IS A VALID ANSWER" in norm
+        )
+        assert 'an omitted depth is "standard"' in norm
+        assert "an omitted ceiling is no ceiling of this run's own" in norm
+        assert "never ask a second time for them" in norm
+
+    def test_the_source_order_for_both_fields_is_stated(self):
+        norm = _norm(_prompt())
+        assert (
+            "The selection answer's depth beats this one; this one beats the "
+            "default" in norm
+        )
+        assert "The selection answer's ceiling beats this one" in norm
+        assert (
+            'fall back to the payload, then to "standard", and record which '
+            "source won in selection.depth_source" in norm
+        )
+        assert "A max_cost_usd that is not a positive number is no ceiling" in norm
+
+
+class TestDepthReachesEveryLensPayload:
+    """The chosen depth is what the lens runs on, per project."""
+
+    def test_every_lens_payload_carries_the_resolved_depth(self, scenario):
+        _, result = scenario
+        depth = result["selection"]["depth"]
+        assert depth in ("quick", "standard", "deep")
+        for row in result["projects"]:
+            if row["lens_status"] == "ran":
+                assert row["lens_payload"] == {
+                    "project_path": row["path"],
+                    "depth": depth,
+                }
+            else:
+                assert row["lens_payload"] is None
+
+    def test_the_humans_depth_beats_the_payload_default(self):
+        result = _load_result("result-five-selected.json")
+        assert result["inputs_declared"]["depth"] == "standard"
+        assert result["selection"]["depth"] == "deep"
+        assert result["selection"]["depth_source"] == "human"
+        payloads = [
+            row["lens_payload"]
+            for row in result["projects"]
+            if row["lens_status"] == "ran"
+        ]
+        assert payloads, "the fixture needs a project whose lens ran"
+        assert all(payload["depth"] == "deep" for payload in payloads)
+
+    def test_with_nobody_asked_the_default_depth_stands(self):
+        result = _load_result("result-two-auto-selected.json")
+        assert _question(result, "selection")["asked"] is False
+        assert result["selection"]["depth"] == "standard"
+        assert result["selection"]["depth_source"] == "default"
+        assert all(
+            row["lens_payload"]["depth"] == "standard"
+            for row in result["projects"]
+            if row["lens_status"] == "ran"
+        )
+
+    def test_the_offered_depths_are_the_ones_the_lens_accepts(self):
+        """The form may not offer a depth the docs currency lens has no
+        meaning for: the enum and the lens's own knob are one list."""
+        lens = yaml.safe_load(
+            (PRESETS_DIR / "016-docs-currency-review.yaml").read_text()
+        )
+        norm = _norm(lens["prompt_template"])
+        assert '- depth: "quick" | "standard" | "deep" (default "standard")' in norm
+        offered = _selection_schema(["apps/checkout"])["properties"]["depth"]["enum"]
+        assert offered == ["quick", "standard", "deep"]
+
+    def test_the_preset_requires_a_depth_on_every_payload(self):
+        norm = _norm(_prompt())
+        assert "THE RESOLVED DEPTH ON EVERY LENS PAYLOAD" in norm
+        assert (
+            'every payload you build carries {"project_path": "<the project '
+            'path>", "depth": "<the resolved depth>"}' in norm
+        )
+        assert "A lens payload without a depth is a bug" in norm
+        assert (
+            "projects[].lens_payload IS THE PAYLOAD YOU ACTUALLY HANDED THE LENS"
+            in norm
+        )
+
+
+class TestRunCeilingStopsFanOut:
+    """A ceiling the human set, measured spend, and declared coverage."""
+
+    @pytest.fixture()
+    def result(self) -> dict:
+        return _load_result("result-ceiling-stopped.json")
+
+    def test_the_ceiling_is_the_humans_number_not_an_estimate(self, result):
+        assert result["budget"]["max_cost_usd"] == 1.5
+        assert result["budget"]["ceiling_source"] == "human"
+        norm = _norm(_prompt())
+        assert (
+            "max_cost_usd is A CEILING THE HUMAN SET, NOT AN ESTIMATE YOU MAKE" in norm
+        )
+        assert "You never predict what this run will cost before it runs" in norm
+        assert "the only cost figures this run reports are measured ones" in norm
+
+    def test_the_rollup_is_measured_with_the_platforms_own_meter(self):
+        prompt = _prompt()
+        norm = _norm(prompt)
+        assert "get_execution" in prompt
+        assert "{{execution.id}}" in prompt
+        assert '"preloop.ai/cost"' in prompt
+        assert "Before the first lens run and again after every lens run" in norm
+        assert "that number, in USD, is what this execution has spent so far" in norm
+        assert "Never substitute a guess for the meter" in norm
+
+    def test_an_unmeasurable_run_stops_nothing(self):
+        norm = _norm(_prompt())
+        assert 'set budget.measurement to "unavailable"' in norm
+        assert "DO NOT STOP ANYTHING on a number you do not have" in norm
+        stopped = _fan_out(
+            projects=["a", "b", "c"],
+            lens_costs={"a": 0.8, "b": 0.8, "c": 0.8},
+            spent_before=0.3,
+            ceiling=1.5,
+            measured=False,
+        )
+        assert stopped["reviewed"] == ["a", "b", "c"]
+        assert stopped["ceiling_hit"] is False
+
+    def test_fan_out_stops_where_the_second_project_would_cross(self, result):
+        """The fixture's own measurements, put back through the rule."""
+        ranked = result["selection"]["selected"]
+        recomputed = _fan_out(
+            projects=ranked,
+            lens_costs=dict.fromkeys(ranked, 0.8),
+            spent_before=0.3,
+            ceiling=result["budget"]["max_cost_usd"],
+        )
+        assert recomputed["reviewed"] == [ranked[0]]
+        assert recomputed["stopped_before"] == ranked[1]
+        assert recomputed["stopped_after"] == result["budget"]["stopped_after"]
+        assert recomputed["spent_usd"] == result["budget"]["spent_usd"]
+        assert recomputed["ceiling_hit"] == result["budget"]["ceiling_hit"] is True
+        assert recomputed["plan_completed"] == result["coverage"]["plan_completed"]
+        assert recomputed["not_reviewed"] == result["coverage"]["projects_not_reviewed"]
+
+    def test_the_first_project_always_runs_and_no_ceiling_stops_nothing(self):
+        # No completed lens run means no measured cost of one: refusing to
+        # start the first project would be an estimate, which is banned.
+        one = _fan_out(
+            projects=["a", "b"],
+            lens_costs={"a": 4.0, "b": 4.0},
+            spent_before=0.1,
+            ceiling=1.0,
+        )
+        assert one["reviewed"] == ["a"]
+        assert one["ceiling_hit"] is True
+        # A ceiling already spent stops the run before any lens runs.
+        none_at_all = _fan_out(
+            projects=["a", "b"],
+            lens_costs={"a": 0.1, "b": 0.1},
+            spent_before=2.0,
+            ceiling=1.0,
+        )
+        assert none_at_all["reviewed"] == []
+        assert none_at_all["stopped_after"] is None
+        # No ceiling: every selected project is reviewed.
+        unbounded = _fan_out(
+            projects=["a", "b", "c"],
+            lens_costs=dict.fromkeys(["a", "b", "c"], 9.0),
+            spent_before=0.0,
+            ceiling=None,
+        )
+        assert unbounded["reviewed"] == ["a", "b", "c"]
+        assert unbounded["plan_completed"] is True
+
+    def test_a_generous_ceiling_reviews_everything_selected(self):
+        ranked = ["a", "b", "c"]
+        room = _fan_out(
+            projects=ranked,
+            lens_costs=dict.fromkeys(ranked, 0.8),
+            spent_before=0.3,
+            ceiling=50.0,
+        )
+        assert room["reviewed"] == ranked
+        assert room["ceiling_hit"] is False
+        assert room["stopped_before"] is None
+
+    def test_the_run_completes_rather_than_failing(self, result):
+        assert result["status"] == "success"
+        assert result["budget"]["ceiling_hit"] is True
+        assert result["budget"]["measurement"] == "execution_cost"
+        assert result["coverage"]["projects_reviewed"] == 1
+        assert result["coverage"]["plan_completed"] is False
+        norm = _norm(_prompt())
+        assert (
+            "A RUN THAT STOPS AT THE CEILING IS A COMPLETE RUN WITH DECLARED "
+            "COVERAGE, NOT A FAILURE" in norm
+        )
+        assert "the run never ends with an error for this reason" in norm
+
+    def test_the_unreached_projects_are_declared_under_coverage(self, result):
+        ranked = result["selection"]["selected"]
+        unreached = ranked[1:]
+        assert result["coverage"]["projects_not_reviewed"] == unreached
+        reasons = {
+            row["path"]: row["reason"] for row in result["coverage"]["not_reviewed"]
+        }
+        assert reasons == dict.fromkeys(unreached, "run ceiling")
+        for row in result["projects"]:
+            if row["path"] in unreached:
+                assert row["lens_status"] == "not_run"
+                assert row["not_run_reason"] == "run ceiling"
+                assert row["health"] == "unknown"
+                assert row["lens_payload"] is None
+
+    def test_the_ceiling_never_upgrades_a_verdict(self, result):
+        assert result["verdict"] == _verdict(result)
+        # Even with every reviewed project healthy, a run that stopped at
+        # the ceiling cannot be a "pass": four projects are unknown.
+        for row in result["projects"]:
+            if row["lens_status"] == "ran":
+                row["verdict"] = "pass"
+                row["health"] = "healthy"
+        assert _verdict(result) == "pass_with_findings"
+
+    def test_the_cover_declares_the_ceiling_it_hit(self):
+        norm = _norm(_prompt())
+        assert "the inline cap, THE RUN CEILING, a lens that could not run" in norm
+        assert (
+            "this box states the ceiling, the measured spend and every "
+            "project the run did not reach, by path" in norm
+        )
+
+    def test_coverage_lists_agree_in_every_scenario(self, scenario):
+        _, result = scenario
+        assert result["coverage"]["projects_not_reviewed"] == [
+            row["path"] for row in result["coverage"]["not_reviewed"]
+        ]
+        assert result["coverage"]["projects_not_reviewed"] == [
+            row["path"] for row in result["projects"] if row["lens_status"] == "not_run"
+        ]
+
+    def test_the_budget_block_is_honest_in_every_scenario(self, scenario):
+        _, result = scenario
+        budget = result["budget"]
+        if budget["ceiling_hit"]:
+            assert budget["max_cost_usd"] is not None
+            assert budget["spent_usd"] is not None
+            assert budget["measurement"] == "execution_cost"
+            assert result["coverage"]["plan_completed"] is False
+        else:
+            assert budget["stopped_after"] is None
+        if budget["max_cost_usd"] is None:
+            assert budget["ceiling_source"] is None
+            assert budget["ceiling_hit"] is False
+
+
+class TestFilingGateTogglesThePullRequest:
+    """The second form is the gate, and the toggle is off unless asked."""
+
+    def test_the_gate_schema_carries_the_toggle_defaulting_off(self):
+        schema = _follow_up_schema(["portfolio:apps/checkout:readme"])
+        toggle = schema["properties"]["open_portfolio_readme_pr"]
+        assert toggle["type"] == "boolean"
+        assert toggle["title"] == "Open the portfolio README PR"
+        assert toggle["default"] is False
+        assert schema["required"] == []
+
+    def test_the_platform_can_draw_the_gate_and_an_answer_may_omit_it(self):
+        from preloop.services.question_schema import (
+            normalize_input_schema,
+            validate_answer,
+        )
+
+        schema = normalize_input_schema(
+            _follow_up_schema(["portfolio:apps/checkout:readme"])
+        )
+        assert schema is not None
+        assert schema["properties"]["open_portfolio_readme_pr"]["default"] is False
+        cleaned = validate_answer(
+            schema, {"approved": [{"id": "portfolio:apps/checkout:readme"}]}
+        )
+        assert (
+            "open_portfolio_readme_pr" not in cleaned
+            or not cleaned["open_portfolio_readme_pr"]
+        )
+        turned_on = validate_answer(schema, {"open_portfolio_readme_pr": True})
+        assert turned_on["open_portfolio_readme_pr"] is True
+
+    def test_with_the_toggle_off_no_pull_request_step_runs(self, scenario):
+        _, result = scenario
+        publication = result["publication"]
+        assert publication["pr_opened"] is False
+        assert publication["pr_url"] is None
+        if publication["open_portfolio_readme_pr"] is False:
+            assert publication["reason"].startswith("toggle off")
+        norm = _norm(_prompt())
+        assert "READ publication.open_portfolio_readme_pr from PHASE 6" in norm
+        assert "Off (the default, and what an expiry leaves behind): STOP HERE" in norm
+        assert (
+            "Do not open a pull request, do not prepare a branch, do not write "
+            "a portfolio README anywhere in the checkout, and do not stage or "
+            "commit anything" in norm
+        )
+
+    def test_the_toggle_is_off_unless_a_human_turned_it_on(self):
+        norm = _norm(_prompt())
+        assert "IT IS OFF UNLESS A HUMAN TURNED IT ON" in norm
+        assert (
+            "absent, null, false, an unasked question (zero candidates), an "
+            "expiry, a decline or an unroutable call all mean off" in norm
+        )
+        assert (
+            "never infer it from a note, from prose, or from how bad the "
+            "portfolio looks" in norm
+        )
+
+    def test_an_expired_gate_opens_nothing(self):
+        result = _load_result("result-second-question-expired.json")
+        assert _question(result, "follow_ups")["status"] == "expired"
+        publication = result["publication"]
+        assert publication["open_portfolio_readme_pr"] is False
+        assert publication["source"] == "expired_default"
+        assert publication["pr_opened"] is False
+        norm = _norm(_prompt())
+        assert "AN EXPIRY ALSO LEAVES THE PULL REQUEST TOGGLE OFF" in norm
+        assert (
+            "a window that closed is never read as permission to open anything" in norm
+        )
+
+    def test_the_toggle_on_records_the_request_and_still_opens_nothing(self):
+        result = _load_result("result-five-selected.json")
+        publication = result["publication"]
+        assert publication["open_portfolio_readme_pr"] is True
+        assert publication["source"] == "human"
+        assert publication["pr_opened"] is False
+        assert publication["pr_url"] is None
+        assert publication["reason"] == (
+            "requested; the publishing step is not part of this preset"
+        )
+        norm = _norm(_prompt())
+        assert "THIS PRESET STILL OPENS NOTHING" in norm
+        assert "NEVER claim a pull request exists" in norm
+        assert "An unbuilt step is reported as unbuilt, never as done" in norm
