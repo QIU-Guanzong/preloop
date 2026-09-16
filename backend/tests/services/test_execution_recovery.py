@@ -389,3 +389,48 @@ async def test_wait_for_completion_timeout_cancels_pending_tasks():
     ):
         await svc.wait_for_completion(timeout=1)
     pending.cancel.assert_called_once()
+
+
+def test_admissible_candidates_do_not_spend_a_hosted_slot_on_a_lease():
+    """A PENDING row with runner_id set is not hosted admission (review LOW)."""
+    from preloop.services.execution_reaper import ReaperPassSummary
+
+    svc = ExecutionRecoveryService()
+    account_id = uuid.uuid4()
+    db = MagicMock()
+    db.get.return_value = MagicMock()
+
+    def _pending(*, runner_id):
+        execution = MagicMock()
+        execution.id = uuid.uuid4()
+        execution.status = "PENDING"
+        execution.agent_session_reference = None
+        execution.runner_id = runner_id
+        execution.redispatch_count = 0
+        execution.last_redispatch_at = None
+        execution.flow = MagicMock(account_id=account_id)
+        return execution
+
+    leased = _pending(runner_id=uuid.uuid4())
+    extra = _pending(runner_id=None)
+    summary = ReaperPassSummary()
+    with (
+        patch.object(
+            execution_recovery.crud_flow_execution,
+            "count_admitted_by_account",
+            return_value={account_id: 4},
+        ),
+        patch(
+            "preloop.services.execution_concurrency.account_running_cap",
+            return_value=5,
+        ),
+    ):
+        kept = svc._admissible_candidates(
+            db,
+            [leased, extra],
+            stale_after_seconds=120,
+            summary=summary,
+        )
+
+    assert {row.id for row in kept} == {leased.id, extra.id}
+    assert summary.skipped_account_cap == 0

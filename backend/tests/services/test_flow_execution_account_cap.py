@@ -491,8 +491,35 @@ class TestTheCapIsHostedOnly:
 
         assert hosted_counts.get(account.id, 0) == 0
 
+    def test_reaper_plan_does_not_spend_a_hosted_slot_on_a_lease(
+        self, db_session: Session
+    ):
+        """A PENDING row with ``runner_id`` must not fill the last hosted slot."""
+        from preloop.services.execution_reaper import ReaperPassSummary
 
-class TestRunnerNaksCappedWork:
+        account = _make_account(db_session, "Reaper Lease Tenant")
+        flow = _make_flow(db_session, account.id)
+        for index in range(4):
+            hosted = _pending(db_session, flow.id)
+            hosted.status = "RUNNING"
+            hosted.agent_session_reference = f"job/example-run-{index}"
+            db_session.add(hosted)
+        leased = _pending(db_session, flow.id)
+        leased.runner_id = _make_runner(db_session, account.id).id
+        extra = _pending(db_session, flow.id)
+        db_session.commit()
+
+        summary = ReaperPassSummary()
+        kept = ExecutionRecoveryService()._admissible_candidates(
+            db_session,
+            [leased, extra],
+            stale_after_seconds=120,
+            summary=summary,
+        )
+
+        assert {row.id for row in kept} == {leased.id, extra.id}
+        assert summary.skipped_account_cap == 0
+
     """A refused claim returns the message to the stream instead of acking."""
 
     @pytest.mark.asyncio

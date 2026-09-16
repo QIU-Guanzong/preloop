@@ -201,8 +201,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   concurrent child completions resume it exactly once. Docs at
   `docs/guide/flows/flow-delegation.md`.
 - Per-account flow-execution admission cap
-  `FLOW_EXECUTION_MAX_RUNNING_PER_ACCOUNT` (default 3, Helm
-  `flowExecution.maxRunningPerAccount`). An account may override it through
+  `FLOW_EXECUTION_MAX_RUNNING_PER_ACCOUNT` (default 5, Helm
+  `flowExecution.maxRunningPerAccount`). The cap counts hosted
+  executions only. Work assigned to a private runner is bounded by
+  that runner's own concurrency and is not counted against the shared
+  allowance. An account may override it through
   `account.meta_data["flow_execution_max_running_per_account"]`. A refused
   execution stays PENDING with `queued_reason=account_concurrency_cap`.
   One flow also keeps at most one active run per tracker object.
