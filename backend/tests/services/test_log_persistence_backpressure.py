@@ -72,7 +72,10 @@ async def test_saturated_pool_retains_logs_and_backpressures_producers(
         batch_sizes.append(len(batch))
         try:
             return original_insert(batch)
-        except SQLAlchemyTimeoutError:
+        except logs._RETRYABLE_DB_ERRORS:
+            # Pool checkout timeout is sqlalchemy.exc.TimeoutError; a busy
+            # SQLite file in a job container can also surface as
+            # OperationalError. Either one is the saturation this test needs.
             exhausted_cycle.set()
             raise
 
@@ -91,17 +94,21 @@ async def test_saturated_pool_retains_logs_and_backpressures_producers(
         asyncio.create_task(producer(execution_id)) for execution_id in execution_ids
     ]
     try:
-        async with asyncio.timeout(5):
-            while not exhausted_cycle.is_set():
-                await asyncio.sleep(0.005)
+        # Hosted runners usually trip this in well under a second. Overflow
+        # shards run in a bookworm job container on a busy VM, where the
+        # writer thread and sqlite checkout can take much longer. Do not
+        # shrink these waits: passing only on ubuntu-latest hides that.
+        async with asyncio.timeout(30):
+            while not exhausted_cycle.is_set() or queue.qsize() < 32:
+                await asyncio.sleep(0.01)
         assert queue.qsize() == 32
         assert not all(task.done() for task in producers)
         assert engine.pool.checkedout() == 1
         for connection in connections:
             connection.close()
         connections.clear()
-        await asyncio.wait_for(asyncio.gather(*producers), 10)
-        await asyncio.wait_for(queue.join(), 10)
+        await asyncio.wait_for(asyncio.gather(*producers), 60)
+        await asyncio.wait_for(queue.join(), 60)
         with engine.connect() as connection:
             count = connection.scalar(text("SELECT COUNT(*) FROM flow_execution_log"))
             executions = connection.scalar(

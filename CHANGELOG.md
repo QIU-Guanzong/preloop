@@ -32,6 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GITHUB_WORKSPACE`, not `github.action_path`. The latter is a host
   path and does not exist inside the self-hosted job container.
 
+### Fixed
+
+- Tree-stop and child-wait tests bind the session factory to an object
+  that still looks like a Session. GitLab sets `INIT_TEST_DATA=true`,
+  so `TestClient` lifespan seeds via `next(get_db_session()).query`,
+  and a contextmanager-only stub made those client tests ERROR at
+  setup with `Database setup failed`.
+- The log-persistence backpressure test waits long enough for a
+  saturated sqlite pool inside a self-hosted job container. Overflow
+  shards run there; a 5s/10s budget passed on `ubuntu-latest` and
+  timed out on the VMs.
+
 ### Added
 
 - `run-flow` composite GitHub Action (`.github/actions/run-flow`) and a

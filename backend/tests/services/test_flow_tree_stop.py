@@ -8,11 +8,12 @@ output, and the race is driven rather than slept on.
 """
 
 import uuid
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from tests.bound_session import bound_session_factory
 
 from preloop.models.crud import crud_flow, crud_flow_execution, crud_flow_runner
 from preloop.models.models.flow_execution import STOP_COVERAGE_KEY
@@ -30,17 +31,11 @@ pytestmark = pytest.mark.asyncio
 # --- harness ---------------------------------------------------------------
 
 
-@contextmanager
-def _one_session(db_session):
-    """Hand every module the test transaction instead of a new session."""
-    yield db_session
-
-
 @pytest.fixture(autouse=True)
 def _module_sessions(db_session, monkeypatch):
     monkeypatch.setattr(
         "preloop.models.db.session.get_session_factory",
-        lambda: (lambda: _one_session(db_session)),
+        lambda: bound_session_factory(db_session),
     )
 
 
