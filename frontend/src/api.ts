@@ -344,9 +344,27 @@ export async function fetchWithTimeout(
   }
 }
 
+/**
+ * Options for the authenticated fetch helpers.
+ *
+ * `passive` marks a request nobody asked for: a boot-time load, a background
+ * refresh, one leg of a `Promise.allSettled` that fills a page the reader is
+ * already looking at. A paywall answer (402) to one of those is information
+ * about the account, not a decision the reader just tried to make, so it must
+ * not open the upgrade dialog. The rule is the founder decision of
+ * 2026-09-16: the paywall modal appears only on a user action, never from a
+ * background fetch. A passive call still returns the response, so the caller
+ * can resolve it as "not entitled" and render nothing.
+ *
+ * The flag is not sent to the server and does not change the request.
+ */
+export interface AuthFetchOptions extends RequestInit {
+  passive?: boolean;
+}
+
 export async function fetchWithAuth(
   url: string,
-  options: RequestInit = {}
+  options: AuthFetchOptions = {}
 ): Promise<Response> {
   const method = (options.method || 'GET').toUpperCase();
   // Only plain reads: a body, a signal or a custom header makes the call the
@@ -359,16 +377,22 @@ export async function fetchWithAuth(
     options.cache !== 'reload' &&
     options.cache !== 'no-store';
   if (coalescable) {
-    const pending = inFlightGets.get(url);
+    // Passive and active reads of the same URL are coalesced separately. They
+    // ask the same question but they answer to different people: joining a
+    // background load would either swallow the modal a click deserves or pop
+    // one nobody asked for, depending on which request happened to start
+    // first.
+    const key = options.passive ? `passive ${url}` : url;
+    const pending = inFlightGets.get(key);
     if (pending) {
       return (await pending).clone();
     }
     const request = performFetchWithAuth(url, options).finally(() => {
-      if (inFlightGets.get(url) === request) {
-        inFlightGets.delete(url);
+      if (inFlightGets.get(key) === request) {
+        inFlightGets.delete(key);
       }
     });
-    inFlightGets.set(url, request);
+    inFlightGets.set(key, request);
     // The first caller gets a clone too, so every caller reads its own body.
     return (await request).clone();
   }
@@ -377,8 +401,12 @@ export async function fetchWithAuth(
 
 async function performFetchWithAuth(
   url: string,
-  options: RequestInit = {}
+  requested: AuthFetchOptions = {}
 ): Promise<Response> {
+  // `passive` is a rule about this console, not about the request: strip it
+  // here so nothing downstream can mistake it for a fetch option.
+  const { passive: isPassive, ...options } = requested;
+  const passive = isPassive === true;
   let accessToken = localStorage.getItem('accessToken');
 
   if (!accessToken) {
@@ -450,7 +478,10 @@ async function performFetchWithAuth(
     // response without destroying the session. The next request retries.
   }
 
-  if (response.status === 429) {
+  // A passive request is not a user action, so neither of the two answers
+  // below is allowed to interrupt the page with a dialog. The caller reads
+  // the status and decides what to leave out.
+  if (response.status === 429 && !passive) {
     window.dispatchEvent(
       new CustomEvent('show-upgrade-modal', {
         bubbles: true,
@@ -459,7 +490,7 @@ async function performFetchWithAuth(
     );
   }
 
-  if (response.status === 402) {
+  if (response.status === 402 && !passive) {
     // Premium gate (T2): the endpoint answered with the upgrade contract.
     // Read the feature from a clone so callers can still consume the body.
     let feature = '';
@@ -469,7 +500,7 @@ async function performFetchWithAuth(
         feature = String(body.detail.feature || '');
       }
     } catch {
-      // Non-JSON 402 — still show the generic upgrade modal.
+      // Non-JSON 402: still show the generic upgrade modal.
     }
     window.dispatchEvent(
       new CustomEvent('show-upgrade-modal', {
@@ -1013,17 +1044,31 @@ export async function fetchAIModelPricingFromProvider(
   return response.json();
 }
 
+/**
+ * Model price overrides, or nothing when the plan does not include them.
+ *
+ * `passive` is for the loaders that read this list to decorate a page the
+ * reader did not open for pricing (the attention rules, the cost summary).
+ * On a plan without the `price_overrides` capability the endpoint answers
+ * 402; a passive caller gets an empty list instead of an exception and the
+ * account is never shown an upgrade dialog it did not ask for. An active
+ * caller (the override editor) still throws, because there the 402 is the
+ * answer to something the reader just clicked.
+ */
 export async function getModelPriceOverrides(options?: {
   modelAlias?: string;
   activeOnly?: boolean;
+  passive?: boolean;
 }): Promise<ModelPriceOverride[]> {
   const params = new URLSearchParams();
   if (options?.modelAlias) params.set('model_alias', options.modelAlias);
   if (options?.activeOnly) params.set('active_only', 'true');
   const query = params.toString();
   const response = await fetchWithAuth(
-    `/api/v1/billing/cost/pricing-overrides${query ? `?${query}` : ''}`
+    `/api/v1/billing/cost/pricing-overrides${query ? `?${query}` : ''}`,
+    { passive: options?.passive === true }
   );
+  if (response.status === 402 && options?.passive) return [];
   if (!response.ok) {
     throw new Error('Failed to fetch model price overrides');
   }

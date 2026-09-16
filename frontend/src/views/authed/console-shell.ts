@@ -24,13 +24,13 @@ import {
   getFeatures,
   getUserProfile,
   hasAnyPermission,
-  startCheckout,
   type FeaturesResponse,
   type UserPermissions,
 } from '../../api';
 import '../../components/permission-denied';
 import { consoleDialogStyles } from '../../styles/console-dialog';
-import { LOCATION_CHANGED } from '../../router';
+import { LOCATION_CHANGED, Router } from '../../router';
+import { planPageUrl, premiumFeatureLabel } from '../../utils/premium-features';
 
 /** Nav items that require at least one of the listed permissions when RBAC is on. */
 const NAV_PERMISSIONS: Record<string, string[]> = {
@@ -78,24 +78,6 @@ const SIDEBAR_WIDTH_PX = 250;
 
 //     `];
 
-// Human-readable names for gated features (402 upgrade contract).
-const PREMIUM_FEATURE_LABELS: Record<string, string> = {
-  session_optimization: 'AI session optimization',
-  replay_verification: 'replay verification',
-  session_titles: 'AI session titles',
-};
-
-/**
- * Plan the one-click upgrade button buys.
- *
- * Every feature currently reachable through the 402 gate unlocks at the
- * cheapest paid plan, so sending the visitor anywhere more expensive would
- * overcharge them for the thing they just clicked. Was hardcoded to the
- * legacy 'teams' plan, which is no longer purchasable and would now be
- * refused at checkout.
- */
-const UPGRADE_PLAN_ID = 'pro';
-
 @customElement('console-shell')
 export class ConsoleShell extends LitElement {
   @query('#upgrade-modal')
@@ -103,21 +85,6 @@ export class ConsoleShell extends LitElement {
 
   @state()
   private _upgradeFeature = '';
-
-  @state()
-  private _upgradeStarting = false;
-
-  @state()
-  private _upgradeError = '';
-
-  /**
-   * A non-error answer from checkout, in the server's own words.
-   *
-   * Kept apart from `_upgradeError` because "you already have this plan" is
-   * not a failure and must not be announced as one.
-   */
-  @state()
-  private _upgradeNotice = '';
 
   @state()
   private features: FeaturesResponse['features'] = {};
@@ -417,38 +384,34 @@ export class ConsoleShell extends LitElement {
     (this._upgradeModal as any).show();
   };
 
-  private async _startUpgradeCheckout() {
-    this._upgradeStarting = true;
-    this._upgradeError = '';
-    this._upgradeNotice = '';
-    try {
-      // Land back exactly where the gate was hit once checkout-success
-      // reconciles the new subscription (webhook-independent).
-      //
-      // UPGRADE_PLAN_ID is the entry paid plan, not the plan that unlocks
-      // every gated feature. Features gated above it (RBAC, team approvals)
-      // send the visitor to the plan list instead of this button, which is
-      // why the modal keeps a "View plans" route alongside it.
-      const outcome = await startCheckout(
-        UPGRADE_PLAN_ID,
-        'month',
-        window.location.pathname + window.location.search
-      );
-      // A redirect is already navigating, so the modal keeps its spinner and
-      // this frame is about to be replaced. Every other answer means the
-      // person is still looking at this dialog and deserves to read why no
-      // tab opened, in the server's words.
-      if (outcome && outcome.action !== 'redirect') {
-        this._upgradeNotice = outcome.message;
-        this._upgradeStarting = false;
-      }
-    } catch (error) {
-      this._upgradeError =
-        error instanceof Error && error.message
-          ? error.message
-          : 'Checkout is unavailable. Review the current plans or try again.';
-      this._upgradeStarting = false;
-    }
+  /**
+   * Leave the dialog for the plan page.
+   *
+   * The dialog used to start a checkout for one hardcoded plan. That bought
+   * the wrong thing twice over: too much plan for a feature the entry plan
+   * already includes, and a refusal for a feature that needs a bigger one.
+   * It also left the dialog open on top of whatever happened next. Both
+   * actions now close it and hand the decision to the plan page, which knows
+   * the catalog, the account's current plan and the price of each.
+   */
+  private _goToPlans(feature: string) {
+    const url = planPageUrl(feature);
+    (this._upgradeModal as any)?.hide?.();
+    if (!Router.go(url)) this._navigate(url);
+  }
+
+  /** "View plans": the whole list, with nothing chosen for the reader. */
+  private _viewPlans = () => this._goToPlans('');
+
+  /**
+   * "Upgrade now": the same page, with the refused feature named in the
+   * query so it opens on the cheapest plan that unlocks it.
+   */
+  private _upgradeNow = () => this._goToPlans(this._upgradeFeature);
+
+  /** A full page load, for the case where no router claimed the path. */
+  private _navigate(url: string): void {
+    window.location.assign(url);
   }
 
   async connectedCallback() {
@@ -680,29 +643,25 @@ export class ConsoleShell extends LitElement {
       <sl-dialog id="upgrade-modal" label="Upgrade Your Plan">
         ${
           this._upgradeFeature
-            ? html`${
-                PREMIUM_FEATURE_LABELS[this._upgradeFeature] ||
-                this._upgradeFeature
-              }
-              is a paid feature. Upgrade to unlock it and you will come right
-              back here, already unlocked.`
-            : html`This feature is not included in your current plan. Upgrade to
-              unlock it.`
+            ? html`${premiumFeatureLabel(this._upgradeFeature)} is a paid
+              feature. The plan page shows the cheapest plan that includes it,
+              next to the plan you are on now.`
+            : html`This feature is not included in your current plan. The plan
+              page shows what each plan includes, next to the plan you are on
+              now.`
         }
-        ${this._upgradeError ? html`<p role="alert">${this._upgradeError}</p>` : nothing}
-        ${
-          this._upgradeNotice
-            ? html`<p role="status">${this._upgradeNotice}</p>`
-            : nothing
-        }
-        <sl-button slot="footer" href="/console/settings/account">
+        <sl-button
+          slot="footer"
+          data-testid="upgrade-view-plans"
+          @click=${this._viewPlans}
+        >
           View plans
         </sl-button>
         <sl-button
           slot="footer"
           variant="primary"
-          ?loading=${this._upgradeStarting}
-          @click=${this._startUpgradeCheckout}
+          data-testid="upgrade-now"
+          @click=${this._upgradeNow}
         >
           Upgrade now
         </sl-button>

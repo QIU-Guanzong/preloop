@@ -472,6 +472,22 @@ export class AccountView extends LitElement {
     }
   }
 
+  /**
+   * "Choose a plan": open the plan picker on this page and scroll to it.
+   *
+   * The plan section is already on this page, so the shortest honest route to
+   * it is the page itself rather than a navigation. `scrollIntoView` is
+   * guarded because the section renders only once the billing summary has
+   * loaded.
+   */
+  private _handleChoosePlan() {
+    const comparison = this.shadowRoot?.querySelector(
+      'billing-plan-comparison'
+    ) as (HTMLElement & { openPicker?: () => void }) | null;
+    comparison?.openPicker?.();
+    comparison?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  }
+
   private async _handleManageSubscription() {
     if (!this._canManageBilling) return;
     this._error = null;
@@ -1178,14 +1194,30 @@ export class AccountView extends LitElement {
                         : ''
                     }
                     <div class="actions">
-                      <sl-button
-                        size="medium"
-                        variant=${trialExpired ? 'default' : 'primary'}
-                        ?disabled=${!this.subscription || !this._canManageBilling}
-                        @click=${this._handleManageSubscription}
-                      >
-                        Manage in Stripe
-                      </sl-button>
+                      ${
+                        // The provider portal manages a subscription. An
+                        // account on Free has none, so the button was always
+                        // disabled there: a dead control where the only useful
+                        // action belongs. Free gets that action instead.
+                        this.subscription
+                          ? html`<sl-button
+                              size="medium"
+                              variant=${trialExpired ? 'default' : 'primary'}
+                              data-testid="manage-in-stripe"
+                              ?disabled=${!this._canManageBilling}
+                              @click=${this._handleManageSubscription}
+                            >
+                              Manage in Stripe
+                            </sl-button>`
+                          : html`<sl-button
+                              size="medium"
+                              variant="primary"
+                              data-testid="choose-a-plan"
+                              @click=${this._handleChoosePlan}
+                            >
+                              Choose a plan
+                            </sl-button>`
+                      }
                     </div>
                   </div>
 
