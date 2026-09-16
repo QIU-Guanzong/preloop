@@ -10,12 +10,13 @@ is asserted is the row and the resumed turn, not the internals.
 import asyncio
 import json
 import uuid
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as _Row
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
+from tests.bound_session import bound_session_factory
 
 from preloop.a2a.delegation import validate_delegation_task
 from preloop.models.crud import crud_flow, crud_flow_execution
@@ -44,12 +45,6 @@ pytestmark = pytest.mark.asyncio
 # --- harness ---------------------------------------------------------------
 
 
-@contextmanager
-def _one_session(db_session):
-    """Hand the module the test's session instead of a new one."""
-    yield db_session
-
-
 @pytest.fixture(autouse=True)
 def _module_sessions(db_session, monkeypatch):
     """Every session the module opens is the test transaction.
@@ -57,11 +52,13 @@ def _module_sessions(db_session, monkeypatch):
     The module is written against short lived sessions it opens itself; the
     test suite runs inside one rolled back transaction. Binding the factory
     keeps the durable steps honest (real UPDATEs, real conditional claims)
-    without leaking rows.
+    without leaking rows. The stand-in still looks like a Session so
+    GitLab's INIT_TEST_DATA lifespan seed (next(get_db_session()).query)
+    does not fail setup.
     """
     monkeypatch.setattr(
         "preloop.models.db.session.get_session_factory",
-        lambda: (lambda: _one_session(db_session)),
+        lambda: bound_session_factory(db_session),
     )
 
 
