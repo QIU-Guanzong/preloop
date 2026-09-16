@@ -469,7 +469,12 @@ def sync_runtime_session_for_record(
     default_title = _metadata_text(
         record.metadata, "session_title_default", MAX_SESSION_TITLE_CHARS
     )
-    if title:
+    if title and title != session.title:
+        # Only a changed title marks the description dirty. An identical
+        # push must not reindex: when there is no summary_updated_at the
+        # indexer falls back to last_activity_at, which this function
+        # already advanced, and that would delete and reinsert an
+        # unchanged chunk.
         session.title = title
         description_changed = True
     elif default_title and not session.title:
