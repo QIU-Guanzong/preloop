@@ -492,7 +492,9 @@
       "note": null,
       "approved_by": null,
       "approved_at": null,
-      "filed": false
+      "child_execution_id": null,
+      "filed": false,
+      "filed_issue": null
     },
     {
       "id": "portfolio:legacy/inventory-web:inventory-db-url",
@@ -506,7 +508,9 @@
       "note": null,
       "approved_by": null,
       "approved_at": null,
-      "filed": false
+      "child_execution_id": null,
+      "filed": false,
+      "filed_issue": null
     },
     {
       "id": "portfolio:services/billing-api:billing-api-token",
@@ -520,7 +524,9 @@
       "note": null,
       "approved_by": null,
       "approved_at": null,
-      "filed": false
+      "child_execution_id": null,
+      "filed": false,
+      "filed_issue": null
     }
   ],
   "coverage": {
