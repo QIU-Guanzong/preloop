@@ -489,6 +489,13 @@ func newHostExecJobCmd(job map[string]any) (*exec.Cmd, string, time.Duration, er
 func runnerHeartbeatMessage() map[string]any {
 	msg := publicationHeartbeat()
 	msg["host_exec_profiles"] = hostExecAdvertisements()
+	// Re-assert ephemeral on every handshake and heartbeat. Registration
+	// already set it, but a row that predates the flag (or a reconnect to a
+	// replica that has not seen the register) must still be deletable when
+	// this process disappears without unregistering.
+	if runnerOnce.registersEphemeral() {
+		msg["ephemeral"] = true
+	}
 	return msg
 }
 

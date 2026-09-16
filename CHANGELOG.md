@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- One-shot ephemeral runner mode for CI: `preloop runner fg --once
+  --ephemeral [--labels ...] [--wait-for-job 15m]` registers a runner that
+  belongs to a single process, runs exactly one execution, prints its
+  console URL, and unregisters on every exit path (clean finish, Ctrl-C,
+  SIGTERM, SIGHUP). It never reads or writes `~/.preloop/runner.json`, so
+  it cannot take over a persistent runner's identity on the same host, and
+  it defaults its label to `ci-<hostname>-<pid>` so a pinned flow reaches
+  that process and no other. The exit status is the job's verdict: `0`
+  SUCCEEDED, `1` FAILED/STOPPED/TIMEOUT, `2` nothing leased within
+  `--wait-for-job`. The control plane records the row as ephemeral and
+  deletes it when the runner unregisters or its heartbeat lapses past the
+  online grace, instead of leaving an offline row behind; the console
+  Runners page badges one while it is connected.
+
 - Portfolio Review preset (`portfolio-review`). Discovers the
   independently built projects in one repository from manifests and build
   descriptors, asks a human which of them to review, then starts one

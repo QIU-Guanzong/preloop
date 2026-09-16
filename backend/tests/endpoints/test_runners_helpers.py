@@ -239,6 +239,7 @@ async def test_completion_confirms_stop_only_on_terminal_owner_ack(
         status="online",
         reported_status="RUNNING",
         publication_capabilities=None,
+        ephemeral=False,
     )
 
     def set_publication_capabilities(
@@ -345,6 +346,7 @@ async def test_invalid_cra_completion_keeps_original_error_and_contract(
         status="online",
         reported_status="RUNNING",
         publication_capabilities=None,
+        ephemeral=False,
     )
 
     def set_publication_capabilities(
@@ -527,6 +529,7 @@ async def test_invalid_log_batch_error_echoes_batch_id(
         status="busy",
         reported_status="RUNNING",
         publication_capabilities=None,
+        ephemeral=False,
     )
 
     def set_publication_capabilities(

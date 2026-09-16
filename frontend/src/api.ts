@@ -3732,6 +3732,8 @@ export interface RunnerRecord {
   os?: string | null;
   arch?: string | null;
   labels?: string[];
+  /** One-shot CI runner: its row disappears when the job ends. */
+  ephemeral?: boolean;
   status: string;
   last_heartbeat?: string | null;
   current_execution_id?: string | null;

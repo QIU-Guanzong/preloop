@@ -8,7 +8,7 @@ import logging
 import socket
 import secrets
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from string import ascii_letters, digits
 from typing import Any, Dict, List, Mapping, Optional
 from uuid import UUID, uuid4, uuid5
@@ -113,6 +113,9 @@ def register_runner(
     capabilities = normalize_host_exec_advertisements(
         [profile.model_dump() for profile in body.host_exec_profiles]
     )
+    # A CI account registers a new ephemeral runner per job. Reap the ones
+    # whose job died without unregistering before adding another.
+    crud_flow_runner.sweep_stale_ephemeral(db, account_id=current_user.account_id)
     if body.runner_id:
         existing = crud_flow_runner.get(
             db, id=body.runner_id, account_id=str(current_user.account_id)
@@ -125,6 +128,7 @@ def register_runner(
             "capabilities": capabilities,
             "status": "online",
             "last_heartbeat": datetime.now(timezone.utc),
+            "ephemeral": body.ephemeral or existing.ephemeral,
         }
         for field in ("name", "hostname", "os", "arch", "labels", "instance_id"):
             if value := getattr(body, field):
@@ -148,6 +152,7 @@ def register_runner(
             "os": body.os,
             "arch": body.arch,
             "labels": body.labels or [],
+            "ephemeral": body.ephemeral,
             "status": "online",
             "last_heartbeat": datetime.now(timezone.utc),
             "token_hash": hash_runner_token(token),
@@ -169,6 +174,9 @@ def list_runners(
     skip: int = 0,
     limit: int = 100,
 ):
+    # The Runners page is where a phantom would be visible, so reap lapsed
+    # one-shot rows on the way in rather than showing them offline forever.
+    crud_flow_runner.sweep_stale_ephemeral(db, account_id=current_user.account_id)
     rows = crud_flow_runner.list_for_account(
         db, account_id=current_user.account_id, skip=skip, limit=limit
     )
@@ -181,6 +189,7 @@ def runner_fleet_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    crud_flow_runner.sweep_stale_ephemeral(db, account_id=current_user.account_id)
     return schemas.RunnerFleetSummary(
         **crud_flow_runner.counts_for_account(db, account_id=current_user.account_id)
     )
@@ -399,6 +408,9 @@ async def runner_ws(
         "type": "hello",
         "runner_id": runner_key,
         "log_acknowledgements": True,
+        # Echoed so a one-shot CI runner can tell an old control plane (which
+        # would keep its row offline forever) from one that deletes it.
+        "ephemeral": bool(runner.ephemeral),
     }
     db.refresh(runner)
     emit_runner_updated(runner, db)
@@ -473,6 +485,9 @@ async def runner_ws(
                     break
                 if runner.halt_requested:
                     await publication.close()
+                if raw.get("ephemeral") is True and not runner.ephemeral:
+                    crud_flow_runner.mark_ephemeral(db, runner_id=runner.id)
+                    db.refresh(runner)
                 status = "busy" if runner.current_execution_id else "online"
                 if "host_exec_profiles" in raw:
                     runner.capabilities = normalize_host_exec_advertisements(raw)
@@ -571,6 +586,15 @@ async def runner_ws(
                     fresh_runner = crud_flow_runner.get_fresh(db, runner_id=runner_id)
                     if fresh_runner is not None:
                         emit_runner_updated(fresh_runner, db)
+                        # A one-shot runner said goodbye on purpose: the
+                        # process is gone, so the row goes with it instead of
+                        # waiting out the heartbeat grace.
+                        if fresh_runner.ephemeral:
+                            crud_flow_runner.sweep_stale_ephemeral(
+                                db,
+                                account_id=fresh_runner.account_id,
+                                grace=timedelta(0),
+                            )
                 await websocket.send_json({"type": "ack"})
                 break
 

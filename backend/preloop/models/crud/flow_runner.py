@@ -463,6 +463,81 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
             "last_runner_heartbeat": last.isoformat() if last else None,
         }
 
+    def mark_ephemeral(self, db: Session, *, runner_id: UUID) -> bool:
+        """Flag a runner row as one-shot. Idempotent.
+
+        Registration already carries the flag; the runner re-asserts it on
+        every heartbeat so a row that predates the flag, or a replica that
+        never saw the register call, still converges on the value the
+        process itself reports.
+
+        Args:
+            db: Database session.
+            runner_id: Runner primary key.
+
+        Returns:
+            True when this call changed the row.
+        """
+        updated = (
+            db.query(FlowRunner)
+            .filter(FlowRunner.id == runner_id, FlowRunner.ephemeral.is_(False))
+            .update({FlowRunner.ephemeral: True}, synchronize_session=False)
+        )
+        db.commit()
+        return bool(updated)
+
+    def sweep_stale_ephemeral(
+        self,
+        db: Session,
+        *,
+        account_id: Optional[UUID] = None,
+        grace: timedelta = ONLINE_HEARTBEAT_TTL,
+    ) -> int:
+        """Delete one-shot runners whose heartbeat lapsed past ``grace``.
+
+        An ordinary runner that stops answering is a machine that may come
+        back, so it is kept and marked offline. An ephemeral runner is one
+        CI process: once its heartbeat lapses that process is gone, and
+        keeping the row only puts a phantom on the Runners page and an
+        unreachable candidate in front of the scheduler. Rows holding an
+        execution are left alone so completion handling still finds them.
+
+        Args:
+            db: Database session.
+            account_id: Restrict the sweep to one account, or None for all.
+            grace: How long after the last heartbeat a row may survive.
+
+        Returns:
+            Number of deleted rows.
+        """
+        cutoff = datetime.now(timezone.utc) - grace
+        query = db.query(FlowRunner).filter(
+            FlowRunner.ephemeral.is_(True),
+            FlowRunner.current_execution_id.is_(None),
+            or_(
+                FlowRunner.last_heartbeat.is_(None),
+                FlowRunner.last_heartbeat < cutoff,
+            ),
+        )
+        if account_id is not None:
+            query = query.filter(FlowRunner.account_id == account_id)
+        # A row with no heartbeat at all was created moments ago by a runner
+        # that has not connected yet; give it the same grace from creation.
+        doomed = [
+            row.id
+            for row in query.all()
+            if row.last_heartbeat is not None or _created_before(row, cutoff)
+        ]
+        if not doomed:
+            return 0
+        deleted = (
+            db.query(FlowRunner)
+            .filter(FlowRunner.id.in_(doomed))
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        return int(deleted)
+
     def touch_heartbeat(
         self,
         db: Session,
@@ -479,6 +554,16 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
         db.commit()
         db.refresh(runner)
         return runner
+
+
+def _created_before(row: FlowRunner, cutoff: datetime) -> bool:
+    """True when a row that never sent a heartbeat is already past ``cutoff``."""
+    created = getattr(row, "created_at", None)
+    if created is None:
+        return True
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return created < cutoff
 
 
 def runner_matches_pool(row: FlowRunner, pool: str) -> bool:

@@ -234,6 +234,12 @@ export class RunnersView extends LitElement {
     return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
   }
 
+  /** Online or busy: a runner that is actually connected right now. */
+  private isPresent(status: string): boolean {
+    const value = (status || '').toLowerCase();
+    return value === 'online' || value === 'busy';
+  }
+
   private statusVariant(status: string): string {
     switch ((status || '').toLowerCase()) {
       case 'online':
@@ -321,6 +327,23 @@ export class RunnersView extends LitElement {
                               >
                                 ${this.statusLabel(row.status)}
                               </sl-badge>
+                              ${
+                                /*
+                                 * An ephemeral runner is only worth pointing
+                                 * out while it is here: the row vanishes with
+                                 * the CI job, so a reader seeing this badge
+                                 * knows not to expect it back.
+                                 */
+                                row.ephemeral && this.isPresent(row.status)
+                                  ? html`<sl-badge
+                                      class="chip"
+                                      pill
+                                      variant="neutral"
+                                      title="One-shot CI runner. It unregisters when its job ends."
+                                      >ephemeral</sl-badge
+                                    >`
+                                  : nothing
+                              }
                             </td>
                             <td class="muted">
                               ${
