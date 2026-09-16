@@ -359,6 +359,12 @@ jobs:
   # Postgres below is started by that machine's Docker daemon and published on
   # localhost:5432, so the VM needs Docker installed and the runner user in the
   # docker group. Nothing else in this job assumes the GitHub image.
+  #
+  # 5432 is a fixed host port, so each machine carrying these labels must run
+  # exactly ONE runner process. Two runners on one host both report
+  # online+idle, pick-runner cannot tell them apart, and the second shard to
+  # start would die on "port is already allocated". Scale out with more
+  # machines, never with a second listener on the same box.
   test-backend:
     name: Backend Tests (${{ matrix.group }}/8)
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.test_runner) }}
@@ -557,11 +563,16 @@ jobs:
         id: playwright
         run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
 
+      # runner.environment is in the key because Playwright ships per-distro
+      # browser builds: the GitHub image gets an ubuntu-xx build, a Debian VM
+      # gets a debian-xx one, and both report runner.os == Linux. Sharing one
+      # key would have each restore the other's flavour and re-download.
+      # The pip caches below need no such split: those are manylinux wheels.
       - name: Cache Playwright browsers
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+          key: playwright-${{ runner.os }}-${{ runner.environment }}-${{ steps.playwright.outputs.version }}
 
       # GitHub-hosted only: the runner image preconfigures Google's
       # chrome-stable apt source, which this job never uses. Its index
