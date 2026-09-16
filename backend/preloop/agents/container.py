@@ -4815,8 +4815,13 @@ true
             plan = resolve_report_publication(git_config)
             if plan is not None:
                 fields = plan.as_marker_fields()
-        except ReportPublicationError:
-            pass
+        except ReportPublicationError as error:
+            # Invalid leftover config: still print a marker with empty fields
+            # so a refused publication is never silent.
+            self.logger.warning(
+                "Report publication plan unavailable for refusal marker: %s",
+                error,
+            )
         return build_failed_report_publication_shell(reason, fields) + "\n"
 
     def _combine_report_publication_and_push(
@@ -4852,8 +4857,13 @@ true
             plan = resolve_report_publication(git_config)
             if plan is not None:
                 fields = plan.as_marker_fields()
-        except ReportPublicationError:
-            pass
+        except ReportPublicationError as error:
+            # Invalid leftover config: still print write_flow_conflict so
+            # agent commits take the normal push path with a marker.
+            self.logger.warning(
+                "Report publication plan unavailable for write-flow conflict: %s",
+                error,
+            )
         refusal = build_failed_report_publication_shell("write_flow_conflict", fields)
         return (
             f"cd {shlex.quote(clone_path)} 2>/dev/null || true\n"
