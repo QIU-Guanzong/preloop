@@ -754,7 +754,7 @@ async def verify_email(
 
 
 @router.post("/resend-verification", status_code=status.HTTP_200_OK)
-async def resend_verification(
+def resend_verification(
     verification_data: EmailVerificationResendRequest,
     background_tasks: BackgroundTasks,
     request: Request,
@@ -767,6 +767,11 @@ async def resend_verification(
     whether the address exists (same rule as forgot-password) and it never
     says whether it was already verified, so this cannot be used to probe
     for accounts. Rate limited per client IP and per address.
+
+    Deliberately a plain ``def``: the body is one synchronous lookup on the
+    request-scoped ``Session``, and FastAPI dispatches ``def`` handlers on the
+    threadpool, so a saturated pool costs one worker thread instead of the API
+    event loop (see ``preloop.api.loop_safety``).
 
     Args:
         verification_data: Body carrying the address to send to.

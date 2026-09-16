@@ -82,12 +82,15 @@ paths:
         \ address, so they hold no token. The answer never says\nwhether the address\
         \ exists (same rule as forgot-password) and it never\nsays whether it was\
         \ already verified, so this cannot be used to probe\nfor accounts. Rate limited\
-        \ per client IP and per address.\n\nArgs:\n    verification_data: Body carrying\
-        \ the address to send to.\n    background_tasks: Background tasks for sending\
-        \ the email.\n    request: The incoming request object (client IP for the\
-        \ limit).\n\nReturns:\n    The same neutral message for every address.\n\n\
-        Raises:\n    HTTPException: 429 when the resend budget for this IP or address\
-        \ is\n        exhausted."
+        \ per client IP and per address.\n\nDeliberately a plain ``def``: the body\
+        \ is one synchronous lookup on the\nrequest-scoped ``Session``, and FastAPI\
+        \ dispatches ``def`` handlers on the\nthreadpool, so a saturated pool costs\
+        \ one worker thread instead of the API\nevent loop (see ``preloop.api.loop_safety``).\n\
+        \nArgs:\n    verification_data: Body carrying the address to send to.\n  \
+        \  background_tasks: Background tasks for sending the email.\n    request:\
+        \ The incoming request object (client IP for the limit).\n\nReturns:\n   \
+        \ The same neutral message for every address.\n\nRaises:\n    HTTPException:\
+        \ 429 when the resend budget for this IP or address is\n        exhausted."
       operationId: resend_verification_api_v1_auth_resend_verification_post
       requestBody:
         content:
