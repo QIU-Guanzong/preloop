@@ -62,7 +62,7 @@ REDACTED_VALUE = GatewayUsageSearchService.REDACTED_VALUE
 _CREDENTIAL_PATTERN = re.compile(
     r"(?i)\b([\w.-]{0,64}(?:api[_-]?key|authorization|secret|token|password)"
     r"[\w.-]{0,64})\s*[:=]\s*"
-    r"(\"[^\"]{0,4096}[^\"]*\"|'[^']{0,4096}[^']*'|\S{1,4096}\S*)"
+    r"(\"[^\"]{0,4096}+[^\"]*\"|'[^']{0,4096}+[^']*'|\S{1,4096}\S*)"
 )
 #: PEM private-key blocks pasted into transcript, notes, or tool summaries.
 _PEM_PRIVATE_KEY_PATTERN = re.compile(
@@ -144,10 +144,12 @@ def redact_text(text: str) -> tuple[str, bool]:
     Labelled pairs (``api_key: value`` / ``secret=value``) are masked first.
     The value alternatives consume the rest of a matching run
     (``\\S{1,4096}\\S*``, and the quoted forms
-    ``"[^"]{0,4096}[^"]*"`` / ``'[^']{0,4096}[^']*'``) so a value
-    longer than 4096 characters is fully masked, not truncated. Nothing
-    follows those alternatives in the pattern, so per-start cost stays
-    bounded by the first quantifier.
+    ``"[^"]{0,4096}+[^"]*"`` / ``'[^']{0,4096}+[^']*'``) so a value
+    longer than 4096 characters is fully masked, not truncated. The
+    bounded quoted parts are possessive so an unclosed quote cannot
+    re-scan the run once per split point. Nothing follows those
+    alternatives in the pattern, so per-start cost stays bounded by
+    the first quantifier.
 
     A labelled key whose prefix before the keyword exceeds 64 characters
     does not match: there is no word boundary before the keyword inside a

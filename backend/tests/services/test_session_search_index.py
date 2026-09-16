@@ -1,6 +1,7 @@
 """Tests for the session search corpus chunk writers."""
 
 import logging
+import time
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -227,6 +228,20 @@ def test_labelled_credential_redaction_masks_long_quoted_value():
     assert REDACTED_VALUE in redacted
     assert '"' not in redacted
     assert redacted.endswith(" suffix")
+
+
+def test_labelled_credential_redaction_unclosed_quote_is_fast():
+    """An unclosed api_key=\" plus 100k non-quotes must return in milliseconds."""
+    payload = "A" * 100_000
+    text = f'prefix api_key="{payload}'
+    started = time.perf_counter()
+    redacted, changed = redact_text(text)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.05
+    assert changed is True
+    assert payload not in redacted
+    assert "A" * 32 not in redacted
+    assert REDACTED_VALUE in redacted
 
 
 def test_bare_provider_key_in_free_text_is_stored_redacted(db_session, test_user):
