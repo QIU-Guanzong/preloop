@@ -16,6 +16,19 @@ describe('AccountView', () => {
     return (el.shadowRoot?.textContent ?? '').replace(/\s+/g, ' ').trim();
   }
 
+  /** The built-in usage card's cells, read by their visible label. */
+  function usageCells(el: AccountView): Record<string, string> {
+    const cells: Record<string, string> = {};
+    el.shadowRoot?.querySelectorAll('.usage-metric').forEach((metric) => {
+      const read = (selector: string) =>
+        (metric.querySelector(selector)?.textContent ?? '')
+          .replace(/\s+/g, ' ')
+          .trim();
+      cells[read('.usage-label')] = read('.usage-value');
+    });
+    return cells;
+  }
+
   function json(data: unknown, status = 200) {
     return new Response(JSON.stringify(data), {
       status,
@@ -574,7 +587,7 @@ describe('AccountView', () => {
     expect(element.shadowRoot?.querySelector('pricing-card')).not.to.exist;
   });
 
-  it('does not claim a dollar costs a dollar at a 1:1 credit rate (D13)', async () => {
+  it('never offers an opt-in for extra usage that does not exist (D13)', async () => {
     fetchStub = createFetchStub({ billing: true, extraCreditPricePerUsd: 1 });
     const element = (await fixture(
       html`<account-view></account-view>`
@@ -583,11 +596,128 @@ describe('AccountView', () => {
     await waitUntil(() => !(element as any)._loading, 'load');
     await element.updateComplete;
 
-    const text = element.shadowRoot?.textContent ?? '';
-    expect(text).to.contain(
-      'Additional usage is billed at cost only when you opt in'
+    expect(usageCells(element)['Extra credits']).to.equal(
+      'Usage stops at the allowance.'
     );
+    const text = copy(element);
+    expect(text).to.not.contain('opt in');
     expect(text).to.not.contain('$1.00 per');
+  });
+
+  it('quotes no price for extra usage even when the server sends one', async () => {
+    // A marked-up rate is still a price for something nobody can buy.
+    fetchStub = createFetchStub({ billing: true, extraCreditPricePerUsd: 1.2 });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    expect(usageCells(element)['Extra credits']).to.equal(
+      'Usage stops at the allowance.'
+    );
+    expect(copy(element)).to.not.contain('per $1.00 of additional usage');
+  });
+
+  it('shows $0.00 and the whole cap when a capped plan has no usage yet', async () => {
+    // The founder's Legacy Teams account: $10 allowance, $10 cap, nothing
+    // spent, so the server sends no usage figure at all. "Not configured"
+    // there reads as a broken plan; the account simply has not spent.
+    fetchStub = createFetchStub({
+      billing: true,
+      hostedOverrides: {
+        included_limit_usd: 10,
+        active_limit_usd: 10,
+        current_usage_usd: null,
+        remaining_limit_usd: null,
+      },
+    });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const cells = usageCells(element);
+    expect(cells['Usage so far']).to.equal('$0.00');
+    expect(cells['Remaining before cap']).to.equal('$10');
+    expect(cells['Current active cap']).to.equal('$10');
+    expect(copy(element)).to.not.contain('Not configured');
+  });
+
+  it('reports a literal zero usage as $0.00, not as an absent figure', async () => {
+    fetchStub = createFetchStub({
+      billing: true,
+      hostedOverrides: {
+        included_limit_usd: 10,
+        active_limit_usd: 10,
+        current_usage_usd: 0,
+        remaining_limit_usd: 10,
+      },
+    });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const cells = usageCells(element);
+    expect(cells['Usage so far']).to.equal('$0.00');
+    expect(cells['Remaining before cap']).to.equal('$10');
+  });
+
+  it('still says "Not configured" when the plan has no allowance and no cap', async () => {
+    fetchStub = createFetchStub({
+      billing: true,
+      hostedOverrides: {
+        included_limit_usd: null,
+        active_limit_usd: null,
+        current_usage_usd: null,
+        remaining_limit_usd: null,
+      },
+    });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const cells = usageCells(element);
+    expect(cells['Usage so far']).to.equal('Not configured');
+    expect(cells['Remaining before cap']).to.equal('Not configured');
+    expect(cells['Monthly allowance']).to.equal('Not configured');
+  });
+
+  it('measures zero spend against the free tier one-time credit', async () => {
+    // Free has a one-time credit instead of a monthly cap, so the cap-based
+    // check alone would call an untouched grant "Not configured".
+    fetchStub = createFetchStub({
+      billing: true,
+      freeTier: true,
+      hostedOverrides: {
+        included_limit_usd: null,
+        active_limit_usd: null,
+        current_usage_usd: null,
+        remaining_limit_usd: null,
+        one_time_credit_usd: 5,
+      },
+    });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const cells = usageCells(element);
+    expect(cells['One-time credit']).to.equal('$5.00');
+    expect(cells['Usage so far']).to.equal('$0.00');
+    // No cap to subtract from, so nothing is invented for the cap cell.
+    expect(cells['Remaining before cap']).to.equal('Not configured');
   });
   it('keeps the sales-led plan (null price) and drops only the $0 plan', async () => {
     fetchStub = createFetchStub({
