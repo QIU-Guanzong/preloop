@@ -21,14 +21,21 @@ from sqlalchemy.orm import Session
 
 from preloop.models import models
 
-from .entitlement import entitlement_clause
+from .entitlement import entitlement_clause, grandfather_clause
 
 #: Plan id assumed for an account without an entitled subscription.
 DEFAULT_PLAN_ID = "free"
 
 
 def _entitled_plan_subquery() -> Any:
-    """Latest entitled subscription per account, as (account_id, plan_id)."""
+    """Latest entitled subscription per account, as (account_id, plan_id).
+
+    Carries the withdrawn-plan grandfathering rule as well as the entitlement
+    rule, so a preflight count of "accounts on the legacy plan" reports the
+    same population the account page, the seat gate and the comparison view
+    resolve. A preflight that counted unpaid trials of a retired plan as
+    entitled would report capacity pressure for accounts that are on Free.
+    """
     ranked = (
         select(
             models.Subscription.account_id.label("account_id"),
@@ -40,7 +47,10 @@ def _entitled_plan_subquery() -> Any:
             )
             .label("rank"),
         )
-        .where(entitlement_clause(models.Subscription))
+        .where(
+            entitlement_clause(models.Subscription),
+            grandfather_clause(models.Subscription, models.Plan),
+        )
         .subquery()
     )
     return select(ranked.c.account_id, ranked.c.plan_id).where(ranked.c.rank == 1)

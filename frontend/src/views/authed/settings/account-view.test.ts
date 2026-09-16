@@ -318,6 +318,55 @@ describe('AccountView', () => {
     expect(patchCall, 'expected a PATCH request').to.exist;
   });
 
+  // The persisted plan row keeps the name a grandfathered plan was sold
+  // under, so a catalog sync can never rewrite a live contract's terms. The
+  // catalog carries the current public name, and the server resolves it into
+  // `effective_plan.name`. When the two disagree the catalog wins on screen,
+  // which is what stops a withdrawn plan from announcing itself as "Teams"
+  // after the catalog renamed it to "Legacy Teams".
+  it('names a grandfathered legacy plan from the catalog, not the stored row', async () => {
+    fetchStub = createFetchStub({
+      billing: true,
+      subscription: {
+        plan_id: 'teams',
+        status: 'active',
+        current_period_end: '2030-01-01T00:00:00Z',
+      },
+      summaryPlan: { id: 'teams', name: 'Teams', features: { max_agents: -1 } },
+      effectivePlanId: 'teams',
+      effectivePlan: { id: 'teams', name: 'Legacy Teams' },
+    });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const rendered = element.shadowRoot?.querySelector('.plan-name');
+    expect(rendered?.textContent?.trim()).to.equal('Legacy Teams');
+  });
+
+  it('falls back to the stored plan name when the server sends no effective plan', async () => {
+    fetchStub = createFetchStub({
+      billing: true,
+      subscription: {
+        plan_id: 'plan-pro',
+        status: 'active',
+        current_period_end: '2030-01-01T00:00:00Z',
+      },
+    });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const rendered = element.shadowRoot?.querySelector('.plan-name');
+    expect(rendered?.textContent?.trim()).to.equal('Pro Plan');
+  });
+
   it('reports an ended trial as Free from the effective plan fields (D13)', async () => {
     fetchStub = createFetchStub({
       billing: true,

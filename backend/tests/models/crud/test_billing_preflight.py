@@ -335,6 +335,70 @@ class TestEntitledAccounts:
 
         assert counts[plan_id] == 1
 
+    def test_an_ended_trial_of_a_withdrawn_plan_is_counted_as_free(self, db_session):
+        """The preflight must count the population the console resolves.
+
+        A withdrawn plan (``is_active = False``) is grandfathered only for a
+        paying customer or a trial that is still running. Counting an ended
+        trial of it as entitled would report capacity pressure for an account
+        that is on Free, and it is how a retired plan appeared to have
+        subscribers it did not have.
+        """
+        now = datetime.now(timezone.utc)
+        plan_id = f"preflight-withdrawn-{uuid.uuid4().hex[:8]}"
+        plan = _plan(db_session, plan_id)
+        plan.is_active = False
+        db_session.flush()
+        account = _account(db_session)
+        _subscription(
+            db_session,
+            account,
+            plan_id,
+            status="trialing",
+            current_period_start=now - timedelta(days=44),
+            current_period_end=now - timedelta(days=14),
+        )
+
+        counts = billing_preflight.entitled_accounts_by_plan(db_session)
+        pressure = billing_preflight.entitled_capacity_pressure(
+            db_session, plan_id=plan_id, max_users=1, max_agents=1
+        )
+
+        assert plan_id not in counts
+        assert pressure["accounts"] == 0
+
+    def test_a_paying_subscriber_of_a_withdrawn_plan_is_still_counted(self, db_session):
+        plan_id = f"preflight-grandfathered-{uuid.uuid4().hex[:8]}"
+        plan = _plan(db_session, plan_id)
+        plan.is_active = False
+        db_session.flush()
+        account = _account(db_session)
+        _subscription(db_session, account, plan_id, status="active")
+
+        counts = billing_preflight.entitled_accounts_by_plan(db_session)
+
+        assert counts[plan_id] == 1
+
+    def test_a_locally_written_active_row_with_no_provider_id_is_not_counted(
+        self, db_session
+    ):
+        """A plan change written locally and never completed at the provider."""
+        plan_id = f"preflight-halfapplied-{uuid.uuid4().hex[:8]}"
+        plan = _plan(db_session, plan_id)
+        plan.is_active = False
+        db_session.flush()
+        _subscription(
+            db_session,
+            _account(db_session),
+            plan_id,
+            status="active",
+            stripe_subscription_id=None,
+        )
+
+        counts = billing_preflight.entitled_accounts_by_plan(db_session)
+
+        assert plan_id not in counts
+
     def test_an_unentitled_account_is_never_counted(self, db_session):
         plan_id = f"preflight-stale-{uuid.uuid4().hex[:8]}"
         _plan(db_session, plan_id)

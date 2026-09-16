@@ -15,7 +15,11 @@ from sqlalchemy.orm import Session
 
 from preloop.models import models
 from .api_usage import exclude_replay_usage_condition
-from .entitlement import ENTITLED_STATUSES, entitlement_clause
+from .entitlement import (
+    ENTITLED_STATUSES,
+    entitlement_clause,
+    grandfather_clause,
+)
 
 __all__ = ["ENTITLED_STATUSES", "CRUDBilling", "billing"]
 
@@ -104,12 +108,21 @@ class CRUDBilling:
         account that never subscribed, so every caller falls through to Free
         instead of honouring a stale ``trialing`` status. See
         :mod:`preloop.models.crud.entitlement` for the rule.
+
+        A row pointing at a plan that has been withdrawn from sale
+        (``plan.is_active == False``) only counts while somebody is paying
+        for it: grandfathering is a promise to paying customers, not a way
+        for an ended trial of a retired plan to keep that plan's terms and
+        name. A row whose plan row is missing entirely is treated the same
+        way, so it falls back to the default plan instead of resolving terms
+        nobody can read.
         """
         return (
             db.query(models.Subscription)
             .filter(
                 models.Subscription.account_id == account_id,
                 entitlement_clause(models.Subscription),
+                grandfather_clause(models.Subscription, models.Plan),
             )
             .order_by(models.Subscription.created_at.desc())
             .first()
