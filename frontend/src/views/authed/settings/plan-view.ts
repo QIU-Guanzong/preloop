@@ -22,7 +22,11 @@ import {
   getFeatures,
   startCheckout,
 } from '../../../api';
-import type { BillingPlan, PlanChangeOptions } from '../../../types/billing';
+import type {
+  BillingPlan,
+  PlanChangeOptions,
+  PlanEligibility,
+} from '../../../types/billing';
 import {
   PLAN_PAGE_PATH,
   capabilityForFeature,
@@ -218,6 +222,27 @@ export class PlanView extends LitElement {
     return options.current_plan?.id ?? 'free';
   }
 
+  /**
+   * Whether this plan is quoted rather than sold, for the label and the click.
+   *
+   * The server answers it outright when it sends eligibility. When it does
+   * not (an older server sends no `plan_eligibility` at all), the catalog's
+   * `purchasable` flag decides, and a published card with no price either way
+   * is a sales conversation whatever the catalog says: a plan the page itself
+   * prints as "Priced per deployment" has no amount to put through checkout.
+   */
+  private _isQuoteOnly(
+    plan: PricingPlan | undefined,
+    catalog: BillingPlan | undefined,
+    verdict: PlanEligibility | undefined
+  ): boolean {
+    if (verdict) return verdict.purchasable === false;
+    return (
+      catalog?.purchasable === false ||
+      (!!plan && plan.price_monthly == null && plan.price_annually == null)
+    );
+  }
+
   private _catalogPlan(planId: string): BillingPlan | undefined {
     return this._options?.plans.find((p) => p.id === planId);
   }
@@ -299,12 +324,7 @@ export class PlanView extends LitElement {
 
     // A quote-only plan is not bought from a console. The server supplies the
     // destination when it has one; the card falls back to the demo request.
-    const quoteOnly =
-      verdict?.purchasable === false ||
-      (verdict === undefined &&
-        (catalog?.purchasable === false ||
-          (plan.price_monthly == null && plan.price_annually == null)));
-    if (quoteOnly) {
+    if (this._isQuoteOnly(plan, catalog, verdict)) {
       return {
         label: plan.cta_text || 'Contact us',
         note: 'Priced per deployment.',
@@ -399,11 +419,10 @@ export class PlanView extends LitElement {
     const plan = this._plans.find((p) => p.id === planId);
     const catalog = this._catalogPlan(planId);
     const verdict = options.plan_eligibility?.find((e) => e.plan_id === planId);
-    const quoteOnly =
-      verdict?.purchasable === false ||
-      (verdict === undefined && catalog?.purchasable === false) ||
-      catalog === undefined;
-    if (quoteOnly) {
+    // The same question the card's label answered. One predicate, because a
+    // button that says "Contact us" and starts a checkout is the drift this
+    // page exists to remove.
+    if (this._isQuoteOnly(plan, catalog, verdict) || catalog === undefined) {
       this._navigate(verdict?.contact_url || plan?.cta_url || '/request-demo');
       return;
     }

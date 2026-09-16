@@ -71,6 +71,32 @@ const CONTENT = {
   },
 };
 
+/**
+ * A published card with no price, whose catalog entry never says
+ * `purchasable: false`. An older server sends no `plan_eligibility` at all,
+ * so nothing but the missing price says this plan is quoted, not sold.
+ */
+const UNPRICED_CARD = {
+  id: 'scale',
+  name: 'Scale',
+  price_monthly: null,
+  price_annually: null,
+  deployment: 'cloud',
+  tagline: 'Priced with you.',
+  cta_text: 'Talk to us',
+  cta_url: '/request-demo',
+  features: [],
+};
+
+const UNPRICED_CATALOG = {
+  id: 'scale',
+  name: 'Scale',
+  price_monthly: null,
+  price_annually: null,
+  features: {},
+  capabilities: [],
+};
+
 /** The billing catalog, as plan-change-options reports it. */
 const CATALOG = [
   {
@@ -171,6 +197,7 @@ describe('PlanView', () => {
       legacy?: boolean;
       checkout?: Record<string, unknown>;
       blocked?: string[];
+      unpricedPlan?: boolean;
     } = {}
   ) {
     const billing = opts.billing !== false;
@@ -202,16 +229,30 @@ describe('PlanView', () => {
         const url = typeof input === 'string' ? input : input.toString();
         const method = (init?.method || 'GET').toUpperCase();
 
-        if (url.includes('/landing-content.json')) return json(CONTENT);
+        if (url.includes('/landing-content.json'))
+          return json(
+            opts.unpricedPlan
+              ? {
+                  ...CONTENT,
+                  pricing: {
+                    ...CONTENT.pricing,
+                    plans: [...CONTENT.pricing.plans, UNPRICED_CARD],
+                  },
+                }
+              : CONTENT
+          );
 
         if (url.includes('/api/v1/features')) {
           return json({ plugins: [], features: { billing } });
         }
 
         if (url.includes('/api/v1/billing/plan-change-options')) {
+          const catalog = opts.unpricedPlan
+            ? [...CATALOG, UNPRICED_CATALOG]
+            : CATALOG;
           const plans = opts.legacy
             ? [
-                ...CATALOG,
+                ...catalog,
                 {
                   id: 'teams',
                   name: 'Legacy Teams',
@@ -223,7 +264,7 @@ describe('PlanView', () => {
                   capabilities: ['ai_optimization'],
                 },
               ]
-            : CATALOG;
+            : catalog;
           const blocked = opts.blocked ?? [];
           const eligibility = opts.blocked
             ? plans.map((p) => ({
@@ -568,6 +609,34 @@ describe('PlanView', () => {
     )?.textContent;
     expect(line).to.contain('Legacy Teams');
     expect(line).to.contain('renews on');
+  });
+
+  it('clicks the button it rendered on a server that sends no eligibility', async () => {
+    // The old-server shape: no `plan_eligibility`, and a card the catalog
+    // never marked unpurchasable. The page prints "Priced per deployment", so
+    // the click has to go to the sales conversation rather than to a checkout
+    // for an amount nobody quoted.
+    const element = await mount({ currentPlan: 'pro', unpricedPlan: true });
+    expect(element.shadowRoot?.querySelector('[data-testid="plan-error"]')).to
+      .not.exist;
+    expect(ctas(element)['Scale']).to.equal('Talk to us');
+    expect(note(element, 'Scale')).to.contain('Priced per deployment');
+
+    const navigate = sinon.stub(element as any, '_navigate');
+    const panel = element.shadowRoot?.querySelector(
+      'billing-plan-comparison'
+    ) as any;
+    const startChange = sinon.spy(panel, 'startChange');
+    clickCard(element, 'Scale');
+    await element.updateComplete;
+
+    expect(navigate).to.have.been.calledWith('/request-demo');
+    expect(startChange).to.not.have.been.called;
+    expect(
+      fetchStub
+        .getCalls()
+        .some((c) => String(c.args[0]).includes('create-checkout-session'))
+    ).to.equal(false);
   });
 
   it('says when a subscription is ending rather than renewing', async () => {
