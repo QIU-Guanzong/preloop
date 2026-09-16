@@ -1,4 +1,4 @@
-import { LitElement, html, css, unsafeCSS } from 'lit';
+import { LitElement, html, css, unsafeCSS, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import '@shoelace-style/shoelace/dist/components/alert/alert.js';
@@ -958,6 +958,17 @@ export class RuntimeSessionsView extends LitElement {
   }
 
   @state() private isPremium = true;
+
+  /** Open the shell upgrade modal for AI session titles (passive list hint). */
+  private openTitlesUpgrade(): void {
+    window.dispatchEvent(
+      new CustomEvent('show-upgrade-modal', {
+        detail: { feature: 'session_titles', code: 'upgrade_required' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
 
   private async loadSessions(isSoftRefresh = false) {
     const seq = ++this.loadSequence;
@@ -2314,7 +2325,19 @@ export class RuntimeSessionsView extends LitElement {
               </div>
               <span slot="count">${this.sessionCountLabel}</span>
             </list-toolbar>
-
+            ${
+              this.isPremium
+                ? nothing
+                : html`
+                    <button
+                      type="button"
+                      class="titles-upsell-hint"
+                      @click=${this.openTitlesUpgrade}
+                    >
+                      Unlock AI titles for these sessions
+                    </button>
+                  `
+            }
             ${
               this.error
                 ? html`

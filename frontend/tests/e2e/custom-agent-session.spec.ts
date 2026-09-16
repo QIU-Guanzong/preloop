@@ -163,13 +163,15 @@ async function runCustomAgentWizard(
   await page.goto('/console/agents');
 
   const wizard = page.locator('preloop-deploy-wizard');
-
-  // The wizard auto-opens for a fresh (agent-less) account; otherwise click the
-  // "Deploy Agent" trigger to open the onboarding dialog. Try the trigger but
-  // tolerate the auto-open case.
-  const trigger = page.getByRole('button', { name: /Deploy Agent/i });
+  const trigger = page.getByRole('button', {
+    name: /Onboard existing agent/i,
+  });
+  // Fresh accounts auto-open the wizard. Otherwise the Agents page trigger
+  // is "Onboard existing agent" (the custom-agent path). "Deploy new agent"
+  // opens a different dialog and is not this flow.
   if ((await wizard.count()) === 0) {
-    await trigger.first().click().catch(() => undefined);
+    await trigger.first().waitFor({ state: 'visible', timeout: 30_000 });
+    await trigger.first().click();
   }
   await wizard.first().waitFor({ state: 'attached', timeout: 30_000 });
 
@@ -269,6 +271,8 @@ async function listSessions(
 }
 
 test.describe('Custom-agent onboarding + per-run session', () => {
+  test.describe.configure({ timeout: 120_000 });
+
   test('walks the wizard and mints a gateway credential', async ({ page }) => {
     const creds = resolveCreds();
     await login(page, creds);
