@@ -33,8 +33,11 @@ inputs:
     default: 40m
   labels:
     description: >-
-      Runner label for mode "runner". Defaults to a label unique to this
-      job, so the execution reaches this runner and no other.
+      A single runner label for mode "runner". Defaults to a label unique
+      to this job, so the execution reaches this runner and no other. One
+      label, not a list: a comma is rejected up front, because the CLI
+      would split it into several labels while the trigger pins the
+      execution to one.
     required: false
     default: ''
   cli-version:
@@ -62,6 +65,8 @@ runs:
       shell: bash
       env:
         MODE: ${{ inputs.mode }}
+        LABELS: ${{ inputs.labels }}
+        PAYLOAD: ${{ inputs.payload }}
       run: |
         set -euo pipefail
         case "$MODE" in
@@ -71,6 +76,27 @@ runs:
         if [ "$MODE" = runner ] && [ "$RUNNER_OS" != Linux ]; then
           echo "::error::mode 'runner' needs Docker on a Linux runner; this job is $RUNNER_OS"
           exit 1
+        fi
+        # One label, not a list. The CLI splits --labels on commas, so
+        # "ci,large" registers two labels while the trigger pins the
+        # execution to one label literally named "ci,large". Nothing would
+        # ever lease it, and the job would sit there until the timeout.
+        case "${MODE}:${LABELS}" in
+          runner:*,*)
+            echo "::error::labels takes a single runner label; '$LABELS' contains a comma, which the CLI would split into separate labels while the trigger pins to one exact label"
+            exit 1
+            ;;
+        esac
+        # A payload is a JSON value or a path to a file holding one. A value
+        # that is neither is almost always a mistyped path, or a build step
+        # that produced nothing. Say that, instead of failing later on a
+        # JSON parse error that names the path as if it were the document.
+        if [ -n "$PAYLOAD" ] && [ ! -f "$PAYLOAD" ]; then
+          first="$(printf '%s' "$PAYLOAD" | tr -d '[:space:]' | cut -c1)"
+          if [ "$first" != '{' ] && [ "$first" != '[' ]; then
+            echo "::error::payload '$PAYLOAD' is neither an existing file nor a JSON object or array"
+            exit 1
+          fi
         fi
 
     - name: Install the Preloop CLI
@@ -153,6 +179,8 @@ runs:
         elif [ -f "$PAYLOAD" ]; then
           cp "$PAYLOAD" "$payload_file"
         else
+          # Not a file, so it is a JSON value: "Check inputs" already
+          # rejected anything that is neither.
           printf '%s' "$PAYLOAD" > "$payload_file"
         fi
         args=(flow trigger "$FLOW" --timeout "$TIMEOUT")

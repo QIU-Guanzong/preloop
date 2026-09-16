@@ -75,7 +75,9 @@ jobs:
 The `payload` input takes either a path to a JSON file (as above) or a
 JSON string. The action pipes it through `preloop flow trigger
 --payload -`, so nothing lands on a command line where another step
-could read it out of the process table.
+could read it out of the process table. A value that is neither an
+existing file nor a JSON object or array fails the step immediately: a
+mistyped path is a typo to report, not a payload to send.
 
 The step fails when the execution does. The outputs (`execution-id`,
 `execution-url`, `status`) are written before the failure, so a later
@@ -90,7 +92,9 @@ The step fails when the execution does. The outputs (`execution-id`,
           payload: payload.json
           token: ${{ secrets.PRELOOP_TOKEN }}
           mode: runner
-          cli-version: '0.16.0'   # needs one-shot ephemeral support
+          # The first release with `runner fg --once --ephemeral`
+          # (0.16.0 once published; 0.15.0 does not have it).
+          cli-version: '0.16.0'
 ```
 
 In `runner` mode the action:
@@ -120,10 +124,13 @@ console. See
     own machine. (A measured number on `ubuntu-latest` is pending; it
     needs a live run against a control plane.)
 *   `cli-version` must be a release that has `runner fg --once
-    --ephemeral`. The action checks and fails with that message rather
-    than dying on an unknown flag.
+    --ephemeral`, which is the first release after this feature lands
+    (`0.16.0` once published). The action checks the installed CLI and
+    fails with that message rather than dying on an unknown flag.
 *   The default `labels` is unique per run and attempt. Override it only
-    when the trigger side already knows a different label.
+    when the trigger side already knows a different label, and pass one
+    label: the action rejects a comma, because the CLI would register
+    several labels while the trigger pins the execution to one.
 
 ## Do not review the same pull request twice
 
@@ -165,12 +172,12 @@ cache, image pulled every time.
 | Input | Default | Meaning |
 | --- | --- | --- |
 | `flow` | required | Flow id or name |
-| `payload` | `''` | JSON object, or a path to a file containing one |
+| `payload` | `''` | JSON object or array, or a path to a file containing one |
 | `token` | required | Account API token |
 | `url` | `https://preloop.ai` | Control plane |
 | `mode` | `hosted` | `hosted` or `runner` |
 | `timeout` | `40m` | How long to wait for the execution |
-| `labels` | per-run label | Runner label for `mode: runner` |
+| `labels` | per-run label | One runner label for `mode: runner` (no commas) |
 | `cli-version` | pinned | CLI release to install |
 
 | Output | Meaning |
