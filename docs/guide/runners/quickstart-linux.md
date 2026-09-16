@@ -160,6 +160,9 @@ Constraints worth knowing before you wire this into a pipeline:
 *   The runner needs `PRELOOP_TOKEN` (or `preloop login`) and a reachable
     control plane, same as a long-lived runner.
 
+The GitHub Actions guide wires this into a workflow:
+[trigger flows from GitHub Actions](../flows/github-actions.md).
+
 ## How runner work counts against your account
 
 A Preloop instance bounds how many executions one account may have admitted

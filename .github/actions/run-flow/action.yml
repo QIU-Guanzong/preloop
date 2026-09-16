@@ -1,0 +1,249 @@
+name: Run a Preloop flow
+description: >-
+  Trigger a Preloop flow from GitHub Actions and fail the job on the
+  execution's verdict. Optionally runs the agent on the job's own VM
+  through a one-shot ephemeral runner.
+
+inputs:
+  flow:
+    description: Flow id or name to trigger.
+    required: true
+  payload:
+    description: >-
+      Trigger payload: a JSON object, or a path to a file containing one.
+      Empty triggers the flow with no payload.
+    required: false
+    default: ''
+  token:
+    description: Preloop account API token (pass a secret, never a literal).
+    required: true
+  url:
+    description: Control plane URL.
+    required: false
+    default: https://preloop.ai
+  mode:
+    description: >-
+      hosted: Preloop runs the agent. runner: this job runs the agent in
+      Docker on the GitHub runner through a one-shot ephemeral runner.
+    required: false
+    default: hosted
+  timeout:
+    description: How long to wait for the execution before giving up.
+    required: false
+    default: 40m
+  labels:
+    description: >-
+      A single runner label for mode "runner". Defaults to a label unique
+      to this job, so the execution reaches this runner and no other. One
+      label, not a list: a comma is rejected up front, because the CLI
+      would split it into several labels while the trigger pins the
+      execution to one.
+    required: false
+    default: ''
+  cli-version:
+    description: >-
+      Preloop CLI version to install. Pinned on purpose: an action that
+      follows "latest" changes what your pipeline runs without a commit.
+    required: false
+    default: 0.15.0
+
+outputs:
+  execution-id:
+    description: Id of the triggered execution (empty if the trigger failed).
+    value: ${{ steps.trigger.outputs.execution-id }}
+  execution-url:
+    description: Console URL of the execution.
+    value: ${{ steps.trigger.outputs.execution-url }}
+  status:
+    description: SUCCEEDED, FAILED, STOPPED, TIMEOUT, or UNKNOWN.
+    value: ${{ steps.trigger.outputs.status }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check inputs
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        LABELS: ${{ inputs.labels }}
+        PAYLOAD: ${{ inputs.payload }}
+      run: |
+        set -euo pipefail
+        case "$MODE" in
+          hosted|runner) ;;
+          *) echo "::error::mode must be 'hosted' or 'runner', got '$MODE'"; exit 1 ;;
+        esac
+        if [ "$MODE" = runner ] && [ "$RUNNER_OS" != Linux ]; then
+          echo "::error::mode 'runner' needs Docker on a Linux runner; this job is $RUNNER_OS"
+          exit 1
+        fi
+        # One label, not a list. The CLI splits --labels on commas, so
+        # "ci,large" registers two labels while the trigger pins the
+        # execution to one label literally named "ci,large". Nothing would
+        # ever lease it, and the job would sit there until the timeout.
+        case "${MODE}:${LABELS}" in
+          runner:*,*)
+            echo "::error::labels takes a single runner label; '$LABELS' contains a comma, which the CLI would split into separate labels while the trigger pins to one exact label"
+            exit 1
+            ;;
+        esac
+        # A payload is a JSON value or a path to a file holding one. A value
+        # that is neither is almost always a mistyped path, or a build step
+        # that produced nothing. Say that, instead of failing later on a
+        # JSON parse error that names the path as if it were the document.
+        if [ -n "$PAYLOAD" ] && [ ! -f "$PAYLOAD" ]; then
+          first="$(printf '%s' "$PAYLOAD" | tr -d '[:space:]' | cut -c1)"
+          if [ "$first" != '{' ] && [ "$first" != '[' ]; then
+            echo "::error::payload '$PAYLOAD' is neither an existing file nor a JSON object or array"
+            exit 1
+          fi
+        fi
+
+    - name: Install the Preloop CLI
+      shell: bash
+      env:
+        PRELOOP_VERSION: ${{ inputs.cli-version }}
+        INSTALL_DIR: ${{ runner.temp }}/preloop-bin
+        PRELOOP_CONFIRM: '1'
+      run: |
+        set -euo pipefail
+        mkdir -p "$INSTALL_DIR"
+        curl -fsSL https://preloop.ai/install/cli | sh
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+        "$INSTALL_DIR/preloop" version
+
+    - name: Start a one-shot ephemeral runner
+      if: inputs.mode == 'runner'
+      shell: bash
+      env:
+        PRELOOP_TOKEN: ${{ inputs.token }}
+        PRELOOP_URL: ${{ inputs.url }}
+        RUNNER_LABEL: ${{ inputs.labels != '' && inputs.labels || format('ci-{0}-{1}', github.run_id, github.run_attempt) }}
+        TIMEOUT: ${{ inputs.timeout }}
+        CLI_VERSION: ${{ inputs.cli-version }}
+      run: |
+        set -euo pipefail
+        # The label is what ties the trigger below to this process. Record it
+        # for the trigger and cleanup steps rather than recomputing it.
+        echo "PRELOOP_CI_RUNNER_LABEL=$RUNNER_LABEL" >> "$GITHUB_ENV"
+        log="$RUNNER_TEMP/preloop-runner.log"
+        : > "$log"
+        # The runner needs Docker on this VM. Say so now, not 15 minutes
+        # later when the execution times out with nothing to lease it.
+        docker info > /dev/null 2>&1 || {
+          echo "::error::mode 'runner' needs a working Docker daemon on this job"
+          exit 1
+        }
+        if ! preloop runner fg --help 2>&1 | grep -q -- '--ephemeral'; then
+          echo "::error::CLI $CLI_VERSION has no one-shot ephemeral mode; pin a newer cli-version"
+          exit 1
+        fi
+        nohup preloop runner fg --once --ephemeral \
+          --labels "$RUNNER_LABEL" \
+          --wait-for-job "$TIMEOUT" >> "$log" 2>&1 &
+        pid=$!
+        echo "PRELOOP_CI_RUNNER_PID=$pid" >> "$GITHUB_ENV"
+        # Wait for the registration to land before triggering. Without this
+        # the execution is queued against a runner that is not online yet,
+        # which works but hides a failed start behind a 15 minute queue.
+        for _ in $(seq 1 60); do
+          if grep -q 'Connected' "$log"; then
+            echo "Ephemeral runner online with label $RUNNER_LABEL"
+            exit 0
+          fi
+          if ! kill -0 "$pid" 2>/dev/null; then
+            break
+          fi
+          sleep 1
+        done
+        echo "::error::ephemeral runner did not come online in 60s"
+        cat "$log"
+        exit 1
+
+    - name: Trigger the flow
+      id: trigger
+      shell: bash
+      env:
+        PRELOOP_TOKEN: ${{ inputs.token }}
+        PRELOOP_URL: ${{ inputs.url }}
+        FLOW: ${{ inputs.flow }}
+        PAYLOAD: ${{ inputs.payload }}
+        TIMEOUT: ${{ inputs.timeout }}
+        MODE: ${{ inputs.mode }}
+      run: |
+        set -uo pipefail
+        log="$RUNNER_TEMP/preloop-trigger.log"
+        payload_file="$RUNNER_TEMP/preloop-payload.json"
+        if [ -z "$PAYLOAD" ]; then
+          : > "$payload_file"
+        elif [ -f "$PAYLOAD" ]; then
+          cp "$PAYLOAD" "$payload_file"
+        else
+          # Not a file, so it is a JSON value: "Check inputs" already
+          # rejected anything that is neither.
+          printf '%s' "$PAYLOAD" > "$payload_file"
+        fi
+        args=(flow trigger "$FLOW" --timeout "$TIMEOUT")
+        if [ -s "$payload_file" ]; then
+          args+=(--payload -)
+        fi
+        if [ "$MODE" = runner ]; then
+          args+=(--runner "$PRELOOP_CI_RUNNER_LABEL")
+        fi
+        # The CLI waits, streams the execution log to this job, and exits
+        # non-zero on FAILED, STOPPED or TIMEOUT. Keep its status, but write
+        # the outputs first: a failed run is exactly when the execution URL
+        # is worth having.
+        set +e
+        preloop "${args[@]}" < "$payload_file" 2>&1 | tee "$log"
+        code=${PIPESTATUS[0]}
+        set -e
+        id="$(sed -n 's/.*(execution \([0-9a-fA-F-]\{36\}\).*/\1/p' "$log" | head -n 1)"
+        status=UNKNOWN
+        if [ "$code" -eq 0 ]; then
+          status=SUCCEEDED
+        else
+          parsed="$(sed -n 's/.*execution [0-9a-fA-F-]\{36\} \([A-Z]*\).*/\1/p' "$log" | tail -n 1)"
+          case "$parsed" in
+            FAILED|STOPPED|TIMEOUT) status="$parsed" ;;
+          esac
+          if grep -q 'timed out after' "$log"; then
+            status=TIMEOUT
+          fi
+        fi
+        {
+          echo "execution-id=$id"
+          echo "status=$status"
+          if [ -n "$id" ]; then
+            echo "execution-url=${PRELOOP_URL%/}/console/flows/executions/$id"
+          else
+            echo "execution-url="
+          fi
+        } >> "$GITHUB_OUTPUT"
+        if [ -n "$id" ]; then
+          echo "[$status] ${PRELOOP_URL%/}/console/flows/executions/$id" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        exit "$code"
+
+    - name: Stop the ephemeral runner
+      if: always() && inputs.mode == 'runner'
+      shell: bash
+      run: |
+        set -uo pipefail
+        pid="${PRELOOP_CI_RUNNER_PID:-}"
+        log="$RUNNER_TEMP/preloop-runner.log"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+          # SIGTERM is the runner's unregister path. Give it a few seconds to
+          # take the row down before the VM disappears with it.
+          kill -TERM "$pid" 2>/dev/null || true
+          for _ in $(seq 1 15); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+          done
+          kill -KILL "$pid" 2>/dev/null || true
+        fi
+        if [ -f "$log" ]; then
+          echo "::group::Ephemeral runner log"
+          tail -n 200 "$log"
+          echo "::endgroup::"
+        fi
