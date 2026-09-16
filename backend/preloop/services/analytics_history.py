@@ -22,13 +22,16 @@ from preloop.models.crud.history_policy import (
 from preloop.plugins import get_plugin_manager
 
 
-def _configured_history_days(db: Session, *, account: models.Account) -> int | None:
-    """Resolve a cloud reporting window; OSS/self-host has no cloud cutoff.
+#: Sanity bound on a plan policy's answer, in days. This is not a plan value
+#: and not a retention floor: it only rejects an obviously broken policy
+#: (zero, negative, a boolean) before it can shrink a window. The shortest
+#: window any plan may legitimately show is the entry plan's, so this sits at
+#: 90 days. Physical retention floors live in retention_policy, untouched.
+MINIMUM_ANALYTICS_POLICY_DAYS = 90
 
-    A broken billing policy cannot choose a shorter window or authorize a
-    purge. Fail explicitly on reporting paths; purge also fails before delete.
-    """
-    provider = get_plugin_manager().get_service("analytics_history_policy")
+
+def _policy_days(db: Session, *, account: models.Account, provider: Any) -> int | None:
+    """Validate one plan policy answer; a broken policy never shortens anything."""
     if provider is None:
         return None
     try:
@@ -39,9 +42,40 @@ def _configured_history_days(db: Session, *, account: models.Account) -> int | N
         ) from exc
     if days is None or days == -1:
         return days
-    if isinstance(days, bool) or not isinstance(days, int) or days < 183:
+    if (
+        isinstance(days, bool)
+        or not isinstance(days, int)
+        or days < MINIMUM_ANALYTICS_POLICY_DAYS
+    ):
         raise HTTPException(503, "Analytics history policy is invalid")
     return days
+
+
+def _configured_history_days(db: Session, *, account: models.Account) -> int | None:
+    """Resolve a cloud reporting window; OSS/self-host has no cloud cutoff.
+
+    A broken billing policy cannot choose a shorter window or authorize a
+    purge. Fail explicitly on reporting paths; purge also fails before delete.
+    """
+    return _policy_days(
+        db,
+        account=account,
+        provider=get_plugin_manager().get_service("analytics_history_policy"),
+    )
+
+
+def _configured_storage_days(db: Session, *, account: models.Account) -> int | None:
+    """Resolve what a plan KEEPS, which can be more than reporting shows.
+
+    A plan may display a shorter window than it stores. Deleting to the
+    displayed window would make that window permanent, so the purge path asks
+    for the storage promise. Plugin builds that publish only the reporting
+    policy keep their old behaviour, where the two were the same number.
+    """
+    provider = get_plugin_manager().get_service("analytics_storage_policy")
+    if provider is None:
+        return _configured_history_days(db, account=account)
+    return _policy_days(db, account=account, provider=provider)
 
 
 def analytics_history_days(db: Session, *, account: models.Account) -> int | None:
@@ -127,7 +161,7 @@ def storage_history_days(db: Session, *, account: models.Account) -> int | None:
     )
     if stored == -1:
         return None
-    current = _configured_history_days(db, account=account)
+    current = _configured_storage_days(db, account=account)
     # Reporting may legitimately fall back to Free after entitlement ends.
     # Existing subscriptions can predate Account's durable floor and must
     # still protect physical rows even while the billing plugin is enabled.

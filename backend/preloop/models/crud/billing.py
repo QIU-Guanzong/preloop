@@ -180,6 +180,177 @@ class CRUDBilling:
             "active_agents": int(agents or 0),
         }
 
+    def plan_fit_candidates(self, db: Session, account_id: str) -> dict[str, list[Any]]:
+        """Members and agents of one account, most-keepable first.
+
+        "Most keepable" is the order an over-capacity account is trimmed in
+        when its plan shrinks (the enterprise plan-fit enforcer):
+
+        Members
+            The account owner (``account.primary_user_id``) first and always,
+            then the most recently active member. Recency of a member is
+            ``User.last_login``; a member who never logged in has none, so
+            those sort last and are broken by ``created_at`` (newest first)
+            and finally by id, which makes the order total and stable.
+
+        Agents
+            Most recently active first, where recency is
+            ``ManagedAgent.last_seen_at`` (stamped by enrollment and by every
+            piece of gateway traffic the agent produces), then ``created_at``
+            and id for the same reason.
+
+        Read-only: it returns rows, decides nothing and writes nothing.
+
+        Args:
+            db: Database session.
+            account_id: Account whose capacity is being measured.
+
+        Returns:
+            ``{"users": [...], "agents": [...]}`` with active rows only.
+        """
+        account = db.query(models.Account).filter(models.Account.id == account_id).one()
+        owner_first = case(
+            (models.User.id == account.primary_user_id, 0),
+            else_=1,
+        )
+        users = (
+            db.query(models.User)
+            .filter(
+                models.User.account_id == account_id,
+                models.User.is_active.is_(True),
+            )
+            .order_by(
+                owner_first,
+                models.User.last_login.desc().nullslast(),
+                models.User.created_at.desc(),
+                models.User.id,
+            )
+            .all()
+        )
+        agents = (
+            db.query(models.ManagedAgent)
+            .filter(
+                models.ManagedAgent.account_id == account_id,
+                models.ManagedAgent.lifecycle_state == "active",
+            )
+            .order_by(
+                models.ManagedAgent.last_seen_at.desc(),
+                models.ManagedAgent.created_at.desc(),
+                models.ManagedAgent.id,
+            )
+            .all()
+        )
+        return {"users": users, "agents": agents}
+
+    def enforce_plan_fit(
+        self,
+        db: Session,
+        *,
+        account_id: str,
+        max_users: int,
+        max_agents: int,
+        reason: str,
+        operation_key: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Trim one account to its plan's caps in a single transaction.
+
+        Deactivates the members and suspends the agents that sit beyond the
+        caps, keeping the most keepable of each (see
+        :meth:`plan_fit_candidates`) and never the owner. A cap of ``-1`` is
+        unlimited and that half of the account is left untouched.
+
+        The whole change, including the audit row, is one transaction under
+        the account lock, so a seat claim racing this cannot land between the
+        measurement and the write. Nothing here decides *whether* an account
+        should be trimmed: the caller (the enterprise plan-fit enforcer) owns
+        that policy, which is why the caps arrive as numbers.
+
+        Idempotency has two layers. A completed operation with the same key
+        is reported back untouched, and an account already inside its caps
+        writes nothing at all.
+
+        Args:
+            db: Database session; committed once on success.
+            account_id: Account to trim.
+            max_users: Seat ceiling, -1 for unlimited.
+            max_agents: Active-agent ceiling, -1 for unlimited.
+            reason: Short machine-readable cause, stored on each agent as its
+                lifecycle reason and in the audit row.
+            operation_key: Stable key for the audit/idempotency row.
+            payload: Inputs recorded on the audit row.
+
+        Returns:
+            ``status`` (``applied``, ``within_limits`` or ``already_applied``),
+            the ``users`` and ``agents`` that were deactivated (id, plus the
+            label a notification needs) and ``operation_id`` when a row was
+            written.
+        """
+        existing = self.operation(db, account_id, operation_key)
+        if existing is not None and existing.status == "completed":
+            return {**dict(existing.result), "status": "already_applied"}
+        self.lock_account(db, account_id)
+        candidates = self.plan_fit_candidates(db, account_id)
+        surplus_users = candidates["users"][max_users:] if max_users >= 0 else []
+        surplus_agents = candidates["agents"][max_agents:] if max_agents >= 0 else []
+        if not surplus_users and not surplus_agents:
+            # Release the lock without discarding anything the caller staged.
+            db.commit()
+            return {
+                "status": "within_limits",
+                "users": [],
+                "agents": [],
+                "operation_id": None,
+            }
+        now = datetime.now(timezone.utc)
+        for user in surplus_users:
+            user.is_active = False
+            db.add(user)
+        for agent in surplus_agents:
+            agent.lifecycle_state = "suspended"
+            agent.lifecycle_reason = reason
+            agent.lifecycle_updated_at = now
+            # Same as an operator pause: a suspended agent holds no control
+            # session, and every auth path already refuses a non-active agent.
+            agent.control_connection_id = None
+            agent.control_last_heartbeat_at = None
+            agent.control_session_mode = None
+            db.add(agent)
+        result = {
+            "status": "applied",
+            "reason": reason,
+            "users": [
+                {
+                    "id": str(user.id),
+                    "username": user.username,
+                    "email": user.email,
+                }
+                for user in surplus_users
+            ],
+            "agents": [
+                {"id": str(agent.id), "display_name": agent.display_name}
+                for agent in surplus_agents
+            ],
+        }
+        if surplus_users:
+            from .capacity import record_capacity_change
+
+            record_capacity_change(db, str(account_id))
+        row = models.BillingOperation(
+            account_id=account_id,
+            operation_key=operation_key,
+            kind="plan_fit_enforcement",
+            status="completed",
+            lease_until=None,
+            payload=payload,
+            result=result,
+        )
+        db.add(row)
+        db.flush()
+        result["operation_id"] = str(row.id)
+        db.commit()
+        return result
+
     def accept_invitation(
         self, db: Session, invitation_id: Any, user_data: dict[str, Any]
     ) -> models.User:

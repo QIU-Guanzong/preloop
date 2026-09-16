@@ -12,6 +12,14 @@ from preloop.models import models
 
 HISTORY_RETENTION_KEY = "subscription_history_retention_days"
 
+#: Plan feature key for the READ-TIME analytics window, in days. It is not a
+#: storage promise and never reaches the purger: a plan may show less history
+#: than it stores (the Free plan does), but no plan may show more than
+#: ``retention_days`` keeps. Physical deletion follows ``retention_days``
+#: alone, which is why :func:`analytics_plan_retention` below does not read
+#: this key.
+ANALYTICS_WINDOW_KEY = "analytics_window_days"
+
 
 def preserve_history_retention(
     db: Session, *, account_id: Any, days: int | None
@@ -68,6 +76,25 @@ def longest_history_promise(*values: Any) -> int:
     return -1 if -1 in valid else max([0, *valid])
 
 
+def analytics_read_window(features: dict[str, Any] | None) -> int | None:
+    """Days of analytics a plan SHOWS, which may be fewer than it stores.
+
+    ``analytics_window_days`` when the plan states one, otherwise the plan's
+    retention promise, so a plan that says nothing shows everything it keeps.
+    Read-time only: callers use it to bound a query, never to delete a row.
+
+    Args:
+        features: A plan's feature map, or None.
+
+    Returns:
+        Days, ``-1`` for unlimited, or None when the plan states neither.
+    """
+    days = (features or {}).get(ANALYTICS_WINDOW_KEY)
+    if type(days) is int and (days == -1 or days > 0):
+        return days
+    return analytics_plan_retention(features)
+
+
 def analytics_plan_retention(features: dict[str, Any] | None) -> int | None:
     """Prefer explicit analytics terms, retaining the legacy audit-only fallback.
 
@@ -75,6 +102,11 @@ def analytics_plan_retention(features: dict[str, Any] | None) -> int | None:
     When analytics is explicit, audit storage is a separate policy and cannot
     make analytics unlimited. Already materialized account floors are never
     reinterpreted or reduced by this helper.
+
+    This is the STORAGE promise, and the purger's only input. A plan's
+    read-time window (``analytics_window_days``, see
+    :func:`analytics_read_window`) is deliberately invisible here: a shorter
+    window must never shorten what is kept.
     """
     values = features or {}
     key = (
