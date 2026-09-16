@@ -127,18 +127,22 @@ jobs:
   # Where do the test jobs run?
   # ==========================================================================
   #
-  # GitHub-hosted minutes are the queue bottleneck on this repo, and a private
-  # Debian x64 VM is registered as a repository runner (`my-debian-vm`, labels
-  # self-hosted,Linux,X64). It is NOT always on. So the test suites ask this
-  # job where to go and it answers with a `runs-on` value:
+  # ubuntu-latest is the default. Idle self-hosted Linux/X64 runners are
+  # extra capacity, not a replacement pool: GitHub will wait forever on a
+  # self-hosted `runs-on` rather than overflow onto hosted, so sending every
+  # test job to three VMs serializes the suite and is slower than before.
   #
-  #   ["self-hosted","Linux","X64"]   at least one matching runner is online
-  #                                   and idle
-  #   "ubuntu-latest"                 anything else, including every failure
-  #                                   mode below
+  # Frontend, plugins, and coverage stay on ubuntu-latest and do not wait
+  # for this job. Backend is eight shards; this job emits `backend_plan`,
+  # an array of eight {runner, container, db_host, postgres_ports} entries.
+  # The first 8-N shards stay hosted (group 1 is the long pole). The last
+  # N shards — the excess — go to idle self-hosted runners, each in a
+  # python:<PYTHON_VERSION>-bookworm container so two listeners on one VM
+  # do not collide on host 5432. N is min(idle matching runners, 8).
   #
-  # The fallback is the safe default and this job NEVER fails the workflow:
-  # a PR must not go red because the runner inventory could not be read.
+  # Anything else, including every failure mode below, is N=0 (all hosted).
+  # This job NEVER fails the workflow: a PR must not go red because the
+  # runner inventory could not be read.
   #
   # Two knobs the repo admin owns:
   #
@@ -148,22 +152,13 @@ jobs:
   #                                `administration: read`, which the workflow
   #                                GITHUB_TOKEN cannot be granted. Absent or
   #                                empty (forks, Dependabot, not created yet)
-  #                                means ubuntu-latest.
-  #   variable CI_SELF_HOSTED_TESTS  set to "false" to force every test job
-  #                                back onto the public runners without a
-  #                                commit. Unset or anything else means the
-  #                                routing above is live.
+  #                                means all hosted.
+  #   variable CI_SELF_HOSTED_TESTS  set to "false" to force every shard
+  #                                onto ubuntu-latest without a commit.
+  #                                Unset or anything else means the routing
+  #                                above is live.
   #
-  # Caveat the admin should know: one VM serializes all of it. The eight
-  # backend shards, Backend Coverage, Frontend Tests and Runtime Plugin Tests
-  # run one at a time on a single runner instead of eleven public runners in
-  # parallel, so wall clock gets worse even though queue time gets better.
-  # Register more runners with the same labels, or flip CI_SELF_HOSTED_TESTS
-  # to false. Two listeners on one host are OK for backend shards only
-  # because those jobs run in a container and do not bind host 5432.
-  # Frontend/plugin jobs never needed that port.
-  #
-  # Python: setup-python has no Debian 12 builds. Routed jobs use
+  # Python: setup-python has no Debian 12 builds. Jobs use
   # .github/actions/setup-ci-python, which venvs a matching system
   # interpreter (needs python3.11-venv on Debian) and only then falls
   # back to setup-python. Hosted ubuntu-latest has no system 3.11, so
@@ -175,12 +170,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      test_runner: ${{ steps.pick.outputs.test_runner }}
-      db_host: ${{ steps.pick.outputs.db_host }}
-      postgres_ports: ${{ steps.pick.outputs.postgres_ports }}
-      job_container: ${{ steps.pick.outputs.job_container }}
+      backend_plan: ${{ steps.pick.outputs.backend_plan }}
     steps:
-      - name: Choose self-hosted or public runners for the test jobs
+      - name: Assign overflow backend shards to idle self-hosted runners
         id: pick
         env:
           # Empty on forks and Dependabot: secrets are not exposed there.
@@ -191,49 +183,59 @@ jobs:
         run: |
           set -uo pipefail
 
-          SELF_HOSTED='["self-hosted","Linux","X64"]'
-          PUBLIC='"ubuntu-latest"'
+          emit() {
+            idle="$1"
+            reason="$2"
+            case "$idle" in
+              ''|*[!0-9]*) idle=0 ;;
+            esac
+            if [ "$idle" -gt 8 ]; then idle=8; fi
 
-          pick() {
-            echo "test_runner=$1" >> "$GITHUB_OUTPUT"
-            # Backend shards publish Postgres on host 5432 when the job
-            # runs on the VM (public ubuntu-latest). Two self-hosted
-            # listeners on one machine then collide. So self-hosted
-            # backend jobs run in a container and reach Postgres by
-            # service hostname, with no host port. Public jobs keep
-            # localhost:5432 and are unchanged.
-            if [ "$1" = "$SELF_HOSTED" ]; then
-              echo "db_host=postgres" >> "$GITHUB_OUTPUT"
-              echo "postgres_ports=[]" >> "$GITHUB_OUTPUT"
-              echo "job_container={\"image\":\"python:${PYTHON_VERSION}-bookworm\"}" >> "$GITHUB_OUTPUT"
-            else
-              echo "db_host=localhost" >> "$GITHUB_OUTPUT"
-              echo 'postgres_ports=["5432:5432"]' >> "$GITHUB_OUTPUT"
-              echo "job_container=null" >> "$GITHUB_OUTPUT"
+            plan=$(IDLE="$idle" PYVER="${PYTHON_VERSION:-3.11}" jq -cn '
+              def public:
+                {runner:"ubuntu-latest",container:null,db_host:"localhost",
+                 postgres_ports:["5432:5432"]};
+              def private:
+                {runner:["self-hosted","Linux","X64"],
+                 container:{image:("python:"+$ENV.PYVER+"-bookworm")},
+                 db_host:"postgres",postgres_ports:[]};
+              ($ENV.IDLE|tonumber) as $idle
+              | [range(0;8) | if . >= (8 - $idle) then private else public end]
+            ') || plan=""
+
+            if [ -z "$plan" ]; then
+              idle=0
+              reason="$reason (plan fallback: all public)"
+              plan='[{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]},{"runner":"ubuntu-latest","container":null,"db_host":"localhost","postgres_ports":["5432:5432"]}]'
             fi
-            echo "reason: $2"
-            echo "test jobs will run on: $1"
-            echo "- \`runs-on\` for the test jobs: \`$1\`" >> "$GITHUB_STEP_SUMMARY"
-            echo "- reason: $2" >> "$GITHUB_STEP_SUMMARY"
+
+            {
+              echo "backend_plan<<EOF"
+              echo "$plan"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "reason: $reason"
+            echo "overflow shards on self-hosted: $idle / 8"
+            echo "- overflow self-hosted backend shards: \`$idle / 8\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- reason: $reason" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           }
 
           if [ "${SELF_HOSTED_TESTS:-true}" = "false" ]; then
-            pick "$PUBLIC" "repository variable CI_SELF_HOSTED_TESTS is false"
+            emit 0 "repository variable CI_SELF_HOSTED_TESTS is false"
           fi
 
           if [ -z "${GH_TOKEN:-}" ]; then
-            pick "$PUBLIC" "secret CI_RUNNER_READ_TOKEN is absent or empty"
+            emit 0 "secret CI_RUNNER_READ_TOKEN is absent or empty"
           fi
 
           if ! runners=$(gh api "repos/${REPO}/actions/runners" --paginate 2>&1); then
             echo "runner list unavailable: $runners"
-            pick "$PUBLIC" "could not list repository runners (token scope or API error)"
+            emit 0 "could not list repository runners (token scope or API error)"
           fi
 
           # Online, not already busy, and carrying all three labels. Busy
-          # matters because a single VM would otherwise collect a queue while
-          # public runners sit idle.
+          # matters: a working VM must not steal shards it cannot start.
           available=$(printf '%s' "$runners" | jq -s '
             [ .[].runners[]?
               | select(.status == "online" and .busy == false)
@@ -245,15 +247,15 @@ jobs:
 
           case "$available" in
             ''|*[!0-9]*)
-              pick "$PUBLIC" "could not parse the runner list"
+              emit 0 "could not parse the runner list"
               ;;
           esac
 
           if [ "$available" -ge 1 ]; then
-            pick "$SELF_HOSTED" "$available idle self-hosted Linux/X64 runner(s) online"
+            emit "$available" "$available idle self-hosted Linux/X64 runner(s) take overflow shards"
           fi
 
-          pick "$PUBLIC" "no idle self-hosted Linux/X64 runner is online"
+          emit 0 "no idle self-hosted Linux/X64 runner is online"
 
   # ==========================================================================
   # Requirements resolve (guard)
@@ -384,17 +386,17 @@ jobs:
   # coverage floor is applied after shards are combined -- a single shard
   # only sees part of the tree.
   #
-  # Runner: pick-runner decides. Public ubuntu-latest keeps this job on
-  # the VM: services Postgres is published at localhost:5432, same as
-  # before. Self-hosted runs the job in python:<version>-bookworm and
-  # reaches Postgres by the service hostname, with no host port, so two
-  # listeners on one machine do not collide on 5432. The VM still needs
-  # Docker and the runner user in the docker group. Nothing else in this
-  # job assumes the GitHub image.
+  # Runner: ubuntu-latest is the default. pick-runner may send the last
+  # N shards (idle self-hosted count) to private VMs as overflow. Public
+  # shards stay on the VM with Postgres at localhost:5432. Overflow
+  # shards run in python:<version>-bookworm and reach Postgres by the
+  # service hostname, with no host port, so two listeners on one machine
+  # do not collide on 5432. The VM still needs Docker and the runner
+  # user in the docker group.
   test-backend:
     name: Backend Tests (${{ matrix.group }}/8)
-    runs-on: ${{ fromJSON(needs.pick-runner.outputs.test_runner) }}
-    container: ${{ fromJSON(needs.pick-runner.outputs.job_container) }}
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.backend_plan)[matrix.group - 1].runner }}
+    container: ${{ fromJSON(needs.pick-runner.outputs.backend_plan)[matrix.group - 1].container }}
     needs: [changes, pick-runner]
     if: needs.changes.outputs.backend == 'true'
     timeout-minutes: 45
@@ -409,7 +411,7 @@ jobs:
           POSTGRES_DB: test_db
           POSTGRES_USER: test_user
           POSTGRES_PASSWORD: test_password
-        ports: ${{ fromJSON(needs.pick-runner.outputs.postgres_ports) }}
+        ports: ${{ fromJSON(needs.pick-runner.outputs.backend_plan)[matrix.group - 1].postgres_ports }}
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -417,7 +419,7 @@ jobs:
           --health-retries 5
 
     env:
-      DATABASE_URL: postgresql://test_user:test_password@${{ needs.pick-runner.outputs.db_host }}:5432/test_db
+      DATABASE_URL: postgresql://test_user:test_password@${{ fromJSON(needs.pick-runner.outputs.backend_plan)[matrix.group - 1].db_host }}:5432/test_db
       OPENAI_API_KEY: mock_key
       ANTHROPIC_API_KEY: mock_key
       PRELOOP_DISABLE_TELEMETRY: "true"
@@ -480,8 +482,8 @@ jobs:
 
   test-backend-coverage:
     name: Backend Coverage
-    runs-on: ${{ fromJSON(needs.pick-runner.outputs.test_runner) }}
-    needs: [changes, pick-runner, test-backend]
+    runs-on: ubuntu-latest
+    needs: [changes, test-backend]
     if: needs.changes.outputs.backend == 'true'
     timeout-minutes: 20
     steps:
@@ -543,8 +545,8 @@ jobs:
 
   test-frontend:
     name: Frontend Tests
-    runs-on: ${{ fromJSON(needs.pick-runner.outputs.test_runner) }}
-    needs: [changes, pick-runner]
+    runs-on: ubuntu-latest
+    needs: [changes]
     if: needs.changes.outputs.frontend == 'true'
     timeout-minutes: 45
     defaults:
@@ -638,8 +640,8 @@ jobs:
 
   test-runtime-plugins:
     name: Runtime Plugin Tests
-    runs-on: ${{ fromJSON(needs.pick-runner.outputs.test_runner) }}
-    needs: [changes, pick-runner]
+    runs-on: ubuntu-latest
+    needs: [changes]
     if: needs.changes.outputs.plugins == 'true'
     timeout-minutes: 30
 

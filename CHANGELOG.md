@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   host 5432. Two runner processes on one VM can run shards together.
   Public `ubuntu-latest` backend jobs stay on the VM with
   `localhost:5432`.
+- Self-hosted GitHub runners are extra CI capacity, not a replacement
+  pool. Frontend, plugins, and coverage stay on `ubuntu-latest`. Backend
+  keeps its eight hosted shards by default; idle self-hosted Linux/X64
+  runners take only overflow shards (the tail of the matrix, in a
+  `python:<version>-bookworm` job container so they do not bind host
+  5432). Sending every test job to three VMs serialized the suite and
+  was slower than public runners.
 - The setup-ci-python composite invokes its helper via
   `GITHUB_WORKSPACE`, not `github.action_path`. The latter is a host
   path and does not exist inside the self-hosted job container.
