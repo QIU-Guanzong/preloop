@@ -41,7 +41,22 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Install the Preloop CLI
-        run: curl -fsSL https://preloop.ai/install/cli | sh
+        run: |
+          curl -fsSL https://preloop.ai/install/cli | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve PR head SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PR_HEAD}" ]; then
+            echo "HEAD_SHA=${PR_HEAD}" >> "$GITHUB_ENV"
+          else
+            echo "HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)" >> "$GITHUB_ENV"
+          fi
 
       - name: Trigger the flow and wait for the verdict
         env:
@@ -50,6 +65,8 @@ jobs:
           PRELOOP_FLOW: ${{ vars.PRELOOP_FLOW || 'Pull Request Reviewer' }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
           PR_URL: ${{ github.event.pull_request.html_url || format('{0}/pull/{1}', github.event.repository.html_url, inputs.pr) }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ env.HEAD_SHA }}
         run: |
           set -euo pipefail
           if [ -z "${PRELOOP_TOKEN}" ]; then
@@ -57,6 +74,6 @@ jobs:
             exit 1
           fi
           payload=$(jq -cn --arg url "$PR_URL" --argjson number "$PR_NUMBER" \
-            --arg repo "${{ github.repository }}" --arg sha "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --arg repo "$GH_REPO" --arg sha "$HEAD_SHA" \
             '{pull_request: {url: $url, number: $number, head_sha: $sha}, repository: {full_name: $repo}, source: "github-actions"}')
           echo "$payload" | preloop flow trigger "$PRELOOP_FLOW" --payload - --timeout 40m

@@ -20,6 +20,7 @@ jobs:
           PRELOOP_URL: https://preloop.example.com
         run: |
           curl -fsSL https://preloop.ai/install/cli | sh
+          export PATH="${HOME}/.local/bin:${PATH}"
           preloop flow trigger pull-request-reviewer \
             --payload '{"pull_request":{"url":"https://github.com/example/repo/pull/1"}}'
 ```
@@ -27,6 +28,10 @@ jobs:
 `PRELOOP_TOKEN` is an account API token. OIDC exchange is not part of this
 command yet. Use `--payload -` to pipe a JSON event file from a previous step.
 Omit `--wait` in CI; waiting is the default when stdin is not a TTY.
+
+On GitHub-hosted runners the installer writes to `~/.local/bin`, which is
+not on PATH. In a single step, export it as above. Across steps, append
+that directory to `$GITHUB_PATH` in the install step.
 
 ## `runner_pool` flow config
 
