@@ -124,6 +124,109 @@ jobs:
           fi
 
   # ==========================================================================
+  # Where do the test jobs run?
+  # ==========================================================================
+  #
+  # GitHub-hosted minutes are the queue bottleneck on this repo, and a private
+  # Debian x64 VM is registered as a repository runner (`my-debian-vm`, labels
+  # self-hosted,Linux,X64). It is NOT always on. So the test suites ask this
+  # job where to go and it answers with a `runs-on` value:
+  #
+  #   ["self-hosted","Linux","X64"]   at least one matching runner is online
+  #                                   and idle
+  #   "ubuntu-latest"                 anything else, including every failure
+  #                                   mode below
+  #
+  # The fallback is the safe default and this job NEVER fails the workflow:
+  # a PR must not go red because the runner inventory could not be read.
+  #
+  # Two knobs the repo admin owns:
+  #
+  #   secret CI_RUNNER_READ_TOKEN  a fine-grained PAT scoped to this repo with
+  #                                Repository permissions > Administration:
+  #                                Read-only. Listing runners needs
+  #                                `administration: read`, which the workflow
+  #                                GITHUB_TOKEN cannot be granted. Absent or
+  #                                empty (forks, Dependabot, not created yet)
+  #                                means ubuntu-latest.
+  #   variable CI_SELF_HOSTED_TESTS  set to "false" to force every test job
+  #                                back onto the public runners without a
+  #                                commit. Unset or anything else means the
+  #                                routing above is live.
+  #
+  # Caveat the admin should know: one VM serializes all of it. The eight
+  # backend shards, Backend Coverage, Frontend Tests and Runtime Plugin Tests
+  # run one at a time on a single runner instead of eleven public runners in
+  # parallel, so wall clock gets worse even though queue time gets better.
+  # Register more runners with the same labels, or flip CI_SELF_HOSTED_TESTS
+  # to false.
+  pick-runner:
+    name: Pick test runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      test_runner: ${{ steps.pick.outputs.test_runner }}
+    steps:
+      - name: Choose self-hosted or public runners for the test jobs
+        id: pick
+        env:
+          # Empty on forks and Dependabot: secrets are not exposed there.
+          GH_TOKEN: ${{ secrets.CI_RUNNER_READ_TOKEN }}
+          SELF_HOSTED_TESTS: ${{ vars.CI_SELF_HOSTED_TESTS }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+
+          SELF_HOSTED='["self-hosted","Linux","X64"]'
+          PUBLIC='"ubuntu-latest"'
+
+          pick() {
+            echo "test_runner=$1" >> "$GITHUB_OUTPUT"
+            echo "reason: $2"
+            echo "test jobs will run on: $1"
+            echo "- \`runs-on\` for the test jobs: \`$1\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- reason: $2" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+
+          if [ "${SELF_HOSTED_TESTS:-true}" = "false" ]; then
+            pick "$PUBLIC" "repository variable CI_SELF_HOSTED_TESTS is false"
+          fi
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            pick "$PUBLIC" "secret CI_RUNNER_READ_TOKEN is absent or empty"
+          fi
+
+          if ! runners=$(gh api "repos/${REPO}/actions/runners" --paginate 2>&1); then
+            echo "runner list unavailable: $runners"
+            pick "$PUBLIC" "could not list repository runners (token scope or API error)"
+          fi
+
+          # Online, not already busy, and carrying all three labels. Busy
+          # matters because a single VM would otherwise collect a queue while
+          # public runners sit idle.
+          available=$(printf '%s' "$runners" | jq -s '
+            [ .[].runners[]?
+              | select(.status == "online" and .busy == false)
+              | [.labels[].name] as $labels
+              | select(($labels | index("self-hosted")) != null
+                   and ($labels | index("Linux")) != null
+                   and ($labels | index("X64")) != null)
+            ] | length' 2>/dev/null) || available=""
+
+          case "$available" in
+            ''|*[!0-9]*)
+              pick "$PUBLIC" "could not parse the runner list"
+              ;;
+          esac
+
+          if [ "$available" -ge 1 ]; then
+            pick "$SELF_HOSTED" "$available idle self-hosted Linux/X64 runner(s) online"
+          fi
+
+          pick "$PUBLIC" "no idle self-hosted Linux/X64 runner is online"
+
+  # ==========================================================================
   # Requirements resolve (guard)
   # ==========================================================================
   # Every hash-pinned lock in the repo, asked one question: can pip resolve
@@ -251,11 +354,17 @@ jobs:
   # session. Chunks keep collection order, so files stay together. The 60%
   # coverage floor is applied after shards are combined -- a single shard
   # only sees part of the tree.
+  #
+  # Runner: pick-runner decides. On a self-hosted runner the `services:`
+  # Postgres below is started by that machine's Docker daemon and published on
+  # localhost:5432, so the VM needs Docker installed and the runner user in the
+  # docker group. Nothing else in this job assumes the GitHub image.
   test-backend:
     name: Backend Tests (${{ matrix.group }}/8)
-    runs-on: ubuntu-latest
-    needs: changes
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.test_runner) }}
+    needs: [changes, pick-runner]
     if: needs.changes.outputs.backend == 'true'
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -283,7 +392,11 @@ jobs:
       COVERAGE_FILE: coverage-data.${{ matrix.group }}
 
     steps:
+      # clean: true is the default, but a self-hosted workspace is reused
+      # between runs, so say it out loud.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: true
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -335,11 +448,14 @@ jobs:
 
   test-backend-coverage:
     name: Backend Coverage
-    runs-on: ubuntu-latest
-    needs: [changes, test-backend]
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.test_runner) }}
+    needs: [changes, pick-runner, test-backend]
     if: needs.changes.outputs.backend == 'true'
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: true
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -395,15 +511,18 @@ jobs:
 
   test-frontend:
     name: Frontend Tests
-    runs-on: ubuntu-latest
-    needs: changes
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.test_runner) }}
+    needs: [changes, pick-runner]
     if: needs.changes.outputs.frontend == 'true'
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: frontend
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: true
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -444,15 +563,29 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
 
+      # GitHub-hosted only: the runner image preconfigures Google's
+      # chrome-stable apt source, which this job never uses. Its index
+      # intermittently fails with "Hash Sum mismatch" and takes
+      # "playwright install --with-deps" down with it (main and five PRs on
+      # 2026-09-09). Needs root, and a self-hosted runner user may have no
+      # sudo and no such apt source, so it is skipped there.
+      - name: Drop the runner image's chrome apt source
+        if: runner.environment == 'github-hosted'
+        run: sudo rm -f /etc/apt/sources.list.d/google-chrome*.list /etc/apt/sources.list.d/google.list
+
+      # --with-deps shells out to apt-get as root and only knows Ubuntu
+      # package names, so it is used on the GitHub image only. A self-hosted
+      # runner installs the browser into ~/.cache/ms-playwright without
+      # touching the system; its OS libraries are a one-time setup on that
+      # machine ("npx playwright install-deps" as root, once).
       - name: Install Playwright browsers
+        env:
+          WITH_DEPS: ${{ runner.environment == 'github-hosted' && '--with-deps' || '' }}
         run: |
-          # The runner image preconfigures Google's chrome-stable apt source, which this job
-          # never uses. Its index intermittently fails with "Hash Sum mismatch" and takes
-          # "playwright install --with-deps" down with it (main and five PRs on 2026-09-09).
-          # Drop that source, then retry the install, which is a no-op for cached browsers.
-          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list /etc/apt/sources.list.d/google.list
+          # Retry: a no-op for cached browsers.
           for attempt in 1 2 3; do
-            npx playwright install --with-deps chromium && exit 0
+            # shellcheck disable=SC2086 # WITH_DEPS is one flag or empty
+            npx playwright install $WITH_DEPS chromium && exit 0
             echo "playwright install failed (attempt $attempt), retrying in 15s"
             sleep 15
           done
@@ -468,12 +601,15 @@ jobs:
 
   test-runtime-plugins:
     name: Runtime Plugin Tests
-    runs-on: ubuntu-latest
-    needs: changes
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.test_runner) }}
+    needs: [changes, pick-runner]
     if: needs.changes.outputs.plugins == 'true'
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: true
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -743,6 +879,7 @@ jobs:
     if: always() && !cancelled()
     needs:
       - changes
+      - pick-runner
       - lint
       - helm-lint
       - requirements-resolve
@@ -755,6 +892,7 @@ jobs:
       - name: Require every suite to have passed or been skipped
         env:
           CHANGES: ${{ needs.changes.result }}
+          PICKRUNNER: ${{ needs.pick-runner.result }}
           LINT: ${{ needs.lint.result }}
           HELM: ${{ needs.helm-lint.result }}
           REQRESOLVE: ${{ needs.requirements-resolve.result }}
@@ -778,6 +916,7 @@ jobs:
             esac
           }
           check changes "$CHANGES"
+          check pick-runner "$PICKRUNNER"
           check lint "$LINT"
           check helm-lint "$HELM"
           check requirements-resolve "$REQRESOLVE"
