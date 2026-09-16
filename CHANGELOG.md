@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timed out on the VMs.
 - GitHub CI overflow-plan tests compute `backend_plan` in Python, so
   GitLab's unit image (no `jq`) can still pin hosted-first routing.
+- Backend shard routing indexes `backend_plan` with `matrix.group`.
+  GitHub expressions reject minus, so `matrix.group - 1` made the
+  workflow file invalid and no GitHub CI job could start. The plan
+  array is 1-based (dummy `null` at index 0).
 - The upgrade e2e checks out the 2026 `pro` plan, not the withdrawn
   `teams` id. Free accounts see the AI-titles upsell hint on the
   sessions list again. Custom-agent e2e opens the wizard from
