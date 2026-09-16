@@ -196,5 +196,10 @@ def test_composite_falls_back_to_the_pinned_setup_python() -> None:
     prefer = steps[0]
     fallback = steps[1]
     assert "prefer-system-python.sh" in prefer["run"]
+    # github.action_path is the host path. Self-hosted backend shards
+    # run in a job container that mounts the workspace at /__w, so the
+    # host path does not exist. GITHUB_WORKSPACE is remapped.
+    assert "github.action_path" not in prefer["run"]
+    assert "GITHUB_WORKSPACE" in prefer["run"]
     assert fallback["uses"] == SETUP_PYTHON_PIN
     assert fallback["if"] == "steps.system.outputs.use_setup == 'true'"
