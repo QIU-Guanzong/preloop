@@ -809,6 +809,19 @@ describe('api', () => {
       expect(outcome?.message).to.contain('already has a Pro subscription');
     });
 
+    it('fills a speakable sentence when a refresh answer has no message', async () => {
+      // Older EE returns bare {action: "refresh"}. The modal assigns
+      // outcome.message to role=status; an empty string would render nothing.
+      fetchStub.resolves(answer({ action: 'refresh' }));
+
+      const outcome = await startCheckout('pro', 'month');
+
+      expect(outcome?.action).to.equal('refresh');
+      expect(outcome?.message).to.equal(
+        'Your subscription is already up to date. Nothing was charged.'
+      );
+    });
+
     it('asks the billing views to re-read the summary on refresh', async () => {
       // The whole point of a refresh answer: the screen is stale, not the
       // account. Nothing reloads the summary unless this event is dispatched.

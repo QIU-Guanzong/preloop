@@ -964,6 +964,19 @@ describe('ConsoleShell', () => {
       expect(copy(el)).to.not.contain('Unexpected checkout response');
     });
 
+    it('shows a status line when a refresh answer has no server sentence', async () => {
+      const el = await openGate('session_titles');
+      answerCheckout({ action: 'refresh' });
+
+      await (el as any)._startUpgradeCheckout();
+      await el.updateComplete;
+
+      const notice = el.shadowRoot?.querySelector('[role="status"]');
+      expect(notice, 'expected a visible sentence').to.exist;
+      expect(notice?.textContent).to.contain('already up to date');
+      expect(el.shadowRoot?.querySelector('[role="alert"]')).to.not.exist;
+    });
+
     it('stops the button spinning when checkout does not navigate', async () => {
       const el = await openGate('session_titles');
       answerCheckout({

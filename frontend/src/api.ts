@@ -485,14 +485,16 @@ async function performFetchWithAuth(
  * The server always names its own outcome: `action` says what the client
  * should do, `code` identifies the case for tests and logs, and `message` is
  * a plain sentence written for the person who clicked. The client never
- * invents a sentence when the server sent one.
+ * invents a sentence when the server sent one. An older server may omit
+ * `message` on `refresh`; the helper fills a speakable fallback so the
+ * modal cannot go silent.
  */
 export interface CheckoutOutcome {
   /** `redirect`, `refresh`, or whatever a future server adds. */
   action: string;
   /** Stable machine-readable case, e.g. `subscription_exists`. */
   code?: string;
-  /** Sentence to show the user. Always populated by the server. */
+  /** Sentence to show the user. Server words when present. */
   message: string;
   /** Present for `redirect`; the page is already navigating. */
   url?: string;
@@ -580,6 +582,11 @@ export async function startCheckout(
       // out, so the stale view is the whole problem. Ask the billing views to
       // re-read the summary and hand the sentence back instead of throwing,
       // because this is a success for the user even though no tab opened.
+      // An older server omits `message`; do not let the dialog go silent.
+      if (!outcome.message) {
+        outcome.message =
+          'Your subscription is already up to date. Nothing was charged.';
+      }
       window.dispatchEvent(new CustomEvent(BILLING_SUBSCRIPTION_CHANGED));
       return outcome;
     }
