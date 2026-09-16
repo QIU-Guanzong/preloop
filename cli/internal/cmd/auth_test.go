@@ -279,6 +279,11 @@ func captureStdout(t *testing.T, fn func() error) string {
 }
 
 func TestMain(m *testing.M) {
+	if os.Getenv(blockingJobHelperEnv) != "" {
+		runBlockingJobHelper()
+		os.Exit(0)
+	}
+
 	// Prevent tests from reading the developer's real config. This is the
 	// package-wide backstop for any test that forgets to redirect the home
 	// directory itself; testenv.SetProcessHome covers Windows too, where

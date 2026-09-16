@@ -107,11 +107,16 @@ class FlowRunner(Base):
         with a lower ``--concurrency`` lowers it for as long as it is
         connected. It can never raise it: capacity on someone else's machine
         is not the runner's decision.
+
+        A process that has never reported concurrency predates multi-slot
+        runners. Those CLIs ignore a second lease while busy and treat any
+        halt as "kill whatever is running", so they must not hold more than
+        one execution.
         """
         ceiling = max(1, int(self.concurrency or DEFAULT_RUNNER_CONCURRENCY))
         reported = self.reported_concurrency
         if reported is None:
-            return ceiling
+            return 1
         return max(1, min(ceiling, int(reported)))
 
     @property

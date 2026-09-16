@@ -101,6 +101,9 @@ def upgrade() -> None:
         unique=False,
     )
     # Carry live leases over before the columns that hold them disappear.
+    # The old schema had no unique constraint on current_execution_id, so
+    # two runner rows could name the same execution. DISTINCT ON keeps the
+    # most recently heard-from runner so the new unique constraint holds.
     op.execute(
         sa.text(
             """
@@ -110,8 +113,12 @@ def upgrade() -> None:
             )
             SELECT gen_random_uuid(), now(), now(), r.id, r.current_execution_id,
                    r.pending_job, now(), r.halt_requested, r.reported_status
-            FROM flow_runner AS r
-            WHERE r.current_execution_id IS NOT NULL
+            FROM (
+                SELECT DISTINCT ON (current_execution_id) *
+                FROM flow_runner
+                WHERE current_execution_id IS NOT NULL
+                ORDER BY current_execution_id, last_heartbeat DESC NULLS LAST
+            ) AS r
             """
         )
     )

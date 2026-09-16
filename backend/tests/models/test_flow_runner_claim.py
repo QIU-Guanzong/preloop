@@ -28,7 +28,10 @@ def _runner(db: Session, account_id: UUID, **overrides: object) -> models.FlowRu
         "status": "online",
         "last_heartbeat": datetime.now(timezone.utc),
     }
+    reported = overrides.pop("reported", None)
     payload.update(overrides)
+    if reported is not None:
+        payload["reported_concurrency"] = reported
     return crud_flow_runner.create(db, obj_in=payload)
 
 
@@ -53,17 +56,31 @@ def _execution(db: Session, account_id: UUID) -> models.FlowExecution:
 
 def test_a_new_runner_gets_the_default_two_slots(db_session: Session) -> None:
     account = _account(db_session, "Runner default concurrency")
-    runner = _runner(db_session, account.id)
+    runner = _runner(db_session, account.id, reported=2)
     assert runner.concurrency == models.DEFAULT_RUNNER_CONCURRENCY
     assert runner.capacity == 2
     assert runner.free_slots == 2
+
+
+def test_an_unreported_process_cannot_hold_two_leases(db_session: Session) -> None:
+    account = _account(db_session, "Runner never reported concurrency")
+    runner = _runner(db_session, account.id)
+    first = _execution(db_session, account.id)
+    assert runner.capacity == 1
+    assert crud_flow_runner.claim_free_slot(db_session, runner_id=runner.id) is not None
+    crud_flow_runner.create_assignment(
+        db_session, runner_id=runner.id, execution_id=first.id
+    )
+    db_session.refresh(runner)
+    assert runner.free_slots == 0
+    assert crud_flow_runner.claim_free_slot(db_session, runner_id=runner.id) is None
 
 
 def test_claim_free_slot_allows_a_second_job_and_refuses_a_third(
     db_session: Session,
 ) -> None:
     account = _account(db_session, "Runner two slots")
-    runner = _runner(db_session, account.id)
+    runner = _runner(db_session, account.id, reported=2)
     first = _execution(db_session, account.id)
     second = _execution(db_session, account.id)
 
@@ -85,7 +102,7 @@ def test_claim_free_slot_allows_a_second_job_and_refuses_a_third(
 
 def test_releasing_one_slot_leaves_the_other_job_running(db_session: Session) -> None:
     account = _account(db_session, "Runner release one")
-    runner = _runner(db_session, account.id)
+    runner = _runner(db_session, account.id, reported=2)
     first = _execution(db_session, account.id)
     second = _execution(db_session, account.id)
     crud_flow_runner.create_assignment(
@@ -109,7 +126,7 @@ def test_releasing_one_slot_leaves_the_other_job_running(db_session: Session) ->
 
 def test_halt_is_per_assignment(db_session: Session) -> None:
     account = _account(db_session, "Runner halt one")
-    runner = _runner(db_session, account.id)
+    runner = _runner(db_session, account.id, reported=2)
     first = _execution(db_session, account.id)
     second = _execution(db_session, account.id)
     crud_flow_runner.create_assignment(
@@ -175,8 +192,8 @@ def test_find_matching_prefers_the_runner_with_the_most_free_slots(
     db_session: Session,
 ) -> None:
     account = _account(db_session, "Runner free slot order")
-    loaded = _runner(db_session, account.id, concurrency=2)
-    empty = _runner(db_session, account.id, concurrency=2)
+    loaded = _runner(db_session, account.id, concurrency=2, reported=2)
+    empty = _runner(db_session, account.id, concurrency=2, reported=2)
     crud_flow_runner.create_assignment(
         db_session,
         runner_id=loaded.id,

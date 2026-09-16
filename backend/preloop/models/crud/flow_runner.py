@@ -19,7 +19,10 @@ ONLINE_HEARTBEAT_TTL = timedelta(seconds=45)
 
 
 def runner_capacity(runner: models.FlowRunner) -> int:
-    """Slots this runner may fill: the owner's ceiling, lowered by the process."""
+    """Slots this runner may fill: the owner's ceiling, lowered by the process.
+
+    Unreported processes are treated as single-slot; see ``FlowRunner.capacity``.
+    """
     return int(getattr(runner, "capacity", models.DEFAULT_RUNNER_CONCURRENCY))
 
 
@@ -537,7 +540,11 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
     def get_assignment_by_execution(
         self, db: Session, *, execution_id: UUID
     ) -> Optional[models.FlowRunnerAssignment]:
-        """Whichever runner holds this execution, if any."""
+        """Whichever runner holds this execution, if any.
+
+        CRUD surface for API completeness; stop paths that already hold a
+        locked execution row may still read ``runner.assignment_for``.
+        """
         return (
             db.query(FlowRunnerAssignment)
             .filter(FlowRunnerAssignment.execution_id == execution_id)
@@ -547,7 +554,11 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
     def list_assignments(
         self, db: Session, *, runner_id: UUID
     ) -> List[models.FlowRunnerAssignment]:
-        """Every execution this runner currently holds, oldest first."""
+        """Every execution this runner currently holds, oldest first.
+
+        CRUD surface for API completeness; the websocket reads assignments
+        off the loaded runner relationship.
+        """
         return (
             db.query(FlowRunnerAssignment)
             .filter(FlowRunnerAssignment.runner_id == runner_id)
@@ -564,6 +575,9 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
         commit: bool = True,
     ) -> int:
         """Free one slot, or every slot when no execution is named.
+
+        CRUD surface for API completeness; the live websocket releases
+        slots through ``set_publication_capabilities(clear_lease=True)``.
 
         Args:
             db: Database session.
@@ -589,7 +603,14 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
             db.flush()
         return int(removed)
 
-    def request_halt(self, db: Session, *, runner_id: UUID, execution_id: UUID) -> bool:
+    def request_halt(
+        self,
+        db: Session,
+        *,
+        runner_id: UUID,
+        execution_id: UUID,
+        commit: bool = True,
+    ) -> bool:
         """Ask the runner to stop one of its jobs.
 
         Halt is per assignment, not per runner: stopping one execution must
@@ -599,6 +620,7 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
             db: Database session.
             runner_id: Runner holding the work.
             execution_id: Execution to halt.
+            commit: Commit, or only flush for a caller that owns the transaction.
 
         Returns:
             True when an assignment was marked.
@@ -614,7 +636,10 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
                 synchronize_session=False,
             )
         )
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         return bool(updated)
 
     def set_reported_status(
@@ -626,7 +651,11 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
         status: Optional[str],
         commit: bool = True,
     ) -> bool:
-        """Store what the runner says one of its jobs is doing."""
+        """Store what the runner says one of its jobs is doing.
+
+        CRUD surface for API completeness; the websocket writes
+        ``reported_status`` on the loaded assignment in the same transaction.
+        """
         updated = (
             db.query(FlowRunnerAssignment)
             .filter(

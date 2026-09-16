@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,27 @@ import (
 	"github.com/preloop/preloop/cli/internal/config"
 	"github.com/preloop/preloop/cli/internal/testenv"
 )
+
+const blockingJobHelperEnv = "PRELOOP_RUNNER_BLOCKING_JOB"
+
+// runBlockingJobHelper is the child process used by blockingJobCommands.
+// It is a single process (no shell, no sleep grandchild) so Process.Kill
+// on Windows closes stdout and Wait returns. Called from TestMain.
+func runBlockingJobHelper() {
+	marker := os.Getenv("MARKER")
+	release := os.Getenv("RELEASE")
+	report := os.Getenv("REPORT")
+	if marker != "" {
+		_ = os.WriteFile(marker, nil, 0600)
+	}
+	for {
+		if _, err := os.Stat(release); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_, _ = fmt.Println(report)
+}
 
 // concurrencyJob is a minimal leased docker job payload.
 func concurrencyJob(executionID string) map[string]any {
@@ -43,12 +65,10 @@ func blockingJobCommands(t *testing.T) (markers string, release string) {
 	t.Cleanup(func() { runnerHasDocker, newRunnerJobCmd = oldDocker, oldCmd })
 	runnerHasDocker = func() bool { return true }
 	newRunnerJobCmd = func(_ string, env map[string]string, _ runnerDockerOpts) *exec.Cmd {
-		cmd := exec.Command(
-			"sh", "-c",
-			`touch "$MARKER"; while [ ! -f "$RELEASE" ]; do sleep 0.02; done; printf '%s\n' "$REPORT"`,
-		)
+		cmd := exec.Command(os.Args[0], "-test.run=^$")
 		cmd.Env = append(
 			os.Environ(),
+			blockingJobHelperEnv+"=1",
 			"MARKER="+filepath.Join(dir, env["EXECUTION_ID"]),
 			"RELEASE="+release,
 			"REPORT="+resultLine(`{"status":"success"}`, 0),
