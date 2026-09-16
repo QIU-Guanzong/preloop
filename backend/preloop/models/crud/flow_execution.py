@@ -2078,6 +2078,9 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
         connection, return false, and strand the lock until recycle.
         Unlock still rolls the Session back first so an aborted pass
         cannot raise ``PendingRollbackError`` on later Session use.
+        Rollback failure does not skip the unlock. If unlock does not
+        verifiably succeed, the dedicated checkout is invalidated so
+        Postgres drops the lock now instead of at pool recycle.
         Non-Postgres dialects (single-process dev, SQLite tests) always
         win the lease: there is no second reaper to exclude.
 
@@ -2095,7 +2098,7 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
 
         from preloop.services.execution_reaper import STALE_CLAIM_REAPER_LOCK_KEY
 
-        bind = db.get_bind() if hasattr(db, "get_bind") else db.bind
+        bind = db.get_bind()
         dialect = getattr(getattr(bind, "dialect", None), "name", None)
         if bind is None or dialect != "postgresql":
             yield True
@@ -2122,8 +2125,15 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
             try:
                 yield True
             finally:
+                released = False
                 try:
                     db.rollback()
+                except Exception:  # noqa: BLE001 - must not skip the unlock below
+                    logger.warning(
+                        "Rollback after the stale-claim reaper pass failed",
+                        exc_info=True,
+                    )
+                try:
                     released = bool(
                         lock_conn.execute(
                             text(
@@ -2133,17 +2143,17 @@ class CRUDFlowExecution(CRUDBase[FlowExecution]):
                         ).scalar()
                     )
                     lock_conn.commit()
-                    if not released:
-                        logger.error(
-                            "Stale-claim reaper lease unlock returned false; "
-                            "the lock is stranded until this connection closes"
-                        )
-                except Exception:  # noqa: BLE001 - the lock dies with the connection
+                except Exception:  # noqa: BLE001
                     logger.warning(
-                        "Failed to release the stale-claim reaper lease; it is "
-                        "released when this connection closes",
+                        "Failed to release the stale-claim reaper lease",
                         exc_info=True,
                     )
+                if not released:
+                    logger.error(
+                        "Stale-claim reaper lease was not released; closing the "
+                        "connection so Postgres drops the lock now, not at recycle"
+                    )
+                    lock_conn.invalidate()
 
     def record_redispatch(
         self,
