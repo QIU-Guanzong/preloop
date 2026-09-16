@@ -46,6 +46,8 @@ import type {
   AccountGatewayUsageSearchResponse,
   AccountRuntimeSessionDetailResponse,
   AccountRuntimeSessionListResponse,
+  SessionSearchMode,
+  SessionSearchResponse,
   RuntimeSessionSummary,
   RuntimeSessionUpdateRequest,
   RuntimeSessionActivityListResponse,
@@ -1304,6 +1306,69 @@ export async function getAccountRuntimeSessions(
   );
   if (!response.ok) {
     throw new Error('Failed to fetch sessions');
+  }
+  return response.json();
+}
+
+export interface SessionSearchParams {
+  query: string;
+  mode?: SessionSearchMode;
+  startDate?: string;
+  endDate?: string;
+  limit?: number;
+  offset?: number;
+  maxSnippetsPerSession?: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Ranked search over session content.
+ *
+ * POST, not GET, and deliberately: the query is whatever an operator is
+ * hunting for in their own transcripts, and a request body keeps that text out
+ * of every proxy and access log between here and the server.
+ *
+ * The filter block rejects unknown keys server side, so only the filters the
+ * contract names are sent. The list page's source type filter is not one of
+ * them (the corpus carries source kinds of turns, not of sessions), so it is
+ * not a field on this params type and is never forwarded.
+ */
+export async function searchRuntimeSessions(
+  params: SessionSearchParams
+): Promise<SessionSearchResponse> {
+  const filters: Record<string, string> = {};
+  if (params.startDate) {
+    filters.start_date = params.startDate;
+  }
+  if (params.endDate) {
+    filters.end_date = params.endDate;
+  }
+  const body: Record<string, unknown> = {
+    query: params.query,
+    mode: params.mode ?? 'keyword',
+    filters,
+  };
+  if (typeof params.limit === 'number') {
+    body.limit = params.limit;
+  }
+  if (typeof params.offset === 'number') {
+    body.offset = params.offset;
+  }
+  if (typeof params.maxSnippetsPerSession === 'number') {
+    body.max_snippets_per_session = params.maxSnippetsPerSession;
+  }
+
+  const response = await fetchWithAuth('/api/v1/runtime-sessions/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: params.signal,
+  });
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(
+      extractErrorMessage(errorData, 'Failed to search session content')
+    );
   }
   return response.json();
 }

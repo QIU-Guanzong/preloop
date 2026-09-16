@@ -192,6 +192,17 @@ export class PreloopSessionObserver extends LitElement {
   @property({ type: Boolean })
   syncModeToUrl = false;
 
+  /**
+   * Turn to open the transcript at, as the identifier the search corpus
+   * publishes for a matching turn (the gateway interaction id).
+   *
+   * A search result that drops the reader at the top of a two hour session
+   * has not answered their question, so the transcript scrolls to the turn
+   * and flashes it once.
+   */
+  @property({ type: String })
+  focusTurnId: string | null = null;
+
   /** Optional override for the sidebar's no-sessions message. */
   @property({ type: String })
   emptyText = '';
@@ -1596,6 +1607,18 @@ export class PreloopSessionObserver extends LitElement {
     window.history.replaceState(window.history.state, '', url.toString());
   }
 
+  updated(changed: Map<string | number | symbol, unknown>): void {
+    if (
+      changed.has('focusTurnId') &&
+      this.focusTurnId &&
+      this.replayMode === 'conversation'
+    ) {
+      // The conversation view has no per turn anchor and the transcript does,
+      // so a link to a turn lands where that turn can actually be shown.
+      this.setReplayMode('timeline');
+    }
+  }
+
   private setReplayMode(mode: SessionReplayMode): void {
     if (this.replayMode === mode) return;
     this.replayMode = mode;
@@ -1737,6 +1760,23 @@ export class PreloopSessionObserver extends LitElement {
   }
 
   /**
+   * Whether the row carried real ledger fields, not just identity.
+   *
+   * Normalizing a reconstructed search hit fills tokens and cost with zero.
+   * The toolbar must not print that as a measured $0.00.
+   */
+  private sessionRowHasLedger(session: ObservedSession): boolean {
+    const raw = session.raw;
+    if (!raw || typeof raw !== 'object') return false;
+    const row = raw as Record<string, unknown>;
+    return (
+      row.token_usage != null ||
+      typeof row.estimated_cost === 'number' ||
+      typeof row.total_requests === 'number'
+    );
+  }
+
+  /**
    * Whether the session is over. The rule lives in the shared registry
    * (src/actions/runtime-session-actions.ts) so this toolbar and any list
    * offering End session cannot drift apart.
@@ -1806,7 +1846,7 @@ export class PreloopSessionObserver extends LitElement {
                 : nothing
             }
             ${
-              session
+              session && this.sessionRowHasLedger(session)
                 ? html`
                     <span class="meta">
                       ${formatNumber(session.tokenUsage.total_tokens)} tokens ·
@@ -2059,6 +2099,7 @@ export class PreloopSessionObserver extends LitElement {
               : []
           }
           .activity=${this.activeActivity}
+          .focusEventId=${this.focusTurnId}
           .replayMode=${this.replayMode}
           .loading=${
             this.activeSessionId !== null &&

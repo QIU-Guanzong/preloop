@@ -9,6 +9,112 @@ describe('RuntimeSessionsView', () => {
   let fetchStub: sinon.SinonStub;
   let wsStub: sinon.SinonStub;
 
+  const SEARCH_URL = '/api/v1/runtime-sessions/search';
+
+  // One matching session with two snippets, one of each kind the corpus
+  // publishes, so the tags and the deep link both have something to work with.
+  function searchResponse(overrides: Record<string, unknown> = {}) {
+    return {
+      query: 'rollout plan',
+      mode: 'keyword',
+      effective_mode: 'keyword',
+      degraded: { keyword: true, semantic: false, reasons: [], detail: null },
+      indexed_through: null,
+      total: 1,
+      limit: 25,
+      offset: 0,
+      elapsed_ms: 12.5,
+      results: [
+        {
+          runtime_session_id: 'runtime-session-2',
+          session_source_type: 'flow_execution',
+          session_source_id: 'execution-1',
+          session_reference: 'session-abc123',
+          title: 'Triage Assistant',
+          started_at: '2026-03-09T19:00:00Z',
+          last_activity_at: '2026-03-09T19:15:00Z',
+          score: 0.91,
+          best_chunk_rank: 0.62,
+          matched_chunk_count: 3,
+          first_match_at: '2026-03-09T19:05:00Z',
+          last_match_at: '2026-03-09T19:12:00Z',
+          snippets: [
+            {
+              document_id: 'doc-1',
+              runtime_session_id: 'runtime-session-2',
+              source_kind: 'gateway_interaction',
+              source_id: 'usage-flow-1',
+              chunk_index: 0,
+              occurred_at: '2026-03-09T19:05:00Z',
+              role: 'user',
+              rank: 0.62,
+              redaction_state: 'clear',
+              text: 'Review the <mark>rollout</mark> plan before shipping',
+            },
+            {
+              document_id: 'doc-2',
+              runtime_session_id: 'runtime-session-2',
+              source_kind: 'tool_call',
+              source_id: 'tool-7',
+              chunk_index: 0,
+              occurred_at: '2026-03-09T19:12:00Z',
+              role: null,
+              rank: 0.41,
+              redaction_state: 'clear',
+              text: 'search_issues: <mark>rollout</mark> owner',
+            },
+          ],
+        },
+      ],
+      ...overrides,
+    };
+  }
+
+  function searchCalls(): sinon.SinonSpyCall[] {
+    return fetchStub
+      .getCalls()
+      .filter((call) => String(call.args[0]) === SEARCH_URL);
+  }
+
+  async function typeQuery(
+    element: RuntimeSessionsView,
+    value: string
+  ): Promise<void> {
+    const toolbar = element.shadowRoot!.querySelector('list-toolbar')!;
+    toolbar.dispatchEvent(
+      new CustomEvent('search-change', {
+        detail: { value },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await element.updateComplete;
+  }
+
+  async function renderedSearch(
+    query = 'rollout plan'
+  ): Promise<RuntimeSessionsView> {
+    const element = (await fixture(
+      html`<runtime-sessions-view></runtime-sessions-view>`
+    )) as RuntimeSessionsView;
+    await waitUntil(
+      () => !(element as any).loading,
+      'Runtime sessions view did not finish loading'
+    );
+    await typeQuery(element, query);
+    await waitUntil(
+      () => searchCalls().length > 0,
+      'Search did not reach the content search endpoint',
+      { timeout: 3000 }
+    );
+    await waitUntil(
+      () => !(element as any).searchLoading,
+      'Search did not settle'
+    );
+    await element.updateComplete;
+    return element;
+  }
+
   function getDeepText(el: Element | ShadowRoot | null | undefined): string {
     if (!el) return '';
     let text = el.textContent || '';
@@ -36,6 +142,13 @@ describe('RuntimeSessionsView', () => {
     fetchStub = sinon.stub(window, 'fetch');
     fetchStub.callsFake(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString();
+
+      if (url === SEARCH_URL) {
+        return new Response(JSON.stringify(searchResponse()), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
 
       if (url.startsWith('/api/v1/runtime-sessions?')) {
         return new Response(
@@ -525,7 +638,7 @@ describe('RuntimeSessionsView', () => {
     expect(content).to.not.contain('No sessions matched the current filters.');
 
     // With a non-default filter active, blame the filters instead.
-    (element as any).searchQuery = 'nothing-matches-this';
+    (element as any).sessionSourceType = 'flow_execution';
     await element.updateComplete;
 
     await waitUntil(
@@ -705,7 +818,7 @@ describe('RuntimeSessionsView', () => {
       expect(text).to.not.contain('Session Observer');
     });
 
-    it('refetches on a debounced search, like the Agents bar', async () => {
+    it('sends a debounced query to the content search, not the list', async () => {
       const element = (await fixture(
         html`<runtime-sessions-view></runtime-sessions-view>`
       )) as RuntimeSessionsView;
@@ -721,27 +834,41 @@ describe('RuntimeSessionsView', () => {
           .getCalls()
           .map((call) => String(call.args[0]))
           .filter((url) => url.startsWith('/api/v1/runtime-sessions?'));
-      const before = listCalls().length;
+      const listsBefore = listCalls().length;
 
-      const toolbar = element.shadowRoot!.querySelector('list-toolbar')!;
-      toolbar.dispatchEvent(
-        new CustomEvent('search-change', {
-          detail: { value: 'workspace-42' },
-          bubbles: true,
-          composed: true,
-        })
-      );
+      await typeQuery(element, 'rollout plan');
 
       // Nothing goes out on the keystroke itself: the query is a server
-      // parameter, so it waits for the typing to stop.
-      expect(listCalls().length).to.equal(before);
+      // round trip, so it waits for the typing to stop.
+      expect(searchCalls().length).to.equal(0);
 
       await waitUntil(
-        () => listCalls().length > before,
-        'Search did not refetch after the debounce',
+        () => searchCalls().length > 0,
+        'Search did not reach the endpoint after the debounce',
         { timeout: 3000 }
       );
-      expect(listCalls().pop()).to.contain('query=workspace-42');
+
+      const request = searchCalls()[0];
+      expect(String(request.args[0])).to.equal(SEARCH_URL);
+      expect(String((request.args[1] as RequestInit).method)).to.equal('POST');
+      expect(
+        JSON.parse(String((request.args[1] as RequestInit).body))
+      ).to.deep.include({ query: 'rollout plan', mode: 'keyword' });
+      const searchBody = JSON.parse(
+        String((request.args[1] as RequestInit).body)
+      ) as Record<string, unknown>;
+      expect(searchBody).to.not.have.property('session_source_type');
+      expect(
+        (searchBody.filters as Record<string, unknown> | undefined) || {}
+      ).to.not.have.property('session_source_type');
+      expect(
+        (searchBody.filters as Record<string, unknown> | undefined) || {}
+      ).to.not.have.property('source_kind');
+      // The list endpoint never sees the query.
+      expect(listCalls().length).to.equal(listsBefore);
+      expect(
+        listCalls().filter((url) => url.includes('query='))
+      ).to.have.length(0);
     });
 
     it('ignores a stale list when a later load already finished', async () => {
@@ -814,14 +941,14 @@ describe('RuntimeSessionsView', () => {
 
       try {
         // Identical GETs share one in-flight request, so the two loads need
-        // different queries or there is only one fetch to resolve.
-        (element as any).searchQuery = 'stale';
+        // different parameters or there is only one fetch to resolve.
+        (element as any).status = 'active';
         const first = (element as any).loadSessions();
         await waitUntil(
           () => pending.length >= 1,
           'First session list fetch did not start'
         );
-        (element as any).searchQuery = 'fresh';
+        (element as any).status = 'ended';
         const second = (element as any).loadSessions();
         await waitUntil(
           () => pending.length >= 2,
@@ -857,9 +984,9 @@ describe('RuntimeSessionsView', () => {
       await (toolbar as any).updateComplete;
       const input = toolbar.shadowRoot!.querySelector('sl-input.search-input')!;
       expect(input.getAttribute('placeholder')).to.equal(
-        'Principal, session reference, or source id'
+        'Search prompts, responses, and tool calls'
       );
-      expect(input.getAttribute('label')).to.equal('Search sessions');
+      expect(input.getAttribute('label')).to.equal('Search session content');
     });
 
     it('shows one search input on the page', async () => {
@@ -885,6 +1012,360 @@ describe('RuntimeSessionsView', () => {
         observer.shadowRoot!.querySelectorAll('.sidebar sl-input');
       expect(toolbarSearches.length).to.equal(1);
       expect(sidebarSearches.length).to.equal(0);
+    });
+  });
+
+  describe('content search', () => {
+    function snippetButtons(element: RuntimeSessionsView): HTMLElement[] {
+      return Array.from(
+        element.shadowRoot!.querySelectorAll('button.snippet')
+      ) as HTMLElement[];
+    }
+
+    it('renders one snippet per match with its time and match tag', async () => {
+      const element = await renderedSearch();
+
+      const buttons = snippetButtons(element);
+      expect(buttons).to.have.length(2);
+
+      const first = buttons[0];
+      expect(first.getAttribute('data-testid')).to.equal('snippet-doc-1');
+      expect(first.textContent).to.contain('Model call');
+      expect(first.textContent).to.contain('user');
+      expect(first.querySelector('mark')!.textContent).to.equal('rollout');
+      // The timestamp of the turn, not of the session.
+      expect(first.textContent).to.contain(
+        new Intl.DateTimeFormat(undefined, {
+          month: 'short',
+          day: 'numeric',
+          year: 'numeric',
+          hour: 'numeric',
+          minute: '2-digit',
+        }).format(new Date('2026-03-09T19:05:00Z'))
+      );
+      expect(buttons[1].textContent).to.contain('Tool call');
+    });
+
+    it('opens a session-summary hit without claiming a turn jump', async () => {
+      fetchStub.withArgs(SEARCH_URL, sinon.match.any).callsFake(async () => {
+        const body = searchResponse();
+        body.results[0].snippets = [
+          {
+            document_id: 'doc-summary',
+            runtime_session_id: 'runtime-session-2',
+            source_kind: 'session_summary',
+            source_id: 'runtime-session-2',
+            chunk_index: 0,
+            occurred_at: '2026-03-09T19:00:00Z',
+            role: 'system',
+            rank: 0.5,
+            redaction_state: 'clear',
+            text: 'Triage Assistant <mark>rollout</mark>',
+          },
+        ];
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+
+      const element = await renderedSearch();
+      const button = snippetButtons(element)[0];
+      expect(button.textContent).to.contain('Opens the session');
+      button.click();
+      await element.updateComplete;
+
+      expect((element as any).selectedSessionId).to.equal('runtime-session-2');
+      expect((element as any).focusTurnId).to.equal(null);
+      expect(new URLSearchParams(window.location.search).get('turn')).to.equal(
+        null
+      );
+    });
+
+    it('does not claim nothing matched before a search has run', async () => {
+      const element = (await fixture(
+        html`<runtime-sessions-view></runtime-sessions-view>`
+      )) as RuntimeSessionsView;
+      await waitUntil(
+        () => !(element as any).loading,
+        'Runtime sessions view did not finish loading'
+      );
+      await element.updateComplete;
+
+      await typeQuery(element, 'r');
+      await element.updateComplete;
+
+      expect((element as any).searchQuery).to.equal('r');
+      expect((element as any).searchResults).to.equal(null);
+      expect((element as any).searchLoading).to.equal(false);
+      expect(
+        element.shadowRoot!.querySelector('[data-testid="search-empty"]')
+      ).to.equal(null);
+      const loadingState = element.shadowRoot!.querySelector(
+        '[data-testid="search-loading"]'
+      );
+      expect(loadingState).to.not.equal(null);
+      expect(loadingState!.textContent).to.contain('Searching session content');
+    });
+
+    it('opens the session at the matching turn, and the location reproduces it', async () => {
+      const element = await renderedSearch();
+
+      snippetButtons(element)[1].click();
+      await element.updateComplete;
+
+      expect((element as any).selectedSessionId).to.equal('runtime-session-2');
+      expect((element as any).focusTurnId).to.equal('tool-7');
+
+      const params = new URLSearchParams(window.location.search);
+      expect(params.get('sessionId')).to.equal('runtime-session-2');
+      expect(params.get('turn')).to.equal('tool-7');
+      expect(params.get('q')).to.equal('rollout plan');
+
+      const observer = element.shadowRoot!.querySelector(
+        'preloop-session-observer'
+      ) as any;
+      expect(observer.focusTurnId).to.equal('tool-7');
+
+      // Reloading that location reproduces the same view.
+      const reloaded = (await fixture(
+        html`<runtime-sessions-view></runtime-sessions-view>`
+      )) as RuntimeSessionsView;
+      await waitUntil(
+        () => (reloaded as any).searchResults !== null,
+        'Reloaded view did not restore the search'
+      );
+      await reloaded.updateComplete;
+
+      expect((reloaded as any).searchQuery).to.equal('rollout plan');
+      expect((reloaded as any).selectedSessionId).to.equal('runtime-session-2');
+      expect((reloaded as any).focusTurnId).to.equal('tool-7');
+      expect(snippetButtons(reloaded)).to.have.length(2);
+    });
+
+    it('keeps list ledger numbers when a snippet opens a listed session', async () => {
+      const element = await renderedSearch();
+      snippetButtons(element)[0].click();
+      await element.updateComplete;
+
+      const observer = element.shadowRoot!.querySelector(
+        'preloop-session-observer'
+      ) as HTMLElement & { updateComplete: Promise<unknown> };
+      await observer.updateComplete;
+      await waitUntil(() => {
+        const meta = observer.shadowRoot?.querySelector('.toolbar .meta');
+        return Boolean(meta && meta.textContent?.includes('tokens'));
+      }, 'Observer toolbar never showed session ledger numbers');
+
+      const meta = observer.shadowRoot!.querySelector('.toolbar .meta')!;
+      const text = (meta.textContent || '').replace(/\s+/g, ' ').trim();
+      expect(text).to.not.equal('0 tokens · $0.00');
+      expect(text).to.contain('700 tokens');
+      expect(text).to.contain('$0.11');
+    });
+
+    it('restores the list behaviour when the query is emptied', async () => {
+      const element = await renderedSearch();
+      expect(snippetButtons(element)).to.have.length(2);
+
+      const listCallsBefore = fetchStub
+        .getCalls()
+        .filter((call) =>
+          String(call.args[0]).startsWith('/api/v1/runtime-sessions?')
+        ).length;
+      const searchCallsBefore = searchCalls().length;
+
+      await typeQuery(element, '');
+      await waitUntil(
+        () =>
+          fetchStub
+            .getCalls()
+            .filter((call) =>
+              String(call.args[0]).startsWith('/api/v1/runtime-sessions?')
+            ).length > listCallsBefore &&
+          element.shadowRoot!.querySelector('preloop-session-observer') !==
+            null,
+        'Emptying the query did not go back to the list',
+        { timeout: 3000 }
+      );
+      await element.updateComplete;
+
+      expect(searchCalls().length).to.equal(searchCallsBefore);
+      expect((element as any).searchResults).to.equal(null);
+      expect(snippetButtons(element)).to.have.length(0);
+      expect(
+        element.shadowRoot!.querySelector('preloop-session-observer')
+      ).to.not.equal(null);
+      expect(new URLSearchParams(window.location.search).get('q')).to.equal(
+        null
+      );
+    });
+
+    it('states partial coverage when the corpus stops inside the range', async () => {
+      const insideRange = new Date(Date.now() - 3_600_000).toISOString();
+      fetchStub
+        .withArgs(SEARCH_URL, sinon.match.any)
+        .callsFake(
+          async () =>
+            new Response(
+              JSON.stringify(searchResponse({ indexed_through: insideRange })),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+        );
+
+      const element = await renderedSearch();
+      const notice = element.shadowRoot!.querySelector(
+        '[data-testid="coverage-notice"]'
+      );
+      expect(notice).to.not.equal(null);
+      expect(notice!.textContent).to.contain('indexed through');
+    });
+
+    it('states nothing about coverage when the corpus covers the range', async () => {
+      const pastRangeEnd = new Date(
+        Date.now() + 7 * 24 * 3_600_000
+      ).toISOString();
+      fetchStub
+        .withArgs(SEARCH_URL, sinon.match.any)
+        .callsFake(
+          async () =>
+            new Response(
+              JSON.stringify(searchResponse({ indexed_through: pastRangeEnd })),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+        );
+
+      const element = await renderedSearch();
+      expect(
+        element.shadowRoot!.querySelector('[data-testid="coverage-notice"]')
+      ).to.equal(null);
+    });
+
+    it('surfaces a degraded semantic half rather than implying completeness', async () => {
+      fetchStub.withArgs(SEARCH_URL, sinon.match.any).callsFake(
+        async () =>
+          new Response(
+            JSON.stringify(
+              searchResponse({
+                mode: 'hybrid',
+                degraded: {
+                  keyword: true,
+                  semantic: false,
+                  reasons: ['semantic_not_enabled'],
+                  detail:
+                    'Semantic ranking is not enabled on this deployment; these are keyword results ranked by relevance.',
+                },
+              })
+            ),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+      );
+
+      const element = await renderedSearch();
+      const notice = element.shadowRoot!.querySelector(
+        '[data-testid="degraded-notice"]'
+      );
+      expect(notice).to.not.equal(null);
+      expect(notice!.textContent).to.contain('Semantic ranking is not enabled');
+    });
+
+    it('issues one request after the debounce, not one per keystroke', async () => {
+      const element = (await fixture(
+        html`<runtime-sessions-view></runtime-sessions-view>`
+      )) as RuntimeSessionsView;
+      await waitUntil(
+        () => !(element as any).loading,
+        'Runtime sessions view did not finish loading'
+      );
+      await element.updateComplete;
+
+      await typeQuery(element, 'r');
+      await typeQuery(element, 'ro');
+      await typeQuery(element, 'rollout plan');
+      expect(searchCalls().length).to.equal(0);
+
+      await waitUntil(() => searchCalls().length > 0, 'Search never went out', {
+        timeout: 3000,
+      });
+      // Let a second debounce window pass: nothing further goes out.
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(searchCalls().length).to.equal(1);
+      expect(
+        JSON.parse(String((searchCalls()[0].args[1] as RequestInit).body)).query
+      ).to.equal('rollout plan');
+    });
+
+    it('renders a loading state while the search is in flight', async () => {
+      let release: ((value: unknown) => void) | null = null;
+      fetchStub.withArgs(SEARCH_URL, sinon.match.any).callsFake(async () => {
+        await new Promise((resolve) => {
+          release = resolve;
+        });
+        return new Response(JSON.stringify(searchResponse()), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+
+      const element = (await fixture(
+        html`<runtime-sessions-view></runtime-sessions-view>`
+      )) as RuntimeSessionsView;
+      await waitUntil(
+        () => !(element as any).loading,
+        'Runtime sessions view did not finish loading'
+      );
+      await typeQuery(element, 'rollout plan');
+      await waitUntil(
+        () => (element as any).searchLoading === true,
+        'Search never entered its loading state',
+        { timeout: 3000 }
+      );
+      await element.updateComplete;
+
+      const loadingState = element.shadowRoot!.querySelector(
+        '[data-testid="search-loading"]'
+      );
+      expect(loadingState).to.not.equal(null);
+      expect(loadingState!.textContent).to.contain('Searching session content');
+      release?.(null);
+    });
+
+    it('renders an empty state when nothing matched', async () => {
+      fetchStub
+        .withArgs(SEARCH_URL, sinon.match.any)
+        .callsFake(
+          async () =>
+            new Response(
+              JSON.stringify(searchResponse({ total: 0, results: [] })),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+        );
+
+      const element = await renderedSearch();
+      const empty = element.shadowRoot!.querySelector(
+        '[data-testid="search-empty"]'
+      );
+      expect(empty).to.not.equal(null);
+      expect(empty!.textContent).to.contain('No session content matched');
+    });
+
+    it('renders an error state when the search fails', async () => {
+      fetchStub
+        .withArgs(SEARCH_URL, sinon.match.any)
+        .callsFake(
+          async () =>
+            new Response(
+              JSON.stringify({ detail: 'Search is unavailable right now' }),
+              { status: 500, headers: { 'Content-Type': 'application/json' } }
+            )
+        );
+
+      const element = await renderedSearch();
+      const error = element.shadowRoot!.querySelector(
+        '[data-testid="search-error"]'
+      );
+      expect(error).to.not.equal(null);
+      expect(error!.textContent).to.contain('Search is unavailable right now');
     });
   });
 

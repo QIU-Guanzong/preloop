@@ -25,6 +25,7 @@ import {
   getRuntimeSessionGatewayEvents,
   getAccountRuntimeSessionActivityTimeline,
   getAccountRuntimeSessionInteractions,
+  searchRuntimeSessions,
   updateAccountRuntimeSession,
   type RuntimeSessionDetailParams,
   type RuntimeSessionInteractionsParams,
@@ -41,11 +42,58 @@ import type {
   GatewayUsageSearchResultItem,
   RuntimeSessionActivityItem,
   RuntimeSessionSummary,
+  SessionSearchResponse,
+  SessionSearchResult,
+  SessionSearchSnippet,
 } from '../../types';
 import consoleStyles from '../../styles/console-styles.css?inline';
 import { unifiedWebSocketManager } from '../../services/unified-websocket-manager';
 
 type DateRangePreset = 'last-7' | 'last-30' | 'last-90' | 'all' | 'custom';
+
+/**
+ * Keystrokes settle for this long before a search goes out. The query is a
+ * server round trip over the whole corpus, so one request per character would
+ * be one wasted search per character.
+ */
+const SEARCH_DEBOUNCE_MS = 400;
+
+/**
+ * Snippets shown per matching session. Tunable: a handful of lines is enough
+ * to tell a hit from a near miss, and more turns the result list into a
+ * transcript nobody asked to read.
+ */
+const SNIPPETS_PER_SESSION = 3;
+
+/** Matching sessions requested per search. */
+const SEARCH_RESULT_LIMIT = 25;
+
+/**
+ * Readable names for the corpus source kinds, so a snippet says why it
+ * matched rather than showing the column value.
+ */
+const MATCH_TAG_LABELS: Record<string, string> = {
+  gateway_interaction: 'Model call',
+  transcript_message: 'Transcript',
+  tool_call: 'Tool call',
+  operator_note: 'Operator note',
+  session_summary: 'Session summary',
+  flow_log: 'Flow log',
+};
+
+/**
+ * Corpus kinds whose source_id names a turn the transcript can scroll to.
+ *
+ * Gateway interactions store the api usage id, tool calls and transcript
+ * messages store the activity row id, and the transcript keys turns by those
+ * same ids. Session summaries, operator notes and flow logs name something
+ * else, so a click opens the session rather than a turn.
+ */
+const TURN_JUMP_KINDS = new Set([
+  'gateway_interaction',
+  'tool_call',
+  'transcript_message',
+]);
 
 @customElement('runtime-sessions-view')
 export class RuntimeSessionsView extends LitElement {
@@ -91,6 +139,26 @@ export class RuntimeSessionsView extends LitElement {
   @state()
   private searchQuery = '';
 
+  // Content search state. A non empty query puts the page in search mode: the
+  // box asks the ranked search endpoint about what agents said and did, not
+  // the list endpoint about identifier columns.
+  @state()
+  private searchResults: SessionSearchResponse | null = null;
+
+  @state()
+  private searchLoading = false;
+
+  @state()
+  private searchError: string | null = null;
+
+  /**
+   * The turn the transcript should open at, as the identifier the corpus
+   * publishes for a matching turn. Mirrored into the location so the link is
+   * shareable and survives a reload.
+   */
+  @state()
+  private focusTurnId: string | null = null;
+
   @state()
   private sessionSourceType = 'all';
 
@@ -123,6 +191,8 @@ export class RuntimeSessionsView extends LitElement {
   private refreshTimer: number | null = null;
   private searchDebounce: number | null = null;
   private loadSequence = 0;
+  private searchSequence = 0;
+  private onPopState = () => this.applyLocation();
 
   static styles = [
     unsafeCSS(consoleStyles),
@@ -460,6 +530,89 @@ export class RuntimeSessionsView extends LitElement {
         margin-bottom: var(--sl-spacing-small);
       }
 
+      /* Content search results: one block per session, a few snippets each. */
+      .search-results {
+        display: flex;
+        flex-direction: column;
+        gap: var(--sl-spacing-large);
+      }
+
+      .search-result-header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: var(--sl-spacing-small);
+      }
+
+      .search-result-meta {
+        color: var(--sl-color-neutral-600);
+        font-size: var(--sl-font-size-small);
+      }
+
+      .snippet-list {
+        display: flex;
+        flex-direction: column;
+        gap: var(--sl-spacing-x-small);
+        margin-top: var(--sl-spacing-x-small);
+      }
+
+      .snippet {
+        display: block;
+        width: 100%;
+        text-align: left;
+        border: 1px solid var(--sl-color-neutral-200);
+        border-radius: var(--sl-border-radius-medium);
+        background: var(--sl-color-neutral-0);
+        padding: var(--sl-spacing-small);
+        cursor: pointer;
+        font: inherit;
+        color: inherit;
+      }
+
+      .snippet:hover,
+      .snippet:focus-visible {
+        border-color: var(--sl-color-primary-400);
+      }
+
+      .snippet-header {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--sl-spacing-x-small);
+        align-items: center;
+        margin-bottom: var(--sl-spacing-2x-small);
+        font-size: var(--sl-font-size-small);
+        color: var(--sl-color-neutral-600);
+      }
+
+      .snippet-text {
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: var(--sl-font-size-small);
+        line-height: 1.5;
+      }
+
+      .snippet-text mark {
+        background: var(--sl-color-warning-200);
+        color: inherit;
+      }
+
+      .snippet-text.muted {
+        color: var(--sl-color-neutral-500);
+        font-style: italic;
+      }
+
+      .snippet-open-hint {
+        margin-top: var(--sl-spacing-2x-small);
+        font-size: var(--console-text-meta);
+        color: var(--console-meta-color);
+      }
+
+      .search-notices {
+        display: flex;
+        flex-direction: column;
+        gap: var(--sl-spacing-small);
+      }
+
       @media (max-width: 1100px) {
         .layout {
           grid-template-columns: 1fr;
@@ -491,15 +644,20 @@ export class RuntimeSessionsView extends LitElement {
     super.connectedCallback();
 
     if (!this.initialized) {
-      const params = new URLSearchParams(window.location.search);
-      this.selectedSessionId = params.get('sessionId');
       if (this.selectedRange !== 'custom') {
         this.applyPresetDates(this.selectedRange);
       }
       this.initialized = true;
+      // Read the location before the first load: a shared link carries the
+      // query and the turn it was found in, not only the session.
+      this.readLocation();
       void this.loadFeatureFlags();
       void this.loadSessions();
+      if (this.isSearching) {
+        void this.loadSearchResults();
+      }
       this.connectRealtime();
+      window.addEventListener('popstate', this.onPopState);
     }
   }
 
@@ -511,6 +669,43 @@ export class RuntimeSessionsView extends LitElement {
       this.refreshTimer = null;
     }
     this.cancelSearchDebounce();
+    window.removeEventListener('popstate', this.onPopState);
+  }
+
+  /** Whether the page is answering a content query rather than listing. */
+  private get isSearching(): boolean {
+    return this.searchQuery.trim() !== '';
+  }
+
+  /** Pull the deep linkable state out of the current location. */
+  private readLocation(): void {
+    const params = new URLSearchParams(window.location.search);
+    this.selectedSessionId = params.get('sessionId');
+    this.searchQuery = params.get('q') ?? '';
+    this.focusTurnId = params.get('turn');
+  }
+
+  /**
+   * Restore the view the location describes, for the back button.
+   *
+   * A snippet click pushes a location, so going back has to put the page in
+   * the state that location names rather than leaving a url that no longer
+   * matches what is on screen.
+   */
+  private applyLocation(): void {
+    const previousQuery = this.searchQuery;
+    this.readLocation();
+    this.cancelSearchDebounce();
+    if (!this.isSearching) {
+      this.clearSearchResults();
+      // Keep the list that is already on screen; a hard reload would blank
+      // the observer for the length of the round trip.
+      void this.loadSessions(this.sessions !== null);
+      return;
+    }
+    if (this.searchQuery !== previousQuery || !this.searchResults) {
+      void this.loadSearchResults();
+    }
   }
 
   private connectRealtime(): void {
@@ -607,6 +802,11 @@ export class RuntimeSessionsView extends LitElement {
   }
 
   private scheduleRefresh(): void {
+    // Live traffic refreshes the list, not a search: re-running a ranked query
+    // on every gateway event would reshuffle results under the reader.
+    if (this.isSearching) {
+      return;
+    }
     if (this.refreshTimer !== null) {
       window.clearTimeout(this.refreshTimer);
     }
@@ -638,26 +838,92 @@ export class RuntimeSessionsView extends LitElement {
     this.endDate = this.getLocalDateString(today);
   }
 
+  /** Start of the requested range as an instant, or null when unbounded. */
+  private rangeStartIso(): string | null {
+    return this.startDate
+      ? new Date(`${this.startDate}T00:00:00`).toISOString()
+      : null;
+  }
+
+  /** End of the requested range as an instant, or null when unbounded. */
+  private rangeEndIso(): string | null {
+    return this.endDate
+      ? new Date(`${this.endDate}T23:59:59.999`).toISOString()
+      : null;
+  }
+
   private buildListParams(): RuntimeSessionListParams {
     const params: RuntimeSessionListParams = {
       limit: 50,
       status: this.status as 'all' | 'active' | 'ended',
     };
 
-    if (this.startDate) {
-      params.startDate = new Date(`${this.startDate}T00:00:00`).toISOString();
+    const startDate = this.rangeStartIso();
+    const endDate = this.rangeEndIso();
+    if (startDate) {
+      params.startDate = startDate;
     }
-    if (this.endDate) {
-      params.endDate = new Date(`${this.endDate}T23:59:59.999`).toISOString();
+    if (endDate) {
+      params.endDate = endDate;
     }
-    if (this.searchQuery.trim()) {
-      params.query = this.searchQuery.trim();
-    }
+    // The query no longer reaches the list endpoint at all: a typed query is
+    // a question about content, and the list filter only ever matched four
+    // identifier columns.
     if (this.sessionSourceType !== 'all') {
       params.sessionSourceType = this.sessionSourceType;
     }
 
     return params;
+  }
+
+  /**
+   * Run one ranked content search for the current query and filters.
+   *
+   * Sequenced like the list load: a slow earlier search must never overwrite
+   * the answer to what the operator is typing now.
+   */
+  private async loadSearchResults(): Promise<void> {
+    const query = this.searchQuery.trim();
+    if (!query) {
+      this.clearSearchResults();
+      return;
+    }
+
+    const seq = ++this.searchSequence;
+    this.searchLoading = true;
+    this.searchError = null;
+    try {
+      const results = await searchRuntimeSessions({
+        query,
+        startDate: this.rangeStartIso() ?? undefined,
+        endDate: this.rangeEndIso() ?? undefined,
+        limit: SEARCH_RESULT_LIMIT,
+        maxSnippetsPerSession: SNIPPETS_PER_SESSION,
+      });
+      if (seq !== this.searchSequence) return;
+      this.searchResults = results;
+    } catch (error) {
+      if (seq !== this.searchSequence) return;
+      console.error('Failed to search session content:', error);
+      this.searchResults = null;
+      this.searchError =
+        error instanceof Error
+          ? error.message
+          : 'Failed to search session content';
+    } finally {
+      if (seq === this.searchSequence) {
+        this.searchLoading = false;
+      }
+    }
+  }
+
+  private clearSearchResults(): void {
+    // A newer sequence number also abandons any search still in flight.
+    this.searchSequence += 1;
+    this.searchResults = null;
+    this.searchError = null;
+    this.searchLoading = false;
+    this.focusTurnId = null;
   }
 
   private buildDetailParams(): RuntimeSessionDetailParams {
@@ -705,8 +971,13 @@ export class RuntimeSessionsView extends LitElement {
       if (seq !== this.loadSequence) return;
       this.sessions = result;
       if (
-        !this.selectedSessionId ||
-        !this.sessions.items.some((item) => item.id === this.selectedSessionId)
+        // In search mode the selection belongs to the results, which are not
+        // this page of the list; the list must not steal it back.
+        !this.isSearching &&
+        (!this.selectedSessionId ||
+          !this.sessions.items.some(
+            (item) => item.id === this.selectedSessionId
+          ))
       ) {
         this.selectedSessionId = this.sessions.items[0]?.id ?? null;
         this.syncUrl();
@@ -840,14 +1111,38 @@ export class RuntimeSessionsView extends LitElement {
     }
   }
 
-  private syncUrl() {
+  /**
+   * Mirror the view into the location.
+   *
+   * The query and the focused turn ride along with the session, so a link to
+   * "the place in this session where that happened" reproduces that view when
+   * it is opened again. Opening a snippet pushes rather than replaces, which
+   * is what gives the back button something to return to.
+   */
+  private syncUrl(options: { push?: boolean } = {}) {
     const url = new URL(window.location.href);
     if (this.selectedSessionId) {
       url.searchParams.set('sessionId', this.selectedSessionId);
     } else {
       url.searchParams.delete('sessionId');
     }
-    window.history.replaceState({}, '', `${url.pathname}${url.search}`);
+    const query = this.searchQuery.trim();
+    if (query) {
+      url.searchParams.set('q', query);
+    } else {
+      url.searchParams.delete('q');
+    }
+    if (this.focusTurnId) {
+      url.searchParams.set('turn', this.focusTurnId);
+    } else {
+      url.searchParams.delete('turn');
+    }
+    const target = `${url.pathname}${url.search}`;
+    if (options.push) {
+      window.history.pushState({}, '', target);
+    } else {
+      window.history.replaceState({}, '', target);
+    }
   }
 
   private handleRangeChange(event: Event) {
@@ -873,20 +1168,33 @@ export class RuntimeSessionsView extends LitElement {
   }
 
   /**
-   * The bar filters as you type, the way the Agents bar does
-   * (agents-view.ts handleSearchChange). One bar that filters live and one
-   * that waits for a button would be two behaviours for one control, and the
-   * toolbar swallows Enter, so a typed query used to sit there doing nothing
-   * until the operator found Apply. The query is a server parameter, so the
-   * keystrokes are debounced instead of sent one per character.
+   * The bar searches session content as you type.
+   *
+   * A query asks what the agents said and did, so it goes to the ranked
+   * content search rather than the list filter over identifier columns. An
+   * empty box is still browsing, so it returns to the plain list. Either way
+   * the keystrokes are debounced: one request when typing stops, not one per
+   * character.
    */
   private handleSearchChange(event: CustomEvent<{ value: string }>) {
     this.searchQuery = event.detail.value;
     this.cancelSearchDebounce();
     this.searchDebounce = window.setTimeout(() => {
       this.searchDebounce = null;
-      void this.loadSessions();
-    }, 400);
+      void this.runQuery();
+    }, SEARCH_DEBOUNCE_MS);
+  }
+
+  /** Search when there is a query, list when there is not. */
+  private async runQuery(): Promise<void> {
+    if (this.isSearching) {
+      this.syncUrl();
+      await this.loadSearchResults();
+      return;
+    }
+    this.clearSearchResults();
+    this.syncUrl();
+    await this.loadSessions(this.sessions !== null);
   }
 
   private cancelSearchDebounce(): void {
@@ -928,7 +1236,12 @@ export class RuntimeSessionsView extends LitElement {
 
   private async applyFilters() {
     this.cancelSearchDebounce();
-    await this.loadSessions();
+    await this.runQuery();
+    if (this.isSearching) {
+      // The filters bound the list as well, so it stays in step for the
+      // moment the query is cleared.
+      await this.loadSessions();
+    }
   }
 
   private async clearFilters() {
@@ -939,6 +1252,8 @@ export class RuntimeSessionsView extends LitElement {
     this.sessionSourceType = 'all';
     this.status = 'all';
     this.interactionQuery = '';
+    this.clearSearchResults();
+    this.syncUrl();
     await this.loadSessions();
   }
 
@@ -986,10 +1301,41 @@ export class RuntimeSessionsView extends LitElement {
   }
 
   private selectSession(sessionId: string) {
+    if (sessionId === this.selectedSessionId) {
+      // The observer echoes its own auto selection back. That is not the
+      // operator choosing another session, so a focused turn survives it.
+      return;
+    }
     this.selectedSessionId = sessionId;
+    // Picking another session is not landing on a turn any more.
+    this.focusTurnId = null;
     this.syncUrl();
     // Observer loads activity/events for the selection; avoid a duplicate
     // parent getAccountRuntimeSessionDetail fetch.
+  }
+
+  /**
+   * Open the session detail at the turn a snippet came from.
+   *
+   * The corpus names the turn (its source id), the transcript scrolls to it,
+   * and the location records both, so the answer to "where did that happen"
+   * is a link rather than a two hour session to scroll through. Kinds that
+   * have no turn in the transcript still open the session; they just omit
+   * the turn so the page does not pretend it jumped.
+   */
+  private snippetJumpsToTurn(snippet: SessionSearchSnippet): boolean {
+    return TURN_JUMP_KINDS.has(snippet.source_kind);
+  }
+
+  private openSnippet(
+    result: SessionSearchResult,
+    snippet: SessionSearchSnippet
+  ) {
+    this.selectedSessionId = result.runtime_session_id;
+    this.focusTurnId = this.snippetJumpsToTurn(snippet)
+      ? snippet.source_id
+      : null;
+    this.syncUrl({ push: true });
   }
 
   private formatNumber(value: number | null | undefined): string {
@@ -1002,6 +1348,15 @@ export class RuntimeSessionsView extends LitElement {
    * flight so the bar never claims "0 sessions" before the answer arrives.
    */
   private get sessionCountLabel(): string {
+    if (this.isSearching) {
+      if (this.searchLoading || !this.searchResults) {
+        return '';
+      }
+      const matched = this.searchResults.total;
+      return `${this.formatNumber(matched)} matching session${
+        matched === 1 ? '' : 's'
+      }`;
+    }
     if (this.loading || !this.sessions) {
       return '';
     }
@@ -1111,6 +1466,272 @@ export class RuntimeSessionsView extends LitElement {
     return this.hasActiveFilters()
       ? 'No sessions matched the current filters.'
       : 'No sessions yet. A session is recorded automatically the first time an onboarded agent makes a model or tool call through the gateway. Onboard an agent from the Agents page to see your first one.';
+  }
+
+  /**
+   * How far the corpus reaches inside the range being searched, when it stops
+   * short of it.
+   *
+   * The endpoint publishes the newest content it has indexed for the account,
+   * and the corpus fills forward, so a marker that falls inside the requested
+   * range means the newer part of that range cannot match yet. Saying so is
+   * the difference between "nothing matched" and "nothing is indexed".
+   */
+  private partialCoverageThrough(): string | null {
+    const marker = this.searchResults?.indexed_through ?? null;
+    if (!marker) {
+      return null;
+    }
+    const markerTime = new Date(marker).getTime();
+    if (Number.isNaN(markerTime)) {
+      return null;
+    }
+    const start = this.rangeStartIso();
+    const startTime = start ? new Date(start).getTime() : null;
+    const end = this.rangeEndIso();
+    const endTime = end ? new Date(end).getTime() : Date.now();
+    if (startTime !== null && markerTime < startTime) {
+      return null;
+    }
+    if (markerTime >= endTime) {
+      return null;
+    }
+    return marker;
+  }
+
+  /**
+   * What the search could not do, in the endpoint's own words.
+   *
+   * The response carries a degraded block; an answer that ranked on keywords
+   * alone says so rather than letting the reader assume the semantic half ran.
+   */
+  private degradedNotice(): string | null {
+    const degraded = this.searchResults?.degraded;
+    if (!degraded || degraded.reasons.length === 0) {
+      return null;
+    }
+    return (
+      degraded.detail ??
+      'Semantic ranking did not run for this answer; these are keyword results.'
+    );
+  }
+
+  private renderSearchNotices() {
+    const coverage = this.partialCoverageThrough();
+    const degraded = this.degradedNotice();
+    if (!coverage && !degraded) {
+      return '';
+    }
+    return html`
+      <div class="search-notices">
+        ${
+          coverage
+            ? html`
+                <sl-alert variant="neutral" open data-testid="coverage-notice">
+                  <sl-icon slot="icon" name="clock-history"></sl-icon>
+                  Search covers content indexed through
+                  ${this.formatDateTime(coverage)}. Anything newer in this range
+                  is not searchable yet.
+                </sl-alert>
+              `
+            : ''
+        }
+        ${
+          degraded
+            ? html`
+                <sl-alert variant="warning" open data-testid="degraded-notice">
+                  <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                  ${degraded}
+                </sl-alert>
+              `
+            : ''
+        }
+      </div>
+    `;
+  }
+
+  /** The readable reason a snippet matched, with the role when there is one. */
+  private matchTag(snippet: SessionSearchSnippet): string {
+    const label = MATCH_TAG_LABELS[snippet.source_kind] ?? snippet.source_kind;
+    return snippet.role ? `${label} · ${snippet.role}` : label;
+  }
+
+  /**
+   * Render one snippet's text.
+   *
+   * The server marks the matching terms with mark tags around text that is
+   * whatever an agent said, so the text is rendered as text and only the
+   * marker positions are honoured. Nothing captured is ever rendered as
+   * markup.
+   */
+  private renderSnippetText(snippet: SessionSearchSnippet) {
+    if (!snippet.text) {
+      return html`<span class="snippet-text muted"
+        >No stored text for this match (${snippet.redaction_state}). Open the
+        session to see the turn.</span
+      >`;
+    }
+    const parts = snippet.text.split(/<mark>|<\/mark>/);
+    return html`<span class="snippet-text"
+      >${parts.map((part, index) =>
+        index % 2 === 1 ? html`<mark>${part}</mark>` : part
+      )}</span
+    >`;
+  }
+
+  private searchResultTitle(result: SessionSearchResult): string {
+    return (
+      result.title ||
+      result.session_reference ||
+      result.session_source_id ||
+      'Untitled session'
+    );
+  }
+
+  private renderSearchResult(result: SessionSearchResult) {
+    return html`
+      <sl-card data-testid=${`search-result-${result.runtime_session_id}`}>
+        <div class="search-result-header">
+          <div class="session-item-title">
+            ${this.searchResultTitle(result)}
+          </div>
+          <div class="search-result-meta">
+            ${result.matched_chunk_count}
+            match${result.matched_chunk_count === 1 ? '' : 'es'} ·
+            ${this.formatDateTime(result.last_match_at ?? result.started_at)}
+          </div>
+        </div>
+        <div class="snippet-list">
+          ${result.snippets.map(
+            (snippet) => html`
+              <button
+                class="snippet"
+                type="button"
+                data-testid=${`snippet-${snippet.document_id}`}
+                @click=${() => this.openSnippet(result, snippet)}
+              >
+                <div class="snippet-header">
+                  <sl-badge variant="neutral" pill
+                    >${this.matchTag(snippet)}</sl-badge
+                  >
+                  <span>${this.formatDateTime(snippet.occurred_at)}</span>
+                </div>
+                ${this.renderSnippetText(snippet)}
+                ${
+                  this.snippetJumpsToTurn(snippet)
+                    ? ''
+                    : html`<div class="snippet-open-hint">
+                        Opens the session
+                      </div>`
+                }
+              </button>
+            `
+          )}
+        </div>
+      </sl-card>
+    `;
+  }
+
+  private renderSearchResults() {
+    // A keystroke makes searchQuery non-empty immediately, while the request
+    // waits behind the debounce. Until a response (or error) exists, this is
+    // still in flight: claiming "nothing matched" would be a lie.
+    if (this.searchLoading || (!this.searchResults && !this.searchError)) {
+      return html`
+        <sl-card>
+          <div class="loading-state" data-testid="search-loading">
+            <sl-spinner></sl-spinner>
+            <div>Searching session content...</div>
+          </div>
+        </sl-card>
+      `;
+    }
+
+    if (this.searchError) {
+      return html`
+        <sl-alert variant="danger" open data-testid="search-error">
+          <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+          ${this.searchError}
+        </sl-alert>
+      `;
+    }
+
+    const results = this.searchResults?.results ?? [];
+    if (results.length === 0) {
+      return html`
+        <sl-card>
+          <div class="empty-state" data-testid="search-empty">
+            <sl-icon name="search"></sl-icon>
+            <div>
+              No session content matched that query in the selected range.
+            </div>
+          </div>
+        </sl-card>
+      `;
+    }
+
+    return html`
+      <div class="search-results">
+        ${results.map((result) => this.renderSearchResult(result))}
+      </div>
+    `;
+  }
+
+  /**
+   * The matched sessions as list rows for the observer, so opening a snippet
+   * can show a session the current list page never carried.
+   *
+   * Prefer the list summary when we already have it: that row carries the
+   * ledger the observer toolbar prints. A reconstructed identity row would
+   * render as "0 tokens · $0.00" for a session that spent real money.
+   */
+  private searchResultSessions(): Array<Record<string, unknown>> {
+    const listedById = new Map(
+      (this.sessions?.items ?? []).map((row) => [row.id, row])
+    );
+    return (this.searchResults?.results ?? []).map((result) => {
+      const listed = listedById.get(result.runtime_session_id);
+      if (listed) {
+        return listed as unknown as Record<string, unknown>;
+      }
+      return {
+        id: result.runtime_session_id,
+        session_source_type: result.session_source_type,
+        session_source_id: result.session_source_id,
+        session_reference: result.session_reference,
+        title: result.title,
+        started_at: result.started_at,
+        last_activity_at: result.last_activity_at,
+      };
+    });
+  }
+
+  private renderObserver(sessions: Array<Record<string, unknown>> | unknown[]) {
+    return html`
+      <sl-card>
+        <preloop-session-observer
+          scope="account"
+          hideListSearch
+          .sessions=${sessions}
+          .emptyText=${this.emptySessionsText()}
+          .selectedSessionId=${this.selectedSessionId}
+          .focusTurnId=${this.focusTurnId}
+          .syncModeToUrl=${true}
+          layout="full"
+          defaultReplayMode="conversation"
+          .features=${{
+            summaries: true,
+            optimization: this.featureFlags.session_optimization === true,
+            auditLinks: true,
+            liveFollow: true,
+            endSession: true,
+          }}
+          @session-selected=${(event: CustomEvent) => {
+            this.selectSession(event.detail.sessionId);
+          }}
+        ></preloop-session-observer>
+      </sl-card>
+    `;
   }
 
   private renderModelBreakdown(models: GatewayUsageByModel[]) {
@@ -1625,8 +2246,8 @@ export class RuntimeSessionsView extends LitElement {
         <div class="main-column">
           <div class="page">
             <list-toolbar
-              searchPlaceholder="Principal, session reference, or source id"
-              searchLabel="Search sessions"
+              searchPlaceholder="Search prompts, responses, and tool calls"
+              searchLabel="Search session content"
               .search=${this.searchQuery}
               .views=${[]}
               @search-change=${this.handleSearchChange}
@@ -1702,40 +2323,26 @@ export class RuntimeSessionsView extends LitElement {
                 : ''
             }
             ${
-              this.loading
+              this.isSearching
                 ? html`
-                    <sl-card>
-                      <div class="loading-state">
-                        <sl-spinner></sl-spinner>
-                        <div>Loading sessions...</div>
-                      </div>
-                    </sl-card>
+                    ${this.renderSearchNotices()} ${this.renderSearchResults()}
+                    ${
+                      this.selectedSessionId &&
+                      (this.searchResults?.results.length ?? 0) > 0
+                        ? this.renderObserver(this.searchResultSessions())
+                        : ''
+                    }
                   `
-                : html`
-                    <sl-card>
-                      <preloop-session-observer
-                        scope="account"
-                        hideListSearch
-                        .sessions=${this.sessions?.items || []}
-                        .emptyText=${this.emptySessionsText()}
-                        .selectedSessionId=${this.selectedSessionId}
-                        .syncModeToUrl=${true}
-                        layout="full"
-                        defaultReplayMode="conversation"
-                        .features=${{
-                          summaries: true,
-                          optimization:
-                            this.featureFlags.session_optimization === true,
-                          auditLinks: true,
-                          liveFollow: true,
-                          endSession: true,
-                        }}
-                        @session-selected=${(event: CustomEvent) => {
-                          this.selectSession(event.detail.sessionId);
-                        }}
-                      ></preloop-session-observer>
-                    </sl-card>
-                  `
+                : this.loading
+                  ? html`
+                      <sl-card>
+                        <div class="loading-state">
+                          <sl-spinner></sl-spinner>
+                          <div>Loading sessions...</div>
+                        </div>
+                      </sl-card>
+                    `
+                  : this.renderObserver(this.sessions?.items || [])
             }
           </div>
         </div>

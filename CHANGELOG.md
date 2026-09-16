@@ -14,6 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or agent ceiling (seats counted as active users plus live invitations, the
   way the seat gate counts them), and the same counts for a single account.
   Read-only aggregates, no names, emails or provider identifiers.
+- The Sessions search box searches session content. A typed query goes to
+  the ranked content search endpoint instead of the identifier filter, and
+  results render per session with a few snippets each, every snippet carrying
+  its timestamp and a tag naming why it matched. Opening a snippet lands on
+  that turn in the transcript and puts the query, the session and the turn in
+  the location, so the link is shareable and the back button returns to the
+  results. An empty box goes back to the plain list. The page states what the
+  answer could not do: a partial coverage notice when the corpus stops inside
+  the range being searched, and the endpoint's degraded marker when semantic
+  ranking did not run.
 - `search_sessions` built-in tool. An agent searches the runtime session
   corpus before repeating work: ranked results, one trimmed snippet per
   session, a match reason and the endpoint's degraded markers. Scope is the
