@@ -41,9 +41,13 @@ export const DEDICATED_COMPARISON_FALLBACK_TITLE =
 export const CLOUD_TAB_FALLBACK_LABEL = 'Cloud';
 /** Tab label for the self-managed editions when the brand does not name it. */
 export const DEDICATED_TAB_FALLBACK_LABEL = 'Self-hosted';
-/** Cloud tab lead when the brand does not write one. */
-export const CLOUD_LEAD_FALLBACK =
-  'Hosted by Preloop. Start free, upgrade when you need to.';
+/**
+ * Cloud tab lead when a two-tab brand does not write `cloud_lead`.
+ * Name-neutral so a white-label page never claims another product hosts it.
+ * Cloud-only brands do not use this: they already have the page lead under
+ * the H1, and `.tab-lead` is a two-tab element.
+ */
+export const CLOUD_LEAD_FALLBACK = 'Start free, upgrade when you need to.';
 
 interface PricingSsrBrand {
   name?: string;
@@ -241,9 +245,13 @@ export function generatePricingSlottedContent(config: PricingSsrBrand): string {
   const cloudLabel = pricing.cloud_label || CLOUD_TAB_FALLBACK_LABEL;
   const dedicatedLabel =
     pricing.dedicated?.label || DEDICATED_TAB_FALLBACK_LABEL;
+  const hasDedicated = dedicatedPlans.length > 0;
   // Each tab carries its own one-line lead under the tab bar. The page lead
-  // stays under the H1 and describes both.
-  const cloudLead = pricing.cloud_lead || CLOUD_LEAD_FALLBACK;
+  // stays under the H1. The fallback is two-tab only: a cloud-only brand
+  // already has one lead, and inventing a second one duplicated the H1 line
+  // and (when the fallback named Preloop) put a hosting claim on white-labels.
+  const cloudLead =
+    pricing.cloud_lead || (hasDedicated ? CLOUD_LEAD_FALLBACK : '');
 
   const faqBlocks = faqs
     .map(
@@ -281,7 +289,7 @@ export function generatePricingSlottedContent(config: PricingSsrBrand): string {
 
       <section class="pricing-tab pricing-tab-cloud" data-deployment="cloud" data-label="${escapeAttr(cloudLabel)}" data-lead="${escapeAttr(cloudLead)}">
         <h2>${escapeHtml(cloudLabel)}</h2>
-        <p class="lead">${escapeHtml(cloudLead)}</p>
+        ${hasDedicated && cloudLead ? `<p class="lead">${escapeHtml(cloudLead)}</p>` : ''}
         ${cloudCards}
         ${cloudComparison}
       </section>
