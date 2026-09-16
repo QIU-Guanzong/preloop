@@ -248,7 +248,17 @@
       "services/billing-api",
       "services/notifications"
     ],
-    "over_inline_cap": []
+    "over_inline_cap": [],
+    "depth": "quick",
+    "depth_source": "human"
+  },
+  "budget": {
+    "max_cost_usd": 4.0,
+    "ceiling_source": "human",
+    "measurement": "execution_cost",
+    "spent_usd": 1.87,
+    "ceiling_hit": false,
+    "stopped_after": null
   },
   "questions": [
     {
@@ -313,7 +323,11 @@
         "medium": 1,
         "low": 0
       },
-      "result_artifact": "evidence/projects/legacy-inventory-web/result.json"
+      "result_artifact": "evidence/projects/legacy-inventory-web/result.json",
+      "lens_payload": {
+        "project_path": "legacy/inventory-web",
+        "depth": "quick"
+      }
     },
     {
       "path": "services/billing-api",
@@ -331,7 +345,11 @@
         "medium": 1,
         "low": 0
       },
-      "result_artifact": "evidence/projects/services-billing-api/result.json"
+      "result_artifact": "evidence/projects/services-billing-api/result.json",
+      "lens_payload": {
+        "project_path": "services/billing-api",
+        "depth": "quick"
+      }
     },
     {
       "path": "services/notifications",
@@ -349,7 +367,11 @@
         "medium": 0,
         "low": 0
       },
-      "result_artifact": "evidence/projects/services-notifications/result.json"
+      "result_artifact": "evidence/projects/services-notifications/result.json",
+      "lens_payload": {
+        "project_path": "services/notifications",
+        "depth": "quick"
+      }
     },
     {
       "path": "libs/shared-utils",
@@ -367,7 +389,8 @@
         "medium": 0,
         "low": 0
       },
-      "result_artifact": null
+      "result_artifact": null,
+      "lens_payload": null
     },
     {
       "path": "tools/report-cli",
@@ -385,7 +408,8 @@
         "medium": 0,
         "low": 0
       },
-      "result_artifact": null
+      "result_artifact": null,
+      "lens_payload": null
     }
   ],
   "follow_ups": [
@@ -443,6 +467,10 @@
         "path": "tools/report-cli",
         "reason": "not selected by the human"
       }
+    ],
+    "projects_not_reviewed": [
+      "libs/shared-utils",
+      "tools/report-cli"
     ]
   },
   "rollup": {
@@ -460,6 +488,13 @@
     "follow_ups_total": 3,
     "follow_ups_approved": 0,
     "issues_filed": 0
+  },
+  "publication": {
+    "open_portfolio_readme_pr": false,
+    "source": "expired_default",
+    "pr_opened": false,
+    "pr_url": null,
+    "reason": "toggle off: the filing gate expired"
   },
   "verdict": "fail",
   "checks": [
@@ -501,6 +536,6 @@
     "inventory": "evidence/inventory.json",
     "questions": "evidence/questions.json"
   },
-  "disclaimer": "Machine-generated review evidence. Not a certification, audit opinion, or legal advice.",
-  "note": "synthetic fixture"
+  "note": "synthetic fixture",
+  "disclaimer": "Machine-generated review evidence. Not a certification, audit opinion, or legal advice."
 }

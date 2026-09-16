@@ -3,9 +3,12 @@ name: Portfolio Review
 description: >-
   Reviews a repository full of independently built projects and answers
   "which of these is a liability". Discovers the projects from manifests
-  and build descriptors only, asks a human which ones to review, runs the
-  Docs Currency Review lens inline for the selected ones, aggregates the
-  results into a portfolio report and asks which follow ups to keep.
+  and build descriptors only, asks a human which ones to review, how deep
+  and for how much, runs the Docs Currency Review lens inline for the
+  selected ones, aggregates the results into a portfolio report and asks
+  which follow ups to keep. The cost ceiling is a number the human sets,
+  not an estimate the agent makes: fan out stops when the measured spend
+  crosses it and the report declares the projects it did not reach.
   Everything runs inline in one execution: no child executions, no
   security lens, no modernisation. Strictly read-only apart from the
   built-in ask_user question channel: emits /workspace/result.json
@@ -22,9 +25,11 @@ prompt_template: |
   per selected project, and aggregation. You have NO write tools: do not
   create issues, post comments, push commits, or mutate any external
   system, and never run git commit or git push. Never modify tracked
-  files. The ONLY platform tool on your allowlist is the built-in
-  ask_user, which is a question channel, not a write tool. Scratch space
-  is /tmp; deliverables are /workspace/result.json and the pack under
+  files. The ONLY platform tools on your allowlist are the built-in
+  ask_user, which is a question channel, not a write tool, and the
+  built-in get_execution, which is a read-only meter you point at this
+  execution to read what it has spent so far. Scratch space is /tmp;
+  deliverables are /workspace/result.json and the pack under
   /workspace/evidence/.
 
   ORCHESTRATOR DISCIPLINE. Outside PHASE 4 you never read project source
@@ -76,7 +81,12 @@ prompt_template: |
   - max_inline_projects: how many selected projects this run reviews
     inline, default 5, hard cap 8 (INLINE PROJECT CAP, PHASE 4).
   - depth: "quick" | "standard" | "deep" (default "standard"), passed
-    through to each inline lens run unchanged.
+    through to each inline lens run unchanged. The selection answer's
+    depth beats this one; this one beats the default (PHASE 3).
+  - max_cost_usd: the ceiling for this whole run, in USD. The selection
+    answer's ceiling beats this one. Absent from both, this run carries
+    no ceiling of its own and only the instance default applies (RUN
+    CEILING, PHASE 4).
   - eol_runtimes: a table of end-of-life runtimes,
     [{"runtime": "python", "version": "3.8",
       "end_of_life": "<ISO date>"}]. Delivered, it is the ONLY source
@@ -236,6 +246,12 @@ prompt_template: |
      "selected": {"type": "array", "title": "Projects to review",
        "description": "Leave empty to review nothing.",
        "items": {"enum": [<the item ids>]}},
+     "depth": {"type": "string", "title": "Review depth",
+       "description": "How deep each project's lens reads. Default standard.",
+       "enum": ["quick", "standard", "deep"], "default": "standard"},
+     "max_cost_usd": {"type": "number", "title": "Ceiling for this run, USD",
+       "description": "Fan out stops when the running cost crosses this, and the report declares the projects it did not reach. Leave empty for no ceiling of this run's own. Zero cannot be submitted: it is not a ceiling.",
+       "exclusiveMinimum": 0},
      "author": {"type": "string", "title": "Recorded by",
        "x-autofill": "author"},
      "date": {"type": "string", "format": "date",
@@ -244,6 +260,12 @@ prompt_template: |
   THE SELECTABLE IDS ARE EXACTLY THE DISCOVERED PROJECT PATHS: no
   extras, no omissions, no invented ids, and the same strings discovery
   recorded.
+  DEPTH AND THE CEILING ARE OPTIONAL, AND AN ANSWER THAT OMITS BOTH IS A
+  VALID ANSWER: "required" stays empty, an omitted depth is "standard",
+  and an omitted ceiling is no ceiling of this run's own. Never require
+  them, never refuse an answer for missing them, and never ask a second
+  time for them. Record what came back under selection.depth,
+  selection.depth_source and the budget block.
   Pass timeout_seconds: 259200 (3 days) on that same call. A human
   deciding where a review budget goes needs longer than the 300 second
   deployment default, and the tool argument is the first thing the
@@ -263,6 +285,12 @@ prompt_template: |
   will not come. Apply answer.selected directly. Do NOT parse prose: the
   array is the answer, an id outside the items list selects nothing, and
   a project is reviewed only by appearing in that array.
+  answer.depth and answer.max_cost_usd are read the same way, from the
+  structured answer only. A depth outside the three values is not a
+  depth: fall back to the payload, then to "standard", and record which
+  source won in selection.depth_source ("human" | "payload" |
+  "default"). A max_cost_usd that is not a positive number is no
+  ceiling. Neither field changes which projects were selected.
 
   SAFE DEFAULT ON EXPIRY: INVENTORY ONLY. An expired, declined,
   cancelled, empty or unroutable answer means the selection is empty and
@@ -277,7 +305,11 @@ prompt_template: |
   platform reported). A cancelled, declined, empty or unroutable answer
   has no deadline to name: expires_at is null and reason says why. Never
   re-ask, never assume a selection, never treat silence as "review
-  everything".
+  everything". The two new fields change nothing about that default: an
+  expiry answers no depth and no ceiling either, depth falls back to the
+  payload and then to "standard", the ceiling falls back to the payload
+  and then to none, and with NO LENS RUNS neither is ever applied to
+  anything.
 
   ═══════════════════════════════════════════════════════════
   PHASE 4: INLINE DOCS LENS PER SELECTED PROJECT
@@ -296,12 +328,18 @@ prompt_template: |
 
   For each selected project, in rank order, run the DOCS CURRENCY REVIEW
   lens exactly as backend/presets/016-docs-currency-review.yaml defines
-  it, with project_path set to that project's path and depth passed
-  through. DO NOT RESTATE, VARY, RELAX OR EXTEND THAT LENS HERE: its
-  five claim types, its recorded searches, its prose-quality ban, its
-  severity scale and its verdict rules are the definition, and this
-  preset only decides which projects it runs on. It emits
-  preloop.review.docscurrency/v1 per project; write each one to
+  it, with project_path set to that project's path and THE RESOLVED
+  DEPTH ON EVERY LENS PAYLOAD: every payload you build carries
+  {"project_path": "<the project path>", "depth": "<the resolved
+  depth>"}, the same depth for every project in the run, and the value
+  is the one selection.depth records (the human's answer, else the
+  payload, else "standard"). A lens payload without a depth is a bug,
+  and a per project depth of your own invention is a bug too: the human
+  set one depth for this run. DO NOT RESTATE, VARY, RELAX OR EXTEND THAT
+  LENS HERE: its five claim types, its recorded searches, its
+  prose-quality ban, its severity scale and its verdict rules are the
+  definition, and this preset only decides which projects it runs on. It
+  emits preloop.review.docscurrency/v1 per project; write each one to
   evidence/projects/<project slug>/result.json and its report next to
   it. The security lens and the code health lens do not run in this
   preset.
@@ -309,6 +347,59 @@ prompt_template: |
   A lens that errors, times out or cannot be run for a project is
   lens_status "not_run" with a reason. It is never a pass, never a
   health of "healthy", and the run continues with the next project.
+
+  RUN CEILING. max_cost_usd is A CEILING THE HUMAN SET, NOT AN ESTIMATE
+  YOU MAKE. You never predict what this run will cost before it runs and
+  you never put a forecast in the report: the only cost figures this run
+  reports are measured ones. The ceiling in force is the selection
+  answer's, else the payload's, else none; record it and its source
+  ("human" | "payload" | null) under budget.
+
+  MEASURING THE ROLLUP. Before the first lens run and again after every
+  lens run, call get_execution with execution_id "{{execution.id}}" and
+  read "preloop.ai/cost" from the returned record's metadata: that
+  number, in USD, is what this execution has spent so far and it is the
+  running rollup. Write it to budget.spent_usd. The meter restarts when
+  a parked run resumes as a new execution: the rollup is measured on the
+  current execution segment, not the whole run including pre-park
+  discovery. If the platform reports no cost at all (the field is absent
+  or null), set budget.measurement to "unavailable", leave
+  budget.spent_usd null, DO NOT STOP ANYTHING on a number you do not
+  have, and say in the report that the ceiling could not be enforced
+  this run. Never substitute a guess for the meter.
+
+  STOP RULE, evaluated BEFORE each lens run, in this order:
+  - No ceiling in force, or measurement "unavailable": the rule never
+    fires and every selected project inside the inline cap is reviewed.
+  - spent_usd is already at or above max_cost_usd: stop here. With
+    nothing reviewed yet, this run is an inventory.
+  - The FIRST selected project always runs while the ceiling has not
+    been reached: with no completed lens run there is no measured cost
+    of one, and refusing to start on a prediction would be an estimate.
+  - For every project after the first: it starts only when
+      spent_usd + (the most expensive completed lens run so far)
+      is less than or equal to max_cost_usd,
+    where a lens run's cost is the difference between the readings taken
+    either side of it. Otherwise FAN OUT STOPS at that project, and the
+    loop stops with it: the projects ranked after it are not attempted
+    either, because the run has no room for the cheapest of them.
+
+  A RUN THAT STOPS AT THE CEILING IS A COMPLETE RUN WITH DECLARED
+  COVERAGE, NOT A FAILURE. status stays "success", the report is written
+  in full, and the run never ends with an error for this reason. Set
+  budget.ceiling_hit true and budget.stopped_after to the path of the
+  last project whose lens ran (null when the ceiling stopped the run
+  before any lens ran). Every project the run did not reach is
+  lens_status "not_run" with not_run_reason "run ceiling", health
+  "unknown", an entry in coverage.not_reviewed with reason "run ceiling"
+  and a path in coverage.projects_not_reviewed. coverage.plan_completed
+  is false, because the plan the human approved was not completed. BOX 2
+  of the cover names the ceiling, the measured spend and every project
+  the run did not reach, by path.
+
+  The ceiling never improves a verdict and never invents health: an
+  unreached project is "unknown" exactly like any other project no lens
+  ran on, and a run that stopped early can never be a "pass".
 
   ═══════════════════════════════════════════════════════════
   PHASE 5: AGGREGATION
@@ -351,6 +442,9 @@ prompt_template: |
            "id": {"type": "string", "enum": [<the item ids>]},
            "note": {"type": "string", "title": "Note"}},
          "required": ["id"]}},
+     "open_portfolio_readme_pr": {"type": "boolean", "title": "Open the portfolio README PR",
+       "description": "Off by default. Left off, no pull request step runs and the report stays in the evidence pack.",
+       "default": false},
      "author": {"type": "string", "title": "Recorded by",
        "x-autofill": "author"},
      "date": {"type": "string", "format": "date",
@@ -358,6 +452,15 @@ prompt_template: |
    "required": []}
   with timeout_seconds: 259200 on that call too, and the same parked
   answer handling as PHASE 3.
+
+  THIS QUESTION IS THE FILING GATE, and open_portfolio_readme_pr is the
+  only publication decision in the run. IT IS OFF UNLESS A HUMAN TURNED
+  IT ON in that structured answer: absent, null, false, an unasked
+  question (zero candidates), an expiry, a decline or an unroutable call
+  all mean off. Record it under publication.open_portfolio_readme_pr
+  with publication.source ("human" | "default" | "expired_default"), and
+  never infer it from a note, from prose, or from how bad the portfolio
+  looks.
 
   SAFE DEFAULT ON EXPIRY: KEEP NOTHING, AND THE REPORT STILL LANDS. An
   expired, declined, cancelled, empty or unroutable answer leaves EVERY
@@ -367,7 +470,10 @@ prompt_template: |
   PHASE 3 (cancelled, unroutable, declined, expired). NAMES THE DEADLINE
   THAT PASSED only for a genuine expiry. An approved follow up is one
   that came back in the approved array, and approval is recorded, not
-  executed.
+  executed. AN EXPIRY ALSO LEAVES THE PULL REQUEST TOGGLE OFF:
+  publication.open_portfolio_readme_pr is false with source
+  "expired_default", no publishing step runs, and a window that closed
+  is never read as permission to open anything.
 
   NOTHING IS EVER FILED BY THIS PRESET. It has no write tools: approved
   follow ups are a list in result.json for a human or a later flow to
@@ -391,11 +497,13 @@ prompt_template: |
       BOX 2 — "What we did NOT check". Mandatory. May not be empty if
       anything was out of scope, not reviewed, deferred or skipped. List
       the discovered projects no lens ran on and why (not selected, the
-      selection question expired at its deadline, the inline cap,
-      a lens that could not run), the directories the walk excluded or
-      truncated at the depth cap, and the lenses this preset does not
-      run: code health, architecture and, always, the Release Security
-      Audit family at minimum.
+      selection question expired at its deadline, the inline cap, THE
+      RUN CEILING, a lens that could not run), the directories the walk
+      excluded or truncated at the depth cap, and the lenses this preset
+      does not run: code health, architecture and, always, the Release
+      Security Audit family at minimum. When the ceiling stopped the run,
+      this box states the ceiling, the measured spend and every project
+      the run did not reach, by path.
       BOX 3 — "What you should do next week". A short, concrete, ordered
       list of the approved follow ups, highest severity first. No legal
       advice, no certification, and no modernisation plan: name the
@@ -418,6 +526,24 @@ prompt_template: |
   "Machine-generated review evidence. Not a certification, audit
   opinion, or legal advice."
 
+  PUBLISHING STEP, AND THE ONE TOGGLE THAT GATES IT. After the pack is
+  written, READ publication.open_portfolio_readme_pr from PHASE 6:
+  - Off (the default, and what an expiry leaves behind): STOP HERE. The
+    report is the evidence pack and nothing else happens. Do not open a
+    pull request, do not prepare a branch, do not write a portfolio
+    README anywhere in the checkout, and do not stage or commit
+    anything. Record publication.pr_opened false with
+    publication.reason "toggle off".
+  - On: record the request and nothing more. THIS PRESET STILL OPENS
+    NOTHING: it has no write tools, and the step that opens the
+    portfolio README pull request is issue #648, not this run. Set
+    publication.pr_opened false with publication.reason "requested; the
+    publishing step is not part of this preset", say the same sentence
+    in the report, and NEVER claim a pull request exists. An unbuilt
+    step is reported as unbuilt, never as done.
+  publication.pr_url is null in both cases, because this preset never
+  opens one.
+
   As your FINAL action, write /workspace/result.json: valid JSON, one
   top-level object, no trailing output. Do not paste it into chat.
 
@@ -433,12 +559,14 @@ prompt_template: |
     "inputs_declared": { "<what the payload actually delivered>": "..." },
     "runner": { "kind": null, "id": null },
     "discovery": { "root": "<root_path>", "depth_cap": <int>, "depth_cap_hit": true|false, "dirs_truncated_at_cap": [ "<dir>" ], "detectors_matched": [ "<manifest filename>" ], "excluded_dirs": [ "<dir name or prefix>" ], "eol_table": "payload" | null, "count": <int>, "projects": [ { "path": "...", "rank": <int>, "stacks": [ "..." ], "manifests": [ "..." ], "runtimes": [ { "name": "...", "version": "...", "source": "<path>" } ], "last_commit_date": "<ISO date>", "commits_12m": <int>, "file_count": <int>, "has_readme": true|false, "has_architecture_doc": true|false, "has_ci": true|false, "has_tests_dir": true|false, "has_licence": true|false, "triage": { "score": <int>, "band": "high|medium|low", "reasons": [ "<fired rule name>" ] } } ] },
-    "selection": { "source": "human" | "auto_below_threshold" | "payload" | "expired_default", "auto_select_threshold": <int>, "inline_cap": <int, min(max_inline_projects, 8)>, "selected": [ "<project path>" ], "over_inline_cap": [ "<project path>" ] },
+    "selection": { "source": "human" | "auto_below_threshold" | "payload" | "expired_default", "auto_select_threshold": <int>, "inline_cap": <int, min(max_inline_projects, 8)>, "selected": [ "<project path>" ], "over_inline_cap": [ "<project path>" ], "depth": "quick" | "standard" | "deep", "depth_source": "human" | "payload" | "default" },
+    "budget": { "max_cost_usd": <number or null>, "ceiling_source": "human" | "payload" | null, "measurement": "execution_cost" | "unavailable", "spent_usd": <number or null>, "ceiling_hit": true|false, "stopped_after": "<project path or null>" },
     "questions": [ { "phase": "selection" | "follow_ups", "asked": true|false, "status": "answered" | "expired" | "declined" | "cancelled" | "unroutable" | "not_asked", "reason": "<why it was not asked, else null>", "request_id": "<platform id or null>", "expires_at": "<ISO 8601 or null>", "answered_by": "<platform identity or null>", "answered_at": "<ISO 8601 or null>", "items": [ "<row id>" ], "selectable_ids": [ "<id the input schema offered>" ] } ],
-    "projects": [ { "path": "...", "lens": "docs-currency-review", "lens_schema": "preloop.review.docscurrency/v1" | null, "lens_status": "ran" | "not_run", "not_run_reason": "<required when not_run, else null>", "verdict": "pass" | "pass_with_findings" | "fail" | null, "health": "healthy" | "findings" | "failing" | "unknown", "counts": { "holds": 0, "drifted": 0, "not_checkable": 0, "high": 0, "medium": 0, "low": 0 }, "result_artifact": "evidence/projects/<slug>/result.json" | null } ],
+    "projects": [ { "path": "...", "lens": "docs-currency-review", "lens_schema": "preloop.review.docscurrency/v1" | null, "lens_status": "ran" | "not_run", "not_run_reason": "<required when not_run, else null>", "verdict": "pass" | "pass_with_findings" | "fail" | null, "health": "healthy" | "findings" | "failing" | "unknown", "counts": { "holds": 0, "drifted": 0, "not_checkable": 0, "high": 0, "medium": 0, "low": 0 }, "result_artifact": "evidence/projects/<slug>/result.json" | null, "lens_payload": { "project_path": "...", "depth": "quick" | "standard" | "deep" } | null } ],
     "follow_ups": [ { "id": "portfolio:<project path>:<slug>", "project": "...", "title": "...", "severity": "high|medium|low", "evidence": "<path:line>", "rank": <int>, "status": "approved" | "unapproved", "note": "<the human's note, else null>", "approved_by": "<platform identity or null>", "approved_at": "<ISO 8601 or null>", "filed": false } ],
-    "coverage": { "projects_discovered": <int>, "projects_selected": <int>, "projects_reviewed": <int>, "plan_completed": true|false, "not_reviewed": [ { "path": "...", "reason": "..." } ] },
+    "coverage": { "projects_discovered": <int>, "projects_selected": <int>, "projects_reviewed": <int>, "plan_completed": true|false, "not_reviewed": [ { "path": "...", "reason": "..." } ], "projects_not_reviewed": [ "<project path>" ] },
     "rollup": { "by_health": { "healthy": 0, "findings": 0, "failing": 0, "unknown": 0 }, "by_severity": { "high": 0, "medium": 0, "low": 0 }, "follow_ups_total": 0, "follow_ups_approved": 0, "issues_filed": 0 },
+    "publication": { "open_portfolio_readme_pr": true|false, "source": "human" | "default" | "expired_default", "pr_opened": false, "pr_url": null, "reason": "<why nothing was opened>" },
     "verdict": "pass" | "pass_with_findings" | "fail",
     "checks": [ { "name": "...", "passed": true|false, "skipped": true|false, "details": "<evidence>" } ],
     "assessments": [ { "topic": "...", "judgment": "<clearly-marked agent judgment>" } ],
@@ -450,9 +578,11 @@ prompt_template: |
   - "status" is REQUIRED — it is the flow completion signal read by
     Preloop. Write "success" when the portfolio review ran to completion
     and this report was written (regardless of the verdict, and
-    including the inventory-only run a question expiry produces — a
-    parked run that resumed on an expiry still completed); write "error"
-    (and add a "reason" field) when the review could not be completed.
+    including the inventory-only run a question expiry produces, and
+    including the run the ceiling stopped early — a parked run that
+    resumed on an expiry still completed, and so did a run that stopped
+    where the human's money stopped); write "error" (and add a "reason"
+    field) when the review could not be completed.
   - coverage.plan_completed is true when the walk finished, the
     selection was resolved (human answer, payload, or
     auto_below_threshold), every project in selection.selected that is
@@ -462,6 +592,19 @@ prompt_template: |
     (status success) but the review plan did not complete. An empty
     discovery that finished the walk is plan_completed true: there was
     nothing to select or review, and that emptiness is never a "pass".
+    A run the ceiling stopped early also leaves plan_completed false.
+  - projects[].lens_payload IS THE PAYLOAD YOU ACTUALLY HANDED THE LENS,
+    recorded as you sent it: {"project_path": "<that project's path>",
+    "depth": "<selection.depth>"} for every project whose lens ran, and
+    null for every project it did not. Every recorded payload carries
+    the same depth, and it is the one selection.depth names. A row that
+    reports a depth the run did not use is a false record.
+  - coverage.projects_not_reviewed IS THE FLAT PATH LIST OF
+    coverage.not_reviewed, in the same order: one entry there for every
+    entry here, no path in one and not the other, and the reasons stay
+    in not_reviewed. Every project whose lens_status is "not_run"
+    appears in both, whatever stopped it: not selected, an expired
+    question, the inline cap, the run ceiling, or a lens that failed.
   - Verdict, computed from LENS RESULTS AND COVERAGE ONLY: "fail" if
     any project's health is "failing". "pass" only when at least one
     project was discovered, every discovered project was reviewed by a
@@ -493,15 +636,26 @@ agent_config:
   sandbox_type: exec
   enable_auto_lint: false
 allowed_mcp_servers: []
-# The ONLY tool on this allowlist is the platform's built-in ask_user: the
-# question channel for the two batched portfolio questions (which projects
-# to review, which follow ups to keep). It is not a write tool — it routes
-# a question through the platform approval workflow, which captures the
+# Two built-in tools, neither of which writes anything.
+#
+# ask_user is the question channel for the two batched portfolio questions
+# (which projects to review, which follow ups to keep and whether to open
+# the portfolio README pull request). It is not a write tool — it routes a
+# question through the platform approval workflow, which captures the
 # deciding identity — and this preset files nothing, opens nothing and
-# pushes nothing. Everything else (the walk, git, the inline lens) runs in
-# the sandbox against the checkout.
+# pushes nothing.
+#
+# get_execution is a read-only meter. The run ceiling the human sets on the
+# selection form is enforced against MEASURED spend, not against a forecast,
+# and this execution reading its own cost so far is the only honest source
+# for that number in a preset that runs its lenses inline. It reads
+# execution rows; it cannot start, change or stop anything.
+#
+# Everything else (the walk, git, the inline lens) runs in the sandbox
+# against the checkout.
 allowed_mcp_tools:
   - name: ask_user
+  - name: get_execution
 git_clone_config: null
 trigger_config: null
 # Discovery plus up to eight inline lens runs in one execution. The

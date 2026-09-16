@@ -21,7 +21,7 @@ cover.
 | Flow slug | `portfolio-review` |
 | Result schema | `preloop.review.portfolio/v1` |
 | Lens it runs | Docs Currency Review (`preloop.review.docscurrency/v1`), inline, unchanged |
-| Write tools | none, apart from the built-in `ask_user` question channel |
+| Write tools | none: the allowlist is the built-in `ask_user` question channel and the built-in `get_execution` read-only meter |
 | Inline project cap | `max_inline_projects`, default 5, hard cap 8 |
 
 ## What it is not
@@ -37,8 +37,9 @@ cover.
   security-shaped gets one referral finding with a `file:line` pointer,
   never a value.
 - **Not a modernisation plan.** Nothing is fixed, upgraded, refactored or
-  rewritten, and no pull request is opened. The output is a report and a
-  ranked list of follow ups a human approved.
+  rewritten, and no pull request is opened, whatever the filing gate's
+  pull request toggle says. The output is a report and a ranked list of
+  follow ups a human approved.
 - **Not a filer.** The preset has no write tools, so approving a follow
   up records the approval; it does not open anything.
   `rollup.issues_filed` is always `0` and `follow_ups[].filed` is always
@@ -132,10 +133,24 @@ the discovered project paths**:
    "selected": {"type": "array", "title": "Projects to review",
      "description": "Leave empty to review nothing.",
      "items": {"enum": ["services/billing-api", "legacy/inventory-web"]}},
+   "depth": {"type": "string", "title": "Review depth",
+     "enum": ["quick", "standard", "deep"], "default": "standard"},
+   "max_cost_usd": {"type": "number", "title": "Ceiling for this run, USD",
+     "exclusiveMinimum": 0},
    "author": {"type": "string", "title": "Recorded by", "x-autofill": "author"},
    "date": {"type": "string", "format": "date", "x-autofill": "date"}},
  "required": []}
 ```
+
+The same form carries **how deep** and **how much**. Both are optional:
+`required` stays empty, an answer that omits them is a valid answer, an
+omitted `depth` is `standard` and an omitted `max_cost_usd` is no ceiling
+of this run's own. Zero cannot be submitted: it is not a ceiling. The
+answer beats the payload, the payload beats the default, and
+`selection.depth_source` records which one won. The chosen
+depth is passed to every lens payload and recorded there
+(`projects[].lens_payload`), so the report says what the lens actually
+ran on.
 
 **Below the threshold, nothing is asked.** With fewer discovered
 projects than `auto_select_threshold` (default 3) every project is
@@ -144,6 +159,35 @@ answering "yes, both of them" is a question that should not have been
 asked. An explicit payload `projects` list also replaces the question
 (source `payload`).
 
+### The ceiling: a number the human sets, not an estimate the agent makes
+
+`max_cost_usd` is the honest form of the cost model. The run never
+forecasts what it will cost. Before the first lens run and after every
+one, it reads its own spend so far from the platform
+(`get_execution` on this execution, `preloop.ai/cost`), and that measured
+number is the rollup in `budget.spent_usd`. Answering the selection
+question can park the run for days. Resume creates a new execution, so
+that rollup is the current execution segment, not the whole run
+including pre-park discovery.
+
+Fan out stops before a lens run when the spend so far plus the most
+expensive completed lens run would cross the ceiling. The first selected
+project always runs while the ceiling has not been reached: with no
+completed lens run there is no measured cost to project from, and
+refusing to start on a prediction would be an estimate. If the platform
+reports no cost at all, `budget.measurement` is `unavailable`, nothing is
+stopped on a number nobody has, and the report says the ceiling could not
+be enforced.
+
+**A run that stops at the ceiling is a complete run with declared
+coverage, not a failure.** `status` stays `success`, every project the
+run did not reach is `not_run` / `unknown` with reason `run ceiling`, it
+is listed in `coverage.not_reviewed` and `coverage.projects_not_reviewed`,
+`plan_completed` is false, and the cover's "what we did not check" box
+names the ceiling, the measured spend and the projects by path. The
+ceiling never improves a verdict: a run that stopped early can never be a
+`pass`.
+
 ### Second question: which follow ups to keep
 
 Follow ups are **candidates only**, each one backed by a lens finding and
@@ -151,6 +195,22 @@ its pointer, ranked by (project triage rank, lens severity, project
 path), at most five per project in `result.json`. The second question
 offers them as rows with an optional note per approval. With zero
 candidates it is not asked.
+
+It is also the **filing gate**, and it carries the run's only
+publication decision:
+
+```json
+{"open_portfolio_readme_pr": {"type": "boolean",
+  "title": "Open the portfolio README PR", "default": false}}
+```
+
+It is off unless a human turned it on in that structured answer: absent,
+null, false, an unasked question, an expiry, a decline or an unroutable
+call all mean off, and with it off no pull request step runs at all.
+Turned on, the request is recorded (`publication.open_portfolio_readme_pr`)
+and nothing more: this preset has no write tools, the step that opens the
+portfolio README pull request is a separate piece of work, and
+`publication.pr_opened` is always `false`.
 
 ### The window, and what happens when it closes
 
@@ -167,7 +227,7 @@ all fail closed, in the way each question can afford:
 | question | safe default |
 | --- | --- |
 | selection | **inventory only**: no lens runs, every project is `not_run` / `unknown`, no follow up is ranked, the verdict cannot be `pass`. Record `cancelled` as `cancelled` and a routing failure as `unroutable`. Name the deadline that passed only for a genuine expiry |
-| follow ups | **keep nothing**: every candidate stays `unapproved`, and the full portfolio report lands exactly as it would have |
+| follow ups | **keep nothing, open nothing**: every candidate stays `unapproved`, the pull request toggle stays off with source `expired_default`, and the full portfolio report lands exactly as it would have |
 
 Neither question is ever re-asked, and silence is never read as "review
 everything".
@@ -238,9 +298,9 @@ The cover is the same three-box one-pager the rest of the family uses
 (What we checked / What we did not check / What you should do next
 week). Here the "what we did not check" box is load bearing: it names the
 discovered projects no lens ran on and why (not selected, the selection
-question expired at its deadline, the inline cap, a lens that could not
-run), the directories the walk excluded or truncated at the depth cap,
-and the lenses this preset does not run.
+question expired at its deadline, the inline cap, the run ceiling, a lens
+that could not run), the directories the walk excluded or truncated at
+the depth cap, and the lenses this preset does not run.
 
 `result.json` stays under **200 KB**, with every project row under 4 KB
 and every discovery row under 2 KB, so a 25 project portfolio still fits
@@ -257,7 +317,8 @@ with detail moved into the evidence pack.
 | `auto_select_threshold` | `3` | below this many projects, nothing is asked |
 | `projects` | - | explicit selection, replaces the first question |
 | `max_inline_projects` | `5` | inline reviews this run, hard cap 8. `selection.inline_cap` records the effective cap actually applied (`min(max_inline_projects, 8)`), not the ceiling |
-| `depth` | `standard` | passed through to each lens run |
+| `depth` | `standard` | passed through to each lens run; the selection answer beats it |
+| `max_cost_usd` | - | ceiling for the whole run; the selection answer beats it |
 | `eol_runtimes` | - | the only source for `eol_runtime` triage points |
 
 ## Honest limits
@@ -271,3 +332,12 @@ with detail moved into the evidence pack.
   the report asks for delegation instead of pretending.
 - Approval is recorded, never executed: nothing in this preset files an
   issue, opens a pull request or edits a file.
+- The ceiling is enforced **between** lens runs, not inside one. A single
+  lens run can still carry the total past the ceiling, and the report
+  says what was measured rather than pretending otherwise. Refusing a
+  child run that does not fit its own budget is the platform's job, not
+  this preset's.
+- `budget.spent_usd` is a **segment** measurement. Answering the
+  selection question parks the run; resume creates a new execution and
+  the meter starts again. Pre-park discovery spend is not in the rollup
+  the stop rule compares against the human's number.

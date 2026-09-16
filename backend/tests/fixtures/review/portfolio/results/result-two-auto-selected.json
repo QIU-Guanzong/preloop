@@ -130,7 +130,17 @@
       "apps/checkout",
       "apps/pricing"
     ],
-    "over_inline_cap": []
+    "over_inline_cap": [],
+    "depth": "standard",
+    "depth_source": "default"
+  },
+  "budget": {
+    "max_cost_usd": null,
+    "ceiling_source": null,
+    "measurement": "execution_cost",
+    "spent_usd": 1.12,
+    "ceiling_hit": false,
+    "stopped_after": null
   },
   "questions": [
     {
@@ -175,7 +185,11 @@
         "medium": 0,
         "low": 0
       },
-      "result_artifact": "evidence/projects/apps-checkout/result.json"
+      "result_artifact": "evidence/projects/apps-checkout/result.json",
+      "lens_payload": {
+        "project_path": "apps/checkout",
+        "depth": "standard"
+      }
     },
     {
       "path": "apps/pricing",
@@ -193,7 +207,11 @@
         "medium": 0,
         "low": 0
       },
-      "result_artifact": "evidence/projects/apps-pricing/result.json"
+      "result_artifact": "evidence/projects/apps-pricing/result.json",
+      "lens_payload": {
+        "project_path": "apps/pricing",
+        "depth": "standard"
+      }
     }
   ],
   "follow_ups": [],
@@ -202,7 +220,8 @@
     "projects_selected": 2,
     "projects_reviewed": 2,
     "plan_completed": true,
-    "not_reviewed": []
+    "not_reviewed": [],
+    "projects_not_reviewed": []
   },
   "rollup": {
     "by_health": {
@@ -219,6 +238,13 @@
     "follow_ups_total": 0,
     "follow_ups_approved": 0,
     "issues_filed": 0
+  },
+  "publication": {
+    "open_portfolio_readme_pr": false,
+    "source": "default",
+    "pr_opened": false,
+    "pr_url": null,
+    "reason": "toggle off"
   },
   "verdict": "pass",
   "checks": [
@@ -239,6 +265,12 @@
       "passed": true,
       "skipped": false,
       "details": "0: this preset has no write tools"
+    },
+    {
+      "name": "run_ceiling_respected",
+      "passed": true,
+      "skipped": true,
+      "details": "no ceiling in force: nobody was asked and the payload named none; measured spend 1.12 USD"
     }
   ],
   "assessments": [
@@ -254,6 +286,6 @@
     "inventory": "evidence/inventory.json",
     "questions": "evidence/questions.json"
   },
-  "disclaimer": "Machine-generated review evidence. Not a certification, audit opinion, or legal advice.",
-  "note": "synthetic fixture"
+  "note": "synthetic fixture",
+  "disclaimer": "Machine-generated review evidence. Not a certification, audit opinion, or legal advice."
 }

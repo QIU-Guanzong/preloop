@@ -146,6 +146,29 @@ describe('AnswerForm', () => {
     expect(text(element)).to.contain('Needs at least 5 characters');
   });
 
+  it('enforces exclusiveMinimum so a zero ceiling cannot be submitted', async () => {
+    const element = await mount({
+      type: 'object',
+      properties: {
+        max_cost_usd: {
+          type: 'number',
+          title: 'Ceiling for this run, USD',
+          exclusiveMinimum: 0,
+        },
+      },
+    });
+    const input = element.shadowRoot?.querySelector(
+      '.field-input'
+    ) as HTMLInputElement;
+    input.value = '0';
+    input.dispatchEvent(new CustomEvent('sl-input', { bubbles: true }));
+    await element.updateComplete;
+
+    expect(element.validate()).to.be.false;
+    await element.updateComplete;
+    expect(text(element)).to.contain('Must be greater than 0');
+  });
+
   it('puts the server errors on the fields they name', async () => {
     const element = await mount(waiverSchema, items);
     await check(element, 'CVE-1');
