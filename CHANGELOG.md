@@ -376,8 +376,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   construction and never subject to this rule.
 - Code scanning and Code Quality findings on main: report-publication
   logs only closed-vocabulary outcomes, session-search credential
-  redaction uses length-bounded patterns, the in-repo flow-trigger
-  workflow installs the CLI from the checked-out `scripts/install-cli.sh`
+  redaction uses length-bounded patterns that still consume a labelled
+  value past 4096 characters so it cannot leave a plaintext tail, the
+  in-repo flow-trigger workflow checks out the default branch and
+  installs a checksum-verified CLI from that tree's `scripts/install-cli.sh`
   instead of piping curl to sh, and the remaining CodeQL quality notes
   (unclosed publication fds, lock-file Close, unused locals/imports,
   mixed returns, test lambdas) are cleared.

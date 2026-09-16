@@ -201,6 +201,34 @@ def test_labelled_credential_redaction_is_bounded_against_repetition():
     assert REDACTED_VALUE in redacted
 
 
+def test_labelled_credential_redaction_masks_long_unquoted_value():
+    """A 5000-char api_key value must not leave a plaintext tail."""
+    secret = "A" * 5000
+    text = f"prefix api_key={secret} suffix"
+    redacted, changed = redact_text(text)
+    assert changed is True
+    assert secret not in redacted
+    assert secret[4096:] not in redacted
+    assert "A" * 32 not in redacted
+    assert REDACTED_VALUE in redacted
+    assert redacted.startswith("prefix api_key:")
+    assert redacted.endswith(" suffix")
+
+
+def test_labelled_credential_redaction_masks_long_quoted_value():
+    """A quoted value over 4096 chars must be fully masked, not truncated."""
+    secret = "B" * 5000
+    text = f'prefix api_key="{secret}" suffix'
+    redacted, changed = redact_text(text)
+    assert changed is True
+    assert secret not in redacted
+    assert secret[4096:] not in redacted
+    assert "B" * 32 not in redacted
+    assert REDACTED_VALUE in redacted
+    assert '"' not in redacted
+    assert redacted.endswith(" suffix")
+
+
 def test_bare_provider_key_in_free_text_is_stored_redacted(db_session, test_user):
     """A provider key pasted without a label is still masked."""
     session = _session(db_session, test_user.account_id)
