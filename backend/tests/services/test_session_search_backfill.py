@@ -229,8 +229,17 @@ def test_a_restarted_sweeper_resumes_from_the_watermark(db_session, test_user):
     """The watermark is persisted, and the next pass starts below it."""
     sessions = _history(db_session, test_user, sessions=3)
     settings.session_search_backfill_max_rows_per_pass = 1
+    # Scoped to this account on purpose. The test database is shared, so rows
+    # another test committed can leave a second active account behind, and a
+    # never-swept account sorts ahead of this one (``last_pass_at`` nulls
+    # first). An unscoped second pass would then walk the stranger first, so
+    # the recorded page below would be its ``before_started_at`` (None) and
+    # the one-row budget could be spent before this account is reached.
+    only_this_account = [test_user.account_id]
 
-    backfill.run_session_search_backfill(db_session, now=NOW)
+    backfill.run_session_search_backfill(
+        db_session, now=NOW, account_ids=only_this_account
+    )
     first_watermark = _state(db_session, test_user.account_id).cursor_started_at
     walked_from = []
     original = crud_runtime_session.list_for_search_backfill
@@ -241,7 +250,9 @@ def test_a_restarted_sweeper_resumes_from_the_watermark(db_session, test_user):
 
     crud_runtime_session.list_for_search_backfill = _recording
     try:
-        backfill.run_session_search_backfill(db_session, now=NOW)
+        backfill.run_session_search_backfill(
+            db_session, now=NOW, account_ids=only_this_account
+        )
     finally:
         crud_runtime_session.list_for_search_backfill = original
 
