@@ -250,8 +250,8 @@ prompt_template: |
        "description": "How deep each project's lens reads. Default standard.",
        "enum": ["quick", "standard", "deep"], "default": "standard"},
      "max_cost_usd": {"type": "number", "title": "Ceiling for this run, USD",
-       "description": "Fan out stops when the running cost crosses this, and the report declares the projects it did not reach. Leave empty for no ceiling of this run's own.",
-       "minimum": 0},
+       "description": "Fan out stops when the running cost crosses this, and the report declares the projects it did not reach. Leave empty for no ceiling of this run's own. Zero cannot be submitted: it is not a ceiling.",
+       "exclusiveMinimum": 0},
      "author": {"type": "string", "title": "Recorded by",
        "x-autofill": "author"},
      "date": {"type": "string", "format": "date",
@@ -359,11 +359,14 @@ prompt_template: |
   lens run, call get_execution with execution_id "{{execution.id}}" and
   read "preloop.ai/cost" from the returned record's metadata: that
   number, in USD, is what this execution has spent so far and it is the
-  running rollup. Write it to budget.spent_usd. If the platform reports
-  no cost at all (the field is absent or null), set budget.measurement
-  to "unavailable", leave budget.spent_usd null, DO NOT STOP ANYTHING on
-  a number you do not have, and say in the report that the ceiling could
-  not be enforced this run. Never substitute a guess for the meter.
+  running rollup. Write it to budget.spent_usd. The meter restarts when
+  a parked run resumes as a new execution: the rollup is measured on the
+  current execution segment, not the whole run including pre-park
+  discovery. If the platform reports no cost at all (the field is absent
+  or null), set budget.measurement to "unavailable", leave
+  budget.spent_usd null, DO NOT STOP ANYTHING on a number you do not
+  have, and say in the report that the ceiling could not be enforced
+  this run. Never substitute a guess for the meter.
 
   STOP RULE, evaluated BEFORE each lens run, in this order:
   - No ceiling in force, or measurement "unavailable": the rule never

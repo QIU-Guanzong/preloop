@@ -260,6 +260,22 @@ class TestValidateAnswer:
         with pytest.raises(AnswerValidationError):
             validate_answer(schema, {"days": 365})
 
+    def test_exclusive_minimum_rejects_the_bound(self):
+        schema = normalize_input_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "max_cost_usd": {"type": "number", "exclusiveMinimum": 0}
+                },
+            }
+        )
+        assert validate_answer(schema, {"max_cost_usd": 0.01})["max_cost_usd"] == 0.01
+        with pytest.raises(AnswerValidationError) as excinfo:
+            validate_answer(schema, {"max_cost_usd": 0})
+        assert "greater than" in excinfo.value.errors[0]["message"]
+        with pytest.raises(AnswerValidationError):
+            validate_answer(schema, {"max_cost_usd": -1})
+
     def test_multi_select_membership(self):
         schema = normalize_input_schema(
             {

@@ -32,7 +32,7 @@ The root is always an object::
   select), ``format`` (``date`` / ``date-time`` / ``textarea``),
   ``minLength`` / ``maxLength``, ``x-autofill``.
 * ``{"type": "number"}`` or ``{"type": "integer"}`` with ``minimum`` /
-  ``maximum``.
+  ``maximum`` / ``exclusiveMinimum`` / ``exclusiveMaximum``.
 * ``{"type": "boolean"}`` (renders as a switch).
 * ``{"type": "array", "items": {"enum": [...]}}``: multi-select. When the enum
   values are the ids of the question's ``items``, the console renders the item
@@ -96,6 +96,8 @@ _FIELD_KEYS = {
     "maxLength",
     "minimum",
     "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
     "minItems",
     "maxItems",
     "items",
@@ -202,7 +204,7 @@ def _normalize_scalar(field: Dict[str, Any], path: str) -> Dict[str, Any]:
             except (TypeError, ValueError):
                 raise QuestionSchemaError(f"{path}.{key} must be an integer") from None
 
-    for key in ("minimum", "maximum"):
+    for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
         if key in field and field[key] is not None:
             if field_type not in ("number", "integer"):
                 raise QuestionSchemaError(f"{path}.{key} applies to numbers only")
@@ -459,9 +461,23 @@ def _validate_scalar(
             errors.append(
                 {"path": path, "message": f"must be at least {spec['minimum']}"}
             )
+        if "exclusiveMinimum" in spec and value <= spec["exclusiveMinimum"]:
+            errors.append(
+                {
+                    "path": path,
+                    "message": f"must be greater than {spec['exclusiveMinimum']}",
+                }
+            )
         if "maximum" in spec and value > spec["maximum"]:
             errors.append(
                 {"path": path, "message": f"must be at most {spec['maximum']}"}
+            )
+        if "exclusiveMaximum" in spec and value >= spec["exclusiveMaximum"]:
+            errors.append(
+                {
+                    "path": path,
+                    "message": f"must be less than {spec['exclusiveMaximum']}",
+                }
             )
         return int(value) if field_type == "integer" else value
 

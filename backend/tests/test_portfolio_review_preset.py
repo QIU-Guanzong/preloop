@@ -1588,7 +1588,8 @@ class TestSelectionFormCarriesDepthAndTheCeiling:
         ceiling = schema["properties"]["max_cost_usd"]
         assert ceiling["type"] == "number"
         assert ceiling["title"] == "Ceiling for this run, USD"
-        assert ceiling["minimum"] == 0
+        assert ceiling["exclusiveMinimum"] == 0
+        assert "minimum" not in ceiling
         # Selecting projects is still the point of the form.
         assert schema["properties"]["selected"]["items"]["enum"] == [
             "apps/checkout",
@@ -1605,6 +1606,7 @@ class TestSelectionFormCarriesDepthAndTheCeiling:
         assert stored["properties"]["depth"]["enum"] == ["quick", "standard", "deep"]
         assert stored["properties"]["depth"]["default"] == "standard"
         assert stored["properties"]["max_cost_usd"]["type"] == "number"
+        assert stored["properties"]["max_cost_usd"]["exclusiveMinimum"] == 0
         assert stored["required"] == []
 
     def test_an_answer_that_omits_both_is_still_a_valid_answer(self):
@@ -1638,7 +1640,7 @@ class TestSelectionFormCarriesDepthAndTheCeiling:
         assert cleaned["depth"] == "deep"
         assert cleaned["max_cost_usd"] == 12.5
 
-    def test_a_fourth_depth_and_a_negative_ceiling_are_refused(self):
+    def test_a_fourth_depth_and_a_zero_or_negative_ceiling_are_refused(self):
         from preloop.services.question_schema import (
             AnswerValidationError,
             normalize_input_schema,
@@ -1651,6 +1653,8 @@ class TestSelectionFormCarriesDepthAndTheCeiling:
             validate_answer(schema, {"depth": "exhaustive"})
         with pytest.raises(AnswerValidationError):
             validate_answer(schema, {"max_cost_usd": -1})
+        with pytest.raises(AnswerValidationError):
+            validate_answer(schema, {"max_cost_usd": 0})
 
     def test_the_preset_states_that_both_fields_are_optional(self):
         norm = _norm(_prompt())
@@ -1766,6 +1770,7 @@ class TestRunCeilingStopsFanOut:
         assert '"preloop.ai/cost"' in prompt
         assert "Before the first lens run and again after every lens run" in norm
         assert "that number, in USD, is what this execution has spent so far" in norm
+        assert "The meter restarts when a parked run resumes as a new execution" in norm
         assert "Never substitute a guess for the meter" in norm
 
     def test_an_unmeasurable_run_stops_nothing(self):

@@ -1938,6 +1938,8 @@ export interface QuestionField {
   maxLength?: number;
   minimum?: number;
   maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
   minItems?: number;
   maxItems?: number;
   items?: QuestionField;

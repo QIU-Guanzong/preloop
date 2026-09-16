@@ -472,8 +472,20 @@ export class AnswerForm extends LitElement {
       if (field.minimum !== undefined && numeric < field.minimum) {
         return `Must be at least ${field.minimum}`;
       }
+      if (
+        field.exclusiveMinimum !== undefined &&
+        numeric <= field.exclusiveMinimum
+      ) {
+        return `Must be greater than ${field.exclusiveMinimum}`;
+      }
       if (field.maximum !== undefined && numeric > field.maximum) {
         return `Must be at most ${field.maximum}`;
+      }
+      if (
+        field.exclusiveMaximum !== undefined &&
+        numeric >= field.exclusiveMaximum
+      ) {
+        return `Must be less than ${field.exclusiveMaximum}`;
       }
       return null;
     }

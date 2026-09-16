@@ -136,7 +136,7 @@ the discovered project paths**:
    "depth": {"type": "string", "title": "Review depth",
      "enum": ["quick", "standard", "deep"], "default": "standard"},
    "max_cost_usd": {"type": "number", "title": "Ceiling for this run, USD",
-     "minimum": 0},
+     "exclusiveMinimum": 0},
    "author": {"type": "string", "title": "Recorded by", "x-autofill": "author"},
    "date": {"type": "string", "format": "date", "x-autofill": "date"}},
  "required": []}
@@ -145,8 +145,9 @@ the discovered project paths**:
 The same form carries **how deep** and **how much**. Both are optional:
 `required` stays empty, an answer that omits them is a valid answer, an
 omitted `depth` is `standard` and an omitted `max_cost_usd` is no ceiling
-of this run's own. The answer beats the payload, the payload beats the
-default, and `selection.depth_source` records which one won. The chosen
+of this run's own. Zero cannot be submitted: it is not a ceiling. The
+answer beats the payload, the payload beats the default, and
+`selection.depth_source` records which one won. The chosen
 depth is passed to every lens payload and recorded there
 (`projects[].lens_payload`), so the report says what the lens actually
 ran on.
@@ -164,7 +165,10 @@ asked. An explicit payload `projects` list also replaces the question
 forecasts what it will cost. Before the first lens run and after every
 one, it reads its own spend so far from the platform
 (`get_execution` on this execution, `preloop.ai/cost`), and that measured
-number is the rollup in `budget.spent_usd`.
+number is the rollup in `budget.spent_usd`. Answering the selection
+question can park the run for days. Resume creates a new execution, so
+that rollup is the current execution segment, not the whole run
+including pre-park discovery.
 
 Fan out stops before a lens run when the spend so far plus the most
 expensive completed lens run would cross the ceiling. The first selected
@@ -333,3 +337,7 @@ with detail moved into the evidence pack.
   says what was measured rather than pretending otherwise. Refusing a
   child run that does not fit its own budget is the platform's job, not
   this preset's.
+- `budget.spent_usd` is a **segment** measurement. Answering the
+  selection question parks the run; resume creates a new execution and
+  the meter starts again. Pre-park discovery spend is not in the rollup
+  the stop rule compares against the human's number.
