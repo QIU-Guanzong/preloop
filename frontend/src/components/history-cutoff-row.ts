@@ -17,13 +17,19 @@ import {
  * The row itself never does: it is a label, not a prompt.
  *
  * `days` null means there is no window to state (OSS, or an unlimited plan),
- * and then there is no row at all.
+ * and then there is no row at all. With no plan left to move to, the row
+ * states the window and offers nothing: a "See plans" control that leads
+ * only back to the plan you are on is a dead end with a price tag on it.
  */
 @customElement('history-cutoff-row')
 export class HistoryCutoffRow extends LitElement {
   /** The plan's analytics window in days, or null when there is none. */
   @property({ type: Number })
   days: number | null = null;
+
+  /** Name of the cheapest plan with a longer window, or null at the top. */
+  @property({ type: String, attribute: 'unlocks-at-plan-name' })
+  unlocksAtPlanName: string | null = null;
 
   static styles = css`
     :host {
@@ -72,8 +78,16 @@ export class HistoryCutoffRow extends LitElement {
     }
     return html`
       <div class="row" data-testid="history-cutoff-row">
-        <span class="message">${historyCutoffMessage(this.days)}</span>
-        <button type="button" @click=${this.handleSeePlans}>See plans</button>
+        <span class="message"
+          >${historyCutoffMessage(this.days, this.unlocksAtPlanName)}</span
+        >
+        ${
+          this.unlocksAtPlanName
+            ? html`<button type="button" @click=${this.handleSeePlans}>
+                See plans
+              </button>`
+            : nothing
+        }
       </div>
     `;
   }

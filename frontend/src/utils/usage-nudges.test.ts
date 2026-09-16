@@ -7,18 +7,19 @@
  * one person's dismissals into the other's console.
  */
 import { expect } from '@open-wc/testing';
-import type { UsageNudge } from '../api';
+import { NO_USAGE_NUDGES, type UsageNudge, type UsageNudges } from '../api';
 import {
   NUDGE_BANDS,
   NUDGE_THRESHOLD,
   PLAN_ROUTE,
   PLAN_ROUTE_FALLBACK,
-  analyticsWindowDays,
+  analyticsWindow,
   bandFor,
   clearNudgeDismissals,
   dismissNudge,
   loadNudgeDismissals,
   nudgeDismissalsKey,
+  nudgeLadder,
   nudgeLink,
   nudgeMessage,
   visibleNudges,
@@ -35,6 +36,10 @@ function nudge(overrides: Partial<UsageNudge> = {}): UsageNudge {
     unlocks_at_plan: 'pro',
     ...overrides,
   };
+}
+
+function payload(overrides: Partial<UsageNudges> = {}): UsageNudges {
+  return { ...NO_USAGE_NUDGES, ...overrides };
 }
 
 describe('usage nudge bands', () => {
@@ -177,17 +182,82 @@ describe('usage nudge link', () => {
   });
 });
 
-describe('analytics window from the nudge list', () => {
-  it('reads the window in days when the plan has one', () => {
+describe('the analytics window', () => {
+  it('reads the window the payload states, with the plan that lifts it', () => {
     expect(
-      analyticsWindowDays([
-        nudge({ key: 'analytics_window_days', limit: 90, unit: 'days' }),
-      ])
-    ).to.equal(90);
+      analyticsWindow(
+        payload({
+          analytics_window: {
+            days: 90,
+            unlocks_at_plan: 'team',
+            unlocks_at_plan_name: 'Team',
+          },
+        })
+      )
+    ).to.deep.equal({
+      days: 90,
+      unlocks_at_plan: 'team',
+      unlocks_at_plan_name: 'Team',
+    });
+  });
+
+  it('does not depend on the account being near any threshold', () => {
+    // The row saying where history stops has to exist for an account with a
+    // 90 day window and a week of data, which no nudge would ever mention.
+    const quiet = payload({
+      nudges: [nudge({ ratio: 0.01, used: 0 })],
+      analytics_window: {
+        days: 90,
+        unlocks_at_plan: 'team',
+        unlocks_at_plan_name: 'Team',
+      },
+    });
+    expect(visibleNudges(quiet.nudges, {})).to.have.length(0);
+    expect(analyticsWindow(quiet)?.days).to.equal(90);
   });
 
   it('is null when there is no window, which is the OSS answer', () => {
-    expect(analyticsWindowDays([])).to.equal(null);
-    expect(analyticsWindowDays([nudge()])).to.equal(null);
+    expect(analyticsWindow(NO_USAGE_NUDGES)).to.equal(null);
+    expect(analyticsWindow(payload({ nudges: [nudge()] }))).to.equal(null);
+  });
+
+  it('refuses a window that is not a usable number of days', () => {
+    for (const days of [0, -30, Number.NaN]) {
+      expect(
+        analyticsWindow(
+          payload({
+            analytics_window: {
+              days,
+              unlocks_at_plan: null,
+              unlocks_at_plan_name: null,
+            },
+          })
+        )
+      ).to.equal(null);
+    }
+  });
+});
+
+describe('the nudge ladder', () => {
+  it('prefers the ladder the server publishes', () => {
+    const ladder = nudgeLadder(payload({ threshold: 0.6, bands: [0.9, 0.6] }));
+    expect(ladder.threshold).to.equal(0.6);
+    expect(ladder.bands).to.deep.equal([0.6, 0.9]);
+    expect(bandFor(0.7, ladder.bands)).to.equal(0.6);
+    expect(bandFor(0.5, ladder.bands)).to.equal(null);
+  });
+
+  it('falls back to this build when the server states nothing', () => {
+    const ladder = nudgeLadder(NO_USAGE_NUDGES);
+    expect(ladder.threshold).to.equal(NUDGE_THRESHOLD);
+    expect(ladder.bands).to.deep.equal(NUDGE_BANDS);
+  });
+
+  it('ignores a ladder that is not a ladder', () => {
+    const ladder = nudgeLadder(
+      payload({ threshold: Number.NaN, bands: [] as number[] })
+    );
+    expect(ladder.threshold).to.equal(NUDGE_THRESHOLD);
+    expect(ladder.bands).to.deep.equal(NUDGE_BANDS);
   });
 });

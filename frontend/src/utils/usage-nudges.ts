@@ -21,16 +21,46 @@
  * are at 80 percent" is new information, "you are still at 51" is not.
  */
 
-import type { UsageNudge } from '../api';
+import type { AnalyticsWindow, UsageNudge, UsageNudges } from '../api';
 import { router } from '../router';
 import { formatTokenCount } from './execution-presentation';
 import { ANALYTICS_WINDOW_FEATURE } from './history-window';
 
-/** Below this ratio there is nothing worth saying. Mirrors the server. */
+/**
+ * Below this ratio there is nothing worth saying.
+ *
+ * The server states its own threshold and bands in the nudge payload and
+ * `nudgeLadder()` prefers those, so there is one ladder rather than two.
+ * These are the fallback for a build talking to a server that says nothing,
+ * which on OSS means a console with no nudges at all.
+ */
 export const NUDGE_THRESHOLD = 0.5;
 
-/** The ladder a dismissed nudge climbs back over. Mirrors the server. */
+/** The ladder a dismissed nudge climbs back over. Server's if it sends one. */
 export const NUDGE_BANDS: readonly number[] = [0.5, 0.8, 1.0];
+
+/** Where the console nudges from, and the steps it re-nudges at. */
+export interface NudgeLadder {
+  threshold: number;
+  bands: readonly number[];
+}
+
+/** The server's ladder when it sent a usable one, else this build's. */
+export function nudgeLadder(payload: UsageNudges): NudgeLadder {
+  const bands = (payload.bands ?? []).filter(
+    (band) => typeof band === 'number' && Number.isFinite(band) && band > 0
+  );
+  const threshold =
+    typeof payload.threshold === 'number' &&
+    Number.isFinite(payload.threshold) &&
+    payload.threshold > 0
+      ? payload.threshold
+      : NUDGE_THRESHOLD;
+  return {
+    threshold: bands.length ? Math.min(threshold, ...bands) : threshold,
+    bands: bands.length ? [...bands].sort((a, b) => a - b) : NUDGE_BANDS,
+  };
+}
 
 /** Where the plan page lives, and where it lived before it existed. */
 export const PLAN_ROUTE = '/console/settings/plan';
@@ -58,10 +88,13 @@ export function nudgeDismissalsKey(userId: string): string {
  * A band, not the raw ratio: 0.51 and 0.79 are the same news, and a nudge
  * that reappears for every percent is an alarm nobody reads.
  */
-export function bandFor(ratio: number): number | null {
+export function bandFor(
+  ratio: number,
+  bands: readonly number[] = NUDGE_BANDS
+): number | null {
   if (!Number.isFinite(ratio)) return null;
   let band: number | null = null;
-  for (const step of NUDGE_BANDS) {
+  for (const step of bands) {
     if (ratio >= step) band = step;
   }
   return band;
@@ -139,10 +172,11 @@ export function clearNudgeDismissals(userId: string): void {
  */
 export function visibleNudges(
   nudges: readonly UsageNudge[],
-  dismissals: NudgeDismissals
+  dismissals: NudgeDismissals,
+  bands: readonly number[] = NUDGE_BANDS
 ): UsageNudge[] {
   return nudges.filter((nudge) => {
-    const band = bandFor(nudge.ratio);
+    const band = bandFor(nudge.ratio, bands);
     if (band === null) return false;
     const dismissed = dismissals[nudge.key];
     return dismissed === undefined || band > dismissed;
@@ -176,16 +210,24 @@ export function nudgeLink(key: string): string {
 }
 
 /**
- * The plan's analytics window in days, from the nudge list, or null when the
- * account has no window (OSS answers with no nudges at all, and an unlimited
- * window is omitted server-side).
+ * The plan's analytics window, or null when the account has no window.
+ *
+ * Read from the payload's own `analytics_window` field and never inferred
+ * from the nudge list: the list carries limits the account is measurably
+ * close to, and the cutoff row has to exist for an account with a 90 day
+ * window and a week of data, which is nowhere near any threshold. OSS has no
+ * such endpoint, so the field is absent and no row is drawn.
  */
-export function analyticsWindowDays(
-  nudges: readonly UsageNudge[]
-): number | null {
-  const entry = nudges.find((nudge) => nudge.key === ANALYTICS_WINDOW_FEATURE);
-  if (!entry || !Number.isFinite(entry.limit) || entry.limit <= 0) return null;
-  return entry.limit;
+export function analyticsWindow(payload: UsageNudges): AnalyticsWindow | null {
+  const window = payload.analytics_window;
+  if (!window || typeof window !== 'object') return null;
+  const days = Number(window.days);
+  if (!Number.isFinite(days) || days <= 0) return null;
+  return {
+    days,
+    unlocks_at_plan: window.unlocks_at_plan ?? null,
+    unlocks_at_plan_name: window.unlocks_at_plan_name ?? null,
+  };
 }
 
 /** Money the way the console states money: two decimals, four under a cent. */

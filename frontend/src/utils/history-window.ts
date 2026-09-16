@@ -75,9 +75,24 @@ export function isHistoryUnavailable(
   return error instanceof HistoryUnavailableError;
 }
 
-/** The sentence shown where the data stops. */
-export function historyCutoffMessage(days: number): string {
-  return `Data older than ${Math.round(days)} days is on paid plans`;
+/**
+ * The sentence shown where the data stops.
+ *
+ * Every finite window belongs to some plan, including the paid ones, so the
+ * sentence names the plan that actually lifts this window rather than
+ * claiming older data "is on paid plans": telling someone who already pays
+ * that their history is on paid plans is both false and the fastest way to
+ * make them distrust the rest of the console. At the top of the ladder there
+ * is no plan to name, so the row says nothing about plans at all.
+ */
+export function historyCutoffMessage(
+  days: number,
+  unlocksAtPlanName?: string | null
+): string {
+  const older = `Data older than ${Math.round(days)} days`;
+  return unlocksAtPlanName
+    ? `${older} is on the ${unlocksAtPlanName} plan and above`
+    : `${older} is outside your plan's analytics window`;
 }
 
 /**

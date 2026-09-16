@@ -45,6 +45,10 @@ import type {
   SimilarSessionsResponse,
 } from '../types';
 import { unifiedWebSocketManager } from '../services/unified-websocket-manager';
+import {
+  isHistoryUnavailable,
+  requestHistoryUpgrade,
+} from '../utils/history-window';
 import type {
   ObservedSession,
   SessionObserverFeatures,
@@ -976,16 +980,32 @@ export class PreloopSessionObserver extends LitElement {
       return;
     }
     this.loadingSessionId = sessionId;
+    // A timeline that cannot load is not worth an error on a replay that
+    // otherwise renders, with one exception: a session whose whole activity
+    // predates the plan's analytics window. That is the plan speaking, and
+    // it is the only thing this catch keeps.
     try {
       const [events, activity] = await Promise.all([
         getRuntimeSessionGatewayEvents(sessionId, {
           limit: EVENT_PAGE_SIZE,
           offset: 0,
         }),
-        getAccountRuntimeSessionActivityTimeline(sessionId).catch(() => ({
-          items: [],
-        })),
+        getAccountRuntimeSessionActivityTimeline(sessionId).catch(
+          (error: unknown) =>
+            isHistoryUnavailable(error)
+              ? error
+              : { items: [] as RuntimeSessionActivityItem[] }
+        ),
       ]);
+      if (isHistoryUnavailable(activity)) {
+        // Say what the server said instead of drawing an empty replay.
+        this.error = activity.message;
+        // Opening a session older than the window is the person asking to
+        // see older, which is the user action the upgrade modal exists for.
+        // Auto-selection on load is not, and stays silent.
+        if (options.userInitiated) requestHistoryUpgrade();
+        return;
+      }
       this.loadedEvents = {
         ...this.loadedEvents,
         [sessionId]: this.sortEventsDescending(events.logs || []),

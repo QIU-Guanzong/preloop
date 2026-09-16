@@ -55,10 +55,20 @@ describe('history window', () => {
     expect(isHistoryUnavailable(new Error('boom'))).to.equal(false);
   });
 
-  it('states the cutoff in days and plain words', () => {
-    expect(historyCutoffMessage(90)).to.equal(
-      'Data older than 90 days is on paid plans'
+  it('names the plan that actually lifts this window', () => {
+    expect(historyCutoffMessage(90, 'Team')).to.equal(
+      'Data older than 90 days is on the Team plan and above'
     );
+  });
+
+  it('says nothing about plans when there is no higher plan', () => {
+    // A paid plan with a finite window must never be told its own history
+    // "is on paid plans": it is already on one, and there is nothing to buy.
+    for (const unlocks of [null, undefined, '']) {
+      expect(historyCutoffMessage(730, unlocks)).to.equal(
+        "Data older than 730 days is outside your plan's analytics window"
+      );
+    }
   });
 
   it('opens the existing upgrade modal with the window named', async () => {

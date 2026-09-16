@@ -640,23 +640,77 @@ export interface UsageNudge {
 }
 
 /**
- * Usage against plan limits, for the nudge banner.
+ * The plan's analytics window, stated apart from the nudge list.
+ *
+ * The console ends a chronological list with a row saying where the plan
+ * stops showing history. That row is a fact about the plan, not about
+ * consumption, so it is not inferred from `nudges`: an account with a 90 day
+ * window and a week of data is nowhere near any threshold and still needs
+ * the row. Null means no finite window, and then there is no row.
+ */
+export interface AnalyticsWindow {
+  days: number;
+  /** Cheapest purchasable plan with a longer window, or null at the top. */
+  unlocks_at_plan: string | null;
+  /** That plan's catalog name, so the console never title-cases an id. */
+  unlocks_at_plan_name: string | null;
+}
+
+/** Everything the console needs to nudge this account, in one answer. */
+export interface UsageNudges {
+  nudges: UsageNudge[];
+  analytics_window: AnalyticsWindow | null;
+  /** Ratio at which the server says nudging starts, or null if unstated. */
+  threshold: number | null;
+  /** The ladder a dismissed nudge climbs back over, or null if unstated. */
+  bands: number[] | null;
+}
+
+/** No plugin, no answer, nothing to draw. The OSS console's whole story. */
+export const NO_USAGE_NUDGES: UsageNudges = {
+  nudges: [],
+  analytics_window: null,
+  threshold: null,
+  bands: null,
+};
+
+/**
+ * Usage against plan limits, for the nudge banner and the cutoff row.
  *
  * Advisory only, fetched in the background, so every failure is "no
  * nudges": OSS has no billing plugin and answers 404, a server older than
  * this endpoint answers 404 or 405, and a network error must never take a
- * console page down over chrome.
+ * console page down over chrome. A body that is not the documented envelope
+ * is the same answer, because half-understood chrome is worse than none.
  */
-export async function getUsageNudges(): Promise<UsageNudge[]> {
+export async function getUsageNudges(): Promise<UsageNudges> {
   try {
     const response = await fetchWithAuth('/api/v1/billing/nudges');
     if (!response.ok) {
-      return [];
+      return NO_USAGE_NUDGES;
     }
-    const data = await response.json();
-    return Array.isArray(data) ? (data as UsageNudge[]) : [];
+    const data: unknown = await response.json();
+    // A bare list is the shape this endpoint carried before the window and
+    // the ladder joined it. Reading it costs one line and makes the order
+    // the two repositories deploy in stop mattering.
+    if (Array.isArray(data)) {
+      return { ...NO_USAGE_NUDGES, nudges: data as UsageNudge[] };
+    }
+    if (!data || typeof data !== 'object') {
+      return NO_USAGE_NUDGES;
+    }
+    const body = data as Partial<UsageNudges>;
+    return {
+      nudges: Array.isArray(body.nudges) ? body.nudges : [],
+      analytics_window:
+        body.analytics_window && typeof body.analytics_window === 'object'
+          ? body.analytics_window
+          : null,
+      threshold: typeof body.threshold === 'number' ? body.threshold : null,
+      bands: Array.isArray(body.bands) ? body.bands : null,
+    };
   } catch {
-    return [];
+    return NO_USAGE_NUDGES;
   }
 }
 
@@ -1903,6 +1957,12 @@ export async function getAccountRuntimeSessionActivityTimeline(
     `/api/v1/runtime-sessions/${runtimeSessionId}/activity`
   );
   if (!response.ok) {
+    // This is the call that refuses when a session's whole activity sits
+    // behind the plan's analytics window (`require_session_history`), so it
+    // is where opening an old session learns that it is a plan fact rather
+    // than a failure.
+    const refused = await historyUnavailableError(response);
+    if (refused) throw refused;
     throw new Error('Failed to fetch session activity timeline');
   }
   return response.json();

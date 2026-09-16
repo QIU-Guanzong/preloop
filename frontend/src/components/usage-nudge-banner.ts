@@ -1,14 +1,16 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { getUsageNudges, getUserProfile } from '../api';
+import { getUsageNudges, getUserProfile, NO_USAGE_NUDGES } from '../api';
 import type { UsageNudge } from '../api';
 import {
   bandFor,
   dismissNudge,
   loadNudgeDismissals,
+  nudgeLadder,
   nudgeLink,
   nudgeMessage,
   visibleNudges,
+  NUDGE_BANDS,
   NUDGE_THRESHOLD,
   type NudgeDismissals,
 } from '../utils/usage-nudges';
@@ -38,6 +40,14 @@ import {
 export class UsageNudgeBanner extends LitElement {
   @state()
   private nudges: UsageNudge[] = [];
+
+  /** The ladder the server nudges on, or this build's until it answers. */
+  @state()
+  private bands: readonly number[] = NUDGE_BANDS;
+
+  /** Where nudging starts, for a dismissal recorded below the first band. */
+  @state()
+  private threshold = NUDGE_THRESHOLD;
 
   @state()
   private dismissals: NudgeDismissals = {};
@@ -142,24 +152,27 @@ export class UsageNudgeBanner extends LitElement {
    * modal only ever follows a user action.
    */
   private async refresh() {
-    const [profile, nudges] = await Promise.all([
+    const [profile, payload] = await Promise.all([
       getUserProfile().catch(() => null),
-      getUsageNudges(),
+      getUsageNudges().catch(() => NO_USAGE_NUDGES),
     ]);
     this.userId = profile?.id ?? '';
     this.dismissals = this.userId ? loadNudgeDismissals(this.userId) : {};
-    this.nudges = nudges;
+    const ladder = nudgeLadder(payload);
+    this.threshold = ladder.threshold;
+    this.bands = ladder.bands;
+    this.nudges = payload.nudges;
   }
 
   private handleDismiss(nudge: UsageNudge) {
     // Store the band it stood at, not "hidden": the same limit at 80 percent
     // is news again, the same limit at 51 is not.
-    const band = bandFor(nudge.ratio) ?? NUDGE_THRESHOLD;
+    const band = bandFor(nudge.ratio, this.bands) ?? this.threshold;
     this.dismissals = dismissNudge(this.userId, nudge.key, band);
   }
 
   render() {
-    const visible = visibleNudges(this.nudges, this.dismissals);
+    const visible = visibleNudges(this.nudges, this.dismissals, this.bands);
     if (visible.length === 0) return nothing;
 
     return html`

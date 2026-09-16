@@ -17,13 +17,26 @@ describe('history-cutoff-row', () => {
     expect(el.shadowRoot?.textContent?.trim()).to.equal('');
   });
 
-  it('states the cutoff in days', async () => {
+  it('states the cutoff in days and names the plan that lifts it', async () => {
     const el = await fixture<HistoryCutoffRow>(
-      html`<history-cutoff-row .days=${90}></history-cutoff-row>`
+      html`<history-cutoff-row
+        .days=${90}
+        .unlocksAtPlanName=${'Team'}
+      ></history-cutoff-row>`
     );
     expect(el.shadowRoot!.textContent).to.contain(
-      'Data older than 90 days is on paid plans'
+      'Data older than 90 days is on the Team plan and above'
     );
+  });
+
+  it('offers nothing to buy on the plan with the longest window', async () => {
+    const el = await fixture<HistoryCutoffRow>(
+      html`<history-cutoff-row .days=${730}></history-cutoff-row>`
+    );
+    expect(el.shadowRoot!.textContent).to.contain(
+      "Data older than 730 days is outside your plan's analytics window"
+    );
+    expect(el.shadowRoot!.querySelector('button')).to.equal(null);
   });
 
   it('opens the upgrade modal only when the link is pressed', async () => {
@@ -31,7 +44,10 @@ describe('history-cutoff-row', () => {
     const handler = (event: Event) => seen.push(event as CustomEvent);
     window.addEventListener('show-upgrade-modal', handler);
     const el = await fixture<HistoryCutoffRow>(
-      html`<history-cutoff-row .days=${90}></history-cutoff-row>`
+      html`<history-cutoff-row
+        .days=${90}
+        .unlocksAtPlanName=${'Team'}
+      ></history-cutoff-row>`
     );
     expect(seen).to.have.length(0);
     el.shadowRoot!.querySelector('button')!.click();

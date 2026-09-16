@@ -56,7 +56,10 @@ describe('usage-nudge-banner', () => {
     localStorage.removeItem('accessToken');
   });
 
-  function stubApi(nudges: UsageNudge[] | 'missing') {
+  function stubApi(
+    nudges: UsageNudge[] | 'missing',
+    ladder: { threshold: number; bands: number[] } | null = null
+  ) {
     const original = window.fetch;
     window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.toString();
@@ -69,10 +72,18 @@ describe('usage-nudge-banner', () => {
             headers: { 'Content-Type': 'application/json' },
           });
         }
-        return new Response(JSON.stringify(nudges), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
+        return new Response(
+          JSON.stringify({
+            nudges,
+            analytics_window: null,
+            threshold: ladder?.threshold ?? 0.5,
+            bands: ladder?.bands ?? [0.5, 0.8, 1.0],
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        );
       }
       if (url.includes('/auth/users/me')) {
         return new Response(JSON.stringify(USER), {
@@ -88,9 +99,10 @@ describe('usage-nudge-banner', () => {
   }
 
   async function mount(
-    nudges: UsageNudge[] | 'missing'
+    nudges: UsageNudge[] | 'missing',
+    ladder: { threshold: number; bands: number[] } | null = null
   ): Promise<UsageNudgeBanner> {
-    stubApi(nudges);
+    stubApi(nudges, ladder);
     const el = await fixture<UsageNudgeBanner>(
       html`<usage-nudge-banner></usage-nudge-banner>`
     );
@@ -128,6 +140,24 @@ describe('usage-nudge-banner', () => {
     await mount([AGENTS]);
     window.removeEventListener('show-upgrade-modal', handler);
     expect(seen).to.have.length(0);
+  });
+
+  it('nudges on the ladder the server publishes, not a second copy', async () => {
+    // One ladder: if the server moves the threshold to 0.9, a limit at 0.67
+    // says nothing, and a dismissal records the server's band.
+    const quiet = await mount([AGENTS], { threshold: 0.9, bands: [0.9, 1.0] });
+    expect(quiet.shadowRoot?.querySelector('.row')).to.equal(null);
+
+    const loud = await mount([{ ...AGENTS, ratio: 0.95, used: 2.85 }], {
+      threshold: 0.9,
+      bands: [0.9, 1.0],
+    });
+    await waitUntil(() => !!loud.shadowRoot?.querySelector('.row'));
+    loud
+      .shadowRoot!.querySelector<HTMLButtonElement>('button.dismiss')!
+      .click();
+    await loud.updateComplete;
+    expect(loadNudgeDismissals(USER.id)).to.deep.equal({ max_agents: 0.9 });
   });
 
   it('keeps a dismissed limit quiet until it crosses the next band', async () => {
