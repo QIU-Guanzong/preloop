@@ -16,6 +16,7 @@ import {
   uploadAvatar,
   validateTrackerToken,
   startCheckout,
+  coalesceKey,
   getUsageNudges,
   getAccountGatewayUsageSummary,
   getAccountRuntimeSessionActivityTimeline,
@@ -348,6 +349,216 @@ describe('api', () => {
       ]);
 
       expect(fetchStub.callCount).to.equal(2);
+    });
+  });
+
+  describe('passive requests (the paywall is a user action)', () => {
+    const upgradeRequired = () =>
+      new Response(
+        JSON.stringify({
+          detail: { code: 'upgrade_required', feature: 'price_overrides' },
+        }),
+        { status: 402, headers: { 'Content-Type': 'application/json' } }
+      );
+
+    /** Collect every upgrade dialog request raised while `run` runs. */
+    async function modalEvents(run: () => Promise<unknown>) {
+      const seen: CustomEvent[] = [];
+      const listener = (event: Event) => seen.push(event as CustomEvent);
+      window.addEventListener('show-upgrade-modal', listener);
+      try {
+        await run();
+      } finally {
+        window.removeEventListener('show-upgrade-modal', listener);
+      }
+      return seen;
+    }
+
+    it('still opens the dialog for a 402 nobody marked passive', async () => {
+      // The founder decision narrows where the dialog appears, not whether a
+      // click on a gated feature still explains itself.
+      fetchStub.resolves(upgradeRequired());
+
+      const seen = await modalEvents(() =>
+        fetchWithAuth('/api/v1/billing/cost/pricing-overrides')
+      );
+
+      expect(seen).to.have.length(1);
+      expect(seen[0].detail).to.eql({
+        code: 'upgrade_required',
+        feature: 'price_overrides',
+      });
+    });
+
+    it('leaves a passive 402 to the caller, with no dialog', async () => {
+      fetchStub.resolves(upgradeRequired());
+
+      let status = 0;
+      const seen = await modalEvents(async () => {
+        const response = await fetchWithAuth(
+          '/api/v1/billing/cost/pricing-overrides',
+          { passive: true }
+        );
+        status = response.status;
+      });
+
+      expect(seen, 'no dialog from a background read').to.have.length(0);
+      // The answer is still the answer: the caller decides what to render.
+      expect(status).to.equal(402);
+    });
+
+    it('says nothing about a passive rate limit either', async () => {
+      // 429 opens the same dialog, for the same reason: it is an answer about
+      // the plan. A background read that hits it stays quiet.
+      fetchStub.resolves(
+        new Response('{"detail":"slow down"}', { status: 429 })
+      );
+
+      const passiveSeen = await modalEvents(() =>
+        fetchWithAuth('/api/v1/agents', { passive: true })
+      );
+      const activeSeen = await modalEvents(() =>
+        fetchWithAuth('/api/v1/agents')
+      );
+
+      expect(passiveSeen, 'silent in the background').to.have.length(0);
+      expect(activeSeen, 'answers the reader who asked').to.have.length(1);
+    });
+
+    it('never sends the flag to the server', async () => {
+      fetchStub.resolves(
+        new Response('{}', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+
+      await fetchWithAuth('/api/v1/agents', { passive: true });
+
+      const [, options] = fetchStub.firstCall.args;
+      expect(options).to.not.have.property('passive');
+    });
+
+    it("keeps a passive read out of an active caller's coalesced request", async () => {
+      // Sharing one in-flight GET would hand the active caller's answer to a
+      // passive one, or worse, silence the dialog for the reader who clicked.
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      fetchStub.callsFake(async () => {
+        await gate;
+        return upgradeRequired();
+      });
+
+      const seen = await modalEvents(async () => {
+        const both = Promise.all([
+          fetchWithAuth('/api/v1/billing/cost/pricing-overrides', {
+            passive: true,
+          }),
+          fetchWithAuth('/api/v1/billing/cost/pricing-overrides'),
+        ]);
+        release();
+        await both;
+      });
+
+      expect(fetchStub.callCount, 'two separate requests').to.equal(2);
+      expect(seen, 'one dialog, for the caller who asked').to.have.length(1);
+    });
+
+    it('reads the usage nudges without ever interrupting the page', async () => {
+      // The nudge banner loads itself on every console page, so it is the
+      // definition of a request nobody asked for. A 429 there used to raise
+      // the rate-limit dialog over whatever the reader was doing.
+      fetchStub.resolves(
+        new Response('{"detail":"slow down"}', { status: 429 })
+      );
+
+      let nudges: unknown;
+      const seen = await modalEvents(async () => {
+        nudges = await getUsageNudges();
+      });
+
+      expect(seen, 'no dialog from the banner').to.have.length(0);
+      expect(nudges).to.eql(NO_USAGE_NUDGES);
+      const [, options] = fetchStub.firstCall.args;
+      expect(options).to.not.have.property('passive');
+    });
+
+    it('namespaces the passive key with printable characters only', () => {
+      // An invisible separator (a NUL or any other control byte) works at
+      // runtime and passes type checking, but it makes this file "binary" for
+      // grep, ripgrep, git grep and editor search. Keep the separator
+      // readable, and fail here if anyone retypes it as something invisible.
+      const key = coalesceKey('/api/v1/billing/cost/pricing-overrides', true);
+
+      expect(key).to.equal('passive|/api/v1/billing/cost/pricing-overrides');
+      // eslint-disable-next-line no-control-regex
+      expect(
+        /[\x00-\x1f\x7f]/.test(key),
+        `control byte in ${JSON.stringify(key)}`
+      ).to.be.false;
+      expect(key).to.match(/^[\x20-\x7e]+$/);
+      // The active key is the bare URL, so a passive read can never take an
+      // active caller's slot.
+      expect(coalesceKey('/api/v1/agents')).to.equal('/api/v1/agents');
+      expect(coalesceKey('/api/v1/agents', false)).to.equal('/api/v1/agents');
+      expect(coalesceKey('/api/v1/agents', true)).to.not.equal(
+        coalesceKey('/api/v1/agents')
+      );
+    });
+
+    it('does not coalesce passive reads of two different gated features', async () => {
+      // Two background legs of the same boot-time `Promise.allSettled` ask
+      // about different features: one answer must never be handed to the
+      // other, whatever the separator in the key is.
+      fetchStub.callsFake(
+        async (input: RequestInfo | URL) =>
+          new Response(JSON.stringify({ url: String(input) }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+      );
+
+      const [overrides, analytics] = await Promise.all([
+        fetchWithAuth('/api/v1/billing/cost/pricing-overrides', {
+          passive: true,
+        }),
+        fetchWithAuth('/api/v1/analytics/summary', { passive: true }),
+      ]);
+
+      expect(fetchStub.callCount, 'one request per feature').to.equal(2);
+      expect(await overrides.json()).to.eql({
+        url: '/api/v1/billing/cost/pricing-overrides',
+      });
+      expect(await analytics.json()).to.eql({
+        url: '/api/v1/analytics/summary',
+      });
+      expect(
+        coalesceKey('/api/v1/billing/cost/pricing-overrides', true)
+      ).to.not.equal(coalesceKey('/api/v1/analytics/summary', true));
+    });
+
+    it('changes nothing where no plan gate exists (self-hosted default)', async () => {
+      // Without the billing plugin there is no capability gate and no 402, so
+      // a passive call is an ordinary call and returns the same body.
+      fetchStub.resolves(
+        new Response(JSON.stringify([{ id: 'override-1' }]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+
+      const seen = await modalEvents(async () => {
+        const passive = await fetchWithAuth(
+          '/api/v1/billing/cost/pricing-overrides',
+          { passive: true }
+        );
+        expect(passive.status).to.equal(200);
+        expect(await passive.json()).to.eql([{ id: 'override-1' }]);
+      });
+
+      expect(seen).to.have.length(0);
     });
   });
 

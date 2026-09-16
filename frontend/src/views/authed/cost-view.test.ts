@@ -18,6 +18,8 @@ describe('CostView', () => {
   let jobStatus: Record<string, unknown>;
   let repriceResult: Record<string, unknown>;
   let onReprice: (() => void) | null;
+  // Per-test plan gate: 402 is what an account without the capability gets.
+  let overridesGated = false;
 
   const summary = {
     period_start: '2026-03-01T00:00:00Z',
@@ -85,6 +87,7 @@ describe('CostView', () => {
     localStorage.setItem('refreshToken', 'test-refresh-token');
     summaryPayload = { ...summary };
     featuresPayload = { billing: true };
+    overridesGated = false;
     onReprice = null;
     jobStatus = {
       id: 'job-1',
@@ -117,10 +120,22 @@ describe('CostView', () => {
         });
       }
       if (url.includes('/api/v1/billing/cost/pricing-overrides')) {
-        return new Response(JSON.stringify([]), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
+        return new Response(
+          JSON.stringify(
+            overridesGated
+              ? {
+                  detail: {
+                    code: 'upgrade_required',
+                    feature: 'price_overrides',
+                  },
+                }
+              : []
+          ),
+          {
+            status: overridesGated ? 402 : 200,
+            headers: { 'Content-Type': 'application/json' },
+          }
+        );
       }
       if (url.includes('/api/v1/cost/summary')) {
         return new Response(JSON.stringify(summaryPayload), {
@@ -155,6 +170,31 @@ describe('CostView', () => {
     localStorage.clear();
     sessionStorage.clear();
     invalidateApiCaches();
+  });
+
+  it('opens no upgrade dialog when the override list is gated', async () => {
+    // This list decorates the page on load. Founder decision of 2026-09-16:
+    // the paywall modal appears only on a user action.
+    featuresPayload = { billing: true, model_price_overrides: true };
+    overridesGated = true;
+    const seen: Event[] = [];
+    const listener = (event: Event) => seen.push(event);
+    window.addEventListener('show-upgrade-modal', listener);
+    try {
+      const element = (await fixture(
+        html`<cost-view></cost-view>`
+      )) as CostView;
+      await waitUntil(
+        () => (element as unknown as { loading: boolean }).loading === false
+      );
+      await element.updateComplete;
+      expect(seen, 'no dialog on page load').to.have.length(0);
+      expect(
+        (element as unknown as { pricingOverrides: unknown[] }).pricingOverrides
+      ).to.eql([]);
+    } finally {
+      window.removeEventListener('show-upgrade-modal', listener);
+    }
   });
 
   it('renders accessible cost metrics and tables after load', async () => {

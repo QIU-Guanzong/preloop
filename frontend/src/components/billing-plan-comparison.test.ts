@@ -231,11 +231,23 @@ describe('Billing plan comparison', () => {
     confirmResponse = undefined;
     stub = sinon
       .stub(window, 'fetch')
-      .callsFake(async (input: RequestInfo | URL) => {
+      .callsFake(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes('/plan-change-options')) return json(data);
-        if (url.endsWith('/plan-change-preview'))
-          return previewResponse ? previewResponse() : json(quote);
+        if (url.endsWith('/plan-change-preview')) {
+          if (previewResponse) return previewResponse();
+          // The server quotes the period that was asked for. The console
+          // refuses a quote for another period, so a fixture that always
+          // answered "month" would refuse every annual quote.
+          const asked = JSON.parse(String(init?.body ?? '{}')).interval;
+          return json({
+            ...quote,
+            target: {
+              ...quote.target,
+              interval: asked ?? quote.target.interval,
+            },
+          });
+        }
         if (url.endsWith('/plan-change-confirm'))
           return confirmResponse
             ? confirmResponse()
@@ -289,7 +301,7 @@ describe('Billing plan comparison', () => {
     await showUsage(el);
     expect(text(el)).to.not.include('Would this plan cover your usage?');
   });
-  it('defaults the picker to the next tier up, never to Free', async () => {
+  it('defaults the picker to the next tier up on annual billing, never to Free', async () => {
     data.current_subscription = null;
     data.current_plan = plan('free', {
       name: 'Free',
@@ -301,9 +313,111 @@ describe('Billing plan comparison', () => {
     );
     const el = await mount();
     expect((el as any).selectedPlan).to.equal('pro');
+    expect((el as any).interval).to.equal('year');
     await open(el);
-    expect(text(el)).to.include('Pro: $10.00 / month');
+    expect(text(el)).to.include('Pro: $100.00 / year');
+    const picker = el.shadowRoot!.querySelector(
+      '[data-testid="plan"]'
+    ) as HTMLSelectElement;
+    expect([...picker.options].map((o) => o.value)).to.not.include('free');
   });
+  /**
+   * Arrive from somewhere that already asked the question.
+   *
+   * The upgrade dialog and the public pricing cards both send the reader here
+   * with their answer in the query, so this section has to open on it instead
+   * of making the reader choose again.
+   */
+  describe('arriving with a request in the query', () => {
+    let original: string;
+    beforeEach(() => {
+      original = window.location.pathname + window.location.search;
+    });
+    afterEach(() => {
+      window.history.replaceState({}, '', original);
+    });
+    const arriveWith = (query: string) =>
+      window.history.replaceState(
+        {},
+        '',
+        `${window.location.pathname}${query}`
+      );
+
+    it('opens the picker on the named plan and period', async () => {
+      data.plans.push(
+        plan('scale', {
+          name: 'Scale',
+          price_monthly: 50,
+          price_annually: 500,
+        })
+      );
+      data.plan_eligibility!.push(verdict('scale'));
+      arriveWith('?plan=scale&interval=month');
+      const el = await mount();
+      expect((el as any).changing, 'picker open').to.be.true;
+      expect((el as any).selectedPlan).to.equal('scale');
+      expect((el as any).interval).to.equal('month');
+    });
+
+    it('opens on the cheapest plan that includes the refused capability', async () => {
+      // Pro sells ai_optimization but not rbac. Sending a reader refused for
+      // rbac to Pro sells them a plan that refuses them again.
+      data.plans.push(
+        plan('scale', {
+          name: 'Scale',
+          price_monthly: 50,
+          price_annually: 500,
+          capabilities: ['ai_optimization', 'rbac'],
+        })
+      );
+      data.plan_eligibility!.push(verdict('scale'));
+      arriveWith('?feature=rbac');
+      const el = await mount();
+      expect((el as any).selectedPlan).to.equal('scale');
+      expect((el as any).changing).to.be.true;
+    });
+
+    it('keeps the ordinary default when no plan proves it includes the feature', async () => {
+      arriveWith('?feature=reconciliation');
+      const el = await mount();
+      expect((el as any).selectedPlan).to.equal('pro');
+    });
+
+    it('ignores a request to change to the plan the account is already on', async () => {
+      data.current_subscription = null;
+      data.current_plan = plan('free', {
+        name: 'Free',
+        price_monthly: 0,
+        price_annually: 0,
+      });
+      data.plans.unshift(
+        plan('free', { name: 'Free', price_monthly: 0, price_annually: 0 })
+      );
+      arriveWith('?plan=free');
+      const el = await mount();
+      expect((el as any).selectedPlan).to.equal('pro');
+    });
+
+    it('stays collapsed when nothing was requested', async () => {
+      const el = await mount();
+      expect((el as any).changing).to.be.false;
+    });
+  });
+
+  it('opens the picker for the account page when Free has no portal to manage', async () => {
+    data.current_subscription = null;
+    data.current_plan = plan('free', {
+      name: 'Free',
+      price_monthly: 0,
+      price_annually: 0,
+    });
+    const el = await mount();
+    expect((el as any).changing).to.be.false;
+    el.openPicker();
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('[data-testid="plan"]')).to.exist;
+  });
+
   it('treats an expired trial as Free on the collapsed line and picker default', async () => {
     data.current_subscription = {
       ...data.current_subscription!,
@@ -524,7 +638,7 @@ describe('Billing plan comparison', () => {
     await request(el);
     expect(
       JSON.parse(calls('/plan-change-preview')[0].args[1].body)
-    ).to.deep.equal({ target_plan_id: 'pro', interval: 'month' });
+    ).to.deep.equal({ target_plan_id: 'pro', interval: 'year' });
     expect(calls('/plan-change-confirm')).to.have.length(0);
     expect(button(el, 'confirm').disabled).to.equal(true);
     expect(text(el))

@@ -23,6 +23,7 @@ describe('AttentionView', () => {
   let dismissalsResponse: any[];
   let dismissalsSupported = true;
   let rejectPolicies = false;
+  let gatePriceOverrides = false;
   let permissions: string[] | null = null;
   let agentsResponse: any[];
   let usageByModel: any[];
@@ -39,6 +40,7 @@ describe('AttentionView', () => {
     localStorage.setItem('accessToken', 'test-access-token');
     invalidateApiCaches();
     rejectPolicies = false;
+    gatePriceOverrides = false;
     dismissalsSupported = true;
     permissions = null;
     dismissalsResponse = [];
@@ -114,6 +116,23 @@ describe('AttentionView', () => {
           };
           dismissalsResponse = [record];
           return json(record);
+        }
+        if (url.startsWith('/api/v1/billing/cost/pricing-overrides')) {
+          // What a plan without the price_overrides capability answers.
+          return gatePriceOverrides
+            ? new Response(
+                JSON.stringify({
+                  detail: {
+                    code: 'upgrade_required',
+                    feature: 'price_overrides',
+                  },
+                }),
+                {
+                  status: 402,
+                  headers: { 'Content-Type': 'application/json' },
+                }
+              )
+            : json([]);
         }
         if (url.startsWith('/api/v1/approval-requests')) {
           return json(approvalsResponse);
@@ -240,6 +259,24 @@ describe('AttentionView', () => {
   afterEach(() => {
     phoneFrame?.cleanup();
     phoneFrame = undefined;
+  });
+
+  it('opens no upgrade dialog when a gated input answers 402', async () => {
+    // A brand new Free account loads this page first. Founder decision of
+    // 2026-09-16: the paywall modal appears only on a user action, and this
+    // list is read by the page, not by the reader.
+    gatePriceOverrides = true;
+    const seen: Event[] = [];
+    const listener = (event: Event) => seen.push(event);
+    window.addEventListener('show-upgrade-modal', listener);
+    try {
+      const el = await mount();
+      expect(seen, 'no dialog on first load').to.have.length(0);
+      // The page is not a casualty of the refusal either.
+      expect(text(el)).to.contain('refund_order');
+    } finally {
+      window.removeEventListener('show-upgrade-modal', listener);
+    }
   });
 
   it('groups items into sections with counts and actions', async () => {

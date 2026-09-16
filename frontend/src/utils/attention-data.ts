@@ -183,7 +183,12 @@ export async function loadAttentionInputs(
     // An override is a price, including one of $0. Without this the console
     // asks for a price somebody set a month ago. A 403 on an account without
     // the feature drops the list, and the rules fall back to spend.
-    getModelPriceOverrides({ activeOnly: true }),
+    //
+    // Passive: nobody asked for this list. It loads with the dashboard, and
+    // on a plan without the `price_overrides` capability the endpoint answers
+    // 402, which used to open the upgrade dialog on the first screen a new
+    // Free account ever sees.
+    getModelPriceOverrides({ activeOnly: true, passive: true }),
   ]);
 
   const dismissalList =

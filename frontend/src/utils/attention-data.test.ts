@@ -1,11 +1,13 @@
 import { expect } from '@open-wc/testing';
 import sinon from 'sinon';
 
+import { invalidateApiCaches } from '../api';
 import { ATTENTION_QUERY, loadAttentionInputs } from './attention-data';
 
 describe('loadAttentionInputs', () => {
   let fetchStub: sinon.SinonStub;
   let failing: string[] = [];
+  let gated: string[] = [];
   let dismissalsStatus = 200;
 
   const json = (data: unknown) =>
@@ -20,13 +22,24 @@ describe('loadAttentionInputs', () => {
   beforeEach(() => {
     localStorage.setItem('accessToken', 'test-access-token');
     failing = [];
+    gated = [];
     dismissalsStatus = 200;
+    invalidateApiCaches();
     fetchStub = sinon
       .stub(window, 'fetch')
       .callsFake(async (input: RequestInfo | URL) => {
         const url = typeof input === 'string' ? input : input.toString();
         if (failing.some((fragment) => url.includes(fragment))) {
           return new Response('{"detail":"forbidden"}', { status: 403 });
+        }
+        if (gated.some((fragment) => url.includes(fragment))) {
+          // What a plan gate answers: the 402 upgrade contract.
+          return new Response(
+            JSON.stringify({
+              detail: { code: 'upgrade_required', feature: 'price_overrides' },
+            }),
+            { status: 402, headers: { 'Content-Type': 'application/json' } }
+          );
         }
         if (url.startsWith('/api/v1/attention/dismissals')) {
           if (dismissalsStatus !== 200) {
@@ -241,6 +254,27 @@ describe('loadAttentionInputs', () => {
 
     expect(inputs.priceOverrides).to.eql([]);
     expect(inputs.usageSummary?.total_requests).to.equal(3);
+  });
+
+  it('opens no upgrade dialog when a plan gate refuses an input', async () => {
+    // Founder decision of 2026-09-16: the paywall modal appears only on a
+    // user action. Nobody asked for this list: it loads with the dashboard.
+    gated = ['/api/v1/billing/cost/pricing-overrides'];
+    const seen: Event[] = [];
+    const listener = (event: Event) => seen.push(event);
+    window.addEventListener('show-upgrade-modal', listener);
+    try {
+      const inputs = await loadAttentionInputs();
+      expect(seen, 'no upgrade dialog from a background load').to.have.length(
+        0
+      );
+      expect(inputs.priceOverrides).to.eql([]);
+      // The rest of the page still loads: one refused input is not an outage.
+      expect(inputs.usageSummary?.total_requests).to.equal(3);
+      expect(inputs.approvals).to.have.length(1);
+    } finally {
+      window.removeEventListener('show-upgrade-modal', listener);
+    }
   });
 
   it('skips the budget call when billing is off', async () => {

@@ -293,6 +293,68 @@ describe('AccountView', () => {
     expect((element as any)._billingSummary).to.not.be.null;
   });
 
+  it('offers a plan to a Free account instead of a dead portal button', async () => {
+    // The provider portal manages a subscription. Free has none, so the
+    // button sat there disabled where the one useful action belongs.
+    fetchStub = createFetchStub({ billing: true, freeTier: true });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    expect(element.shadowRoot?.textContent).to.not.contain('Manage in Stripe');
+    const choose = element.shadowRoot?.querySelector(
+      '[data-testid="choose-a-plan"]'
+    ) as HTMLElement | null;
+    expect(choose, 'expected a plan action').to.exist;
+    expect(choose?.hasAttribute('disabled')).to.be.false;
+  });
+
+  it('opens the plan picker where the plans already are', async () => {
+    fetchStub = createFetchStub({ billing: true, freeTier: true });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const comparison = element.shadowRoot?.querySelector(
+      'billing-plan-comparison'
+    ) as HTMLElement & { openPicker?: () => void };
+    expect(comparison, 'expected the plan section').to.exist;
+    const openPicker = sinon.stub(comparison, 'openPicker');
+    const scroll = sinon.stub(comparison, 'scrollIntoView');
+    (
+      element.shadowRoot?.querySelector(
+        '[data-testid="choose-a-plan"]'
+      ) as HTMLElement
+    ).click();
+    await element.updateComplete;
+
+    expect(openPicker, 'picker opened').to.have.been.calledOnce;
+    expect(scroll, 'brought into view').to.have.been.calledOnce;
+  });
+
+  it('keeps the portal button for a subscription, disabled only without the permission', async () => {
+    fetchStub = createFetchStub({ billing: true, canManageBilling: false });
+    const element = (await fixture(
+      html`<account-view></account-view>`
+    )) as AccountView;
+
+    await waitUntil(() => !(element as any)._loading, 'load');
+    await element.updateComplete;
+
+    const manage = element.shadowRoot?.querySelector(
+      '[data-testid="manage-in-stripe"]'
+    ) as HTMLElement | null;
+    expect(manage, 'expected the portal button').to.exist;
+    expect(element.shadowRoot?.querySelector('[data-testid="choose-a-plan"]'))
+      .to.not.exist;
+  });
+
   it('shows an error alert when account details fail to load', async () => {
     fetchStub = createFetchStub({ accountFails: true });
     const element = (await fixture(
