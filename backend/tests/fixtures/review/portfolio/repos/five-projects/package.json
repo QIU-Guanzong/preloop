@@ -1,0 +1,8 @@
+{
+  "name": "sample-portfolio",
+  "private": true,
+  "description": "synthetic fixture: workspace root package.json, never a project",
+  "workspaces": [
+    "services/notifications"
+  ]
+}
