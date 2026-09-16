@@ -28,6 +28,9 @@ type onceServer struct {
 	connections     int
 	job             map[string]any
 	handshakeFrames []map[string]any
+	// legacyControlPlane drops `ephemeral` from the hello frame, the way a
+	// control plane without one-shot support does.
+	legacyControlPlane bool
 }
 
 func (s *onceServer) snapshot() ([]map[string]any, []map[string]any, int, int) {
@@ -80,6 +83,12 @@ func newOnceServer(t *testing.T, job map[string]any) (*onceServer, *httptest.Ser
 		first := state.connections == 1
 		state.mu.Unlock()
 		hello := map[string]any{"type": "hello", "log_acknowledgements": true}
+		state.mu.Lock()
+		legacy := state.legacyControlPlane
+		state.mu.Unlock()
+		if !legacy {
+			hello["ephemeral"] = true
+		}
 		if first && state.job != nil {
 			hello["job"] = state.job
 		}
@@ -403,5 +412,55 @@ func TestRunnerExecutionURLUsesControlPlane(t *testing.T) {
 	want := "https://preloop.example.com/console/flows/executions/exec-1"
 	if got := runnerExecutionURL("exec-1"); got != want {
 		t.Fatalf("url = %q, want %q", got, want)
+	}
+}
+
+func TestRunnerOnceWarnsWhenControlPlaneDoesNotConfirmEphemeral(t *testing.T) {
+	// A control plane older than one-shot support ignores `ephemeral` on
+	// register and never deletes the row. The hello echo is the only way
+	// the CI job can find out, so it has to reach the log.
+	const warning = "did not confirm ephemeral registration"
+	for _, tc := range []struct {
+		name   string
+		legacy bool
+		warns  bool
+	}{
+		{name: "current control plane", legacy: false, warns: false},
+		{name: "control plane without one-shot support", legacy: true, warns: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testenv.SetTempHome(t)
+			state, server := newOnceServer(t, nil)
+			state.legacyControlPlane = tc.legacy
+			oldToken, oldURL := FlagToken, FlagURL
+			FlagURL, FlagToken = server.URL, "tok"
+			t.Cleanup(func() { FlagToken, FlagURL = oldToken, oldURL })
+
+			var out bytes.Buffer
+			_ = runFgFlags(t, &out, map[string]string{
+				"once": "true", "ephemeral": "true", "wait-for-job": "150ms",
+			})
+			if got := strings.Contains(out.String(), warning); got != tc.warns {
+				t.Fatalf("warning present = %v, want %v (output %q)",
+					got, tc.warns, out.String())
+			}
+		})
+	}
+}
+
+func TestRunnerOnceEphemeralWarningIsSilentOutsideEphemeralMode(t *testing.T) {
+	var out bytes.Buffer
+	mode := &runnerOnceMode{once: true, out: &out}
+	mode.noteHelloEphemeral(false)
+	if out.Len() != 0 {
+		t.Fatalf("a persistent runner must not warn: %q", out.String())
+	}
+	// And an ephemeral one warns exactly once, however many times it
+	// reconnects to the same old control plane.
+	ephemeral := &runnerOnceMode{once: true, ephemeral: true, out: &out}
+	ephemeral.noteHelloEphemeral(false)
+	ephemeral.noteHelloEphemeral(false)
+	if got := strings.Count(out.String(), "did not confirm"); got != 1 {
+		t.Fatalf("warned %d times, want 1 (%q)", got, out.String())
 	}
 }

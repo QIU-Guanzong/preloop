@@ -149,6 +149,7 @@ type runnerWSMessage struct {
 	Lease         map[string]any     `json:"lease,omitempty"`
 
 	Type            string         `json:"type"`
+	Ephemeral       bool           `json:"ephemeral,omitempty"`
 	Job             map[string]any `json:"job,omitempty"`
 	Halt            bool           `json:"halt,omitempty"`
 	HaltExecutionID string         `json:"halt_execution_id,omitempty"`
@@ -663,6 +664,9 @@ func runRunnerSession(
 		case msg := <-incoming:
 			if msg.Type == "hello" {
 				logAcknowledgements = msg.LogAcknowledgements
+				// The echo is how a one-shot run learns whether this
+				// control plane will delete its row on the way out.
+				runnerOnce.noteHelloEphemeral(msg.Ephemeral)
 				if *runningCmd != nil {
 					if b, ok := (*runningCmd).Stdout.(*runnerLogBuffer); ok {
 						b.setLogAcknowledgements(logAcknowledgements)

@@ -558,9 +558,20 @@ class CRUDFlowRunner(CRUDBase[FlowRunner]):
         ]
         if not doomed:
             return 0
+        # Re-apply the predicate in the DELETE: a row whose heartbeat landed,
+        # or that leased an execution, between the SELECT and here is no
+        # longer stale and must survive.
         deleted = (
             db.query(FlowRunner)
-            .filter(FlowRunner.id.in_(doomed))
+            .filter(
+                FlowRunner.id.in_(doomed),
+                FlowRunner.ephemeral.is_(True),
+                FlowRunner.current_execution_id.is_(None),
+                or_(
+                    FlowRunner.last_heartbeat.is_(None),
+                    FlowRunner.last_heartbeat < cutoff,
+                ),
+            )
             .delete(synchronize_session=False)
         )
         db.commit()

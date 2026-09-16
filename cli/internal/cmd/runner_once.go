@@ -55,6 +55,7 @@ type runnerOnceMode struct {
 
 	leased      atomic.Bool
 	done        atomic.Bool
+	warnedOld   atomic.Bool
 	status      atomic.Value
 	executionID atomic.Value
 }
@@ -97,6 +98,28 @@ func (m *runnerOnceMode) registersEphemeral() bool {
 // stopsAfterOneJob reports whether the process exits after one execution.
 func (m *runnerOnceMode) stopsAfterOneJob() bool {
 	return m != nil && m.once
+}
+
+// noteHelloEphemeral consumes the control plane's echo of the ephemeral
+// flag. A control plane that predates one-shot mode accepts the extra
+// field on register, ignores it, and then keeps the row forever as an
+// offline phantom. The job itself still runs, so this warns once on the
+// first hello instead of failing: a CI log that ends green while leaving
+// a dead runner on the Runners page is the outcome worth naming.
+func (m *runnerOnceMode) noteHelloEphemeral(echoed bool) {
+	if !m.registersEphemeral() || echoed {
+		return
+	}
+	if m.warnedOld.Swap(true) || m.out == nil {
+		return
+	}
+	fmt.Fprintln(
+		m.out,
+		"Warning: this control plane did not confirm ephemeral registration. "+
+			"It is older than one-shot runner support, so this runner will "+
+			"stay listed after the job. Remove it by hand, or upgrade the "+
+			"control plane.",
+	)
 }
 
 // markLeased records that the single execution started and prints its
