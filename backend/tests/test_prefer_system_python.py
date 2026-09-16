@@ -59,9 +59,13 @@ def _run_script(
     env["GITHUB_OUTPUT"] = str(github_output)
     env["GITHUB_PATH"] = str(github_path)
     env["RUNNER_TEMP"] = str(runner_temp)
-    # Keep /bin so rm exists. Tests put fake interpreters first. /usr/bin
-    # is omitted so a host python3 cannot steal the missing/wrong cases.
-    env["PATH"] = os.pathsep.join([path, "/bin"])
+    # A sandbox bin so a host python3 cannot leak in: on Debian /bin is
+    # /usr/bin, so "PATH=...:/bin" still exposes python3.11. The script only
+    # needs rm from outside the fake dir (echo/printf/command/[ are builtins).
+    sandbox = tmp_path / "sandbox-bin"
+    sandbox.mkdir()
+    (sandbox / "rm").symlink_to("/bin/rm")
+    env["PATH"] = os.pathsep.join([path, str(sandbox)])
     result = subprocess.run(
         ["/bin/bash", str(SCRIPT)],
         check=False,
@@ -91,11 +95,18 @@ def test_missing_system_python_falls_back_to_setup_python(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
     assert _output_value(result.github_output, "use_setup") == "true"
     assert result.github_path.read_text(encoding="utf-8") == ""
+    assert "No system Python 3.11 on PATH" in result.stdout
 
 
 def test_wrong_minor_falls_back_to_setup_python(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    # Probe order is python3.11, then python3. Fake both so this is a
+    # version mismatch, not "candidate missing".
+    _write_executable(
+        bin_dir / "python3.11",
+        "#!/bin/sh\nprintf '3.12\\n'\n",
+    )
     _write_executable(
         bin_dir / "python3",
         "#!/bin/sh\nprintf '3.12\\n'\n",
@@ -103,6 +114,7 @@ def test_wrong_minor_falls_back_to_setup_python(tmp_path: Path) -> None:
     result = _run_script(tmp_path, python_version="3.11", path=str(bin_dir))
     assert result.returncode == 0, result.stderr
     assert _output_value(result.github_output, "use_setup") == "true"
+    assert "No system Python 3.11 on PATH" in result.stdout
 
 
 def test_matching_python_without_venv_falls_back(tmp_path: Path) -> None:
@@ -119,6 +131,8 @@ def test_matching_python_without_venv_falls_back(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert _output_value(result.github_output, "use_setup") == "true"
     assert not (result.runner_temp / "preloop-python").exists()
+    assert "::warning::" in result.stdout
+    assert "python3.11-venv" in result.stdout
 
 
 def test_matching_system_python_uses_a_venv(tmp_path: Path) -> None:
@@ -137,6 +151,32 @@ def test_matching_system_python_uses_a_venv(tmp_path: Path) -> None:
     assert str(result.runner_temp / "preloop-python" / "bin") in github_path
     pip = result.runner_temp / "preloop-python" / "bin" / "pip"
     assert pip.is_file()
+
+
+def test_patch_version_input_matches_minor(tmp_path: Path) -> None:
+    """``3.11.16`` must probe ``python3.11``, not ``python3.11.16``."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_executable(
+        bin_dir / "python3.11",
+        '#!/bin/sh\nif [ "$1" = "-c" ]; then printf "3.11\\n"; exit 0; fi\nexit 1\n',
+    )
+    result = _run_script(tmp_path, python_version="3.11.16", path=str(bin_dir))
+    assert result.returncode == 0, result.stderr
+    assert "No system Python" not in result.stdout
+    assert "python3.11-venv" in result.stdout
+    assert _output_value(result.github_output, "use_setup") == "true"
+
+
+def test_broken_interpreter_is_skipped(tmp_path: Path) -> None:
+    """A candidate that exists but exits 1 is not a match."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_executable(bin_dir / "python3.11", "#!/bin/sh\nexit 1\n")
+    result = _run_script(tmp_path, python_version="3.11", path=str(bin_dir))
+    assert result.returncode == 0, result.stderr
+    assert _output_value(result.github_output, "use_setup") == "true"
+    assert "No system Python 3.11 on PATH" in result.stdout
 
 
 def test_ci_python_jobs_use_the_composite() -> None:

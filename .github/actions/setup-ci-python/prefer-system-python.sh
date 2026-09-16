@@ -57,7 +57,7 @@ fi
 venv_dir="${RUNNER_TEMP}/preloop-python"
 rm -rf "${venv_dir}"
 if ! "${py}" -m venv "${venv_dir}"; then
-  echo "System Python ${py} cannot create a venv; will use actions/setup-python"
+  echo "::warning::System Python ${py} cannot create a venv; install python${MM}-venv on Debian. Falling back to actions/setup-python, which has no ${MM} build for this distro."
   rm -rf "${venv_dir}"
   exit 0
 fi
