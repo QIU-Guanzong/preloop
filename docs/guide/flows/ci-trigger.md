@@ -57,3 +57,7 @@ There is no fallback onto hosted compute.
 
 To set up a runner on plain Linux or Proxmox, see the
 [self-hosted runner quickstart](../runners/quickstart-linux.md).
+
+GitHub Actions users have a packaged version of all of this, including
+running the agent on the job's own VM: see
+[trigger flows from GitHub Actions](github-actions.md).

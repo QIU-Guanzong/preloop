@@ -104,6 +104,15 @@ func init() {
 	runnerCmd.AddCommand(runnerStatusCmd)
 	runnerFgCmd.Flags().StringSlice("labels", nil, "labels used to match runner pools")
 	runnerFgCmd.Flags().String("name", "", "runner display name (default: hostname)")
+	runnerFgCmd.Flags().Bool("once", false, "exit after the first leased execution finishes")
+	runnerFgCmd.Flags().Bool(
+		"ephemeral", false,
+		"register for this process only and unregister on every exit path",
+	)
+	runnerFgCmd.Flags().Duration(
+		"wait-for-job", defaultRunnerWaitForJob,
+		"how long --once waits for a job before exiting non-zero",
+	)
 }
 
 type runnerState struct {
@@ -140,6 +149,7 @@ type runnerWSMessage struct {
 	Lease         map[string]any     `json:"lease,omitempty"`
 
 	Type            string         `json:"type"`
+	Ephemeral       bool           `json:"ephemeral,omitempty"`
 	Job             map[string]any `json:"job,omitempty"`
 	Halt            bool           `json:"halt,omitempty"`
 	HaltExecutionID string         `json:"halt_execution_id,omitempty"`
@@ -150,7 +160,15 @@ type runnerWSMessage struct {
 func runRunnerFg(cmd *cobra.Command, args []string) error {
 	labels, _ := cmd.Flags().GetStringSlice("labels")
 	name, _ := cmd.Flags().GetString("name")
+	once, err := runnerOnceFromFlags(cmd)
+	if err != nil {
+		return err
+	}
+	runnerOnce = once
 	hostname, _ := os.Hostname()
+	if once.registersEphemeral() {
+		labels = ephemeralRunnerLabels(labels, hostname, os.Getpid())
+	}
 	if name == "" {
 		name = hostname
 	}
@@ -164,13 +182,32 @@ func runRunnerFg(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Unregister on every exit path an ephemeral process can take: a clean
+	// one-shot finish, a fatal server rejection, a panic. The signal handler
+	// below covers SIGTERM/SIGINT/SIGHUP; SIGKILL cannot be caught, which is
+	// why the server also deletes ephemeral rows whose heartbeat lapses.
+	if once.registersEphemeral() {
+		defer unregisterRunnerBestEffort(state)
+	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Runner %s (%s) connecting...\n", state.Name, state.ID)
 
 	reapOrphanedPublicationRuntimes()
 
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
-	return runnerForegroundLoop(state, interrupt, cmd.OutOrStdout())
+	defer signal.Stop(interrupt)
+	if once.registersEphemeral() {
+		// A CI job whose controlling process dies sends SIGHUP; a runner
+		// that stays registered after it is exactly the phantom this mode
+		// exists to prevent. Long-lived services keep ignoring SIGHUP.
+		signal.Notify(interrupt, syscall.SIGHUP)
+	}
+	stopWaiting := once.armWaitForJob(interrupt)
+	defer stopWaiting()
+	if err := runnerForegroundLoop(state, interrupt, cmd.OutOrStdout()); err != nil {
+		return err
+	}
+	return once.result()
 }
 
 func loadOrRegisterRunner(client *api.Client, name, hostname string, labels []string) (*runnerState, error) {
@@ -181,6 +218,9 @@ func loadOrRegisterRunner(client *api.Client, name, hostname string, labels []st
 		"os":                 runtime.GOOS,
 		"arch":               runtime.GOARCH,
 		"labels":             labels,
+	}
+	if runnerOnce.registersEphemeral() {
+		return registerEphemeralRunner(client, req)
 	}
 	if existing, err := readRunnerState(); err == nil && existing.ID != "" && existing.Token != "" {
 		req["runner_id"] = existing.ID
@@ -306,7 +346,16 @@ func writeJobOutcome(conn *websocket.Conn, outcome leasedJobOutcome) error {
 	if outcome.evidenceUpload != "" {
 		message["evidence_upload"] = outcome.evidenceUpload
 	}
-	return writeRunnerJSON(conn, message)
+	if err := writeRunnerJSON(conn, message); err != nil {
+		return err
+	}
+	// Every terminal report for the single execution passes through here,
+	// including the ones beginLeasedJob writes without ever starting a
+	// container ("docker is not available", a rejected payload).
+	if runnerOnce.record(outcome) {
+		return errRunnerOnceDone
+	}
+	return nil
 }
 
 func rememberOutcome(dst **leasedJobOutcome, outcome leasedJobOutcome) {
@@ -417,6 +466,12 @@ func runnerForegroundLoop(state *runnerState, interrupt <-chan os.Signal, out io
 		if err == nil {
 			return nil
 		}
+		// --once: the single execution reported a terminal status and the
+		// server already has the frame. Do not reconnect for a job that
+		// will never come.
+		if errors.Is(err, errRunnerOnceDone) {
+			return nil
+		}
 		var fatal *runnerFatalError
 		if errors.As(err, &fatal) {
 			return err
@@ -458,7 +513,20 @@ func unregisterRunnerBestEffort(state *runnerState) {
 	}
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	_ = conn.WriteJSON(map[string]any{"type": "unregister"})
+	if err := conn.WriteJSON(map[string]any{"type": "unregister"}); err != nil {
+		return
+	}
+	// Wait for the acknowledgement before dropping the socket. This frame is
+	// the last act of an ephemeral runner, and a process that exits while it
+	// is still in flight leaves behind the row it promised to remove. The
+	// read deadline bounds the wait; the server sends its hello first.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		var reply runnerWSMessage
+		if err := conn.ReadJSON(&reply); err != nil || reply.Type == "ack" {
+			return
+		}
+	}
 }
 
 func runRunnerSession(
@@ -596,6 +664,9 @@ func runRunnerSession(
 		case msg := <-incoming:
 			if msg.Type == "hello" {
 				logAcknowledgements = msg.LogAcknowledgements
+				// The echo is how a one-shot run learns whether this
+				// control plane will delete its row on the way out.
+				runnerOnce.noteHelloEphemeral(msg.Ephemeral)
 				if *runningCmd != nil {
 					if b, ok := (*runningCmd).Stdout.(*runnerLogBuffer); ok {
 						b.setLogAcknowledgements(logAcknowledgements)
@@ -714,6 +785,7 @@ func beginLeasedJob(
 	if executionID == "" {
 		return fmt.Errorf("job missing execution_id")
 	}
+	runnerOnce.markLeased(executionID)
 	if err := isolatedPublicationHostExecError(job); err != nil {
 		outcome := leasedJobOutcome{executionID: executionID, status: "FAILED", errMsg: err.Error()}
 		rememberOutcome(lastComplete, outcome)

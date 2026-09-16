@@ -23,6 +23,9 @@ class RunnerRegisterRequest(BaseModel):
     os: Optional[str] = Field(None, max_length=30)
     arch: Optional[str] = Field(None, max_length=30)
     labels: List[str] = Field(default_factory=list)
+    #: True for `preloop runner fg --ephemeral`: the row exists for one
+    #: process and is deleted, not kept offline, once its heartbeat lapses.
+    ephemeral: bool = False
     runner_id: Optional[UUID] = None
     instance_id: Optional[UUID] = None
     host_exec_profiles: List[HostExecProfileAdvertisement] = Field(
@@ -42,6 +45,7 @@ class RunnerResponse(BaseModel):
     os: Optional[str] = None
     arch: Optional[str] = None
     labels: List[str] = Field(default_factory=list)
+    ephemeral: bool = False
     status: str
     last_heartbeat: Optional[datetime] = None
     current_execution_id: Optional[UUID] = None

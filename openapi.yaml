@@ -23987,6 +23987,10 @@ components:
             type: string
           type: array
           title: Labels
+        ephemeral:
+          type: boolean
+          title: Ephemeral
+          default: false
         runner_id:
           anyOf:
           - type: string
@@ -24053,6 +24057,10 @@ components:
             type: string
           type: array
           title: Labels
+        ephemeral:
+          type: boolean
+          title: Ephemeral
+          default: false
         status:
           type: string
           title: Status
@@ -24143,6 +24151,10 @@ components:
             type: string
           type: array
           title: Labels
+        ephemeral:
+          type: boolean
+          title: Ephemeral
+          default: false
         status:
           type: string
           title: Status

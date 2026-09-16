@@ -111,6 +111,58 @@ The service reads credentials the same way the CLI does; make sure
 `~/.preloop/config.yaml` exists (via `preloop login`) for the user that
 runs the service, since the unit does not inherit your shell exports.
 
+## Ephemeral (CI) mode: one job, then gone
+
+A CI job is not a machine. It appears, runs one execution, and is deleted,
+so a runner registered from inside it must not survive it:
+
+```sh
+preloop runner fg --once --ephemeral --labels ci-$GITHUB_RUN_ID
+```
+
+`--ephemeral` registers a runner that belongs to this process alone. It
+never reads or writes `~/.preloop/runner.json`, so it cannot take over or
+overwrite a persistent runner's identity on the same host, and it
+unregisters on every exit path: a finished job, Ctrl-C, SIGTERM, SIGHUP
+from a dying CI shell. If the job is SIGKILLed, the control plane deletes
+the row once its heartbeat lapses (45 seconds) rather than leaving an
+offline runner in the console forever. While it is connected, the Runners
+page shows an `ephemeral` badge next to its status.
+
+`--once` exits after the first leased execution reaches a terminal state
+and prints the execution URL as soon as the job is leased. The process
+status is the job's verdict, which is what a CI step needs:
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | the execution SUCCEEDED |
+| `1` | the execution FAILED, STOPPED or TIMEOUT, or the runner stopped mid-job |
+| `2` | no execution was leased within `--wait-for-job` (default 15m) |
+
+`--labels` defaults to `ci-<hostname>-<pid>` under `--ephemeral`, a label
+nothing else can match, so a flow triggered with `--runner ci-<...>`
+reaches this process and no other. Pass `--labels` yourself when you want
+a label the trigger side already knows.
+
+Without `--labels` on the trigger, a flow with no `runner_pool` can lease
+to any online private runner, including this one. Pin both sides when a
+CI job must run its own work.
+
+Constraints worth knowing before you wire this into a pipeline:
+
+*   **Linux hosts only.** Docker execution on the runner needs Linux; the
+    mode itself runs anywhere the CLI does, but jobs will not.
+*   **Codex and OpenCode flows only**, the same as any private runner.
+*   **The agent image is pulled fresh on every job.** A cold CI host pays
+    that download on each run; expect the first minutes of the step to be
+    a `docker pull`. A persistent runner amortizes it, an ephemeral one
+    cannot.
+*   The runner needs `PRELOOP_TOKEN` (or `preloop login`) and a reachable
+    control plane, same as a long-lived runner.
+
+The GitHub Actions guide wires this into a workflow:
+[trigger flows from GitHub Actions](../flows/github-actions.md).
+
 ## How runner work counts against your account
 
 A Preloop instance bounds how many executions one account may have admitted

@@ -44,6 +44,12 @@ class FlowRunner(Base):
     os: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     arch: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     labels: Mapped[List[str]] = mapped_column(JSONB, nullable=False, default=list)
+    #: One-shot CI runner (``preloop runner fg --once --ephemeral``). Its row
+    #: belongs to a single process, so a lapsed heartbeat means the process is
+    #: gone for good and the row is deleted rather than kept offline.
+    ephemeral: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false", index=True
+    )
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="offline", index=True
     )

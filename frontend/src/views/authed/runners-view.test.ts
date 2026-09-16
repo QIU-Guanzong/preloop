@@ -120,6 +120,44 @@ describe('RunnersView', () => {
     expect(control?.shadowRoot?.textContent).to.contain('Preloop hosted only');
   });
 
+  it('badges an ephemeral runner only while it is connected', async () => {
+    fetchStub = createFetchStub([
+      {
+        id: '33333333-3333-4333-8333-333333333333',
+        name: 'ci-gha-4242',
+        labels: ['ci-gha-4242'],
+        ephemeral: true,
+        status: 'online',
+        last_heartbeat: '2026-09-16T10:00:00Z',
+      },
+      {
+        id: '44444444-4444-4444-8444-444444444444',
+        name: 'gone-ci',
+        labels: ['ci-old'],
+        ephemeral: true,
+        status: 'offline',
+        last_heartbeat: '2026-09-16T09:00:00Z',
+      },
+    ]);
+    const element = (await fixture(
+      html`<runners-view></runners-view>`
+    )) as RunnersView;
+    await waitUntil(
+      () => !(element as unknown as { loading: boolean }).loading,
+      'Runners view did not finish loading'
+    );
+    await element.updateComplete;
+
+    const rows = Array.from(
+      element.shadowRoot?.querySelectorAll('tbody tr') || []
+    );
+    expect(rows.length).to.equal(2);
+    expect(rows[0].textContent).to.contain('ephemeral');
+    // The offline row is a leftover the sweeper has not reaped yet; calling
+    // it ephemeral there would advertise a runner that cannot take a job.
+    expect(rows[1].textContent).to.not.contain('ephemeral');
+  });
+
   it('empty state is one line with one command and a docs link', async () => {
     fetchStub = createFetchStub([]);
     const element = (await fixture(
