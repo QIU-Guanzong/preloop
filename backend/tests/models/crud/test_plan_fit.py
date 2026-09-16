@@ -146,6 +146,24 @@ class TestEnforcePlanFit:
         assert keep.is_active is True
         assert drop.is_active is False
 
+    def test_the_owner_survives_a_cap_that_leaves_no_seats(self, db_session):
+        """No catalog plan sets 0 seats, and if one ever did, the owner stays.
+
+        Deactivating the owner locks every human out of the account, including
+        out of the upgrade that would undo the trim.
+        """
+        account = _account(db_session)
+        owner = _user(db_session, account, owner=True, last_login=NOW)
+        member = _user(db_session, account, last_login=NOW)
+
+        result = _enforce(db_session, account, max_users=0, max_agents=-1)
+
+        assert [row["id"] for row in result["users"]] == [str(member.id)]
+        db_session.refresh(owner)
+        db_session.refresh(member)
+        assert owner.is_active is True
+        assert member.is_active is False
+
     def test_surplus_agents_are_suspended_and_disconnected(self, db_session):
         account = _account(db_session)
         _user(db_session, account, owner=True, last_login=NOW)

@@ -697,6 +697,27 @@ def test_storage_falls_back_to_the_reporting_policy(monkeypatch):
     )
 
 
+def test_a_reporting_only_policy_cannot_authorize_a_display_window_purge(monkeypatch):
+    """A display window is not permission to delete to that window.
+
+    Plugin builds that publish only the reporting policy are held to the
+    storage bound, so a 90 day Free display window raises on the purge path
+    rather than making the window permanent.
+    """
+    services = {"analytics_history_policy": MagicMock(return_value=90)}
+    monkeypatch.setattr(
+        history,
+        "get_plugin_manager",
+        lambda: SimpleNamespace(get_service=services.get),
+    )
+    account = models.Account(meta_data={})
+
+    assert history.analytics_history_days(MagicMock(), account=account) == 90
+    with pytest.raises(HTTPException) as failure:
+        history.storage_history_days(MagicMock(), account=account)
+    assert failure.value.status_code == 503
+
+
 def test_oss_has_no_storage_policy(monkeypatch):
     monkeypatch.setattr(
         history,

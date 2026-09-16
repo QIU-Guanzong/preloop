@@ -286,12 +286,27 @@ class CRUDBilling:
             label a notification needs) and ``operation_id`` when a row was
             written.
         """
+        # The lock comes first so the idempotency read cannot see a twin's
+        # half-finished work: two triggers on the same overage serialize here,
+        # and the loser reads the winner's completed row.
+        self.lock_account(db, account_id)
         existing = self.operation(db, account_id, operation_key)
         if existing is not None and existing.status == "completed":
+            db.commit()
             return {**dict(existing.result), "status": "already_applied"}
-        self.lock_account(db, account_id)
         candidates = self.plan_fit_candidates(db, account_id)
+        account_owner_id = (
+            db.query(models.Account.primary_user_id)
+            .filter(models.Account.id == account_id)
+            .scalar()
+        )
         surplus_users = candidates["users"][max_users:] if max_users >= 0 else []
+        # The owner sorts first, so this only bites at max_users=0, which no
+        # plan sets. It is here because deactivating the owner locks everyone
+        # out of the account, including out of the upgrade that would undo it.
+        surplus_users = [
+            user for user in surplus_users if str(user.id) != str(account_owner_id)
+        ]
         surplus_agents = candidates["agents"][max_agents:] if max_agents >= 0 else []
         if not surplus_users and not surplus_agents:
             # Release the lock without discarding anything the caller staged.

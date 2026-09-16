@@ -22,15 +22,27 @@ from preloop.models.crud.history_policy import (
 from preloop.plugins import get_plugin_manager
 
 
-#: Sanity bound on a plan policy's answer, in days. This is not a plan value
-#: and not a retention floor: it only rejects an obviously broken policy
-#: (zero, negative, a boolean) before it can shrink a window. The shortest
-#: window any plan may legitimately show is the entry plan's, so this sits at
-#: 90 days. Physical retention floors live in retention_policy, untouched.
+#: Sanity bound on what a plan may SHOW, in days. This is not a plan value and
+#: not a retention floor: it only rejects an obviously broken policy (zero,
+#: negative, a boolean) before it can shrink a window. The shortest window any
+#: plan may legitimately show is the entry plan's, so this sits at 90 days.
 MINIMUM_ANALYTICS_POLICY_DAYS = 90
 
+#: Sanity bound on what a plan may KEEP, in days. Deleting is irreversible, so
+#: the purge path holds the older, stricter bound: no plan stores less than the
+#: entry plan's 183 days, and a policy that answers less than that is broken,
+#: not permission to delete. Physical retention floors live in
+#: retention_policy, untouched.
+MINIMUM_ANALYTICS_STORAGE_DAYS = 183
 
-def _policy_days(db: Session, *, account: models.Account, provider: Any) -> int | None:
+
+def _policy_days(
+    db: Session,
+    *,
+    account: models.Account,
+    provider: Any,
+    minimum: int = MINIMUM_ANALYTICS_POLICY_DAYS,
+) -> int | None:
     """Validate one plan policy answer; a broken policy never shortens anything."""
     if provider is None:
         return None
@@ -42,11 +54,7 @@ def _policy_days(db: Session, *, account: models.Account, provider: Any) -> int 
         ) from exc
     if days is None or days == -1:
         return days
-    if (
-        isinstance(days, bool)
-        or not isinstance(days, int)
-        or days < MINIMUM_ANALYTICS_POLICY_DAYS
-    ):
+    if isinstance(days, bool) or not isinstance(days, int) or days < minimum:
         raise HTTPException(503, "Analytics history policy is invalid")
     return days
 
@@ -70,12 +78,21 @@ def _configured_storage_days(db: Session, *, account: models.Account) -> int | N
     A plan may display a shorter window than it stores. Deleting to the
     displayed window would make that window permanent, so the purge path asks
     for the storage promise. Plugin builds that publish only the reporting
-    policy keep their old behaviour, where the two were the same number.
+    policy keep their old behaviour, where the two were the same number, and
+    they are held to the storage bound: a reporting-only policy answering less
+    than a plan can store (a display window) raises rather than authorizing a
+    purge to that window.
     """
-    provider = get_plugin_manager().get_service("analytics_storage_policy")
+    manager = get_plugin_manager()
+    provider = manager.get_service("analytics_storage_policy")
     if provider is None:
-        return _configured_history_days(db, account=account)
-    return _policy_days(db, account=account, provider=provider)
+        provider = manager.get_service("analytics_history_policy")
+    return _policy_days(
+        db,
+        account=account,
+        provider=provider,
+        minimum=MINIMUM_ANALYTICS_STORAGE_DAYS,
+    )
 
 
 def analytics_history_days(db: Session, *, account: models.Account) -> int | None:
