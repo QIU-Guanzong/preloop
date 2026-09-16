@@ -89,7 +89,6 @@ describe('IssuesView', () => {
     fetchStub?.restore();
     invalidateApiCaches();
     localStorage.clear();
-    window.history.replaceState({}, '', '/');
   });
 
   it('renders the Similar issues header with a filter button', async () => {
