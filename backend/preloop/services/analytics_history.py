@@ -28,21 +28,17 @@ from preloop.plugins import get_plugin_manager
 #: plan may legitimately show is the entry plan's, so this sits at 90 days.
 MINIMUM_ANALYTICS_POLICY_DAYS = 90
 
-#: Sanity bound on what a plan may KEEP, in days. Deleting is irreversible, so
-#: the purge path holds the older, stricter bound: no plan stores less than the
-#: entry plan's 183 days, and a policy that answers less than that is broken,
-#: not permission to delete. Physical retention floors live in
-#: retention_policy, untouched.
+#: Floor on what a plan may KEEP, in days, held unconditionally on the purge
+#: path. Deleting is irreversible, so this stays at the pre-existing 183 day
+#: bound: no plan stores less than the entry plan's 183 days, and an answer
+#: below it is a read-time display window that leaked into the purge path, not
+#: permission to delete. It is a floor and not a veto, because keeping rows
+#: longer than a plan promises is always safe while deleting to a display
+#: window is not. Physical retention floors live in retention_policy, untouched.
 MINIMUM_ANALYTICS_STORAGE_DAYS = 183
 
 
-def _policy_days(
-    db: Session,
-    *,
-    account: models.Account,
-    provider: Any,
-    minimum: int = MINIMUM_ANALYTICS_POLICY_DAYS,
-) -> int | None:
+def _policy_days(db: Session, *, account: models.Account, provider: Any) -> int | None:
     """Validate one plan policy answer; a broken policy never shortens anything."""
     if provider is None:
         return None
@@ -54,7 +50,11 @@ def _policy_days(
         ) from exc
     if days is None or days == -1:
         return days
-    if isinstance(days, bool) or not isinstance(days, int) or days < minimum:
+    if (
+        isinstance(days, bool)
+        or not isinstance(days, int)
+        or days < MINIMUM_ANALYTICS_POLICY_DAYS
+    ):
         raise HTTPException(503, "Analytics history policy is invalid")
     return days
 
@@ -75,24 +75,26 @@ def _configured_history_days(db: Session, *, account: models.Account) -> int | N
 def _configured_storage_days(db: Session, *, account: models.Account) -> int | None:
     """Resolve what a plan KEEPS, which can be more than reporting shows.
 
-    A plan may display a shorter window than it stores. Deleting to the
-    displayed window would make that window permanent, so the purge path asks
-    for the storage promise. Plugin builds that publish only the reporting
-    policy keep their old behaviour, where the two were the same number, and
-    they are held to the storage bound: a reporting-only policy answering less
-    than a plan can store (a display window) raises rather than authorizing a
-    purge to that window.
+    Only ``analytics_storage_policy`` may answer. The reporting policy is
+    deliberately never consulted here: a plan may display a shorter window
+    than it stores (Free shows 90 and keeps 183), and deleting to the
+    displayed window would make that window permanent. A build that publishes
+    only the reporting policy therefore contributes nothing to the purge
+    floor, which stays exactly where it already was, rather than letting a
+    read-time window authorize an irreversible delete.
+
+    A storage answer below :data:`MINIMUM_ANALYTICS_STORAGE_DAYS` is raised to
+    that bound instead of being honoured. Keeping more rows than a plan
+    promises is safe; deleting to a display window is not.
     """
-    manager = get_plugin_manager()
-    provider = manager.get_service("analytics_storage_policy")
-    if provider is None:
-        provider = manager.get_service("analytics_history_policy")
-    return _policy_days(
+    days = _policy_days(
         db,
         account=account,
-        provider=provider,
-        minimum=MINIMUM_ANALYTICS_STORAGE_DAYS,
+        provider=get_plugin_manager().get_service("analytics_storage_policy"),
     )
+    if days is None or days == -1:
+        return days
+    return max(days, MINIMUM_ANALYTICS_STORAGE_DAYS)
 
 
 def analytics_history_days(db: Session, *, account: models.Account) -> int | None:

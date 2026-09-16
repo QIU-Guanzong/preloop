@@ -682,27 +682,56 @@ def test_a_shorter_display_window_does_not_shorten_storage(monkeypatch):
     assert history.storage_history_days(MagicMock(), account=account) == 183
 
 
-def test_storage_falls_back_to_the_reporting_policy(monkeypatch):
-    """A plugin build that publishes only the reporting policy is unchanged."""
-    provider = MagicMock(return_value=365)
-    services = {"analytics_history_policy": provider}
+def test_a_ninety_day_policy_shows_ninety_days_and_purges_at_the_storage_floor(
+    monkeypatch,
+):
+    """The Free read window is 90 days; physical retention is unchanged.
+
+    A storage answer of 90 is a display window that reached the purge path, so
+    it is raised to the 183 day storage floor rather than honoured. Deleting
+    to a display window would make that window permanent.
+    """
+    services = {
+        "analytics_history_policy": MagicMock(return_value=90),
+        "analytics_storage_policy": MagicMock(return_value=90),
+    }
     monkeypatch.setattr(
         history,
         "get_plugin_manager",
         lambda: SimpleNamespace(get_service=services.get),
     )
-    assert (
-        history.storage_history_days(MagicMock(), account=models.Account(meta_data={}))
-        == 365
+    account = models.Account(meta_data={})
+
+    assert history.analytics_history_days(MagicMock(), account=account) == 90
+    assert history.storage_history_days(MagicMock(), account=account) == 183
+
+
+def test_a_reporting_only_plugin_leaves_the_purge_floor_where_it_was(monkeypatch):
+    """A read policy can never feed the purge floor.
+
+    A build that publishes only ``analytics_history_policy`` contributes
+    nothing to the storage answer, so the floor stays at the promise the
+    account already carries. Without this the 90 day Free display window would
+    have become the delete boundary for accounts with no materialized floor.
+    """
+    services = {"analytics_history_policy": MagicMock(return_value=90)}
+    monkeypatch.setattr(
+        history,
+        "get_plugin_manager",
+        lambda: SimpleNamespace(get_service=services.get),
     )
+    account = models.Account(meta_data={}, subscription_history_retention_days=365)
+
+    assert history.analytics_history_days(MagicMock(), account=account) == 90
+    assert history._configured_storage_days(MagicMock(), account=account) is None
+    assert history.storage_history_days(MagicMock(), account=account) == 365
 
 
-def test_a_reporting_only_policy_cannot_authorize_a_display_window_purge(monkeypatch):
-    """A display window is not permission to delete to that window.
+def test_a_reporting_only_plugin_never_shortens_an_unpromised_account(monkeypatch):
+    """With no promise on the account the read window still cannot delete.
 
-    Plugin builds that publish only the reporting policy are held to the
-    storage bound, so a 90 day Free display window raises on the purge path
-    rather than making the window permanent.
+    The floor lands on the persisted subscription promises alone (0 here, so
+    normal deployment retention applies), never on the 90 day display window.
     """
     services = {"analytics_history_policy": MagicMock(return_value=90)}
     monkeypatch.setattr(
@@ -712,10 +741,24 @@ def test_a_reporting_only_policy_cannot_authorize_a_display_window_purge(monkeyp
     )
     account = models.Account(meta_data={})
 
-    assert history.analytics_history_days(MagicMock(), account=account) == 90
-    with pytest.raises(HTTPException) as failure:
-        history.storage_history_days(MagicMock(), account=account)
-    assert failure.value.status_code == 503
+    assert history.storage_history_days(MagicMock(), account=account) == 0
+
+
+def test_a_storage_policy_longer_than_the_floor_is_honoured(monkeypatch):
+    """The 183 day bound is a floor, not a cap: longer promises still hold."""
+    services = {
+        "analytics_history_policy": MagicMock(return_value=90),
+        "analytics_storage_policy": MagicMock(return_value=730),
+    }
+    monkeypatch.setattr(
+        history,
+        "get_plugin_manager",
+        lambda: SimpleNamespace(get_service=services.get),
+    )
+    assert (
+        history.storage_history_days(MagicMock(), account=models.Account(meta_data={}))
+        == 730
+    )
 
 
 def test_oss_has_no_storage_policy(monkeypatch):

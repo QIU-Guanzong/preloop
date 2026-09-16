@@ -8,9 +8,11 @@ calls: who survives a smaller plan, who is deactivated, and what is recorded.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import threading
 import uuid
 
 import pytest
+from sqlalchemy.orm import Session
 
 from preloop.models import models
 from preloop.models.crud import crud_account, crud_user
@@ -209,7 +211,7 @@ class TestEnforcePlanFit:
     def test_an_unlimited_cap_trims_nothing_on_its_side(self, db_session, caps):
         max_users, max_agents = caps
         account = _account(db_session)
-        _user(db_session, account, owner=True, last_login=NOW)
+        owner = _user(db_session, account, owner=True, last_login=NOW)
         _user(db_session, account, last_login=NOW)
         _agent(db_session, account, last_seen_at=NOW)
 
@@ -221,6 +223,11 @@ class TestEnforcePlanFit:
             assert result["users"] == []
         if max_agents == -1:
             assert result["agents"] == []
+        # Every case, including the zero seat cap: the owner always keeps a
+        # seat, so no cap can ever lock the account's administrator out.
+        db_session.refresh(owner)
+        assert owner.is_active is True
+        assert str(owner.id) not in {row["id"] for row in result["users"]}
 
     def test_the_change_is_audited(self, db_session):
         account = _account(db_session)
@@ -263,3 +270,129 @@ class TestEnforcePlanFit:
             .count()
             == 1
         )
+
+
+class TestEnforcePlanFitRace:
+    """Two enforcer triggers landing on one account with the same key.
+
+    The webhook path, the scheduled reconcile and an immediate plan switch can
+    all fire for the same downgrade, so the same ``operation_key`` really does
+    arrive twice at once. These run on independent connections against
+    committed rows, because the race is a database lock question and the
+    transactional test session cannot express it.
+    """
+
+    @staticmethod
+    def _committed_account(engine):
+        """Account with an owner and two surplus members, visible to any connection."""
+        account_id, owner_id = uuid.uuid4(), uuid.uuid4()
+        member_ids = [uuid.uuid4(), uuid.uuid4()]
+        with Session(engine) as db:
+            db.add(
+                models.Account(
+                    id=account_id,
+                    organization_name=f"plan fit race {account_id.hex[:8]}",
+                    is_active=True,
+                )
+            )
+            db.flush()
+            for index, user_id in enumerate([owner_id, *member_ids]):
+                db.add(
+                    models.User(
+                        id=user_id,
+                        account_id=account_id,
+                        username=f"race_{user_id.hex[:10]}",
+                        email=f"race_{user_id.hex[:10]}@example.com",
+                        hashed_password="x",
+                        is_active=True,
+                        last_login=NOW - timedelta(minutes=index),
+                    )
+                )
+            db.flush()
+            db.query(models.Account).filter(models.Account.id == account_id).update(
+                {"primary_user_id": owner_id}
+            )
+            db.commit()
+        return account_id, owner_id, member_ids
+
+    def test_two_sessions_with_one_key_apply_once_and_replay_once(self, db_engine):
+        """The loser blocks on the account lock and reads the winner's row.
+
+        Before the lock came first, both callers passed the idempotency check
+        on their own snapshot and only serialized on the write, so the loser
+        reported ``within_limits`` (or collided on uq_billing_operation_key)
+        instead of the documented ``already_applied`` replay.
+        """
+        account_id, owner_id, member_ids = self._committed_account(db_engine)
+        key = f"plan-fit-race-{uuid.uuid4().hex[:8]}"
+        start = threading.Barrier(2)
+        results: list[dict] = []
+        failures: list[BaseException] = []
+
+        def enforce() -> None:
+            try:
+                with Session(db_engine) as db:
+                    start.wait(timeout=10)
+                    results.append(
+                        billing.enforce_plan_fit(
+                            db,
+                            account_id=str(account_id),
+                            max_users=1,
+                            max_agents=-1,
+                            reason="plan_downgrade",
+                            operation_key=key,
+                            payload={"plan_id": "free"},
+                        )
+                    )
+            except BaseException as exc:  # noqa: BLE001 - reported to the test
+                failures.append(exc)
+
+        threads = [threading.Thread(target=enforce) for _ in range(2)]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
+
+            assert not failures, failures
+            assert not any(thread.is_alive() for thread in threads)
+            assert sorted(result["status"] for result in results) == [
+                "already_applied",
+                "applied",
+            ]
+            # Both callers report the same outcome, so the notification the
+            # enforcer sends is the same whichever one it came from.
+            assert results[0]["users"] == results[1]["users"]
+
+            with Session(db_engine) as db:
+                rows = (
+                    db.query(models.BillingOperation)
+                    .filter(models.BillingOperation.account_id == account_id)
+                    .all()
+                )
+                assert len(rows) == 1
+                assert rows[0].operation_key == key
+                assert rows[0].status == "completed"
+                states = {
+                    str(user.id): user.is_active
+                    for user in db.query(models.User)
+                    .filter(models.User.account_id == account_id)
+                    .all()
+                }
+            assert states[str(owner_id)] is True
+            assert [states[str(member_id)] for member_id in member_ids] == [
+                False,
+                False,
+            ]
+        finally:
+            with Session(db_engine) as db:
+                db.query(models.BillingOperation).filter(
+                    models.BillingOperation.account_id == account_id
+                ).delete()
+                db.query(models.User).filter(
+                    models.User.account_id == account_id
+                ).delete()
+                db.query(models.Account).filter(
+                    models.Account.id == account_id
+                ).delete()
+                db.commit()

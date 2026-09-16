@@ -273,7 +273,8 @@ class CRUDBilling:
         Args:
             db: Database session; committed once on success.
             account_id: Account to trim.
-            max_users: Seat ceiling, -1 for unlimited.
+            max_users: Seat ceiling, -1 for unlimited. A finite ceiling below
+                one is treated as one, because the owner always keeps a seat.
             max_agents: Active-agent ceiling, -1 for unlimited.
             reason: Short machine-readable cause, stored on each agent as its
                 lifecycle reason and in the audit row.
@@ -300,10 +301,17 @@ class CRUDBilling:
             .filter(models.Account.id == account_id)
             .scalar()
         )
-        surplus_users = candidates["users"][max_users:] if max_users >= 0 else []
-        # The owner sorts first, so this only bites at max_users=0, which no
-        # plan sets. It is here because deactivating the owner locks everyone
-        # out of the account, including out of the upgrade that would undo it.
+        # The owner always keeps a seat, so a finite cap below one seat is
+        # treated as one. No catalog plan sets zero seats; a bad catalog row or
+        # a zero-seat custom plan would otherwise lock every human out of the
+        # account, including out of the upgrade that would undo the trim.
+        seat_cap = max(max_users, 1) if max_users >= 0 else max_users
+        surplus_users = candidates["users"][seat_cap:] if seat_cap >= 0 else []
+        # Belt and braces, in the same spirit as the entitlement check in the
+        # billing plugin: the clamp above only keeps the owner because the
+        # owner sorts first in the candidate list. This makes the docstring's
+        # "never the owner" true in code rather than by ordering, so a future
+        # change to plan_fit_candidates cannot quietly break it.
         surplus_users = [
             user for user in surplus_users if str(user.id) != str(account_owner_id)
         ]
