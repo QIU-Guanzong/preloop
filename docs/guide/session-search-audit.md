@@ -66,7 +66,10 @@ characters (the same cap the search request accepts); with it off, no field
 in the row contains the query. An unknown-scope refusal still echoes the
 caller string, but only the first 64 characters, and an unknown-mode
 refusal only the first 32, so a malformed call cannot inflate the row.
-`query_chars` still records the real length.
+Free-text filters (`model_alias`, `provider_name`,
+`runtime_principal_id`) are cut at 128 characters on the write path; the
+search still accepts the full value. `query_chars` still records the real
+length.
 
 ## Who searched
 

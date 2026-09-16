@@ -24,6 +24,7 @@ from preloop.schemas.session_search import (
 from preloop.services import session_search_audit
 from preloop.services.session_search_audit import (
     AUDIT_ACTION,
+    AUDIT_FILTER_STRING_MAX_CHARS,
     AUDIT_MODE_MAX_CHARS,
     AUDIT_RESOURCE_TYPE,
     AUDIT_SCOPE_MAX_CHARS,
@@ -214,6 +215,91 @@ def test_only_the_filters_that_were_applied_are_recorded():
         "flow_id": str(flow_id),
         "start_date": "2026-09-01T00:00:00+00:00",
     }
+
+
+def test_free_text_filter_values_are_capped_on_the_row():
+    """Storage bounds live on the write path, not the request schema."""
+    oversized_alias = "gpt-5-" + ("a" * 200)
+    oversized_provider = "openai-" + ("p" * 200)
+    oversized_principal = "principal-" + ("r" * 200)
+    request = SessionSearchRequest.model_validate(
+        {
+            "query": SECRET_QUERY,
+            "filters": {
+                "model_alias": oversized_alias,
+                "provider_name": oversized_provider,
+                "runtime_principal_id": oversized_principal,
+            },
+        }
+    )
+
+    recorded = applied_filters(request)
+    assert recorded["model_alias"] == oversized_alias[:AUDIT_FILTER_STRING_MAX_CHARS]
+    assert (
+        recorded["provider_name"] == oversized_provider[:AUDIT_FILTER_STRING_MAX_CHARS]
+    )
+    assert (
+        recorded["runtime_principal_id"]
+        == oversized_principal[:AUDIT_FILTER_STRING_MAX_CHARS]
+    )
+    assert len(recorded["model_alias"]) == AUDIT_FILTER_STRING_MAX_CHARS
+    assert len(recorded["provider_name"]) == AUDIT_FILTER_STRING_MAX_CHARS
+    assert len(recorded["runtime_principal_id"]) == AUDIT_FILTER_STRING_MAX_CHARS
+
+    details = build_details(
+        actor=user_actor(None),
+        query=SECRET_QUERY,
+        mode="keyword",
+        filters={
+            "model_alias": oversized_alias,
+            "provider_name": oversized_provider,
+            "runtime_principal_id": oversized_principal,
+        },
+        result_count=0,
+        include_query_text=False,
+    )
+    assert details["filters"]["model_alias"] == recorded["model_alias"]
+    assert details["filters"]["provider_name"] == recorded["provider_name"]
+    assert (
+        details["filters"]["runtime_principal_id"] == recorded["runtime_principal_id"]
+    )
+
+
+def test_short_filter_strings_are_stored_whole():
+    request = SessionSearchRequest.model_validate(
+        {
+            "query": SECRET_QUERY,
+            "filters": {"model_alias": "gpt-5", "provider_name": "openai"},
+        }
+    )
+
+    assert applied_filters(request) == {
+        "model_alias": "gpt-5",
+        "provider_name": "openai",
+    }
+
+
+def test_an_oversized_filter_cannot_inflate_the_audit_row(db_session, test_user):
+    oversized_alias = "gpt-5-" + ("a" * 200)
+    request = SessionSearchRequest.model_validate(
+        {
+            "query": SECRET_QUERY,
+            "filters": {"model_alias": oversized_alias},
+        }
+    )
+
+    audited_search(
+        db_session,
+        account_id=test_user.account_id,
+        request=request,
+        actor=user_actor(test_user),
+        run=lambda: _response(total=1),
+    )
+
+    row = _rows(db_session, test_user.account_id)[0]
+    stored = row.details["filters"]["model_alias"]
+    assert stored == oversized_alias[:AUDIT_FILTER_STRING_MAX_CHARS]
+    assert len(stored) == AUDIT_FILTER_STRING_MAX_CHARS
 
 
 # --- the row is written through the audit path -----------------------------

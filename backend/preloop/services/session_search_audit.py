@@ -96,6 +96,13 @@ AUDIT_SCOPE_MAX_CHARS = 64
 #: write path caps it the same way as `scope`.
 AUDIT_MODE_MAX_CHARS = 32
 
+#: Longest free-text filter value kept on the row. `model_alias`,
+#: `provider_name` and `runtime_principal_id` are optional strings with no
+#: schema max_length, so a validated request can still hand an arbitrarily
+#: long caller string to JSONB. Real aliases sit far under this; the cap
+#: is a storage bound, not a search bound.
+AUDIT_FILTER_STRING_MAX_CHARS = 128
+
 
 def _normalized(query: Optional[str]) -> str:
     """The query as the search itself parsed it, never None.
@@ -222,12 +229,24 @@ def agent_actor(
 
 
 def _filter_value(value: Any) -> Any:
-    """Serialise one filter value for the JSON details column."""
+    """Serialise one filter value for the JSON details column.
+
+    Free-text strings are cut at :data:`AUDIT_FILTER_STRING_MAX_CHARS` so a
+    validated request cannot inflate the row. UUIDs and datetimes stay
+    exact: they are not caller-length strings.
+    """
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, UUID):
         return str(value)
+    if isinstance(value, str):
+        return _bounded(value, AUDIT_FILTER_STRING_MAX_CHARS)
     return value
+
+
+def _bounded_filters(filters: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply the write-path bound to every filter value on the row."""
+    return {key: _filter_value(value) for key, value in sorted(filters.items())}
 
 
 def applied_filters(request: Optional[SessionSearchRequest]) -> Dict[str, Any]:
@@ -235,12 +254,13 @@ def applied_filters(request: Optional[SessionSearchRequest]) -> Dict[str, Any]:
 
     Only the filters the caller set are recorded. A document listing every
     filter as null reads as "eight filters were applied" at a glance, and the
-    question a reviewer has is which of them narrowed the read.
+    question a reviewer has is which of them narrowed the read. Free-text
+    values are clamped here, which is the path ``audited_search`` uses.
     """
     if request is None:
         return {}
     filters = request.filters.model_dump(exclude_none=True)
-    return {key: _filter_value(value) for key, value in sorted(filters.items())}
+    return _bounded_filters(filters)
 
 
 def build_details(
@@ -270,7 +290,7 @@ def build_details(
     details.update(
         {
             "mode": _bounded(mode, AUDIT_MODE_MAX_CHARS),
-            "filters": filters,
+            "filters": _bounded_filters(filters),
             "result_count": result_count,
             "query_hash": query_hash(query),
             "query_chars": len(_normalized(query)),
@@ -504,6 +524,7 @@ __all__ = [
     "ACTOR_UNKNOWN",
     "ACTOR_USER",
     "AUDIT_ACTION",
+    "AUDIT_FILTER_STRING_MAX_CHARS",
     "AUDIT_MODE_MAX_CHARS",
     "AUDIT_RESOURCE_TYPE",
     "AUDIT_SCOPE_MAX_CHARS",
