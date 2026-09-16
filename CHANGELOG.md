@@ -248,6 +248,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Brand pricing config: `landing.pricing.deployment_options` is no longer
+  read. The Dedicated tab is `landing.pricing.dedicated` (same card-plus-table
+  shape as Cloud) with optional `cloud_label`. A leftover
+  `deployment_options` key is ignored and will not render. EE brands.yaml
+  already ships the replacement block.
+
 - Helm gateway Deployments set `PRELOOP_SERVICE_ROLE=gateway` (API pods
   set `api`). `create_app` lazy-imports control-plane routers so a gateway
   process does not load flow orchestration or MCP HTTP. LiteLLM defaults to
