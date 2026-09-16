@@ -591,6 +591,75 @@ describe('PublicPricingView', () => {
     );
   });
 
+  it('announces the tab bar as a toggle group, not as an ARIA tablist', async () => {
+    fetchStub = stubLadderFetch();
+    const el = (await fixture(
+      html`<public-pricing-view></public-pricing-view>`
+    )) as PublicPricingView;
+    await tick();
+    await el.updateComplete;
+
+    const toggle = el.shadowRoot?.querySelector('deployment-toggle') as
+      HTMLElement | undefined;
+    await (toggle as any)?.updateComplete;
+    const list = toggle?.shadowRoot?.querySelector('.tab-list');
+    // The panel it switches lives in the parent view's shadow root, so a
+    // "tab" could never carry aria-controls. It stays a group of toggle
+    // buttons and only looks like a tab bar.
+    expect(list?.getAttribute('role')).to.equal('group');
+    expect(list?.getAttribute('aria-label')).to.equal('Deployment');
+    const buttons = Array.from(
+      toggle?.shadowRoot?.querySelectorAll('button') || []
+    );
+    expect(buttons.length).to.equal(2);
+    buttons.forEach((b) => {
+      expect(b.getAttribute('role')).to.equal(null);
+      expect(b.getAttribute('aria-selected')).to.equal(null);
+      expect(b.getAttribute('aria-pressed')).to.be.oneOf(['true', 'false']);
+    });
+    expect(buttons.map((b) => b.getAttribute('aria-pressed'))).to.deep.equal([
+      'true',
+      'false',
+    ]);
+  });
+
+  it('reserves the tab lead row even when a brand writes no self-hosted lead', async () => {
+    const withoutLead = JSON.parse(JSON.stringify(LADDER_CONTENT));
+    delete withoutLead.pricing.dedicated.lead;
+    fetchStub = sinon
+      .stub(window, 'fetch')
+      .callsFake(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/landing-content.json')) {
+          return new Response(JSON.stringify(withoutLead), { status: 200 });
+        }
+        return new Response(JSON.stringify({ features: {} }), { status: 200 });
+      });
+    const el = (await fixture(
+      html`<public-pricing-view></public-pricing-view>`
+    )) as PublicPricingView;
+    await tick();
+    await el.updateComplete;
+
+    const leadRow = () =>
+      el.shadowRoot?.querySelector('.tab-lead') as HTMLElement | null;
+    const cardsTop = () =>
+      (
+        el.shadowRoot?.querySelector('.period-row') as HTMLElement | null
+      )?.getBoundingClientRect().top || 0;
+    const cloudHeight = leadRow()?.getBoundingClientRect().height || 0;
+    const cloudTop = cardsTop();
+    expect(cloudHeight).to.be.greaterThan(0);
+
+    await selectTab(el, 'dedicated');
+    // The brand wrote no lead for this tab, so the line is empty, but the
+    // element and its height survive and the row below does not move up.
+    expect(leadRow(), 'the lead row survives an empty lead').to.exist;
+    expect(leadRow()?.textContent?.trim()).to.equal('');
+    expect(leadRow()?.getBoundingClientRect().height).to.equal(cloudHeight);
+    expect(cardsTop()).to.equal(cloudTop);
+  });
+
   it('keeps the period pill inside Cloud and reserves its row on Self-hosted', async () => {
     fetchStub = stubLadderFetch();
     const el = (await fixture(

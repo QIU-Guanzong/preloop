@@ -363,11 +363,16 @@ export class PublicPricingView extends LitElement {
       }
 
       /* One line per tab, directly under the bar. Centred and quiet: it
-         explains the tab, it does not compete with the heading. */
+         explains the tab, it does not compete with the heading. The row keeps
+         one line of height even when a brand leaves a tab's lead empty, for
+         the same reason .period-row does: switching tabs must not move the
+         card row. */
       .tab-lead {
         margin: 0.75rem auto 0 auto;
         text-align: center;
         font-size: 1rem;
+        line-height: 1.5;
+        min-height: 1.5rem;
         color: var(--sl-color-text-secondary);
         max-width: 46rem;
       }
@@ -742,8 +747,12 @@ export class PublicPricingView extends LitElement {
             ${
               // One line per tab. Each tab is a different product, so each
               // gets its own sentence instead of a single lead that has to
-              // hedge across both.
-              this._activeLead()
+              // hedge across both. On a two-tab page the element is rendered
+              // even when a brand leaves one lead empty ("dedicated.lead" is
+              // optional), because a vanishing line would move the card row
+              // by two lines, which is the jump .period-row already prevents
+              // one level down.
+              this._hasDedicated() || this._activeLead()
                 ? html`<p class="tab-lead">${this._activeLead()}</p>`
                 : ''
             }

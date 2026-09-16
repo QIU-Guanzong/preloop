@@ -125,6 +125,27 @@ describe('PricingCard', () => {
     expect(text).to.not.contain('billed annually ($120/yr)');
   });
 
+  it('keeps the rounding disclosure even when the note is overridden', async () => {
+    // $3,500 / 12 is $291.67, so the headline is rounded. A custom note may
+    // change the wording but must not be the reason the card stops saying
+    // what is actually charged.
+    const el = await renderCard(
+      {
+        ...BASE,
+        id: 'business',
+        name: 'Business',
+        price_monthly: 350,
+        price_annually: 3500,
+        price_note_annual: 'Billed yearly, 2 months free',
+      },
+      'year'
+    );
+    const text = el.shadowRoot?.textContent || '';
+    expect(text).to.contain('$292');
+    expect(text).to.contain('Billed yearly, 2 months free');
+    expect(text).to.contain('monthly rate rounded from $3,500/yr');
+  });
+
   it('honours price_label so a floor price is not shown as an exact one', async () => {
     const el = await renderCard({
       id: 'enterprise',

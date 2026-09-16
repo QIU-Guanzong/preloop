@@ -14,6 +14,14 @@ import { segmentedToggleStyles } from './segmented-toggle-styles';
  * The labels are properties because the brand names the tabs (EE says
  * "Self-hosted"); the `tab-cloud` / `tab-dedicated` class hooks and the
  * `dedicated` value stay as they are so nothing downstream has to be renamed.
+ *
+ * Semantics: this is a two-option filter, announced as a group of toggle
+ * buttons (`role="group"` + `aria-pressed`), and the tab bar is purely a
+ * look. It deliberately does not claim `role="tab"`. The panel it switches
+ * lives in the parent view's shadow root, so `aria-controls` cannot reference
+ * it (IDREFs do not cross a shadow boundary), and a tab that cannot point at
+ * its tabpanel, with no roving tabindex and no arrow keys, describes the
+ * control to assistive tech worse than a plain toggle group does.
  */
 @customElement('deployment-toggle')
 export class DeploymentToggle extends LitElement {
@@ -127,23 +135,19 @@ export class DeploymentToggle extends LitElement {
           this.dark ? 'dark' : ''
         }"
       >
-        <div class="tab-list" role="tablist" aria-label="Deployment">
+        <div class="tab-list" role="group" aria-label="Deployment">
           <button
             type="button"
-            role="tab"
             class="tab-cloud"
             aria-pressed=${this.deployment === 'cloud' ? 'true' : 'false'}
-            aria-selected=${this.deployment === 'cloud' ? 'true' : 'false'}
             @click=${() => this._select('cloud')}
           >
             ${this.cloudLabel}
           </button>
           <button
             type="button"
-            role="tab"
             class="tab-dedicated"
             aria-pressed=${this.deployment === 'dedicated' ? 'true' : 'false'}
-            aria-selected=${this.deployment === 'dedicated' ? 'true' : 'false'}
             @click=${() => this._select('dedicated')}
           >
             ${this.dedicatedLabel}
