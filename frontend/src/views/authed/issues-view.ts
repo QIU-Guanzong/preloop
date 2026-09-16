@@ -311,8 +311,8 @@ export class IssuesView extends LitElement {
         similarity_threshold: this._similarityThreshold,
       });
 
-      this._duplicates = data.duplicates;
-      this._hasMorePages = data.duplicates.length === this._pageSize;
+      this._duplicates = data.duplicates ?? [];
+      this._hasMorePages = this._duplicates.length === this._pageSize;
       this._updateUrl(); // Update URL after fetching
       void this.fetchAIModelVerdicts();
     } catch (error) {
