@@ -955,9 +955,7 @@ describe('PublicPricingView', () => {
     try {
       await (el as any)._handleSignUp('pro');
       expect(
-        navigate.calledOnceWith(
-          '/console/settings/account?plan=pro&interval=year'
-        )
+        navigate.calledOnceWith('/console/settings/plan?plan=pro&interval=year')
       ).to.equal(true);
     } finally {
       localStorage.removeItem('accessToken');
@@ -1005,9 +1003,7 @@ describe('PublicPricingView', () => {
         .filter((c) => String(c.args[0]).includes('create-checkout-session'));
       expect(checkoutCalls.length).to.equal(0);
       expect(
-        navStub.calledOnceWith(
-          '/console/settings/account?plan=free&interval=year'
-        )
+        navStub.calledOnceWith('/console/settings/plan?plan=free&interval=year')
       ).to.be.true;
     } finally {
       localStorage.removeItem('accessToken');

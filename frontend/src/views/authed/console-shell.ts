@@ -52,6 +52,11 @@ const NAV_PERMISSIONS: Record<string, string[]> = {
   '/console/settings/teams': ['view_teams'],
   '/console/settings/invitations': ['invite_users', 'view_users'],
   '/console/settings/account': ['manage_account', 'view_billing'],
+  '/console/settings/plan': ['manage_account', 'view_billing'],
+  // Halting an account is the kill switch permission, not the billing one.
+  // The controls used to sit on the account page, where a reader who could
+  // not use them still saw them.
+  '/console/settings/emergency': ['manage_kill_switch'],
 };
 
 const SIDEBAR_BREAKPOINT = 768;
@@ -847,6 +852,17 @@ export class ConsoleShell extends LitElement {
                             : ''
                         }
                         ${
+                          // Plans exist only where something is sold. Without
+                          // the billing plugin the deployment has no catalog,
+                          // no subscription and nothing for this page to say.
+                          this.features.billing
+                            ? this._renderNavLink(
+                                '/console/settings/plan',
+                                html`<sl-menu-item>Plan</sl-menu-item>`
+                              )
+                            : ''
+                        }
+                        ${
                           this.features.team_management
                             ? this._renderNavLink(
                                 '/console/settings/teams',
@@ -894,6 +910,14 @@ export class ConsoleShell extends LitElement {
                         ${this._renderNavLink(
                           '/console/settings/notification-preferences',
                           html`<sl-menu-item>Notifications</sl-menu-item>`
+                        )}
+                        <!-- The kill switch. Last in the list and reachable
+                             in one click, rather than halfway down the
+                             account page where an operator in a hurry has to
+                             scroll past an organisation name to find it. -->
+                        ${this._renderNavLink(
+                          '/console/settings/emergency',
+                          html`<sl-menu-item>Emergency</sl-menu-item>`
                         )}
                       </sl-menu>
                     </sl-details>

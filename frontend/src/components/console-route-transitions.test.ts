@@ -130,11 +130,13 @@ const MATRIX: Landing[] = [
     tag: 'notification-preferences-view',
     params: {},
   },
-  // Legacy pricing links land on the account page with current plan details.
+  { path: '/console/settings/plan', tag: 'plan-view', params: {} },
+  { path: '/console/settings/emergency', tag: 'emergency-view', params: {} },
+  // Legacy pricing links land on the plan page, which is where plans live.
   {
     path: '/console/pricing',
-    url: '/console/settings/account',
-    tag: 'account-view',
+    url: '/console/settings/plan',
+    tag: 'plan-view',
     params: {},
   },
   { path: '/console/authorize', tag: 'oauth-consent-view', params: {} },
@@ -572,7 +574,7 @@ describe('console route transitions', () => {
     }
     // These used to do nothing. If a view stops rendering one, this test
     // quietly stops covering it, so the count is part of the assertion.
-    // `/console/pricing` redirects onto account-view, which has no extra
+    // `/console/pricing` redirects onto plan-view, which has no extra
     // console Back link of its own. The walk finds 13 stable exits.
     expect(
       clicked.length,

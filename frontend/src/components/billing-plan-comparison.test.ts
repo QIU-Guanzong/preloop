@@ -404,7 +404,41 @@ describe('Billing plan comparison', () => {
     });
   });
 
-  it('opens the picker for the account page when Free has no portal to manage', async () => {
+  it('opens on the plan a card asked for', async () => {
+    // The plan page's cards state the offer; the quote and the confirmation
+    // stay here, so a card click selects a plan rather than buying one.
+    data.plans.unshift(
+      plan('free', { name: 'Free', price_monthly: 0, price_annually: 0 })
+    );
+    const el = await mount();
+    el.startChange('pro', 'year');
+    await el.updateComplete;
+
+    expect((el as any).changing).to.be.true;
+    expect((el as any).selectedPlan).to.equal('pro');
+    expect((el as any).interval).to.equal('year');
+    expect(calls('/plan-change-preview')).to.have.length(0);
+  });
+
+  it('waits for the options before applying a plan asked for during the load', async () => {
+    const el = await fixture<BillingPlanComparison>(
+      html`<billing-plan-comparison></billing-plan-comparison>`
+    );
+    // Asked while the first read is still in flight. Selecting now would
+    // cancel that read and leave the section loading forever.
+    el.startChange('pro', 'year');
+    await waitUntil(() => !(el as any).loading, 'options never arrived');
+    await el.updateComplete;
+
+    expect((el as any).selectedPlan).to.equal('pro');
+    expect((el as any).interval).to.equal('year');
+    expect(el.shadowRoot!.querySelector('[data-testid="plan"]')).to.exist;
+  });
+
+  it('opens on a named plan for an account with no subscription', async () => {
+    // The plan page's cards are the only caller now that the account page
+    // links out instead of embedding this section, so the Free path in has
+    // to work through the same entry point as every other card.
     data.current_subscription = null;
     data.current_plan = plan('free', {
       name: 'Free',
@@ -413,9 +447,10 @@ describe('Billing plan comparison', () => {
     });
     const el = await mount();
     expect((el as any).changing).to.be.false;
-    el.openPicker();
+    el.startChange('pro', 'year');
     await el.updateComplete;
     expect(el.shadowRoot!.querySelector('[data-testid="plan"]')).to.exist;
+    expect((el as any).selectedPlan).to.equal('pro');
   });
 
   it('treats an expired trial as Free on the collapsed line and picker default', async () => {

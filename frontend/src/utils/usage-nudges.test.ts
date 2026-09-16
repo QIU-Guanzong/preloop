@@ -8,6 +8,7 @@
  */
 import { expect } from '@open-wc/testing';
 import { NO_USAGE_NUDGES, type UsageNudge, type UsageNudges } from '../api';
+import { router } from '../router';
 import {
   NUDGE_BANDS,
   NUDGE_THRESHOLD,
@@ -179,6 +180,42 @@ describe('usage nudge link', () => {
     // The plan page is built alongside this banner; until its route exists
     // the account view is where plans have always lived.
     expect([PLAN_ROUTE, PLAN_ROUTE_FALLBACK]).to.contain(link.split('?')[0]);
+  });
+
+  // The seam #769 left for the plan page, now that the page has landed. The
+  // test above runs with a bare router and so cannot tell the two answers
+  // apart; these two register the route table either way and pin each answer.
+  it('links to the plan page once its route is registered', async () => {
+    await router.setRoutes(
+      [
+        {
+          path: '/console',
+          children: [{ path: 'settings/plan', component: 'plan-view' }],
+        },
+      ],
+      true
+    );
+    try {
+      expect(nudgeLink('max_agents')).to.equal(
+        `${PLAN_ROUTE}?feature=max_agents`
+      );
+    } finally {
+      await router.setRoutes([], true);
+    }
+  });
+
+  it('falls back to the account view when only a catch-all matches', async () => {
+    await router.setRoutes(
+      [{ path: '(.*)', component: 'not-found-view' }],
+      true
+    );
+    try {
+      expect(nudgeLink('max_agents')).to.equal(
+        `${PLAN_ROUTE_FALLBACK}?feature=max_agents`
+      );
+    } finally {
+      await router.setRoutes([], true);
+    }
   });
 });
 

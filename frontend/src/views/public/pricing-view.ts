@@ -5,8 +5,15 @@ import landingStyles from '../../styles/landing.css?inline';
 import pricingStyles from '../../styles/pricing-styles.css?inline';
 import '../../components/billing-toggle';
 import '../../components/deployment-toggle';
-import '../../components/pricing-card';
+import '../../components/pricing-plans';
+import {
+  pricingPlansStyles,
+  type Comparison,
+  type PricingPlan as Plan,
+} from '../../components/pricing-plans';
+import { loadPricingContent } from '../../utils/pricing-content';
 import { startAnonymousCheckout, startCheckout } from '../../api';
+import { PLAN_PAGE_PATH } from '../../utils/premium-features';
 import {
   CLOUD_COMPARISON_FALLBACK_TITLE,
   CLOUD_LEAD_FALLBACK,
@@ -18,52 +25,16 @@ import {
 /**
  * Where a signed-in customer changes an existing subscription.
  *
- * One constant because the destination is moving: the plan page with the
- * usage-based comparison replaces the account view, and when it lands only
- * this line changes.
+ * The destination has now landed: the console plan page renders these same
+ * cards plus the usage-based comparison, so it, not the account view, is
+ * where a live subscription changes. It is the shared constant rather than a
+ * second literal, so moving the page again stays a one line edit.
  */
-const PLAN_CHANGE_PATH = '/console/settings/account';
-
-interface Plan {
-  id: string;
-  name: string;
-  /** Small line under the name; only the plans that declare one get it. */
-  subtitle?: string;
-  price_monthly: number | null;
-  price_annually: number | null;
-  features: string[];
-  badge?: string;
-  highlight?: boolean;
-  cta_text?: string;
-  cta_url?: string;
-  description?: string;
-  price_label?: string;
-  price_note?: string;
-  price_note_annual?: string;
-  tagline?: string;
-  /** Which tab the plan belongs to; anything untagged is a cloud plan. */
-  deployment?: 'cloud' | 'dedicated';
-}
+const PLAN_CHANGE_PATH = PLAN_PAGE_PATH;
 
 interface PricingFaq {
   q: string;
   a: string;
-}
-
-interface ComparisonRow {
-  label: string;
-  values: Record<string, string | boolean>;
-}
-
-interface ComparisonGroup {
-  title: string;
-  rows: ComparisonRow[];
-}
-
-interface Comparison {
-  title?: string;
-  note?: string;
-  groups: ComparisonGroup[];
 }
 
 /**
@@ -281,60 +252,27 @@ export class PublicPricingView extends LitElement {
   }
 
   private async _loadFromJson() {
-    const response = await fetch('/landing-content.json');
-    if (!response.ok) {
-      throw new Error(`Failed to load pricing content: ${response.statusText}`);
+    // Same loader as the console plan page: one reader of the published
+    // content means the two pages cannot show different plans.
+    const content = await loadPricingContent();
+    if (content.title) this._title = content.title;
+    if (content.lead) this._lead = content.lead;
+    if (content.cloudLabel) this._cloudLabel = content.cloudLabel;
+    if (content.cloudLead) this._cloudLead = content.cloudLead;
+    if (content.dedicatedLabel) this._dedicatedLabel = content.dedicatedLabel;
+    if (content.dedicatedLead) this._dedicatedLead = content.dedicatedLead;
+    if (typeof content.billingToggle === 'boolean') {
+      this._billingToggle = content.billingToggle;
     }
-    const content = await response.json();
-    const pricing = content.pricing || {};
-    if (pricing.title) this._title = pricing.title;
-    if (pricing.lead) this._lead = pricing.lead;
-    if (pricing.cloud_label) this._cloudLabel = pricing.cloud_label;
-    if (pricing.cloud_lead) this._cloudLead = pricing.cloud_lead;
-    if (pricing.dedicated?.label)
-      this._dedicatedLabel = pricing.dedicated.label;
-    if (pricing.dedicated?.lead) this._dedicatedLead = pricing.dedicated.lead;
-    if (typeof pricing.billing_toggle === 'boolean') {
-      this._billingToggle = pricing.billing_toggle;
+    if (content.plans.length) this._plans = content.plans;
+    if (content.comparison) this._comparison = content.comparison;
+    if (content.dedicatedPlans.length) {
+      this._dedicatedPlans = content.dedicatedPlans;
     }
-    const toPlan = (p: any, fallback?: 'cloud' | 'dedicated'): Plan => ({
-      id: p.id,
-      name: p.name,
-      subtitle: p.subtitle,
-      price_monthly: p.price_monthly ?? null,
-      price_annually: p.price_annually ?? null,
-      price_label: p.price_label,
-      price_note: p.price_note,
-      price_note_annual: p.price_note_annual,
-      tagline: p.tagline,
-      badge: p.badge,
-      highlight: p.highlight,
-      cta_text: p.cta_text,
-      cta_url: p.cta_url,
-      deployment:
-        (p.deployment ?? fallback) === 'dedicated' ? 'dedicated' : 'cloud',
-      description: p.description,
-      features: p.features || [],
-    });
-    if (Array.isArray(pricing.plans)) {
-      this._plans = pricing.plans.map((p: any) => toPlan(p));
+    if (content.dedicatedComparison) {
+      this._dedicatedComparison = content.dedicatedComparison;
     }
-    if (pricing.comparison && Array.isArray(pricing.comparison.groups)) {
-      this._comparison = pricing.comparison as Comparison;
-    }
-    // The brand's own `dedicated` block wins; otherwise a plan tagged
-    // `dedicated` in the catalog still lands on the second tab.
-    if (Array.isArray(pricing.dedicated?.plans)) {
-      this._dedicatedPlans = pricing.dedicated.plans.map((p: any) =>
-        toPlan(p, 'dedicated')
-      );
-    }
-    if (Array.isArray(pricing.dedicated?.comparison?.groups)) {
-      this._dedicatedComparison = pricing.dedicated.comparison as Comparison;
-    }
-    if (Array.isArray(pricing.faqs)) {
-      this._faqs = pricing.faqs;
-    }
+    if (content.faqs.length) this._faqs = content.faqs;
   }
 
   /** Seam for tests: window.location is not stubbable in the runner. */
@@ -443,6 +381,9 @@ export class PublicPricingView extends LitElement {
   static styles = [
     unsafeCSS(pricingStyles),
     unsafeCSS(landingStyles),
+    // The card row and the comparison table render into this element's light
+    // DOM, so the shared markup is styled by the shared sheet from here.
+    pricingPlansStyles,
     css`
       /* The top-level axis. Full width so the tab bar's rule spans the card
          row underneath it and the two tabs read as the page's navigation. */
@@ -501,88 +442,6 @@ export class PublicPricingView extends LitElement {
       }
       .error {
         color: var(--sl-color-danger-600);
-      }
-
-      /* Four cards need a tighter minimum than the shared 260px grid or the
-         ladder wraps to two rows on ordinary laptop widths. */
-      .plans-grid {
-        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-      }
-
-      .comparison-section {
-        margin-top: 3.5rem;
-      }
-
-      /* Narrow screens scroll the table sideways instead of squashing four
-         columns into unreadable slivers. */
-      .comparison-scroll {
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-      }
-
-      .comparison-table {
-        width: 100%;
-        min-width: 720px;
-        margin: 0 auto;
-        border-collapse: collapse;
-        background-color: #21262f;
-        color: #e6edf3;
-        border-radius: 16px;
-        overflow: hidden;
-      }
-
-      .comparison-table th,
-      .comparison-table td {
-        font-size: 0.95rem;
-        padding: 0.75rem 1rem;
-        text-align: center;
-        vertical-align: middle;
-        border-bottom: 1px solid rgba(230, 237, 243, 0.12);
-      }
-
-      .comparison-table thead th {
-        font-size: 1.05rem;
-        font-weight: 600;
-        border-bottom: 2px solid #58a6ff;
-      }
-
-      .comparison-table .row-label {
-        text-align: left;
-        font-weight: 500;
-        min-width: 220px;
-      }
-
-      .comparison-table .group-row th {
-        text-align: left;
-        font-size: 0.8rem;
-        font-weight: 700;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-        color: #8b949e;
-        padding-top: 1.5rem;
-        border-bottom: 1px solid rgba(230, 237, 243, 0.2);
-      }
-
-      .comparison-table tbody tr:last-child th,
-      .comparison-table tbody tr:last-child td {
-        border-bottom: none;
-      }
-
-      .check-mark sl-icon {
-        color: #58a6ff;
-        font-size: 1.2rem;
-      }
-
-      .cross-mark sl-icon {
-        color: #6e7681;
-        font-size: 1.1rem;
-      }
-
-      .comparison-note {
-        margin-top: 1rem;
-        text-align: center;
-        font-size: 0.9rem;
-        color: var(--sl-color-text-secondary);
       }
 
       .hero-content .lead {
@@ -654,44 +513,26 @@ export class PublicPricingView extends LitElement {
             </p>`
           : ''
       }
-      <div class="plans-grid" @signup-requested=${this._handleSignUpRequest}>
-        ${plans.map(
-          (plan) => html`
-            <pricing-card
-              .plan=${plan}
-              .interval=${this._interval}
-              .dark=${true}
-            ></pricing-card>
-          `
-        )}
+      <!-- No \`plans-grid\` here: <pricing-plan-cards> renders that div
+           itself, so the class would nest one grid inside another. -->
+      <div @signup-requested=${this._handleSignUpRequest}>
+        <pricing-plan-cards
+          .plans=${plans}
+          .interval=${this._interval}
+          .dark=${true}
+        ></pricing-plan-cards>
       </div>
     `;
-  }
-
-  /** Render one comparison cell: booleans become marks, text prints as-is. */
-  private _renderCell(value: string | boolean | undefined) {
-    if (value === true) {
-      return html`<span class="check-mark"
-        ><sl-icon name="check-lg" label="Included"></sl-icon
-      ></span>`;
-    }
-    if (value === false) {
-      return html`<span class="cross-mark"
-        ><sl-icon name="x-lg" label="Not included"></sl-icon
-      ></span>`;
-    }
-    // Undefined renders empty rather than as a dash or a "no": an unstated
-    // limit is not a claim that the plan lacks the capability.
-    return value ?? '';
   }
 
   /**
    * The below-the-fold comparison table. Quotas, retention, and the feature
    * split live here, keeping every card to one number plus one line.
    *
-   * Both tabs use this method: Cloud compares Free/Pro/Team/Business, and
-   * Self-hosted compares the editions. Only the columns and the rows differ,
-   * never the shape of the table.
+   * Both tabs use this method: Cloud compares the hosted plans and Self-hosted
+   * compares the editions. Only the columns and the rows differ, never the
+   * shape of the table, which is why the console plan page renders the same
+   * element rather than a second copy of this markup.
    */
   private _renderComparison(
     comparison: Comparison | null,
@@ -699,57 +540,12 @@ export class PublicPricingView extends LitElement {
     fallbackTitle: string
   ) {
     if (!comparison?.groups?.length || !plans.length) return '';
-
-    const planIds = plans.map((p) => p.id);
-    const colCount = planIds.length + 1;
-
     return html`
-      <section class="comparison-section">
-        <div class="section-container">
-          <h2 class="text-center">${comparison.title || fallbackTitle}</h2>
-          <div class="comparison-scroll">
-            <table class="comparison-table">
-              <thead>
-                <tr>
-                  <th scope="col" class="row-label"></th>
-                  ${plans.map(
-                    (plan) => html`<th scope="col">${plan.name}</th>`
-                  )}
-                </tr>
-              </thead>
-              <tbody>
-                ${comparison.groups.map(
-                  (group) => html`
-                    <tr class="group-row">
-                      <th scope="colgroup" colspan=${colCount}>
-                        ${group.title}
-                      </th>
-                    </tr>
-                    ${group.rows.map(
-                      (row) => html`
-                        <tr>
-                          <th scope="row" class="row-label">${row.label}</th>
-                          ${planIds.map(
-                            (id) =>
-                              html`<td>
-                                ${this._renderCell(row.values?.[id])}
-                              </td>`
-                          )}
-                        </tr>
-                      `
-                    )}
-                  `
-                )}
-              </tbody>
-            </table>
-          </div>
-          ${
-            comparison.note
-              ? html`<p class="comparison-note">${comparison.note}</p>`
-              : ''
-          }
-        </div>
-      </section>
+      <pricing-plan-comparison
+        .comparison=${comparison}
+        .plans=${plans}
+        .fallbackTitle=${fallbackTitle}
+      ></pricing-plan-comparison>
     `;
   }
 

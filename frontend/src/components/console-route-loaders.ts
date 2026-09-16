@@ -27,6 +27,8 @@ export const consoleRouteLoaders = {
   'webhooks-view': () => import('../views/authed/settings/webhooks-view'),
   'appearance-view': () => import('../views/authed/settings/appearance-view'),
   'account-view': () => import('../views/authed/settings/account-view'),
+  'plan-view': () => import('../views/authed/settings/plan-view'),
+  'emergency-view': () => import('../views/authed/settings/emergency-view'),
   'user-management-view': () =>
     import('../views/authed/settings/user-management-view'),
   'team-management-view': () =>

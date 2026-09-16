@@ -7,17 +7,13 @@ import {
   AccountOrganization,
   getFeatures,
   FeaturesResponse,
-  getKillSwitchStatus,
-  activateKillSwitch,
-  deactivateKillSwitch,
   BILLING_SUBSCRIPTION_CHANGED,
 } from '../../../api';
-import type { KillSwitchScope, KillSwitchStatus } from '../../../types';
-import '@shoelace-style/shoelace/dist/components/textarea/textarea.js';
 import '@shoelace-style/shoelace/dist/components/details/details.js';
 import consoleStyles from '../../../styles/console-styles.css?inline';
 import pricingStyles from '../../../styles/pricing-styles.css?inline';
-import '../../../components/billing-plan-comparison';
+import { Router } from '../../../router';
+import { PLAN_PAGE_PATH } from '../../../utils/premium-features';
 import '@shoelace-style/shoelace/dist/components/input/input.js';
 import '@shoelace-style/shoelace/dist/components/button/button.js';
 import '@shoelace-style/shoelace/dist/components/card/card.js';
@@ -142,18 +138,6 @@ export class AccountView extends LitElement {
   @state() private _error: string | null = null;
   @state() private _canManageBilling = false;
 
-  // ── Emergency controls (account kill switch, #157) ─────────────────────
-  @state() private _haltStatus: KillSwitchStatus | null = null;
-  @state() private _haltReason = '';
-  @state() private _haltBusy = false;
-  @state() private _haltError: string | null = null;
-
-  private static readonly HALT_SCOPE_LABELS: Record<KillSwitchScope, string> = {
-    gateway: 'Model requests',
-    tools: 'Tool calls',
-    flows: 'Flow executions',
-  };
-
   // The 2026 ladder's limits, in the order a buyer weighs them. The legacy
   // keys (api_calls_monthly, ai_calls_monthly, issues_ingested_monthly,
   // custom_*_enabled) still exist on the plan rows because the shared
@@ -211,7 +195,6 @@ export class AccountView extends LitElement {
       this._handleSubscriptionChanged
     );
     await this._fetchData();
-    void this._refreshHaltStatus();
   }
 
   disconnectedCallback() {
@@ -220,58 +203,6 @@ export class AccountView extends LitElement {
       this._handleSubscriptionChanged
     );
     super.disconnectedCallback();
-  }
-
-  /** Reload kill-switch state; failures keep the last known state. */
-  private async _refreshHaltStatus() {
-    try {
-      this._haltStatus = await getKillSwitchStatus();
-    } catch {
-      // Keep the last known state when a status refresh fails.
-    }
-  }
-
-  private async _handleHalt() {
-    this._haltBusy = true;
-    this._haltError = null;
-    try {
-      this._haltStatus = await activateKillSwitch({
-        reason: this._haltReason.trim() || null,
-      });
-      this._haltReason = '';
-      this.dispatchEvent(
-        new CustomEvent('kill-switch-changed', {
-          bubbles: true,
-          composed: true,
-        })
-      );
-    } catch (error) {
-      this._haltError =
-        (error as Error).message || 'Failed to activate the halt.';
-    } finally {
-      this._haltBusy = false;
-    }
-  }
-
-  private async _handleResume(scopes: KillSwitchScope[]) {
-    this._haltBusy = true;
-    this._haltError = null;
-    try {
-      this._haltStatus = await deactivateKillSwitch({
-        scopes,
-        reason: this._haltReason.trim() || null,
-      });
-      this.dispatchEvent(
-        new CustomEvent('kill-switch-changed', {
-          bubbles: true,
-          composed: true,
-        })
-      );
-    } catch (error) {
-      this._haltError = (error as Error).message || 'Failed to lift the halt.';
-    } finally {
-      this._haltBusy = false;
-    }
   }
 
   private async _fetchData() {
@@ -291,11 +222,23 @@ export class AccountView extends LitElement {
       const isProprietary = features.features['billing'] === true;
 
       if (isProprietary) {
-        const [summaryRes, publicPlansRes, customPlansRes] = await Promise.all([
-          fetchWithAuth('/api/v1/billing/summary'),
-          fetchWithAuth('/api/v1/billing/plans'),
-          fetchWithAuth('/api/v1/billing/custom-plans'),
-        ]);
+        const [summaryRes, publicPlansRes, customPlansRes, optionsRes] =
+          await Promise.all([
+            fetchWithAuth('/api/v1/billing/summary'),
+            fetchWithAuth('/api/v1/billing/plans'),
+            fetchWithAuth('/api/v1/billing/custom-plans'),
+            fetchWithAuth('/api/v1/billing/plan-change-options'),
+          ]);
+
+        // Whether the reader may open the provider portal at all. The plan
+        // picker used to answer this, from this same endpoint, while it still
+        // lived on this page. Asking here keeps the request count the same
+        // and keeps "Manage in Stripe" from offering an action the account's
+        // role cannot take. A failure leaves it disabled, as before.
+        if (optionsRes.ok) {
+          const options = await optionsRes.json();
+          this._canManageBilling = options?.can_manage_billing === true;
+        }
 
         if (summaryRes.ok) {
           this._billingSummary = await summaryRes.json();
@@ -473,19 +416,21 @@ export class AccountView extends LitElement {
   }
 
   /**
-   * "Choose a plan": open the plan picker on this page and scroll to it.
+   * "Choose a plan" and "View plans": the plan page.
    *
-   * The plan section is already on this page, so the shortest honest route to
-   * it is the page itself rather than a navigation. `scrollIntoView` is
-   * guarded because the section renders only once the billing summary has
-   * loaded.
+   * The plans used to be a section at the bottom of this page, under the
+   * organisation name, the quota and the usage table, which is why an account
+   * with no subscription had to scroll past everything it was not looking for
+   * to find the only action it could take. They now have a page of their own,
+   * and this page keeps the summary and the route to it.
    */
   private _handleChoosePlan() {
-    const comparison = this.shadowRoot?.querySelector(
-      'billing-plan-comparison'
-    ) as (HTMLElement & { openPicker?: () => void }) | null;
-    comparison?.openPicker?.();
-    comparison?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    if (!Router.go(PLAN_PAGE_PATH)) this._navigate(PLAN_PAGE_PATH);
+  }
+
+  /** A full page load, for the case where no router claimed the path. */
+  private _navigate(url: string): void {
+    window.location.assign(url);
   }
 
   private async _handleManageSubscription() {
@@ -996,144 +941,6 @@ export class AccountView extends LitElement {
             </div>
           </sl-card>
 
-          <!-- Emergency controls: the account kill switch (#157). Sits at the
-               top of the settings page so the big red button is where an
-               operator in a hurry looks for account-level controls. -->
-          <sl-card style="margin-bottom: 2rem;">
-            <h2 slot="header" style="margin: 0; font-size: 1.25rem;">
-              Emergency Controls
-            </h2>
-            ${
-              this._haltError
-                ? html`
-                    <sl-alert variant="danger" open closable>
-                      <sl-icon
-                        slot="icon"
-                        name="exclamation-triangle"
-                      ></sl-icon>
-                      ${this._haltError}
-                    </sl-alert>
-                  `
-                : ''
-            }
-            ${
-              this._haltStatus?.active
-                ? html`
-                    <div
-                      style="display: flex; flex-direction: column; gap: 0.75rem;"
-                    >
-                      <div>
-                        <strong style="color: var(--sl-color-danger-600);">
-                          Agent activity is halted.
-                        </strong>
-                        The following traffic is rejected until the halt is
-                        lifted:
-                      </div>
-                      <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
-                        ${this._haltStatus.scopes.map(
-                          (entry) => html`
-                            <span class="status-chip pending">
-                              ${AccountView.HALT_SCOPE_LABELS[entry.scope]}
-                              blocked
-                            </span>
-                          `
-                        )}
-                      </div>
-                      ${
-                        this._haltStatus.scopes.find((s) => s.reason)?.reason
-                          ? html`
-                              <div>
-                                Reason:
-                                ${
-                                  this._haltStatus.scopes.find((s) => s.reason)!
-                                    .reason
-                                }
-                              </div>
-                            `
-                          : ''
-                      }
-                      <sl-input
-                        label="Recovery reason"
-                        maxlength="500"
-                        value=${this._haltReason}
-                        @sl-input=${(e: any) => (this._haltReason = e.target.value)}
-                        ?disabled=${this._haltBusy}
-                      ></sl-input>
-                      <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
-                        ${this._haltStatus.scopes.map(
-                          (entry) => html`
-                            <sl-button
-                              size="small"
-                              outline
-                              ?disabled=${this._haltBusy}
-                              @click=${() => this._handleResume([entry.scope])}
-                            >
-                              Resume
-                              ${AccountView.HALT_SCOPE_LABELS[
-                                entry.scope
-                              ].toLowerCase()}
-                            </sl-button>
-                          `
-                        )}
-                        ${
-                          this._haltStatus.scopes.length > 1
-                            ? html`
-                                <sl-button
-                                  size="small"
-                                  variant="primary"
-                                  ?disabled=${this._haltBusy}
-                                  @click=${() =>
-                                    this._handleResume(
-                                      this._haltStatus!.scopes.map(
-                                        (entry) => entry.scope
-                                      )
-                                    )}
-                                >
-                                  Resume all
-                                </sl-button>
-                              `
-                            : ''
-                        }
-                      </div>
-                      <div class="more">
-                        Staged recovery: restore model requests first and verify
-                        behavior, then tool calls, then flow executions.
-                      </div>
-                    </div>
-                  `
-                : html`
-                    <div
-                      style="display: flex; flex-direction: column; gap: 0.75rem;"
-                    >
-                      <div>
-                        The kill switch blocks new model requests, MCP tool
-                        calls, and flow starts for this account within five
-                        seconds. Managed flow executions receive stop requests;
-                        termination is confirmed separately. Activation is
-                        audited.
-                      </div>
-                      <sl-textarea
-                        label="Reason (recorded for audit)"
-                        placeholder="What is going wrong?"
-                        value=${this._haltReason}
-                        @sl-input=${(e: any) =>
-                          (this._haltReason = e.target.value)}
-                        ?disabled=${this._haltBusy}
-                      ></sl-textarea>
-                      <div>
-                        <sl-button
-                          variant="danger"
-                          ?loading=${this._haltBusy}
-                          @click=${this._handleHalt}
-                        >
-                          Block new agent requests
-                        </sl-button>
-                      </div>
-                    </div>
-                  `
-            }
-          </sl-card>
-
           ${
             isProprietary
               ? html`
@@ -1201,14 +1008,22 @@ export class AccountView extends LitElement {
                         // action belongs. Free gets that action instead.
                         this.subscription
                           ? html`<sl-button
-                              size="medium"
-                              variant=${trialExpired ? 'default' : 'primary'}
-                              data-testid="manage-in-stripe"
-                              ?disabled=${!this._canManageBilling}
-                              @click=${this._handleManageSubscription}
-                            >
-                              Manage in Stripe
-                            </sl-button>`
+                                size="medium"
+                                variant=${trialExpired ? 'default' : 'primary'}
+                                data-testid="manage-in-stripe"
+                                ?disabled=${!this._canManageBilling}
+                                @click=${this._handleManageSubscription}
+                              >
+                                Manage in Stripe
+                              </sl-button>
+                              <sl-button
+                                size="medium"
+                                variant="default"
+                                data-testid="view-plans"
+                                @click=${this._handleChoosePlan}
+                              >
+                                View plans
+                              </sl-button>`
                           : html`<sl-button
                               size="medium"
                               variant="primary"
@@ -1370,13 +1185,6 @@ export class AccountView extends LitElement {
                         `
                       : ''
                   }
-                  <billing-plan-comparison
-                    @billing-permission-changed=${(event: CustomEvent) => {
-                      this._canManageBilling =
-                        event.detail.canManageBilling === true;
-                    }}
-                    @billing-subscription-changed=${this._refreshBillingSummary}
-                  ></billing-plan-comparison>
                 `
               : ''
           }

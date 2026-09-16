@@ -1,6 +1,8 @@
 # Account kill switch
 
-Use **Settings > Account > Emergency Controls** to halt an account. Owners,
+Use **Settings > Emergency** (`/console/settings/emergency`) to halt an
+account. The controls used to sit on the account page; they now have their own
+page, visible only to a reader who may use them. Owners,
 admins and roles granted `manage_kill_switch` can activate or recover scopes.
 Every authenticated account member can see the persistent console banner and
 read `GET /api/v1/account/kill-switch/status`.

@@ -1,7 +1,7 @@
 import { LitElement, css, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { fetchWithAuth } from '../api';
-import { capabilityForFeature } from '../utils/premium-features';
+import { cheapestPlanUnlocking } from '../utils/premium-features';
 import type {
   BillingMonth,
   BillingNotice,
@@ -76,6 +76,11 @@ export class BillingPlanComparison extends LitElement {
   @state() private pendingConfirmation: string | null = null;
   @state() private operatorRecovery = false;
   private recoveryKey: string | null = null;
+  /** A plan asked for from outside while the options were still loading. */
+  private pendingSelection: {
+    plan: string;
+    interval: 'month' | 'year';
+  } | null = null;
   private revision = 0;
   private expiryTimer?: number;
 
@@ -85,14 +90,25 @@ export class BillingPlanComparison extends LitElement {
   }
 
   /**
-   * Open the picker from outside: the account page's "Choose a plan".
+   * Open the picker on one named plan: the plan page's card buttons.
    *
-   * An account with no subscription has nothing to manage in the provider's
-   * portal, so its one billing action is this section. Calling it a second
-   * time is harmless.
+   * The cards state the offer and nothing else. The price, the consequences
+   * and the confirmation stay here, in the one place that holds a server
+   * quote, so a card click selects a plan rather than starting a change.
+   * Calling it before the options have loaded is harmless: the plan is kept
+   * and `refresh` discards it only if the account cannot move there.
    */
-  openPicker(): void {
+  startChange(planId: string, interval?: 'month' | 'year'): void {
     this.changing = true;
+    const wanted = interval ?? this.interval;
+    if (this.loading) {
+      // The options are still arriving. Selecting now would cancel that load
+      // in flight, so record the request and let `refresh` apply it once it
+      // knows whether this account can move to that plan at all.
+      this.pendingSelection = { plan: planId, interval: wanted };
+      return;
+    }
+    this.choose(planId, wanted);
   }
 
   disconnectedCallback(): void {
@@ -304,6 +320,11 @@ export class BillingPlanComparison extends LitElement {
           this.changing = true;
       }
       this.refreshRequired = false;
+      if (this.pendingSelection) {
+        this.selectedPlan = this.pendingSelection.plan;
+        this.interval = this.pendingSelection.interval;
+        this.pendingSelection = null;
+      }
       if (
         !options.plans.some(
           (p) =>
@@ -420,33 +441,32 @@ export class BillingPlanComparison extends LitElement {
   }
 
   /**
-   * The cheapest plan this account can move to that includes `feature`.
+   * The cheapest plan this account can move to that unlocks `feature`.
    *
-   * `feature` is the capability named by the 402 upgrade contract. A plan that
-   * does not publish a capability list cannot be proven to include it, so it
-   * is not offered; the caller falls back to the ordinary default.
+   * `feature` is the name the 402 upgrade contract refused, mapped to a plan
+   * capability by the shared selector. The rule (published capability, sold,
+   * priced, not legacy) lives in `premium-features` so the plan page's card
+   * highlight and this panel's preselection cannot name two different plans;
+   * what stays here is what only this panel knows: which plans are targets
+   * and which ones the server says this account may take. A feature no
+   * eligible plan unlocks returns nothing and the caller falls back to the
+   * ordinary default.
    */
   private cheapestUnlocking(
     options: PlanChangeOptions,
     feature: string
   ): string | undefined {
-    const capability = capabilityForFeature(feature);
-    const price = (plan: BillingPlan): number =>
-      typeof plan.price_monthly === 'number'
-        ? plan.price_monthly
-        : Number.POSITIVE_INFINITY;
     const currentId = this.effectiveCurrentPlan(options)?.id;
-    return options.plans
-      .filter(
-        (p) =>
-          this.isTarget(p) &&
-          p.id !== currentId &&
-          this.eligible(p) &&
-          p.purchasable !== false &&
-          Number.isFinite(price(p)) &&
-          (p.capabilities ?? []).includes(capability)
-      )
-      .sort((a, b) => price(a) - price(b))[0]?.id;
+    return (
+      cheapestPlanUnlocking(
+        options.plans,
+        feature,
+        (plan) =>
+          this.isTarget(plan as BillingPlan) &&
+          plan.id !== currentId &&
+          this.eligible(plan as BillingPlan)
+      ) || undefined
+    );
   }
 
   /** One line of what the plan includes, for the collapsed state. */

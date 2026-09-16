@@ -123,6 +123,38 @@ describe('LitApp routing', () => {
     expect(customElements.get('onboarding-view')).to.equal(undefined);
   });
 
+  it('resolves the plan page and the emergency page', async () => {
+    const el = await fixture<HTMLElement>(html`<lit-app></lit-app>`);
+
+    Router.go('/console/settings/plan');
+    await waitUntil(
+      () => Boolean(el.shadowRoot?.querySelector('console-shell > plan-view')),
+      'Expected the plan route to render',
+      { timeout: 5000 }
+    );
+
+    Router.go('/console/settings/emergency');
+    await waitUntil(
+      () =>
+        Boolean(el.shadowRoot?.querySelector('console-shell > emergency-view')),
+      'Expected the emergency route to render',
+      { timeout: 5000 }
+    );
+  });
+
+  it('redirects the console pricing route to the plan page', async () => {
+    await fixture(html`<lit-app></lit-app>`);
+
+    Router.go('/console/pricing');
+
+    await waitUntil(
+      () => window.location.pathname === '/console/settings/plan',
+      'Expected /console/pricing to redirect to the plan page',
+      { timeout: 5000 }
+    );
+    expect(window.location.pathname).to.equal('/console/settings/plan');
+  });
+
   it('registers markdown pages from BRAND_CONFIG.static_markdown_pages', async () => {
     (window as any).BRAND_CONFIG.static_markdown_pages = [
       { path: '/dora', src: '/content/dora.md' },
