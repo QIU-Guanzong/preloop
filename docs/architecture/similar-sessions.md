@@ -116,7 +116,7 @@ reloading never reorders the list under the reader.
 
 The panel sits under the replay on the sessions page, collapsed, behind the
 `similarSessions` observer feature. Opening it asks once. Each entry links to
-the other session (`/console/sessions?sessionId=...&replay=conversation`) and
+the other session (`/console/runtime-sessions?sessionId=...`) and
 renders the matching passage inline.
 
 Entries open the other session, not the matching turn inside it. Deep linking

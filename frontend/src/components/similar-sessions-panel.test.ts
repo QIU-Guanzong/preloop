@@ -218,7 +218,7 @@ describe('similar-sessions-panel', () => {
 
     const link = el.shadowRoot?.querySelector('a.entry');
     expect(link?.getAttribute('href')).to.equal(
-      '/console/sessions?sessionId=11111111-1111-4111-8111-111111111111&replay=conversation'
+      '/console/runtime-sessions?sessionId=11111111-1111-4111-8111-111111111111'
     );
   });
 

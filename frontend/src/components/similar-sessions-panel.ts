@@ -209,9 +209,9 @@ export class SimilarSessionsPanel extends LitElement {
 
   /** Where an entry points when the host does not take the click. */
   private hrefFor(result: SimilarSessionResult): string {
-    return `/console/sessions?sessionId=${encodeURIComponent(
+    return `/console/runtime-sessions?sessionId=${encodeURIComponent(
       result.runtime_session_id
-    )}&replay=conversation`;
+    )}`;
   }
 
   private onEntryClick(event: MouseEvent, result: SimilarSessionResult): void {
