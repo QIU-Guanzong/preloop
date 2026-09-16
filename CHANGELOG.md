@@ -32,6 +32,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `before*` hooks have no field that reaches the model, so a note claimed there
   is held for its session and rides the next tool call's carrying hook, once. A
   turn with no pending note produces the same response as before.
+- `preloop sessions search` queries session content from a terminal
+  through `POST /api/v1/runtime-sessions/search`. The query is the
+  argument, `--from` / `--to` bound the time range, `--mode` picks the
+  ranking mode and `--limit` pages past `--page-size` (at most 50) by
+  offset. Default output is one readable block per session: identifiers,
+  timestamps, why it matched and the matching turns. `--json` emits each
+  response page exactly as the endpoint sent it; degraded markers, the
+  indexed-through marker and the result count go to standard error so a
+  piped payload stays clean. Exit status is 0 for results, 2 for no
+  results and 1 for a failure, which prints one sentence rather than a
+  server stack trace. Docs in `cli/README.md`.
 - `preloop notes send` posts one operator note from the terminal to
   `POST /api/v1/operator-notes`. Name exactly one of `--agent`,
   `--session`, or `--execution`. The body is the argument, or stdin when
