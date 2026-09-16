@@ -56,9 +56,16 @@ const catalog = () => ({
           : ['ai_optimization', 'rbac'],
     features: {
       max_users: id === 'enterprise' ? 100 : id === 'team' ? 5 : 1,
-      max_agents: id === 'free' ? 3 : -1,
+      max_agents:
+        id === 'free' ? 3 : id === 'pro' ? 10 : id === 'team' ? 100 : -1,
       byok_ingest_tokens_monthly:
-        id === 'enterprise' ? -1 : id === 'free' ? 10000000 : 100000000,
+        id === 'enterprise'
+          ? -1
+          : id === 'free'
+            ? 100000000
+            : id === 'pro'
+              ? 1000000000
+              : 5000000000,
       retention_days: Number(days),
       hosted_models_monthly_limit_usd:
         id === 'free' || id === 'enterprise' ? null : 2,
@@ -90,6 +97,54 @@ describe('Public pricing from billing catalog', () => {
       .and.include('Older analytics are periodically removed')
       .and.include('longer grandfathered commitments remain protected');
   });
+  it('states the agent cap the catalog carries, never "unlimited" by habit', () => {
+    const result = applyPricingCatalog(config, catalog());
+    const row = result.comparison!.groups[0].rows.find(
+      (r) => r.label === 'Agents'
+    )!;
+    expect(row.values).to.deep.equal({ free: '3', pro: '10', team: '100' });
+    // The card line is derived from the same number, so a cap change in
+    // plans.yaml can never leave the card promising more than the plan gives.
+    expect(result.plans.find((p) => p.id === 'pro')!.tagline).to.equal(
+      'One person, up to 10 agents.'
+    );
+    expect(result.plans.find((p) => p.id === 'team')!.tagline).to.equal(
+      'Up to 5 people, up to 100 agents.'
+    );
+  });
+
+  it('keeps "every agent governed" for a plan the catalog leaves uncapped', () => {
+    const source = catalog();
+    source.plans.find((p) => p.id === 'team')!.features.max_agents = -1;
+    const result = applyPricingCatalog(config, source);
+    expect(result.plans.find((p) => p.id === 'team')!.tagline).to.equal(
+      'Up to 5 people, every agent governed.'
+    );
+    const row = result.comparison!.groups[0].rows.find(
+      (r) => r.label === 'Agents'
+    )!;
+    expect(row.values.team).to.equal('Unlimited');
+  });
+
+  it('compacts BYOK quotas through the billions', () => {
+    const result = applyPricingCatalog(config, catalog());
+    const row = result.comparison!.groups[0].rows.find(
+      (r) => r.label === 'BYOK analysis quota / month'
+    )!;
+    expect(row.values).to.deep.equal({
+      free: '100M tokens',
+      pro: '1B tokens',
+      team: '5B tokens',
+    });
+  });
+
+  it('names the quoted plan by what it actually is, self-hosted or run by us', () => {
+    const result = applyPricingCatalog(config, catalog());
+    expect(result.plans.find((p) => p.id === 'enterprise')!.tagline).to.equal(
+      'Self-hosted, or a dedicated instance run by us. Up to 100 users.'
+    );
+  });
+
   it('does not advertise planned capabilities absent from the shipped catalog', () => {
     const result = applyPricingCatalog(config, catalog());
     const rows = result.comparison!.groups.flatMap((g) => g.rows);
@@ -205,7 +260,7 @@ describe('Public pricing from billing catalog', () => {
     // against, so the brand's own block is the source of truth and the
     // catalog step must not rewrite or drop it.
     const dedicated = {
-      label: 'Dedicated',
+      label: 'Self-hosted',
       plans: [
         {
           id: 'opensource',
@@ -217,7 +272,7 @@ describe('Public pricing from billing catalog', () => {
         },
       ],
       comparison: {
-        title: 'Compare dedicated editions',
+        title: 'Compare self-hosted editions',
         groups: [
           {
             title: 'Edition',

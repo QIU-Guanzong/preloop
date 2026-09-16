@@ -34,12 +34,13 @@ const CONTENT = {
 /**
  * The 2026 ladder as the page now presents it: four cloud plans and their
  * comparison table on the Cloud tab, three editions and their own comparison
- * table on the Dedicated tab. Same layout on both, different columns.
+ * table on the Self-hosted tab. Same layout on both, different columns.
  */
 const LADDER_CONTENT = {
   pricing: {
     title: 'Pricing',
-    lead: 'Choose Cloud for hosted subscriptions or Dedicated for self-managed options.',
+    lead: 'USD prices exclude tax; annual plans are prepaid.',
+    cloud_lead: 'Hosted by Preloop. Start free, upgrade when you need to.',
     billing_toggle: true,
     plans: [
       {
@@ -57,7 +58,7 @@ const LADDER_CONTENT = {
         price_monthly: 12,
         price_annually: 120,
         deployment: 'cloud',
-        tagline: 'You and all your agents.',
+        tagline: 'One person, up to 10 agents.',
         features: [],
       },
       {
@@ -66,16 +67,16 @@ const LADDER_CONTENT = {
         price_monthly: 120,
         price_annually: 1200,
         deployment: 'cloud',
-        tagline: 'Up to 5 people, every agent governed.',
+        tagline: 'Up to 5 people, up to 100 agents.',
         features: [],
       },
       {
         id: 'business',
         name: 'Business',
         price_monthly: 350,
-        price_annually: 3500,
+        price_annually: 3600,
         deployment: 'cloud',
-        tagline: 'Up to 20 people, scale usage.',
+        tagline: 'Up to 20 people, every agent governed.',
         features: [],
       },
     ],
@@ -90,9 +91,18 @@ const LADDER_CONTENT = {
               label: 'Agents',
               values: {
                 free: '3',
-                pro: 'Unlimited',
-                team: 'Unlimited',
+                pro: '10',
+                team: '100',
                 business: 'Unlimited',
+              },
+            },
+            {
+              label: 'BYOK analysis quota / month',
+              values: {
+                free: '100M tokens',
+                pro: '1B tokens',
+                team: '5B tokens',
+                business: '20B tokens',
               },
             },
           ],
@@ -109,7 +119,8 @@ const LADDER_CONTENT = {
       ],
     },
     dedicated: {
-      label: 'Dedicated',
+      label: 'Self-hosted',
+      lead: 'Run Preloop on your own infrastructure, or on a dedicated instance we operate for you.',
       plans: [
         {
           id: 'opensource',
@@ -125,10 +136,11 @@ const LADDER_CONTENT = {
         {
           id: 'business-selfhosted',
           name: 'Business',
+          subtitle: 'Self-hosted license',
           price_monthly: null,
           price_annually: null,
-          price_label: 'Contact us',
-          tagline: 'A limited introduction for teams that self-operate.',
+          price_label: '$6,000/yr',
+          tagline: 'Up to 25 users on your infrastructure.',
           cta_text: 'Contact us',
           cta_url: '/request-demo',
           features: [],
@@ -139,14 +151,15 @@ const LADDER_CONTENT = {
           price_monthly: null,
           price_annually: null,
           price_label: 'from $30k/yr',
-          tagline: 'Dedicated or self-hosted, up to 100 users.',
+          tagline:
+            'Self-hosted, or a dedicated instance run by us. Up to 100 users.',
           cta_text: 'Contact us',
           cta_url: '/request-demo',
           features: [],
         },
       ],
       comparison: {
-        title: 'Compare dedicated editions',
+        title: 'Compare self-hosted editions',
         note: 'Editions are quoted, not bought through checkout.',
         groups: [
           {
@@ -182,7 +195,7 @@ const LADDER_CONTENT = {
   },
 };
 
-/** Click the Cloud/Dedicated tab and let the view settle. */
+/** Click the Cloud/Self-hosted tab and let the view settle. */
 async function selectTab(
   el: PublicPricingView,
   tab: 'cloud' | 'dedicated'
@@ -283,14 +296,14 @@ describe('PublicPricingView', () => {
     ).to.equal(false);
   });
 
-  it('hydrates a dedicated-only slotted page without refetching JSON', async () => {
+  it('hydrates a self-hosted-only slotted page without refetching JSON', async () => {
     fetchStub = stubFetch();
     const el = await fixture<PublicPricingView>(
       html`<public-pricing-view
         ><article>
           <header
             slot="pricing-heading"
-            data-title="Dedicated only"
+            data-title="Self-hosted only"
             data-lead="Self-hosted editions."
           ></header>
           <section>
@@ -312,7 +325,7 @@ describe('PublicPricingView', () => {
     await waitUntil(() => (el as any)._loaded);
     await el.updateComplete;
     expect(el.shadowRoot?.textContent)
-      .to.include('Dedicated only')
+      .to.include('Self-hosted only')
       .and.include('Self-hosted editions.');
     const card = el.shadowRoot?.querySelector('pricing-card') as HTMLElement;
     expect(card, 'dedicated card hydrates from dedicated-plan slots').to.exist;
@@ -441,7 +454,7 @@ describe('PublicPricingView', () => {
     // The fixture opens on Yearly: Pro's 120/yr divides exactly, so the card
     // leads with the effective monthly rate.
     const yearly = snapshot();
-    expect(yearly.prices).to.deep.equal(['$0', '$10', '$100', '$3,500']);
+    expect(yearly.prices).to.deep.equal(['$0', '$10', '$100', '$300']);
 
     const toggle = el.shadowRoot?.querySelector('billing-toggle') as
       HTMLElement | undefined;
@@ -489,7 +502,7 @@ describe('PublicPricingView', () => {
     }
   });
 
-  it('switches to Dedicated: same layout, different columns, no period toggle', async () => {
+  it('switches to Self-hosted: same layout, different columns, no period pill', async () => {
     fetchStub = stubLadderFetch();
     const el = (await fixture(
       html`<public-pricing-view></public-pricing-view>`
@@ -525,7 +538,9 @@ describe('PublicPricingView', () => {
       'Business',
       'Enterprise',
     ]);
-    expect(el.shadowRoot?.textContent).to.contain('Compare dedicated editions');
+    expect(el.shadowRoot?.textContent).to.contain(
+      'Compare self-hosted editions'
+    );
     expect(table?.textContent).to.contain('Self-hosted, Apache 2.0');
     expect(table?.querySelector('.cross-mark'), 'excluded mark').to.exist;
 
@@ -542,6 +557,161 @@ describe('PublicPricingView', () => {
     ) as HTMLButtonElement | null;
     expect(cloudBtn?.getAttribute('aria-pressed')).to.equal('false');
     expect(dedicatedBtn?.getAttribute('aria-pressed')).to.equal('true');
+  });
+
+  it('leads with a Cloud and Self-hosted tab bar, each with its own line', async () => {
+    fetchStub = stubLadderFetch();
+    const el = (await fixture(
+      html`<public-pricing-view></public-pricing-view>`
+    )) as PublicPricingView;
+    await tick();
+    await el.updateComplete;
+
+    const toggle = el.shadowRoot?.querySelector('deployment-toggle') as
+      HTMLElement | undefined;
+    await (toggle as any)?.updateComplete;
+    expect((toggle as any)?.tabs, 'renders as a tab bar').to.equal(true);
+    expect(
+      toggle?.shadowRoot?.querySelector('.tab-bar'),
+      'tab bar styling hook'
+    ).to.exist;
+    const labels = Array.from(
+      toggle?.shadowRoot?.querySelectorAll('button') || []
+    ).map((b) => b.textContent?.trim());
+    expect(labels).to.deep.equal(['Cloud', 'Self-hosted']);
+
+    // Each tab carries its own one-line lead directly under the bar.
+    const lead = el.shadowRoot?.querySelector('.tab-lead');
+    expect(lead?.textContent?.trim()).to.equal(
+      'Hosted by Preloop. Start free, upgrade when you need to.'
+    );
+    await selectTab(el, 'dedicated');
+    expect(el.shadowRoot?.querySelector('.tab-lead')?.textContent).to.contain(
+      'Run Preloop on your own infrastructure'
+    );
+  });
+
+  it('announces the tab bar as a toggle group, not as an ARIA tablist', async () => {
+    fetchStub = stubLadderFetch();
+    const el = (await fixture(
+      html`<public-pricing-view></public-pricing-view>`
+    )) as PublicPricingView;
+    await tick();
+    await el.updateComplete;
+
+    const toggle = el.shadowRoot?.querySelector('deployment-toggle') as
+      HTMLElement | undefined;
+    await (toggle as any)?.updateComplete;
+    const list = toggle?.shadowRoot?.querySelector('.tab-list');
+    // The panel it switches lives in the parent view's shadow root, so a
+    // "tab" could never carry aria-controls. It stays a group of toggle
+    // buttons and only looks like a tab bar.
+    expect(list?.getAttribute('role')).to.equal('group');
+    expect(list?.getAttribute('aria-label')).to.equal('Deployment');
+    const buttons = Array.from(
+      toggle?.shadowRoot?.querySelectorAll('button') || []
+    );
+    expect(buttons.length).to.equal(2);
+    buttons.forEach((b) => {
+      expect(b.getAttribute('role')).to.equal(null);
+      expect(b.getAttribute('aria-selected')).to.equal(null);
+      expect(b.getAttribute('aria-pressed')).to.be.oneOf(['true', 'false']);
+    });
+    expect(buttons.map((b) => b.getAttribute('aria-pressed'))).to.deep.equal([
+      'true',
+      'false',
+    ]);
+  });
+
+  it('reserves the tab lead row even when a brand writes no self-hosted lead', async () => {
+    const withoutLead = JSON.parse(JSON.stringify(LADDER_CONTENT));
+    delete withoutLead.pricing.dedicated.lead;
+    fetchStub = sinon
+      .stub(window, 'fetch')
+      .callsFake(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/landing-content.json')) {
+          return new Response(JSON.stringify(withoutLead), { status: 200 });
+        }
+        return new Response(JSON.stringify({ features: {} }), { status: 200 });
+      });
+    const el = (await fixture(
+      html`<public-pricing-view></public-pricing-view>`
+    )) as PublicPricingView;
+    await tick();
+    await el.updateComplete;
+
+    const leadRow = () =>
+      el.shadowRoot?.querySelector('.tab-lead') as HTMLElement | null;
+    const cardsTop = () =>
+      (
+        el.shadowRoot?.querySelector('.period-row') as HTMLElement | null
+      )?.getBoundingClientRect().top || 0;
+    const cloudHeight = leadRow()?.getBoundingClientRect().height || 0;
+    const cloudTop = cardsTop();
+    expect(cloudHeight).to.be.greaterThan(0);
+
+    await selectTab(el, 'dedicated');
+    // The brand wrote no lead for this tab, so the line is empty, but the
+    // element and its height survive and the row below does not move up.
+    expect(leadRow(), 'the lead row survives an empty lead').to.exist;
+    expect(leadRow()?.textContent?.trim()).to.equal('');
+    expect(leadRow()?.getBoundingClientRect().height).to.equal(cloudHeight);
+    expect(cardsTop()).to.equal(cloudTop);
+  });
+
+  it('keeps the period pill inside Cloud and reserves its row on Self-hosted', async () => {
+    fetchStub = stubLadderFetch();
+    const el = (await fixture(
+      html`<public-pricing-view></public-pricing-view>`
+    )) as PublicPricingView;
+    await tick();
+    await el.updateComplete;
+
+    const periodRow = () =>
+      el.shadowRoot?.querySelector('.period-row') as HTMLElement | null;
+    const pill = el.shadowRoot?.querySelector(
+      'billing-toggle'
+    ) as HTMLElement | null;
+    expect(pill, 'Cloud has the period pill').to.exist;
+    await (pill as any)?.updateComplete;
+    expect((pill as any)?.compact, 'small pill, not a second tab bar').to.equal(
+      true
+    );
+    const cloudHeight = periodRow()?.getBoundingClientRect().height || 0;
+    expect(cloudHeight).to.be.greaterThan(0);
+
+    await selectTab(el, 'dedicated');
+    // Nothing on this tab is priced per month, so the pill goes, but its row
+    // keeps the exact same height and the cards do not jump.
+    expect(el.shadowRoot?.querySelector('billing-toggle')).to.not.exist;
+    expect(periodRow(), 'the row survives').to.exist;
+    expect(periodRow()?.getBoundingClientRect().height).to.equal(cloudHeight);
+  });
+
+  it('prints the self-hosted Business subtitle on that card alone', async () => {
+    fetchStub = stubLadderFetch();
+    const el = (await fixture(
+      html`<public-pricing-view></public-pricing-view>`
+    )) as PublicPricingView;
+    await tick();
+    await el.updateComplete;
+    await selectTab(el, 'dedicated');
+
+    const cards = Array.from(
+      el.shadowRoot?.querySelectorAll('pricing-card') || []
+    );
+    await Promise.all(cards.map((c) => (c as any).updateComplete));
+    const subtitles = cards.map(
+      (c) =>
+        (c as HTMLElement).shadowRoot
+          ?.querySelector('.plan-subtitle')
+          ?.textContent?.trim() || ''
+    );
+    expect(subtitles).to.deep.equal(['', 'Self-hosted license', '']);
+    expect((cards[1] as HTMLElement).shadowRoot?.textContent).to.contain(
+      '$6,000/yr'
+    );
   });
 
   it('sends a dedicated card CTA to its own link, never to checkout', async () => {
@@ -591,7 +761,7 @@ describe('PublicPricingView', () => {
     expect(el.shadowRoot?.querySelector('billing-toggle')).to.exist;
     expect(el.shadowRoot?.textContent).to.contain('Compare cloud plans');
     expect(el.shadowRoot?.textContent).to.not.contain(
-      'Compare dedicated editions'
+      'Compare self-hosted editions'
     );
   });
 
@@ -730,7 +900,9 @@ describe('PublicPricingView', () => {
     expect(el.shadowRoot?.textContent).to.contain('Compare cloud plans');
     expect(el.shadowRoot?.textContent).to.not.contain('Compare plans');
     await selectTab(el, 'dedicated');
-    expect(el.shadowRoot?.textContent).to.contain('Compare dedicated editions');
+    expect(el.shadowRoot?.textContent).to.contain(
+      'Compare self-hosted editions'
+    );
   });
 
   it('sends enterprise to the contact route, never to checkout', async () => {
@@ -801,7 +973,7 @@ describe('PublicPricingView', () => {
           data-price-monthly=""
           data-price-annually=""
           data-price-label="from $30k/yr"
-          data-tagline="Dedicated or self-hosted, up to 100 users."
+          data-tagline="Self-hosted, or a dedicated instance run by us."
           data-deployment="dedicated"
           data-features=""
         ></div>

@@ -5,6 +5,8 @@ import { formatPlanPrice } from '../pricing-format';
 interface Plan {
   id: string;
   name: string;
+  /** Small line under the name. Only set where the name alone is ambiguous. */
+  subtitle?: string;
   price_monthly: number | null;
   price_annually: number | null;
   features: { [key: string]: any } | string[];
@@ -207,6 +209,22 @@ export class PricingCard extends LitElement {
       font-size: 1.25rem;
     }
 
+    /* Only rendered when the plan declares one. "Business" exists on both
+       tabs, so the self-hosted licence says so directly under its name
+       rather than relying on the visitor remembering which tab is open. */
+    .plan-subtitle {
+      margin: 0 0 0.25rem 0;
+      font-size: 0.85rem;
+      font-weight: 500;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      color: var(--sl-color-text-secondary);
+    }
+
+    .plan-card.popular .plan-subtitle {
+      color: rgba(255, 255, 255, 0.85);
+    }
+
     .price-wrap {
       margin: 0.25rem 0 0.75rem 0;
     }
@@ -221,6 +239,7 @@ export class PricingCard extends LitElement {
     }
 
     .plan-name,
+    .plan-subtitle,
     .price-main,
     .unit {
       text-align: center;
@@ -362,6 +381,11 @@ export class PricingCard extends LitElement {
             : null
         }
         <h3 class="plan-name">${this.plan.name}</h3>
+        ${
+          this.plan.subtitle
+            ? html`<p class="plan-subtitle">${this.plan.subtitle}</p>`
+            : null
+        }
         <div class="price-wrap">${this.formatPrice(this.plan)}</div>
 
         ${

@@ -9,12 +9,18 @@
  * Rules, applied generically from the catalog rather than hand-written per
  * plan:
  *   - Monthly always shows the monthly amount as `$N` with a `/mo` unit.
- *   - Yearly shows the effective monthly rate (`annual / 12`) when that
- *     division is exact, because "$10 /mo billed annually" is the number a
- *     buyer compares against the monthly price.
- *   - When the division is not exact the annual total becomes the headline
- *     instead: `$291.67 /mo` is an ugly, unmemorable price, and rounding it
- *     silently would understate or overstate what is charged.
+ *   - Yearly shows the effective monthly rate (`annual / 12`) to the nearest
+ *     whole dollar, because "$300 /mo billed annually" is the number a buyer
+ *     compares against the monthly price. The annual total is always printed
+ *     in the note, so the exact amount charged is never hidden.
+ *   - Every plan follows that one rule. There is no per-plan branch: a card
+ *     that led with `$3,600 /yr` while its neighbours led with a monthly rate
+ *     made the ladder unreadable at a glance.
+ *   - When the division is not exact the note says so, so a rounded headline
+ *     is never mistaken for the exact monthly charge. A brand-supplied
+ *     `price_note_annual` replaces the derived wording, but the rounding and
+ *     the annual total are appended to it in that case: a custom note can
+ *     change the words, never hide what is charged.
  *   - `price_label` wins outright so a floor price ("from $30k/yr") is never
  *     rendered as if it were an exact amount.
  */
@@ -87,19 +93,25 @@ export function formatPlanPrice(
   if (interval === 'month' || annual === null) return monthlyDisplay();
 
   const effective = annual / MONTHS_PER_YEAR;
-  if (Number.isInteger(effective)) {
-    return {
-      headline: money(effective),
-      unit: '/mo',
-      note: plan.price_note_annual ?? `billed annually (${money(annual)}/yr)`,
-    };
-  }
+  const exact = Number.isInteger(effective);
+  const derived = exact
+    ? `billed annually (${money(annual)}/yr)`
+    : `billed annually (${money(annual)}/yr), monthly rate rounded`;
+  // A brand note replaces the derived wording, but it may not swallow the two
+  // facts that keep a rounded headline honest: the exact annual total and the
+  // rounding itself. When the division is not exact they are appended to the
+  // custom note rather than dropped, because the headline is then the only
+  // number on the card and it is not what the buyer is charged.
+  const custom = plan.price_note_annual;
+  const note = custom
+    ? exact
+      ? custom
+      : `${custom}, monthly rate rounded from ${money(annual)}/yr`
+    : derived;
   return {
-    headline: money(annual),
-    unit: '/yr',
-    note:
-      plan.price_note_annual ??
-      `about ${money(Math.round(effective))}/mo, billed annually`,
+    headline: money(exact ? effective : Math.round(effective)),
+    unit: '/mo',
+    note,
   };
 }
 
