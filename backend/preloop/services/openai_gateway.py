@@ -186,7 +186,10 @@ from preloop.services.gateway_usage_index_queue import (
     get_gateway_usage_index_queue,
 )
 from preloop.services.gateway_usage_search import GatewayUsageSearchService
-from preloop.services.session_search_index import index_gateway_interaction
+from preloop.services.session_search_index import (
+    index_gateway_interaction,
+    index_session_summary,
+)
 from preloop.services.model_content_policy import (
     enforce_request_policy,
     enforce_response_policy,
@@ -9540,19 +9543,51 @@ class OpenAIGatewayService:
         if not summary:
             return
 
-        self.db.execute(
-            text(
-                "UPDATE runtime_session "
-                "SET summary = :summary, summary_updated_at = :summary_updated_at "
-                "WHERE id = :runtime_session_id"
-            ),
-            {
-                "summary": summary[:1000],
-                "summary_updated_at": observed_at,
-                "runtime_session_id": runtime_session.id,
-            },
+        stored_summary = summary[:1000]
+        existing_updated_at = summary_state.get("summary_updated_at")
+        summary_changed = (
+            stored_summary != existing_summary or existing_updated_at is None
         )
-        self.db.commit()
+        if summary_changed:
+            self.db.execute(
+                text(
+                    "UPDATE runtime_session "
+                    "SET summary = :summary, summary_updated_at = :summary_updated_at "
+                    "WHERE id = :runtime_session_id"
+                ),
+                {
+                    "summary": stored_summary,
+                    "summary_updated_at": observed_at,
+                    "runtime_session_id": runtime_session.id,
+                },
+            )
+            self.db.commit()
+            occurred_at = observed_at
+        else:
+            # Same sentence as the stored one: keep summary_updated_at so
+            # the search chunk is not deleted and reinserted unchanged.
+            occurred_at = existing_updated_at or observed_at
+        try:
+            index_session_summary(
+                self.db,
+                account_id=self.auth_context.user.account_id,
+                runtime_session_id=runtime_session.id,
+                title=getattr(runtime_session, "title", None),
+                summary=stored_summary,
+                occurred_at=occurred_at,
+                meta_data={
+                    "session_source_type": getattr(
+                        runtime_session, "session_source_type", None
+                    )
+                },
+                commit=True,
+            )
+        except Exception:  # noqa: BLE001 - a summary is never lost over search
+            logger.warning(
+                "Session summary indexing failed for session %s",
+                runtime_session.id,
+                exc_info=True,
+            )
 
     def _runtime_session_summary_state(
         self, runtime_session_id: Any

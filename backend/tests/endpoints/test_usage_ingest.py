@@ -838,6 +838,20 @@ class TestRuntimeSessions:
         # Summaries only: no transcript text was stored.
         assert session.activities == []
 
+        from preloop.models.crud import crud_session_search_document
+        from preloop.models.models.session_search_document import (
+            SOURCE_KIND_SESSION_SUMMARY,
+        )
+
+        chunks = crud_session_search_document.list_for_source(
+            db_session,
+            source_kind=SOURCE_KIND_SESSION_SUMMARY,
+            source_id=str(session.id),
+        )
+        assert len(chunks) == 1
+        assert "title: Count the Go files in cli" in chunks[0].content
+        assert "whole count" in chunks[0].content
+
         # A later default title never overrides a real one.
         later = self._lifecycle(
             "response",
@@ -849,6 +863,96 @@ class TestRuntimeSessions:
         client.post(INGEST_URL, json=_payload([later]))
         db_session.refresh(session)
         assert session.title == "Count the Go files in cli"
+
+        # An identical summary push must not move summary_updated_at or
+        # rewrite the search chunk.
+        before_updated_at = session.summary_updated_at
+        before_chunk = chunks[0]
+        same_summary = self._lifecycle(
+            "response",
+            "conv-live",
+            "stop:gen-3:0",
+            3,
+            input_tokens=4,
+            output_tokens=6,
+            metadata={
+                "hook_event_name": "stop",
+                "session_title": "Count the Go files in cli",
+                "session_summary": "That is the whole count; nothing else changed.",
+            },
+        )
+        assert (
+            client.post(INGEST_URL, json=_payload([same_summary])).json()["accepted"]
+            == 1
+        )
+        db_session.refresh(session)
+        db_session.refresh(before_chunk)
+        assert session.summary == "That is the whole count; nothing else changed."
+        assert session.summary_updated_at == before_updated_at
+        after_chunks = crud_session_search_document.list_for_source(
+            db_session,
+            source_kind=SOURCE_KIND_SESSION_SUMMARY,
+            source_id=str(session.id),
+        )
+        assert len(after_chunks) == 1
+        assert after_chunks[0].id == before_chunk.id
+        assert after_chunks[0].content_hash == before_chunk.content_hash
+        assert after_chunks[0].occurred_at == before_chunk.occurred_at
+
+    def test_identical_title_only_push_does_not_rewrite_the_chunk(
+        self, client, db_session, test_user
+    ):
+        """A title-only session must not churn the chunk on an identical push."""
+        _make_cursor_agent(db_session, test_user.account_id)
+        db_session.commit()
+        first = self._lifecycle(
+            "response",
+            "conv-title",
+            "stop:title-1:0",
+            10,
+            metadata={"session_title": "Count the Go files in cli"},
+        )
+        assert client.post(INGEST_URL, json=_payload([first])).json()["accepted"] == 1
+
+        session = self._session(db_session, test_user.account_id, "conv-title")
+        assert session.title == "Count the Go files in cli"
+        assert session.summary is None
+        assert session.summary_updated_at is None
+
+        from preloop.models.crud import crud_session_search_document
+        from preloop.models.models.session_search_document import (
+            SOURCE_KIND_SESSION_SUMMARY,
+        )
+
+        before = crud_session_search_document.list_for_source(
+            db_session,
+            source_kind=SOURCE_KIND_SESSION_SUMMARY,
+            source_id=str(session.id),
+        )
+        assert len(before) == 1
+        before_id = before[0].id
+        before_hash = before[0].content_hash
+        before_occurred_at = before[0].occurred_at
+
+        later = self._lifecycle(
+            "response",
+            "conv-title",
+            "stop:title-2:0",
+            5,
+            metadata={"session_title": "Count the Go files in cli"},
+        )
+        assert client.post(INGEST_URL, json=_payload([later])).json()["accepted"] == 1
+        db_session.refresh(session)
+        after = crud_session_search_document.list_for_source(
+            db_session,
+            source_kind=SOURCE_KIND_SESSION_SUMMARY,
+            source_id=str(session.id),
+        )
+        assert session.title == "Count the Go files in cli"
+        assert len(after) == 1
+        assert after[0].id == before_id
+        assert after[0].content_hash == before_hash
+        assert after[0].occurred_at == before_occurred_at
 
     def test_session_end_closes_and_session_start_reopens(
         self, client, db_session, test_user
