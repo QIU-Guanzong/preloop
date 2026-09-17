@@ -62,9 +62,9 @@ const catalog = () => ({
         id === 'enterprise'
           ? -1
           : id === 'free'
-            ? 100000000
+            ? 20000000
             : id === 'pro'
-              ? 1000000000
+              ? 200000000
               : 5000000000,
       retention_days: Number(days),
       hosted_models_monthly_limit_usd:
@@ -132,8 +132,8 @@ describe('Public pricing from billing catalog', () => {
       (r) => r.label === 'BYOK analysis quota / month'
     )!;
     expect(row.values).to.deep.equal({
-      free: '100M tokens',
-      pro: '1B tokens',
+      free: '20M tokens',
+      pro: '200M tokens',
       team: '5B tokens',
     });
   });

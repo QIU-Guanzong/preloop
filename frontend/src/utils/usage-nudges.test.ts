@@ -190,12 +190,12 @@ describe('usage nudge copy', () => {
       nudgeMessage(
         nudge({
           key: 'byok_ingest_tokens_monthly',
-          used: 51_000_000,
-          limit: 100_000_000,
+          used: 10_200_000,
+          limit: 20_000_000,
           unit: 'tokens',
         })
       )
-    ).to.equal('51M of 100M analysis tokens this month');
+    ).to.equal('10.2M of 20M analysis tokens this month');
     expect(
       nudgeMessage(
         nudge({
