@@ -25,6 +25,8 @@ agent_config:
     max_no_progress: 2
     max_age_hours: 168
     ci_deadline_seconds: 3600
+    # Reconciliations to wait out a provider infrastructure failure on one head.
+    max_ci_infra_retries: 3
     repair_early: false
     # Explicit provider actor IDs, not names or comment markers.
     trusted_reviewer_ids: [12345]
@@ -119,16 +121,50 @@ between turns; CI waiting and stuck-job deadlines belong to the scheduler.
 GitHub reconciliation reads the current PR head, checks, legacy commit statuses,
 submitted reviews, unresolved inline review threads and conversation comments.
 It incorporates configured required checks, branch protection and effective
-ruleset check/review requirements. GitLab reconciliation reads MR notes,
-commit/pipeline/job statuses, approvals and blocking discussion state. Both paths
-recheck the head after reading gates and stop repairing closed or merged PRs.
+ruleset check/review requirements. A failing check run contributes its own
+bounded, redacted `output` title/summary/text as diagnostic evidence.
 
-Only current-head check failures trigger repairs. Pending or missing required
-checks wait until the CI deadline, then report an explicit blocked state.
-Current cancellations, startup failures, permission requirements and unknown
-outcomes block readiness instead of inviting speculative code edits. Neutral,
-skipped and allowed-failure outcomes follow provider semantics. A failed required
-check never becomes ready simply because a webhook was missing.
+GitLab reconciliation reads MR notes, current-head commit statuses, approvals and
+blocking discussion state. It also reads the current head's pipeline (from the MR
+head pipeline, otherwise the newest pipeline for that exact SHA) and that
+pipeline's jobs. Retried attempts, jobs from another SHA and jobs from another
+project are discarded, and the newest attempt of each job name decides. For at
+most three failing jobs, a bounded redacted tail of the job trace is read as
+diagnostic evidence; a missing or forbidden trace is simply absent. When the
+pipeline has no readable job (a configuration error, or jobs the token cannot
+list), its own status is the evidence instead. Job and pipeline reads stay inside
+one provider page, like notes and statuses.
+
+Both paths recheck the head after reading gates and stop repairing closed or
+merged PRs.
+
+Only current-head check failures trigger repairs, and only when provider details
+attribute the failure to the branch. Pending or missing required checks wait
+until the CI deadline, then report an explicit blocked state. Current
+cancellations, startup failures, permission requirements and unknown outcomes
+block readiness instead of inviting speculative code edits. Neutral, skipped and
+allowed-failure outcomes follow provider semantics. A failed required check never
+becomes ready simply because a webhook was missing.
+
+### Terminal failure classification
+
+Every failing required check is classified from provider metadata, never from the
+log text (a trace is untrusted task data and cannot request a repair):
+
+| Evidence | Outcome |
+| --- | --- |
+| GitLab `script_failure`/`test_failure`, or a GitHub check-run `failure` | code failure: one coalesced repair round |
+| Runner, API, scheduler, image-pull and similar platform reasons | infrastructure: bounded wait, then `ci_infrastructure_failure` |
+| GitLab timeout reasons, GitHub `timed_out` | infrastructure: bounded wait, then `ci_timeout` |
+| Quota, archived project, blocked user, protected environment, upstream permission reasons | `ci_permission_required`, a human must act |
+| `unknown_failure`, an unrecognised reason, or a failing check with no readable job | `ci_failure_unclassified` |
+| A retried attempt whose newer attempt decided the check | ignored |
+
+Infrastructure failures never consume a repair turn. They are retried for
+`max_ci_infra_retries` reconciliations of the same head (default 3, reported as
+`ci_infrastructure_failure_retry`/`ci_timeout_retry`), then the thread blocks with
+the reason above. A new head or a recovered rerun clears that allowance. Review
+feedback that arrives while CI infrastructure is broken still repairs normally.
 
 Readiness requires passing checks and review gates on the current head. Provider
 permission errors, pagination beyond the bounded reconciliation window, and

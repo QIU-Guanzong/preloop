@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 from types import SimpleNamespace
 from copy import deepcopy
 from urllib.parse import quote
@@ -15,8 +15,16 @@ from preloop.models import models
 from preloop.models.crud import crud_tracker, crud_flow_feedback
 from preloop.models.crud.oauth_app_installation import crud_oauth_app_installation
 from preloop.sync.trackers import create_tracker_client
-from preloop.sync.exceptions import TrackerPermissionError
+from preloop.sync.exceptions import TrackerPermissionError, TrackerResponseError
 from sqlalchemy.orm import Session
+
+# Bounded diagnostic tail kept per failing job. Traces are untrusted task data,
+# so only the end of the log (where the failing command reports) is retained.
+JOB_TRACE_TAIL_BYTES = 4000
+# Failing jobs whose trace is read during one reconciliation.
+MAX_JOB_TRACES = 3
+# GitLab job/pipeline reads stay inside one page, like notes and statuses.
+PROVIDER_PAGE_SIZE = 100
 
 
 @dataclass
@@ -30,16 +38,33 @@ class FeedbackState:
     reviews_passed: bool = False
     blocked_reason: str | None = None
     feedback: list[dict[str, Any]] = field(default_factory=list)
+    # Terminal failures the provider attributes to its own infrastructure. They
+    # never invite a code repair; the scheduler retries them a bounded number of
+    # times and then escalates with an explicit reason.
+    infra_failures: list[dict[str, Any]] = field(default_factory=list)
 
 
 def bounded_text(value: Any) -> str:
     """Limit untrusted provider prose and redact common credential forms."""
     text = str(value or "")[:12000]
+    return redact(text)
+
+
+def redact(text: str) -> str:
+    """Remove the common inline credential forms from provider prose."""
     return re.sub(
         r"(?i)(bearer\s+|(?:token|password|api[_-]?key)\s*[=:]\s*)[^\s]+",
         r"\1[REDACTED]",
         text,
     )
+
+
+def bounded_trace(value: Any) -> str:
+    """Keep a redacted tail of a job log; an oversized trace is never stored whole."""
+    text = str(value or "")
+    if len(text) > JOB_TRACE_TAIL_BYTES:
+        text = text[-JOB_TRACE_TAIL_BYTES:]
+    return redact(text)
 
 
 def receipt(
@@ -60,34 +85,161 @@ def receipt(
     }
     identity["kind"] = kind
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    payload = {
+        "id": str(obj.get("id", "")),
+        "body": bounded_text(
+            obj.get("body") or obj.get("note") or obj.get("name") or obj.get("context")
+        ),
+        "url": obj.get("html_url")
+        or obj.get("web_url")
+        or obj.get("details_url")
+        or obj.get("target_url"),
+        "state": obj.get("state") or obj.get("conclusion") or obj.get("status"),
+        "updated_at": obj.get("updated_at")
+        or obj.get("submitted_at")
+        or obj.get("created_at"),
+    }
+    diagnostic = check_diagnostic(obj)
+    if diagnostic:
+        # Bounded redacted CI evidence for the repair turn, still untrusted text.
+        payload["diagnostic"] = diagnostic
+    if obj.get("failure_reason"):
+        payload["failure_reason"] = str(obj["failure_reason"])[:200]
     return {
         "event_key": key,
         "delivery_id": None,
         "head_sha": head_sha,
         "kind": kind,
-        "payload": {
-            "id": str(obj.get("id", "")),
-            "body": bounded_text(
-                obj.get("body")
-                or obj.get("note")
-                or obj.get("name")
-                or obj.get("context")
-            ),
-            "url": obj.get("html_url")
-            or obj.get("web_url")
-            or obj.get("details_url")
-            or obj.get("target_url"),
-            "state": obj.get("state") or obj.get("conclusion") or obj.get("status"),
-            "updated_at": obj.get("updated_at")
-            or obj.get("submitted_at")
-            or obj.get("created_at"),
-        },
+        "payload": payload,
     }
+
+
+def check_diagnostic(obj: dict[str, Any]) -> str | None:
+    """Bounded failing-check evidence: a GitLab job trace or GitHub check output."""
+    if obj.get("trace"):
+        return bounded_trace(obj["trace"])
+    output = obj.get("output")
+    if isinstance(output, dict):
+        parts = [
+            str(output.get(key) or "")
+            for key in ("title", "summary", "text")
+            if output.get(key)
+        ]
+        if parts:
+            return bounded_trace("\n".join(parts))
+    return None
+
+
+PENDING_OUTCOMES = frozenset(
+    {
+        "queued",
+        "pending",
+        "running",
+        "in_progress",
+        "created",
+        "waiting_for_resource",
+        "preparing",
+        "scheduled",
+        None,
+    }
+)
+FAILED_OUTCOMES = frozenset({"failure", "failed", "timed_out"})
+BLOCKED_OUTCOMES = frozenset(
+    {
+        "cancelled",
+        "canceled",
+        "action_required",
+        "startup_failure",
+        "manual",
+        "error",
+        "stale",
+    }
+)
+# GitLab job/pipeline failure reasons. Only a failing script is the branch's own
+# defect; everything else is the platform's problem or needs a human decision.
+CODE_FAILURE_REASONS = frozenset({"script_failure", "test_failure"})
+TIMEOUT_FAILURE_REASONS = frozenset(
+    {"stuck_or_timeout_failure", "job_execution_timeout"}
+)
+PERMISSION_FAILURE_REASONS = frozenset(
+    {
+        "archived_failure",
+        "builds_disabled",
+        "ci_quota_exceeded",
+        "deployment_rejected",
+        "forward_deployment_failure",
+        "insufficient_bridge_permissions",
+        "insufficient_upstream_permissions",
+        "project_deleted",
+        "protected_environment_failure",
+        "secrets_provider_not_found",
+        "user_blocked",
+    }
+)
+INFRA_FAILURE_REASONS = frozenset(
+    {
+        "api_failure",
+        "data_integrity_failure",
+        "downstream_bridge_project_not_found",
+        "environment_creation_failure",
+        "image_pull_failure",
+        "no_matching_runner",
+        "pipeline_loop_detected",
+        "reached_max_descendant_pipelines_depth",
+        "runner_system_failure",
+        "runner_unsupported",
+        "scheduler_failure",
+        "stale_schedule",
+        "trace_size_exceeded",
+        "upstream_bridge_project_not_found",
+    }
+)
+# A reason we do not recognise, or a failing check with no readable evidence, is
+# never guessed into a repair round.
+UNCLASSIFIED_REASONS = frozenset({"unknown_failure", "missing_dependency_failure"})
+
+
+class CheckClassification(NamedTuple):
+    """Terminal outcome buckets for one head; a tuple for existing call sites."""
+
+    pending: bool
+    passed: bool
+    blocked_reason: str | None
+    failures: list[dict[str, Any]]
+    infra_failures: list[dict[str, Any]]
+
+
+def classify_failure(item: dict[str, Any]) -> str:
+    """Bucket one failing check from provider details only, never from log prose.
+
+    Returns ``code`` (a repair round is warranted), ``infra`` or ``timeout``
+    (bounded retry then escalation), ``permission`` (a human must act) or
+    ``unknown`` (no usable evidence, so an explicit blocked reason).
+    """
+    reason = str(item.get("failure_reason") or "").strip().lower()
+    if reason in CODE_FAILURE_REASONS:
+        return "code"
+    if reason in TIMEOUT_FAILURE_REASONS:
+        return "timeout"
+    if reason in PERMISSION_FAILURE_REASONS:
+        return "permission"
+    if reason in INFRA_FAILURE_REASONS:
+        return "infra"
+    if reason and reason not in UNCLASSIFIED_REASONS:
+        return "unknown"
+    outcome = item.get("conclusion") or item.get("state") or item.get("status")
+    if outcome == "timed_out":
+        return "timeout"
+    if reason in UNCLASSIFIED_REASONS or item.get("details_unavailable") is True:
+        # The provider reported a failure it cannot explain, or its job detail
+        # read was unavailable. Repairing on that evidence would be a guess.
+        return "unknown"
+    return "code"
 
 
 def classify_checks(
     checks: list[dict[str, Any]], required: list[str], *, allow_empty: bool = False
-) -> tuple[bool, bool, str | None, list[dict[str, Any]]]:
+) -> CheckClassification:
     """Classify every required terminal outcome; uncertain gates block readiness."""
     by_name: dict[str, dict[str, Any]] = {}
     for item in checks:
@@ -101,42 +253,94 @@ def classify_checks(
     )
     pending = bool(set(required) - set(by_name))
     blocked = "required_checks_missing" if pending else None
-    failures = []
+    failures: list[dict[str, Any]] = []
+    infra_failures: list[dict[str, Any]] = []
     if not selected and not allow_empty:
-        return True, False, "required_checks_missing", []
+        return CheckClassification(True, False, "required_checks_missing", [], [])
     for item in selected:
         conclusion = item.get("conclusion") or item.get("state") or item.get("status")
         if item.get("allow_failure") is True:
             continue
+        if item.get("superseded") is True:
+            # A retried attempt: the newer attempt of the same check decides.
+            continue
         if conclusion in {"success", "neutral", "skipped"}:
             continue
-        if conclusion in {
-            "queued",
-            "pending",
-            "running",
-            "in_progress",
-            "created",
-            "waiting_for_resource",
-            "preparing",
-            "scheduled",
-            None,
-        }:
+        if conclusion in PENDING_OUTCOMES:
             pending = True
-        elif conclusion in {"failure", "failed", "timed_out"}:
-            failures.append(item)
-        elif conclusion in {
-            "cancelled",
-            "canceled",
-            "action_required",
-            "startup_failure",
-            "manual",
-            "error",
-            "stale",
-        }:
+        elif conclusion in FAILED_OUTCOMES:
+            category = classify_failure(item)
+            if category == "code":
+                failures.append(item)
+            elif category in {"infra", "timeout"}:
+                infra_failures.append(item)
+            elif category == "permission":
+                blocked = "ci_permission_required"
+            else:
+                blocked = "ci_failure_unclassified"
+        elif conclusion in BLOCKED_OUTCOMES:
             blocked = f"ci_{conclusion}"
         else:
             blocked = "ci_unknown_outcome"
-    return pending, not pending and not failures and not blocked, blocked, failures
+    return CheckClassification(
+        pending,
+        not pending and not failures and not infra_failures and not blocked,
+        blocked,
+        failures,
+        infra_failures,
+    )
+
+
+async def _optional(read: Any) -> Any:
+    """Await one diagnostic read; a missing or denied resource is not an error.
+
+    Rate limits, connection failures and other provider errors still propagate:
+    incomplete evidence must never look like a clean read.
+    """
+    try:
+        return await read
+    except TrackerPermissionError:
+        return None
+    except TrackerResponseError as error:
+        if re.search(r"error:\s*(404|403)\b", str(error)):
+            return None
+        raise
+
+
+def _pipeline_only(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
+    """A pipeline with no readable job (config error, unavailable jobs) is evidence.
+
+    Its own status still decides pending versus failed, but a pipeline-level
+    failure has no job trace, so it can never be guessed into a code repair.
+    An unreported status is no evidence at all.
+    """
+    if not pipeline.get("status"):
+        return []
+    return [
+        {
+            "id": pipeline.get("id"),
+            "name": f"pipeline #{pipeline.get('id')}",
+            "status": pipeline.get("status"),
+            "web_url": pipeline.get("web_url"),
+            "details_unavailable": True,
+        }
+    ]
+
+
+def _unexplained(
+    checks: list[dict[str, Any]], jobs: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Commit statuses with no readable job of the same name cannot be repaired."""
+    explained = {str(job.get("name") or "") for job in jobs}
+    results = []
+    for item in checks:
+        name = str(item.get("name") or item.get("context") or "")
+        status = item.get("status") or item.get("state")
+        if name not in explained and status in FAILED_OUTCOMES:
+            results.append({**item, "details_unavailable": True})
+        else:
+            results.append(item)
+    return results
 
 
 def feedback_tracker_options(db: Session, tracker: Any) -> dict[str, Any]:
@@ -318,10 +522,14 @@ class FeedbackProvider:
                 )
             elif rule.get("type") in {"workflows", "code_scanning"}:
                 unsupported_gate = True
-        state.checks_pending, state.checks_passed, state.blocked_reason, failed = (
-            classify_checks(
-                checks.get("check_runs", []) + statuses.get("statuses", []), required
-            )
+        (
+            state.checks_pending,
+            state.checks_passed,
+            state.blocked_reason,
+            failed,
+            state.infra_failures,
+        ) = classify_checks(
+            checks.get("check_runs", []) + statuses.get("statuses", []), required
         )
         if (
             thread_page_limit
@@ -378,17 +586,34 @@ class FeedbackProvider:
         state = FeedbackState(sha, closed=mr["state"] in {"closed", "merged"})
         if state.closed:
             return state
-        checks = await get(f"{repo}/repository/commits/{sha}/statuses?per_page=100")
-        notes = await get(f"{base}/notes?per_page=100&sort=desc&order_by=updated_at")
+        page = f"per_page={PROVIDER_PAGE_SIZE}"
+        checks = await get(f"{repo}/repository/commits/{sha}/statuses?{page}")
+        notes = await get(f"{base}/notes?{page}&sort=desc&order_by=updated_at")
         approvals = await get(f"{base}/approvals")
-        state.checks_pending, state.checks_passed, state.blocked_reason, failed = (
-            classify_checks(checks, self.thread.policy.get("required_checks", []))
+        jobs, jobs_truncated = await self._gitlab_jobs(get, repo, mr, sha)
+        # Job details decide first: a commit status of the same name carries no
+        # failure reason, so it cannot classify its own failure.
+        (
+            state.checks_pending,
+            state.checks_passed,
+            state.blocked_reason,
+            failed,
+            infra,
+        ) = classify_checks(
+            jobs + _unexplained(checks, jobs),
+            self.thread.policy.get("required_checks", []),
         )
-        if len(notes) >= 100 or len(checks) >= 100:
+        state.infra_failures = infra
+        if (
+            len(notes) >= PROVIDER_PAGE_SIZE
+            or len(checks) >= PROVIDER_PAGE_SIZE
+            or jobs_truncated
+        ):
             state.blocked_reason = "provider_page_limit"
         state.reviews_passed = approvals.get("approvals_left", 1) == 0 and bool(
             mr.get("blocking_discussions_resolved", False)
         )
+        await self._gitlab_traces(get, repo, failed)
         state.feedback = self._comments(notes, "comment", sha) + [
             receipt("ci", item, head_sha=sha) for item in failed
         ]
@@ -400,3 +625,92 @@ class FeedbackProvider:
                 blocked_reason="head_changed_during_reconciliation",
             )
         return state
+
+    async def _gitlab_jobs(
+        self, get: Any, repo: str, mr: dict[str, Any], sha: str
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Current-head pipeline jobs, deduplicated by name with retries dropped.
+
+        Stale pipelines, other projects and superseded attempts are discarded
+        before classification. An unavailable pipeline or job read marks the
+        evidence unavailable instead of inventing a code failure.
+        """
+        pipeline = await self._gitlab_pipeline(get, repo, mr, sha)
+        if pipeline is None:
+            return [], False
+        identity = pipeline["id"]
+        jobs = await _optional(
+            get(
+                f"{repo}/pipelines/{identity}/jobs"
+                f"?per_page={PROVIDER_PAGE_SIZE}&include_retried=false"
+            )
+        )
+        if jobs is None:
+            # Commit statuses still describe the gates; their failures simply
+            # have no readable job evidence (see _unexplained).
+            return _pipeline_only(pipeline), False
+        truncated = len(jobs) >= PROVIDER_PAGE_SIZE
+        latest: dict[str, dict[str, Any]] = {}
+        for job in sorted(
+            jobs, key=lambda item: int(item.get("id") or 0), reverse=True
+        ):
+            job_pipeline = job.get("pipeline") or {}
+            if (
+                job.get("retried") is True
+                or (job_pipeline.get("sha") or sha) != sha
+                or str(job_pipeline.get("project_id", self.thread.repository_id))
+                != self.thread.repository_id
+            ):
+                continue
+            name = str(job.get("name") or "")
+            if name in latest:
+                # An earlier attempt of a job the provider ran again.
+                continue
+            latest[name] = {
+                "id": job.get("id"),
+                "name": name,
+                "status": job.get("status"),
+                "stage": job.get("stage"),
+                "allow_failure": job.get("allow_failure"),
+                "failure_reason": job.get("failure_reason"),
+                "web_url": job.get("web_url"),
+                "created_at": job.get("created_at"),
+                "pipeline_id": identity,
+            }
+        return list(latest.values()) or _pipeline_only(pipeline), truncated
+
+    async def _gitlab_pipeline(
+        self, get: Any, repo: str, mr: dict[str, Any], sha: str
+    ) -> dict[str, Any] | None:
+        """The pipeline of the current head only, never a stale or foreign run."""
+        head = mr.get("head_pipeline") or {}
+        if head.get("id") and head.get("sha") == sha:
+            if str(head.get("project_id", self.thread.repository_id)) != str(
+                self.thread.repository_id
+            ):
+                return None
+            return dict(head)
+        pipelines = await _optional(
+            get(
+                f"{repo}/pipelines?sha={quote(sha, safe='')}"
+                "&order_by=id&sort=desc&per_page=20"
+            )
+        )
+        for item in pipelines or []:
+            if item.get("sha") == sha and item.get("id"):
+                return dict(item)
+        return None
+
+    async def _gitlab_traces(
+        self, get: Any, repo: str, failed: list[dict[str, Any]]
+    ) -> None:
+        """Attach a bounded redacted trace tail to the first failing jobs."""
+        for job in failed[:MAX_JOB_TRACES]:
+            if not job.get("id"):
+                continue
+            trace = await _optional(get(f"{repo}/jobs/{job['id']}/trace"))
+            text = getattr(trace, "text", trace)
+            if isinstance(text, bytes):
+                text = text.decode("utf-8", "replace")
+            if isinstance(text, str) and text.strip():
+                job["trace"] = text
