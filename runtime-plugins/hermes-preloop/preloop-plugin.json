@@ -1,19 +1,28 @@
 {
   "name": "preloop-hermes-plugin",
   "displayName": "Preloop",
-  "description": "Expose Hermes to Preloop for discovery, status, Agent Control, voice-transcript delivery, and native tool-call approval on mobile/watch.",
-  "version": "0.2.2",
+  "description": "Hold your Hermes agent's dangerous tool calls for approval on phone, watch, Slack, Mattermost, email or the web console, keep an audit trail of every decision, and talk to a running session from anywhere.",
+  "version": "0.3.0",
   "runtime": "hermes",
   "license": "Apache-2.0",
   "homepage": "https://preloop.ai",
   "repository": "https://github.com/preloop/preloop/tree/main/runtime-plugins/hermes-preloop",
   "keywords": [
     "preloop",
-    "agent-control",
     "hermes",
-    "voice",
+    "approvals",
+    "tool-approval",
+    "human-in-the-loop",
+    "governance",
+    "policy",
+    "audit",
+    "budget",
+    "cost-control",
+    "control-plane",
+    "remote-control",
+    "agent-control",
     "observability",
-    "tool-approval"
+    "voice"
   ],
   "entrypoint": "preloop_hermes_plugin.plugin",
   "permissions": [

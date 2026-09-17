@@ -4059,12 +4059,15 @@ export interface RunPresetTarget {
 
 export interface RunPresetItemResult {
   issue_id?: string | null;
+  issue_key?: string | null;
   project_id?: string | null;
   number?: number | null;
   execution_id?: string | null;
   execution_status?: string | null;
   execution_url?: string | null;
   error?: string | null;
+  // The target already had an active run on this flow; the request reused it.
+  coalesced?: boolean | null;
 }
 
 export interface RunPresetResponse {

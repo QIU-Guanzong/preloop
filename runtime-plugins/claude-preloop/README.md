@@ -1,12 +1,26 @@
-# @preloop-ai/claude-plugin
+# Reach your Claude Code sessions from anywhere
 
-Preloop Agent Control sidecar for [Claude Code](https://code.claude.com).
-It lets Preloop steer Claude Code sessions (send messages, interrupt) and see
-session presence from the Preloop console and mobile apps, using the same
-`preloop.agent_control.v1` protocol as the Hermes and OpenClaw runtime
-plugins.
+A Claude Code session you started this morning is still running. You are not at
+that keyboard, and there is no way to see it or say anything to it.
 
-Status: prototype (issue preloop/preloop#131).
+`@preloop-ai/claude-plugin` is the Preloop Agent Control sidecar for
+[Claude Code](https://code.claude.com). It connects Claude Code to
+[Preloop](https://github.com/preloop/preloop), the open-source AI agent control
+plane, so that:
+
+- **You can see which sessions are alive**, from the Preloop console and the
+  mobile apps.
+- **You can talk to them.** Send a message into a sidecar-owned session, resume
+  a persisted one by id, or interrupt the current turn. Operator text lands as
+  an auditable user turn, never a hidden system prompt.
+- **Approvals keep working without it.** Tool approvals stay on the Claude Code
+  hook path, so stopping the sidecar never leaves anything ungoverned.
+
+It uses the same `preloop.agent_control.v1` protocol as the Hermes and OpenClaw
+runtime plugins. Apache-2.0.
+
+Status: prototype (issue preloop/preloop#131). Read
+[Honest limitations](#honest-limitations) before you rely on it.
 
 ## Why a sidecar
 

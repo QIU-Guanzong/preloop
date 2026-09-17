@@ -10,6 +10,7 @@ import { expect } from '@open-wc/testing';
 import { NO_USAGE_NUDGES, type UsageNudge, type UsageNudges } from '../api';
 import { router } from '../router';
 import {
+  FALLBACK_LADDER,
   NUDGE_BANDS,
   NUDGE_THRESHOLD,
   PLAN_ROUTE,
@@ -101,6 +102,84 @@ describe('usage nudge dismissals', () => {
 
   it('never shows a limit under the threshold, dismissed or not', () => {
     expect(visibleNudges([nudge({ ratio: 0.2 })], {})).to.have.length(0);
+  });
+});
+
+describe('what the console is allowed to say', () => {
+  it('gates on the threshold the server stated, not on this build bands', () => {
+    // A server that nudges from 0.9 and publishes no bands is obeyed: the
+    // console used to fall back to its own 0.5 and speak about limits the
+    // server had decided were not worth a sentence.
+    const strict = nudgeLadder(payload({ threshold: 0.9, bands: null }));
+    expect(strict.threshold).to.equal(0.9);
+    expect(visibleNudges([nudge({ ratio: 0.67 })], {}, strict)).to.have.length(
+      0
+    );
+    expect(visibleNudges([nudge({ ratio: 0.95 })], {}, strict)).to.have.length(
+      1
+    );
+
+    const early = nudgeLadder(payload({ threshold: 0.25, bands: null }));
+    expect(visibleNudges([nudge({ ratio: 0.3 })], {}, early)).to.have.length(1);
+  });
+
+  it('records a dismissal below the first band at the threshold', () => {
+    const early = nudgeLadder(payload({ threshold: 0.25, bands: null }));
+    expect(bandFor(0.3, early.bands)).to.equal(null);
+    const dismissals = { max_agents: early.threshold };
+    expect(
+      visibleNudges([nudge({ ratio: 0.3 })], dismissals, early)
+    ).to.have.length(0);
+    expect(
+      visibleNudges([nudge({ ratio: 0.6 })], dismissals, early)
+    ).to.have.length(1);
+  });
+
+  it('says nothing about a limit that is not a number it can state', () => {
+    // Unlimited items are dropped server-side. If one arrives anyway, the
+    // console stays quiet rather than printing "12 of -1 agents" or reaching
+    // for a limit of its own.
+    for (const limit of [-1, 0, Number.NaN]) {
+      expect(
+        visibleNudges([nudge({ ratio: 1, used: 12, limit })], {})
+      ).to.have.length(0);
+    }
+  });
+
+  it('prints an unknown plan id verbatim and invents nothing for it', () => {
+    // The account pays for a plan that is not in the public ladder. Its
+    // numbers are the server's, and no Free-plan limit is substituted.
+    const legacy = nudge({
+      key: 'analytics_window_days',
+      ratio: 0.8219,
+      used: 300,
+      limit: 365,
+      unit: 'days',
+      plan_id: 'teams',
+      unlocks_at_plan: 'team',
+    });
+    expect(visibleNudges([legacy], {}, FALLBACK_LADDER)).to.deep.equal([
+      legacy,
+    ]);
+    expect(nudgeMessage(legacy)).to.equal(
+      '300 of 365 days of analytics history'
+    );
+    expect(nudgeMessage(legacy)).to.not.contain('90');
+    expect(nudgeLink(legacy.key)).to.contain('?feature=analytics_window_days');
+  });
+
+  it('keeps the analytics window of a plan it has never heard of', () => {
+    const window = analyticsWindow(
+      payload({
+        analytics_window: {
+          days: 365,
+          unlocks_at_plan: 'team',
+          unlocks_at_plan_name: null,
+        },
+      })
+    );
+    expect(window?.days).to.equal(365);
+    expect(window?.unlocks_at_plan).to.equal('team');
   });
 });
 

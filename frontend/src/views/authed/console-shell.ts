@@ -918,24 +918,36 @@ export class ConsoleShell extends LitElement {
                       <sl-menu>
                         ${
                           this.features.user_management
-                            ? html`${this._renderNavLink(
+                            ? this._renderNavLink(
                                 '/console/settings/account',
                                 html`<sl-menu-item>Account</sl-menu-item>`
-                              )}
-                              ${this._renderNavLink(
-                                '/console/settings/users',
-                                html`<sl-menu-item>Users</sl-menu-item>`
-                              )}`
+                              )
                             : ''
                         }
                         ${
                           // Plans exist only where something is sold. Without
                           // the billing plugin the deployment has no catalog,
                           // no subscription and nothing for this page to say.
+                          //
+                          // It sits directly under Account and above Users
+                          // because that is what it is about: what this
+                          // account pays for. Below Users it read as a
+                          // per-person setting, which is the one thing a plan
+                          // is not. The two conditions stay separate so a
+                          // deployment without user management still reaches
+                          // its plan.
                           this.features.billing
                             ? this._renderNavLink(
                                 '/console/settings/plan',
                                 html`<sl-menu-item>Plan</sl-menu-item>`
+                              )
+                            : ''
+                        }
+                        ${
+                          this.features.user_management
+                            ? this._renderNavLink(
+                                '/console/settings/users',
+                                html`<sl-menu-item>Users</sl-menu-item>`
                               )
                             : ''
                         }

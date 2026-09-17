@@ -24458,6 +24458,11 @@ components:
           - type: string
           - type: 'null'
           title: Issue Id
+        issue_key:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Issue Key
         project_id:
           anyOf:
           - type: string
@@ -24488,6 +24493,10 @@ components:
           - type: string
           - type: 'null'
           title: Error
+        coalesced:
+          type: boolean
+          title: Coalesced
+          default: false
       type: object
       title: RunPresetItemResult
       description: Target outcome for a preset run, including dispatch failure receipts.

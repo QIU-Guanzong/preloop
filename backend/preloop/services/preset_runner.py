@@ -6,11 +6,13 @@ targets are supported. Both reviewer flows use preset ``pull-request-reviewer``.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from preloop.api.auth.permissions import has_permission
@@ -32,6 +34,8 @@ TRIAGE_SLUG = "issue-triage-assistant"
 ISSUE_PRESET_SLUGS = {IMPLEMENTER_SLUG, TRIAGE_SLUG}
 PR_PRESET_SLUGS = {REVIEWER_SLUG}
 
+logger = logging.getLogger(__name__)
+
 
 class PresetRunnerError(Exception):
     """Structured failure from resolve-or-create or payload build."""
@@ -44,6 +48,79 @@ class PresetRunnerError(Exception):
 
 def _http(status_code: int, detail: Any) -> PresetRunnerError:
     return PresetRunnerError(status_code, detail)
+
+
+def _issue_display_key(issue: Any) -> Optional[str]:
+    """Human-readable issue identity for a per-item outcome.
+
+    Batch results are read next to a 25-row selection, where a positional
+    label cannot say which issue needs attention.
+    """
+    key = getattr(issue, "key", None)
+    if isinstance(key, str) and key.strip():
+        return key.strip()
+    external_id = getattr(issue, "external_id", None)
+    if external_id is not None and str(external_id).strip():
+        return f"#{str(external_id).strip()}"
+    return None
+
+
+def _active_run_for_target(
+    db: Session,
+    flow: Any,
+    trigger_event_data: Dict[str, Any],
+    *,
+    account_id: Any,
+) -> Optional[Any]:
+    """Return a run of ``flow`` that already holds this issue or pull request.
+
+    One active execution per (flow, tracker object) is what the webhook path
+    enforces; a second click, a retried request or the same issue selected in
+    two batches would otherwise start a duplicate agent on the same object.
+
+    Detection is best effort: it coalesces onto a run that is still active,
+    not onto an assessed issue revision, and a lookup failure lets the run the
+    caller asked for proceed rather than refusing it. Durable per-revision
+    identity is still specified work (issue #448).
+    """
+    from preloop.services.flow_trigger_service import FlowTriggerService
+
+    service = FlowTriggerService(db)
+    try:
+        found = service.find_active_execution_for_event_object(
+            flow, trigger_event_data, account_id
+        )
+    except (SQLAlchemyError, TypeError, ValueError, AttributeError):
+        logger.warning(
+            "Could not check for an active run of flow %s on this target; "
+            "starting the requested run",
+            getattr(flow, "id", None),
+            exc_info=True,
+        )
+        return None
+    if found is None:
+        return None
+    object_key, active = found
+    service.record_coalesced_trigger(
+        flow,
+        trigger_event_data,
+        object_key,
+        active,
+        reason="manual_run_active_execution",
+    )
+    return active
+
+
+def _coalesced_item(active: Any, **identity: Any) -> Dict[str, Any]:
+    """Per-item outcome that points at the run already working on the target."""
+    execution_id = str(active.id)
+    return {
+        **identity,
+        "execution_id": execution_id,
+        "execution_status": active.status,
+        "execution_url": f"/console/flows/executions/{execution_id}",
+        "coalesced": True,
+    }
 
 
 def _label_names(labels: Any) -> List[str]:
@@ -714,6 +791,21 @@ async def run_preset_on_target(
     trigger_event_data = build_issue_trigger_payload(
         issue, project, tracker, git_only=preset_slug != TRIAGE_SLUG
     )
+    issue_key = _issue_display_key(issue)
+
+    active = _active_run_for_target(
+        db, flow, trigger_event_data, account_id=current_user.account_id
+    )
+    if active is not None:
+        item = _coalesced_item(active, issue_id=str(issue_id), issue_key=issue_key)
+        return {
+            "execution_id": item["execution_id"],
+            "flow_id": str(flow.id),
+            "flow_name": flow.name,
+            "flow_created": created,
+            "execution_url": item["execution_url"],
+            "results": [item],
+        }
 
     from preloop.services.flow_trigger_service import (
         FlowDispatchError,
@@ -742,6 +834,7 @@ async def run_preset_on_target(
             "results": [
                 {
                     "issue_id": str(issue_id),
+                    "issue_key": issue_key,
                     "execution_id": execution_id,
                     "execution_status": exc.execution_status,
                     "execution_url": url,
@@ -865,10 +958,18 @@ async def _run_preset_on_issue_batch(
             results.append({"issue_id": key, "error": item_errors[key]})
             continue
         issue, project, tracker = loaded[key]
+        issue_key = _issue_display_key(issue)
         try:
             trigger_event_data = build_issue_trigger_payload(
                 issue, project, tracker, git_only=False
             )
+            active = _active_run_for_target(
+                db, flow, trigger_event_data, account_id=current_user.account_id
+            )
+            if active is not None:
+                item_result = _coalesced_item(active, issue_id=key, issue_key=issue_key)
+                results.append(item_result)
+                continue
             result = await trigger_service.trigger_flow(
                 flow_id=flow.id,
                 test_mode=False,
@@ -880,6 +981,7 @@ async def _run_preset_on_issue_batch(
                 results.append(
                     {
                         "issue_id": key,
+                        "issue_key": issue_key,
                         "error": "Flow trigger did not return an execution id",
                     }
                 )
@@ -887,6 +989,7 @@ async def _run_preset_on_issue_batch(
             execution_id = str(raw_execution_id)
             item_result = {
                 "issue_id": key,
+                "issue_key": issue_key,
                 "execution_id": execution_id,
                 "execution_status": result.get("status"),
                 "execution_url": f"/console/flows/executions/{execution_id}",
@@ -896,6 +999,7 @@ async def _run_preset_on_issue_batch(
             # so callers inspect the existing run instead of submitting it twice.
             item_result = {
                 "issue_id": key,
+                "issue_key": issue_key,
                 "execution_id": exc.execution_id,
                 "execution_status": exc.execution_status,
                 "execution_url": f"/console/flows/executions/{exc.execution_id}",
@@ -903,9 +1007,13 @@ async def _run_preset_on_issue_batch(
                 "View the existing run before retrying.",
             }
         except PresetRunnerError as exc:
-            item_result = {"issue_id": key, "error": _error_text(exc.detail)}
+            item_result = {
+                "issue_id": key,
+                "issue_key": issue_key,
+                "error": _error_text(exc.detail),
+            }
         except ValueError as exc:
-            item_result = {"issue_id": key, "error": str(exc)}
+            item_result = {"issue_id": key, "issue_key": issue_key, "error": str(exc)}
         results.append(item_result)
         if first_execution_id is None and item_result.get("execution_id"):
             first_execution_id = item_result["execution_id"]
@@ -992,6 +1100,20 @@ async def _run_preset_on_pull_request(
         number=int(number),
     )
     trigger_event_data = build_pull_request_trigger_payload(pr, project, tracker)
+
+    active = _active_run_for_target(
+        db, flow, trigger_event_data, account_id=current_user.account_id
+    )
+    if active is not None:
+        item = _coalesced_item(active, project_id=str(project_id), number=int(number))
+        return {
+            "execution_id": item["execution_id"],
+            "flow_id": str(flow.id),
+            "flow_name": flow.name,
+            "flow_created": created,
+            "execution_url": item["execution_url"],
+            "results": [item],
+        }
 
     from preloop.services.flow_trigger_service import (
         FlowDispatchError,
