@@ -864,9 +864,14 @@ func beginLeasedJob(
 	}()
 	resumeFrom := jobResumeFrom(job)
 	if optsErr == nil && opts.PersistWorkspace {
-		if hostDir, persistErr := preparePersistWorkspace(executionID, resumeFrom); persistErr == nil {
+		if hostDir, recovered, persistErr := preparePersistWorkspace(executionID, resumeFrom); persistErr == nil {
 			opts.WorkspaceHostDir = hostDir
 			_ = touchWorkspaceLease(executionID)
+			if !recovered {
+				// Starting anyway would clone cold and silently discard the
+				// unpushed work this job was leased to continue.
+				optsErr = workspaceRecoveryUnavailable(resumeFrom, hostDir)
+			}
 		} else {
 			optsErr = fmt.Errorf("persist workspace: %w", persistErr)
 		}

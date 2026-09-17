@@ -278,6 +278,105 @@ def persistable_job_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return stored
 
 
+def unwrap_agent_config(config: Any) -> Any:
+    """Strip the doubly wrapped ``{"agent_config": {...}}`` storage shape.
+
+    Some stored flow configurations nest the configuration inside a single
+    ``agent_config`` key. Every reader has to agree on one unwrapping: a
+    reader that misses it sees no ``runner`` section, and a host-bound
+    continuation then reads as free to run anywhere.
+
+    Args:
+        config: A stored or payload agent configuration, of any type.
+
+    Returns:
+        The inner configuration when the wrapper is present, else ``config``.
+    """
+    if (
+        isinstance(config, dict)
+        and set(config) == {"agent_config"}
+        and isinstance(config["agent_config"], dict)
+    ):
+        return config["agent_config"]
+    return config
+
+
+def workspace_owner_runner_id(
+    db: Session, *, payload: Dict[str, Any]
+) -> Optional[UUID]:
+    """The runner that holds the local workspace this job wants to resume.
+
+    A private runner keeps a persisted workspace in its own configuration
+    directory and never uploads it. Resuming that work on a second machine
+    would start from a cold clone and quietly drop the unpushed commits, so
+    the continuation is pinned to the host that owns the directory.
+
+    ``None`` means "any matching runner will do": either this is not a
+    resume, the flow does not persist its workspace, or the prior execution
+    was never assigned to a private runner.
+
+    Args:
+        db: Database session.
+        payload: The lease payload built for this execution.
+
+    Returns:
+        The owning runner id, or None when the job is not host bound.
+    """
+    from preloop.models.crud import crud_flow_execution
+
+    resume_from = payload.get("resume_from")
+    if not isinstance(resume_from, str) or not resume_from.strip():
+        return None
+    config = unwrap_agent_config(payload.get("agent_config"))
+    runner_config = config.get("runner") if isinstance(config, dict) else None
+    if not isinstance(runner_config, dict) or not _truthy(
+        runner_config.get("persist_workspace")
+    ):
+        return None
+    try:
+        prior_id = UUID(resume_from.strip())
+    except (ValueError, AttributeError, TypeError):
+        return None
+    prior = crud_flow_execution.get(db, id=prior_id)
+    owner = getattr(prior, "runner_id", None) if prior is not None else None
+    if owner is None and prior is not None:
+        owner = runner_id_from_session_reference(
+            getattr(prior, "agent_session_reference", None)
+        )
+    return owner
+
+
+def _truthy(value: Any) -> bool:
+    """Match the private runner CLI's reading of ``persist_workspace``."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def runner_wait_notice(runner: Optional[FlowRunner], execution_id: Any) -> str:
+    """Operator-visible reason a host-bound continuation is still queued."""
+    name = getattr(runner, "name", None) or PRIVATE_RUNNER_FALLBACK_NAME
+    return (
+        f"Waiting for private runner {name}: it holds the local workspace for "
+        f"execution {execution_id}. The workspace is never uploaded, so this "
+        "continuation cannot move to another host."
+    )
+
+
+def runner_blocked_notice(runner: Optional[FlowRunner], execution_id: Any) -> str:
+    """Operator action required once a host-bound continuation times out."""
+    name = getattr(runner, "name", None) or PRIVATE_RUNNER_FALLBACK_NAME
+    return (
+        f"Private runner {name} did not come online within {DEFAULT_QUEUE_TIMEOUT}. "
+        f"The recovery workspace for execution {execution_id} is still on that "
+        "host, under the runner configuration directory. Bring the runner back "
+        "and retry, or start a fresh conversation from the published branch. "
+        "Preloop does not upload private workspaces or move them to another host."
+    )
+
+
 def lease_job(
     db: Session,
     *,
@@ -285,6 +384,7 @@ def lease_job(
     pool: str,
     execution_id: UUID,
     payload: Dict[str, Any],
+    required_runner_id: Optional[UUID] = None,
 ) -> Optional[FlowRunner]:
     """Assign a pending job to one matching online runner. None if queued.
 
@@ -293,6 +393,10 @@ def lease_job(
     hold up to its capacity at once; ``find_matching`` already orders the
     emptiest machine first. Credentials are stripped from the stored payload;
     the caller still holds the original dict for the in-memory WebSocket push.
+
+    ``required_runner_id`` pins the job to the host that holds its local
+    recovery state. No other runner is considered, even an idle one in the
+    same pool: the work would restart from a cold clone there.
     """
     from preloop.models.crud import crud_flow_execution
 
@@ -306,6 +410,8 @@ def lease_job(
     matches = crud_flow_runner.find_matching(
         db, account_id=account_id, pool=pool, online_only=True
     )
+    if required_runner_id is not None:
+        matches = [row for row in matches if row.id == required_runner_id]
     available = [
         row
         for row in matches
