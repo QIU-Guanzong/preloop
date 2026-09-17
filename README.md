@@ -10,12 +10,9 @@
 
 Preloop is a single self-hostable platform: an **MCP firewall** for tool access, an **AI model gateway** for cost, safety and attribution, **policy-as-code** with **human approvals**, and **runtime session observability**.
 
-Basic account, agent, API-key and model budgets and single-person human approval workflows are included in the open-source core and cloud Free. Multi-user approval routing, quorum, escalations and advanced organization administration are commercial features. Cloud usage allowances and hosted credits are separate from governance budgets.
-
-
-Flow presets can collect machine evidence for CRA- and EU AI Act-style reviews (SBOM verify, exploit check); Runtime Observability keeps the session timeline next to it. That is not a conformity assessment, certification, or legal advice. Presets: [security audit presets](docs/guide/flows/security-audit-presets.md).
-
 Onboard existing agents with one command. Talk to long-running ones from the console, phone, or watch. Deploy event-driven automations when GitHub, GitLab, Jira, or a webhook fires. Works with OpenClaw, Claude Code, Codex CLI, Cursor, Gemini CLI, Hermes, OpenCode, Windsurf, and any MCP-compatible agent.
+
+Flow presets can review pull requests, implement issues, scan for vulnerabilities, collect machine evidence for CRA- and EU AI Act-style reviews (SBOM verify, exploit check); Runtime Observability keeps the session timeline next to it. That is not a conformity assessment, certification, or legal advice. Presets: [security audit presets](docs/guide/flows/security-audit-presets.md).
 
 ```bash
 # 1. Install the CLI (macOS / Linux)
