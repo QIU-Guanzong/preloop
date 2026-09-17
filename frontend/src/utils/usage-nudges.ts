@@ -19,6 +19,14 @@
  * stored is the band the person dismissed at, not a boolean, so crossing
  * the next threshold (50, then 80, then 100 percent) says it again: "you
  * are at 80 percent" is new information, "you are still at 51" is not.
+ *
+ * One rule governs every number here: the server owns them. `used`, `limit`,
+ * `unit`, `ratio` and the analytics window are printed exactly as they
+ * arrive, and an account on a plan this build has never heard of is a plan
+ * this build says nothing about. There is no client-side table of plan
+ * limits to fall back to, and in particular no Free-plan default: a person
+ * paying for a plan that is not in the public ladder must never be told the
+ * limits of the plan they are not on.
  */
 
 import type { AnalyticsWindow, UsageNudge, UsageNudges } from '../api';
@@ -45,19 +53,33 @@ export interface NudgeLadder {
   bands: readonly number[];
 }
 
-/** The server's ladder when it sent a usable one, else this build's. */
+/** This build's ladder, used only where the server publishes none. */
+export const FALLBACK_LADDER: NudgeLadder = {
+  threshold: NUDGE_THRESHOLD,
+  bands: NUDGE_BANDS,
+};
+
+/**
+ * The server's ladder when it sent a usable one, else this build's.
+ *
+ * The threshold is taken as stated. It used to be lowered to the smallest
+ * band, so a server saying "nudge from 0.9" while publishing the usual
+ * 0.5/0.8/1.0 ladder to re-nudge on came back out of here as 0.5, and the
+ * console spoke about limits the server had decided were not worth
+ * mentioning. Bands are the re-nudge ladder, not the gate.
+ */
 export function nudgeLadder(payload: UsageNudges): NudgeLadder {
   const bands = (payload.bands ?? []).filter(
     (band) => typeof band === 'number' && Number.isFinite(band) && band > 0
   );
-  const threshold =
+  const stated =
     typeof payload.threshold === 'number' &&
     Number.isFinite(payload.threshold) &&
     payload.threshold > 0
       ? payload.threshold
-      : NUDGE_THRESHOLD;
+      : null;
   return {
-    threshold: bands.length ? Math.min(threshold, ...bands) : threshold,
+    threshold: stated ?? (bands.length ? Math.min(...bands) : NUDGE_THRESHOLD),
     bands: bands.length ? [...bands].sort((a, b) => a - b) : NUDGE_BANDS,
   };
 }
@@ -83,7 +105,12 @@ export function nudgeDismissalsKey(userId: string): string {
 }
 
 /**
- * The band a ratio has reached, or null below the threshold.
+ * The band a ratio has reached, or null below the first band.
+ *
+ * The first band is not the threshold: the threshold is the server's gate on
+ * whether a limit is worth a sentence, and `visibleNudges()` applies it.
+ * This answers the other question, how loud the news is, and a ratio over
+ * the threshold but under the lowest band simply has no band yet.
  *
  * A band, not the raw ratio: 0.51 and 0.79 are the same news, and a nudge
  * that reappears for every percent is an alarm nobody reads.
@@ -167,17 +194,33 @@ export function clearNudgeDismissals(userId: string): void {
 }
 
 /**
- * The nudges worth showing: at or past the threshold, and either never
- * dismissed or dismissed at a lower band than they now stand at.
+ * The nudges worth showing: at or past the server's threshold, measurable,
+ * and either never dismissed or dismissed at a lower band than they now
+ * stand at.
+ *
+ * The gate is the threshold the server published, not the first band this
+ * build happens to carry, so the console speaks about exactly the limits the
+ * server considers worth a sentence and never about a limit it does not.
+ *
+ * A limit that is not a positive finite number is not a limit: the server
+ * drops unlimited items, and if one ever arrives (`-1`, `null`, a zero
+ * allowance) the console stays quiet rather than printing "3 of -1 agents".
+ * Nothing is substituted for it, because a limit this console cannot read is
+ * not a limit it may invent.
  */
 export function visibleNudges(
   nudges: readonly UsageNudge[],
   dismissals: NudgeDismissals,
-  bands: readonly number[] = NUDGE_BANDS
+  ladder: NudgeLadder = FALLBACK_LADDER
 ): UsageNudge[] {
   return nudges.filter((nudge) => {
-    const band = bandFor(nudge.ratio, bands);
-    if (band === null) return false;
+    if (!Number.isFinite(nudge.limit) || nudge.limit <= 0) return false;
+    if (!Number.isFinite(nudge.ratio) || nudge.ratio < ladder.threshold) {
+      return false;
+    }
+    // Below the first band but above the threshold the dismissal is recorded
+    // at the threshold, so the two comparisons stay on one scale.
+    const band = bandFor(nudge.ratio, ladder.bands) ?? ladder.threshold;
     const dismissed = dismissals[nudge.key];
     return dismissed === undefined || band > dismissed;
   });

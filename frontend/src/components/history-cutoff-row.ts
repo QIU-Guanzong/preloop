@@ -20,6 +20,13 @@ import {
  * and then there is no row at all. With no plan left to move to, the row
  * states the window and offers nothing: a "See plans" control that leads
  * only back to the plan you are on is a dead end with a price tag on it.
+ *
+ * "A plan left to move to" is the plan id the server sent, not its display
+ * name. The name is only how the sentence reads: a payload that names a plan
+ * the console cannot put a word to (an older server, a catalog the console
+ * has never seen) still has somewhere to send the reader, so the offer
+ * stands and the sentence simply stops naming a plan. The window itself is
+ * whatever the server said, verbatim.
  */
 @customElement('history-cutoff-row')
 export class HistoryCutoffRow extends LitElement {
@@ -30,6 +37,10 @@ export class HistoryCutoffRow extends LitElement {
   /** Name of the cheapest plan with a longer window, or null at the top. */
   @property({ type: String, attribute: 'unlocks-at-plan-name' })
   unlocksAtPlanName: string | null = null;
+
+  /** Id of that plan. Present without a name on a plan the catalog renamed. */
+  @property({ type: String, attribute: 'unlocks-at-plan' })
+  unlocksAtPlan: string | null = null;
 
   static styles = css`
     :host {
@@ -82,7 +93,7 @@ export class HistoryCutoffRow extends LitElement {
           >${historyCutoffMessage(this.days, this.unlocksAtPlanName)}</span
         >
         ${
-          this.unlocksAtPlanName
+          this.unlocksAtPlanName || this.unlocksAtPlan
             ? html`<button type="button" @click=${this.handleSeePlans}>
                 See plans
               </button>`
