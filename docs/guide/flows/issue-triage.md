@@ -71,9 +71,17 @@ receipts, expected edit fields and provider snapshots. Final receipts also match
 the observed provider update time; pending write expectations expire. Suppression
 keys on the receipt, not on which tools a flow selected, so an event that carries no
 trusted receipt stays eligible for every flow. Marker text alone does not suppress
-an event. Manual runs remain eligible, as do assignment, reopening and later human
+an event. Manual runs remain eligible, as do reopening and later human
 edits. Rapid human edits can still
 enqueue multiple runs; this is not durable per-revision coalescing.
+
+Automatic triage also skips an issue update whose provider change set touches
+neither the title nor the description. GitLab reports an assignee, milestone or
+due-date edit as a plain issue update, and triage has nothing new to read in one.
+The check needs a provider change set: a delivery without one (Jira, a replayed
+payload, a manual run) still runs. Only flows created from this preset are held
+back, so a GitLab assignment still reaches other flows that subscribe to issue
+updates.
 
 ## Manual runs
 
@@ -91,10 +99,23 @@ unchanged; batch `targets` is triage-only.
 For non-Git trackers, the packet keeps the issue key and known URL. It does
 not invent a repository, clone URL, default branch, or author from an assignee.
 
-Batch results report each issue separately. If dispatch fails after an execution
-was created, its ID, status and link remain in the response with a warning. The
-console shows these warnings and run links; inspect an existing run before
-retrying. Other valid issues in the batch continue.
+Batch results report each issue separately, each with its issue key so a
+25-row selection says which issue needs attention. If dispatch fails after an
+execution was created, its ID, status and link remain in the response with a
+warning. The console shows these warnings and run links; inspect an existing run
+before retrying. Other valid issues in the batch continue.
+
+A manual run reuses a run that is already active on the same flow and the same
+issue instead of starting a second agent on it. That item comes back with
+`coalesced: true` and the existing execution's ID, status and link, and the
+console says a run is already working on the target. The same guard covers the
+implementer and reviewer run actions, matching the one-active-run-per-object rule
+the webhook path already applies. It keys on an active execution for the object,
+not on the assessed issue revision, so it is not durable idempotency: once a run
+finishes, the next request starts a new one. Detection is best effort and a
+lookup failure starts the requested run rather than refusing it. For trackers
+other than GitHub and GitLab the packet carries no object key, so those manual
+runs are never coalesced.
 
 ## Diagnostic result
 

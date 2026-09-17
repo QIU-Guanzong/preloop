@@ -209,7 +209,9 @@ export class RunPresetDialog extends LitElement {
   private showRunResultToast(result: RunPresetResponse): void {
     const items = result.results;
     const failures = items?.filter((item) => item.error).length || 0;
-    const created = items?.filter((item) => item.execution_id).length || 0;
+    const running = items?.filter((item) => item.coalesced).length || 0;
+    const created =
+      items?.filter((item) => item.execution_id && !item.coalesced).length || 0;
     const alert = Object.assign(document.createElement('sl-alert'), {
       variant: failures ? 'warning' : 'success',
       duration: Infinity,
@@ -226,6 +228,9 @@ export class RunPresetDialog extends LitElement {
       ? (created
           ? `${created} ${created === 1 ? 'run' : 'runs'} created.`
           : 'No runs were created.') +
+        (running
+          ? ` ${running} ${running === 1 ? 'target was' : 'targets were'} already running.`
+          : '') +
         (failures
           ? ` ${failures} ${failures === 1 ? 'target needs' : 'targets need'} attention.`
           : '')
@@ -245,13 +250,18 @@ export class RunPresetDialog extends LitElement {
     if (items) {
       for (const [index, item] of items.entries()) {
         const line = document.createElement('div');
+        // Name the target. A position in the list cannot tell a reader which
+        // of 25 selected issues needs attention.
         const label =
           item.project_id && item.number != null
             ? `Pull request #${item.number}`
-            : `Issue ${index + 1}`;
-        line.append(
-          document.createTextNode(`${label}: ${item.error || 'Run created.'} `)
-        );
+            : item.issue_key || `Issue ${index + 1}`;
+        const outcome =
+          item.error ||
+          (item.coalesced
+            ? 'A run is already working on this target.'
+            : 'Run created.');
+        line.append(document.createTextNode(`${label}: ${outcome} `));
         if (item.execution_url) addRunLink(line, item.execution_url);
         alert.append(line);
       }

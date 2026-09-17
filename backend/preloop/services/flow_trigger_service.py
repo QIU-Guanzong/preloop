@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import logging
 import threading
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import Connection
@@ -40,6 +40,10 @@ from preloop.services.webhook_delivery_dedupe import (
 from preloop.utils.workspace_seed import attach_workspace_file_paths
 from preloop.models.db.session import get_session_factory
 from preloop.schemas.issue_triage import provider_revision
+from preloop.services.issue_triage_trigger import (
+    is_triage_preset_flow,
+    issue_update_touches_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -479,12 +483,34 @@ class FlowTriggerService:
 
         return None
 
-    def _record_coalesced_trigger(
+    def find_active_execution_for_event_object(
+        self,
+        flow: Flow,
+        event_data: Dict[str, Any],
+        account_id: Any,
+    ) -> Optional[Tuple[str, FlowExecution]]:
+        """Object key and this flow's active run for it, or None.
+
+        Public entry point for callers outside the webhook path (the manual
+        ``POST /flows/run-preset`` runs) so one active execution per (flow,
+        tracker object) means the same thing however the run was started.
+        """
+        object_key = self._extract_tracker_object_key(event_data)
+        if not object_key:
+            return None
+        active = self._find_active_execution_for_tracker_object(
+            flow, object_key, str(account_id)
+        )
+        return (object_key, active) if active is not None else None
+
+    def record_coalesced_trigger(
         self,
         flow: Flow,
         event_data: Dict[str, Any],
         object_key: str,
         active: FlowExecution,
+        *,
+        reason: str = "active_execution_for_tracker_object",
     ) -> None:
         """Make a skipped trigger visible instead of silently dropping it."""
         logger.info(
@@ -513,7 +539,7 @@ class FlowTriggerService:
                     "object_key": object_key,
                     "active_execution_id": str(active.id),
                     "active_status": active.status,
-                    "reason": "active_execution_for_tracker_object",
+                    "reason": reason,
                 },
             )
         except Exception:  # noqa: BLE001 - audit must never block triggering
@@ -1468,6 +1494,10 @@ class FlowTriggerService:
             if triage_self_update:
                 logger.info("Event matches a recorded triage write receipt")
 
+            # Relevance is a property of the delivery, so evaluate it once.
+            # Only triage flows are held back by it (see issue_triage_trigger).
+            triage_content_change = issue_update_touches_content(event_data)
+
             # Filter flows by trigger_config and enabled status
             flows_to_trigger = []
             for flow in matching_flows:
@@ -1485,6 +1515,15 @@ class FlowTriggerService:
                 if triage_self_update:
                     logger.info(
                         "Skipping flow %s for a recorded triage issue update",
+                        flow.id,
+                    )
+                    continue
+
+                if not triage_content_change and is_triage_preset_flow(self.db, flow):
+                    logger.info(
+                        "Skipping triage flow %s: this issue update changed "
+                        "neither the title nor the description, so triage has "
+                        "nothing new to assess",
                         flow.id,
                     )
                     continue
@@ -1602,7 +1641,7 @@ class FlowTriggerService:
                                 flow, object_key, account_id
                             )
                             if active is not None:
-                                self._record_coalesced_trigger(
+                                self.record_coalesced_trigger(
                                     flow, event_data, object_key, active
                                 )
                                 continue
