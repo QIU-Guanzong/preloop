@@ -200,7 +200,8 @@ class GitHubTracker(BaseTracker):
                         raise TrackerAuthenticationError("GitHub authentication failed")
                     elif response.status_code >= 400:
                         raise TrackerResponseError(
-                            f"GitHub API error: {response.status_code} - {response.text}"
+                            f"GitHub API error: {response.status_code} - {response.text}",
+                            status_code=response.status_code,
                         )
 
                     data = response.json()
@@ -279,7 +280,8 @@ class GitHubTracker(BaseTracker):
                         TrackerPermissionError if denied else TrackerResponseError
                     )
                     raise error_type(
-                        f"GitHub API error: {response.status_code} - {response.text}"
+                        f"GitHub API error: {response.status_code} - {response.text}",
+                        status_code=response.status_code,
                     )
                 if response.status_code == 204:
                     return None, dict(response.headers)
