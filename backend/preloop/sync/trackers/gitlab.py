@@ -120,7 +120,10 @@ class GitLabTracker(BaseTracker):
             if e.response_code == HTTP_STATUS_UNAUTHORIZED:
                 raise TrackerAuthenticationError(f"GitLab authentication failed: {e}")
             else:
-                raise TrackerResponseError(f"GitLab API error: {e.response_code} - {e}")
+                raise TrackerResponseError(
+                    f"GitLab API error: {e.response_code} - {e}",
+                    status_code=e.response_code,
+                )
         except gitlab.exceptions.GitlabConnectionError as e:
             raise TrackerConnectionError(f"GitLab connection error: {e}")
         except Exception as e:
@@ -145,7 +148,10 @@ class GitLabTracker(BaseTracker):
             if e.response_code == HTTP_STATUS_UNAUTHORIZED:
                 raise TrackerAuthenticationError(f"GitLab authentication failed: {e}")
             else:
-                raise TrackerResponseError(f"GitLab API error: {e.response_code} - {e}")
+                raise TrackerResponseError(
+                    f"GitLab API error: {e.response_code} - {e}",
+                    status_code=e.response_code,
+                )
         except gitlab.exceptions.GitlabConnectionError as e:
             raise TrackerConnectionError(f"GitLab connection error: {e}")
         except Exception as e:
