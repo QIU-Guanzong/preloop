@@ -375,7 +375,7 @@ export class PlanView extends LitElement {
     if (plan.id === 'free') {
       return {
         label: 'Switch to Free',
-        note: `Takes effect on ${this._periodEnd()}. Paid time is not refunded.`,
+        note: `Takes effect on ${this._periodEnd()}.`,
       };
     }
 
@@ -387,7 +387,7 @@ export class PlanView extends LitElement {
         }
       : {
           label: `Switch to ${plan.name}`,
-          note: `Takes effect on ${this._periodEnd()}. Paid time is not refunded.`,
+          note: `Takes effect on ${this._periodEnd()}.`,
         };
   };
 

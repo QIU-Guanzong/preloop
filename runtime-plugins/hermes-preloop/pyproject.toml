@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "preloop-hermes-plugin"
-version = "0.2.2"
-description = "Preloop exposure and Agent Control plugin for Hermes"
+version = "0.3.0"
+description = "Approve or deny your Hermes agent's dangerous tool calls from your phone, watch, Slack or the web, and talk to a running session from anywhere."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -15,7 +15,23 @@ dependencies = [
   "PyYAML>=6.0",
   "preloop>=0.9.3",
 ]
-keywords = ["preloop", "hermes", "agent-control", "tool-approval", "autonomous-agents"]
+keywords = [
+  "preloop",
+  "hermes",
+  "approvals",
+  "tool-approval",
+  "human-in-the-loop",
+  "governance",
+  "policy",
+  "audit",
+  "budget",
+  "cost-control",
+  "control-plane",
+  "remote-control",
+  "agent-control",
+  "observability",
+  "autonomous-agents",
+]
 
 [project.urls]
 Homepage = "https://preloop.ai"
