@@ -17,8 +17,8 @@ import {
   validateTrackerToken,
   startCheckout,
   startAnonymousCheckout,
-  getTrialPrompt,
-  dismissTrialPrompt,
+  getPlanChoice,
+  recordFreePlanChoice,
   coalesceKey,
   getUsageNudges,
   getAccountGatewayUsageSummary,
@@ -1203,52 +1203,40 @@ describe('api', () => {
     });
   });
 
-  describe('trial prompt', () => {
-    it('reads the offer the server decided on', async () => {
+  describe('plan choice', () => {
+    beforeEach(() => {
+      // The durable "no" is remembered per tab, which in a test file is per
+      // module. Each case starts from a console that has not asked yet.
+      invalidateApiCaches();
+    });
+
+    it('reads the decision the server made', async () => {
       fetchStub.resolves(
         new Response(
-          JSON.stringify({
-            show: true,
-            reason: 'eligible',
-            trial_days: 14,
-            plans: [
-              {
-                id: 'pro',
-                name: 'Pro',
-                price_monthly: 12,
-                price_annually: 120,
-              },
-            ],
-          }),
+          JSON.stringify({ show: true, reason: 'eligible', trial_days: 14 }),
           { status: 200, headers: { 'Content-Type': 'application/json' } }
         )
       );
 
-      const prompt = await getTrialPrompt();
+      const decision = await getPlanChoice();
 
-      expect(prompt.show).to.equal(true);
-      expect(prompt.trial_days).to.equal(14);
-      expect(prompt.plans[0].name).to.equal('Pro');
+      expect(decision.show).to.equal(true);
+      expect(decision.reason).to.equal('eligible');
+      expect(decision.trial_days).to.equal(14);
     });
 
-    it('shows nothing when the instance has no billing plugin', async () => {
-      // OSS: the endpoint does not exist, so the console must simply not ask
-      // anyone to start a trial. A 404 is a normal answer here, not an error.
+    it('asks nothing of a console with no billing plugin', async () => {
+      // OSS: the endpoint does not exist, so a 404 is a normal answer here,
+      // not an error, and it means "there is no plan to choose".
       fetchStub.resolves(new Response('Not Found', { status: 404 }));
 
-      const prompt = await getTrialPrompt();
+      const decision = await getPlanChoice();
 
-      expect(prompt.show).to.equal(false);
-      expect(prompt.reason).to.equal('unavailable');
-      expect(prompt.plans).to.deep.equal([]);
+      expect(decision.show).to.equal(false);
+      expect(decision.reason).to.equal('unavailable');
     });
 
-    it('does not throw when recording the answer fails', async () => {
-      fetchStub.rejects(new Error('offline'));
-      await dismissTrialPrompt();
-    });
-
-    it('asks passively, so no offer ever raises a dialog', async () => {
+    it('asks passively, so the question never raises a dialog', async () => {
       // The shell asks this on load. A rate limit on a question nobody typed
       // must not put the paywall dialog over the page (#770's rule).
       fetchStub.resolves(
@@ -1258,17 +1246,110 @@ describe('api', () => {
       const listener = (event: Event) => seen.push(event as CustomEvent);
       window.addEventListener('show-upgrade-modal', listener);
 
-      let prompt;
+      let decision;
       try {
-        prompt = await getTrialPrompt();
+        decision = await getPlanChoice();
       } finally {
         window.removeEventListener('show-upgrade-modal', listener);
       }
 
-      expect(seen, 'no dialog from a background offer').to.have.length(0);
-      expect(prompt.show).to.equal(false);
+      expect(seen, 'no dialog from a background question').to.have.length(0);
+      expect(decision.show).to.equal(false);
       const [, options] = fetchStub.firstCall.args;
       expect(options).to.not.have.property('passive');
+    });
+
+    it('asks again after an unreachable plugin, and only once after a no', async () => {
+      // Two different kinds of "false". A 404 or a 500 is the plugin being
+      // absent or broken, and the question has to heal itself when it comes
+      // back. A reasoned refusal (a member who cannot buy, an account that
+      // already subscribes) writes nothing down on the core profile, so
+      // without this memo those people would re-ask on every route change
+      // for the life of the account, to be told the same thing.
+      fetchStub.resolves(new Response('boom', { status: 500 }));
+      expect((await getPlanChoice()).reason).to.equal('unavailable');
+      expect((await getPlanChoice()).reason).to.equal('unavailable');
+      expect(fetchStub.callCount).to.equal(2);
+
+      fetchStub.resolves(
+        new Response(
+          JSON.stringify({
+            show: false,
+            reason: 'not_billing_actor',
+            trial_days: 14,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+      expect((await getPlanChoice()).reason).to.equal('not_billing_actor');
+      expect(fetchStub.callCount).to.equal(3);
+
+      const again = await getPlanChoice();
+      expect(again.reason).to.equal('not_billing_actor');
+      expect(again.trial_days).to.equal(14);
+      expect(fetchStub.callCount, 'answered from the memo').to.equal(3);
+    });
+
+    it('keeps asking while the answer is still yes', async () => {
+      // An open question is not settled, so nothing is remembered: the screen
+      // has to be able to appear on a later load.
+      fetchStub.resolves(
+        new Response(
+          JSON.stringify({ show: true, reason: 'eligible', trial_days: 14 }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+
+      await getPlanChoice();
+      await getPlanChoice();
+
+      expect(fetchStub.callCount).to.equal(2);
+    });
+
+    it('forgets the answer when the session does', async () => {
+      // Signing out and in as somebody else must not inherit the previous
+      // person's settled question.
+      fetchStub.resolves(
+        new Response(
+          JSON.stringify({
+            show: false,
+            reason: 'subscription_exists',
+            trial_days: 14,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+      await getPlanChoice();
+      await getPlanChoice();
+      expect(fetchStub.callCount).to.equal(1);
+
+      invalidateApiCaches();
+      await getPlanChoice();
+      expect(fetchStub.callCount).to.equal(2);
+    });
+
+    it('posts the free choice and throws when the write is refused', async () => {
+      fetchStub.resolves(
+        new Response(
+          JSON.stringify({ show: false, reason: 'answered', trial_days: 14 }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+      await recordFreePlanChoice();
+      const [url, options] = fetchStub.firstCall.args;
+      expect(String(url)).to.contain('/api/v1/billing/plan-choice');
+      expect(options.method).to.equal('POST');
+
+      // A screen that came down over a write that did not happen would ask
+      // again on the next load, which reads as a bug, so this one throws.
+      fetchStub.resolves(new Response('nope', { status: 500 }));
+      let message = '';
+      try {
+        await recordFreePlanChoice();
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).to.contain('Could not record your choice');
     });
   });
 

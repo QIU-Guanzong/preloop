@@ -255,6 +255,13 @@ def _build_auth_user_response(user: UserModel, db: Session) -> AuthUserResponse:
         permissions=_resolve_user_permissions(user, db),
         avatar_url=user.avatar_url,
         avatar_source=user.avatar_source,
+        # The console already fetches this profile on every load, so carrying
+        # the answer here is what keeps "have you chosen a plan" from costing
+        # an extra request per page for the overwhelming majority of people,
+        # who chose long ago. Only a false sends the console on to ask the
+        # billing plugin, which is the only place that can see a subscription
+        # or a member's billing rights.
+        plan_choice_made=user.plan_choice_made_at is not None,
         team_ids=_resolve_team_ids(user, db),
     )
 
@@ -598,6 +605,15 @@ async def register(
             "is_active": True,
             "email_verified": False,
             "user_source": "local",
+            # Somebody who arrived from the pricing page already answered the
+            # plan question, and the console must not ask it again. Recording
+            # it here, on the row, is what carries the answer through the
+            # email verification round trip and onto every other device: a
+            # query string does not survive a link in an inbox, and
+            # localStorage does not survive a second browser.
+            "plan_choice_made_at": (
+                datetime.now(UTC) if user_data.plan_choice else None
+            ),
         }
         new_user = crud_user.create(session, obj_in=user_dict, commit=False)
         logger.info(f"[REGISTER] User created with ID: {new_user.id}")
@@ -660,6 +676,10 @@ async def register(
             "email": new_user.email,
             "full_name": new_user.full_name,
             "email_verified": new_user.email_verified,
+            # Echoed rather than left to the schema default, which is "yes"
+            # on purpose so that an older server never provokes the question.
+            # Here the answer is known, so it is told.
+            "plan_choice_made": new_user.plan_choice_made_at is not None,
             "team_ids": [],
         }
     except IntegrityError:
