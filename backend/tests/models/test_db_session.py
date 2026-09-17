@@ -352,3 +352,20 @@ class TestReleaseTransaction:
         session_module.release_transaction(session)
 
         session.invalidate.assert_called_once_with()
+
+    def test_an_unusable_session_does_not_raise_into_the_waiting_caller(self) -> None:
+        """The callers are a websocket loop and a poller. Neither expects a throw.
+
+        `Session.invalidate()` on an already closed session raises, and this is
+        the last line of the cleanup path, so an unguarded call would take down
+        the handler this helper exists to protect.
+        """
+        session = MagicMock(spec=Session)
+        session.in_transaction.return_value = True
+        session.commit.side_effect = SQLAlchemyError("commit failed")
+        session.rollback.side_effect = SQLAlchemyError("connection is gone")
+        session.invalidate.side_effect = SQLAlchemyError("session is closed")
+
+        session_module.release_transaction(session)
+
+        session.invalidate.assert_called_once_with()

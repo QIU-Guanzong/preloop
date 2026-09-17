@@ -36,12 +36,17 @@ from sqlalchemy.exc import DBAPIError
 # migration is wrong". Retrying the upgrade resumes from the last revision
 # that committed, which is why per-revision transactions are a precondition
 # for retrying at all.
+#
+# 57014 (query_canceled) is deliberately absent. A migration session sees it
+# when the cluster ``statement_timeout`` fires, which means the revision is
+# too slow rather than unlucky: it would fail the same way on all 20 attempts,
+# each one holding ACCESS EXCLUSIVE for the full timeout with live traffic
+# queued behind it. That revision needs a drained API, not a retry.
 RETRYABLE_SQLSTATES = frozenset(
     {
         "40001",  # serialization_failure
         "40P01",  # deadlock_detected
-        "55P03",  # lock_not_available
-        "57014",  # query_canceled (statement/lock timeout surfaced as cancel)
+        "55P03",  # lock_not_available (this is what lock_timeout raises)
     }
 )
 
@@ -50,10 +55,12 @@ DEFAULT_MAX_ATTEMPTS = 20
 DEFAULT_RETRY_MIN_SECONDS = 3.0
 DEFAULT_RETRY_MAX_SECONDS = 15.0
 
-# ``5s``, ``250ms``, ``2min`` or a bare millisecond count. Anything else is a
-# typo, and a typo that reaches ``SET lock_timeout`` is a syntax error in the
-# middle of a release, so it is rejected here in favour of the default.
-_LOCK_TIMEOUT_PATTERN = re.compile(r"^\d+(\.\d+)?\s*(us|ms|s|min|h|d)?$")
+# ``5s``, ``250ms``, ``2min`` or a bare millisecond count. An integer with an
+# optional unit and nothing else: ``lock_timeout`` is an integer GUC, and the
+# value is spliced into a single libpq ``options`` token, so a fraction, an
+# internal space or an overflowing count is refused at connect time and the
+# Job dies before its first revision. Rejected here in favour of the default.
+_LOCK_TIMEOUT_PATTERN = re.compile(r"^\d{1,9}(us|ms|s|min|h)?$")
 
 T = TypeVar("T")
 
@@ -61,7 +68,8 @@ T = TypeVar("T")
 class _ConfigurableContext(Protocol):
     """The slice of ``alembic.context`` this module uses."""
 
-    def configure(self, **kwargs: Any) -> None: ...
+    def configure(self, **kwargs: Any) -> None:
+        """Configure the migration context (see ``alembic.context.configure``)."""
 
 
 def _env_str(name: str, default: str) -> str:
@@ -183,16 +191,16 @@ def run_with_lock_retries(
     """
     total = attempts if attempts is not None else max_attempts()
     low, high = delay_bounds if delay_bounds is not None else retry_delay_bounds()
-    last_error: BaseException
     for attempt in range(1, total + 1):
         try:
             return operation()
-        except BaseException as error:  # noqa: BLE001 - re-raised below
+        # Exception, not BaseException: a cancelled or interrupted release must
+        # stop, not sleep and try again.
+        except Exception as error:
             if not is_lock_contention(error) or attempt == total:
                 raise
-            last_error = error
             delay = jitter(low, high)
             if on_retry is not None:
-                on_retry(attempt, delay, last_error)
+                on_retry(attempt, delay, error)
             sleep(delay)
     raise AssertionError("unreachable: retry loop exited without a result")

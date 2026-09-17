@@ -516,6 +516,10 @@ async def runner_ws(
         hello["halt"] = True
         hello["halt_execution_id"] = halts[0]
         hello["halt_execution_ids"] = halts
+    # Sending is a network wait too. A runner that is connected but not reading
+    # (a closed laptop) applies backpressure here, so the reads that built this
+    # payload must not still be holding their locks while we block on the peer.
+    release_transaction(db)
     await websocket.send_json(hello)
 
     try:
@@ -633,6 +637,10 @@ async def runner_ws(
                     reply["halt"] = True
                     reply["halt_execution_id"] = halts[0]
                     reply["halt_execution_ids"] = halts
+                # The reply is fully built, and a stalled peer can park this
+                # send for as long as the keepalive allows. Same reason as the
+                # release before `receive_json`.
+                release_transaction(db)
                 await websocket.send_json(reply)
                 continue
 

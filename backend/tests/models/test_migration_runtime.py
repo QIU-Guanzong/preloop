@@ -152,13 +152,38 @@ class TestLockTimeout:
             "options": "-c lock_timeout=250ms"
         }
 
-    @pytest.mark.parametrize("value", ["5 seconds; DROP", "", "abc", "-1s"])
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "5 seconds; DROP",
+            "",
+            "abc",
+            "-1s",
+            # An internal space becomes a second bare argument inside the one
+            # libpq `options` token, so the connection is refused.
+            "5 s",
+            # lock_timeout is an integer GUC: no fractions.
+            "5.5",
+            "0.25min",
+            # Overflows the integer GUC.
+            "99999999999999",
+            # Not a unit Postgres accepts for this setting.
+            "1d",
+        ],
+    )
     def test_a_malformed_override_falls_back_to_the_default(
         self, monkeypatch: pytest.MonkeyPatch, value: str
     ) -> None:
-        """A typo here would be a syntax error in the middle of a release."""
+        """A typo here kills the Job at connect time, before the first revision."""
         monkeypatch.setenv("PRELOOP_MIGRATION_LOCK_TIMEOUT", value)
         assert migration_runtime.lock_timeout() == "5s"
+
+    @pytest.mark.parametrize("value", ["250ms", "2min", "5000", "30s", "1h", "500us"])
+    def test_the_shapes_postgres_accepts_are_kept(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv("PRELOOP_MIGRATION_LOCK_TIMEOUT", value)
+        assert migration_runtime.lock_timeout() == value
 
     def test_non_postgres_urls_get_no_options(self) -> None:
         assert migration_runtime.connect_args("sqlite:///./test.db") == {}
@@ -216,6 +241,41 @@ class TestRetryPolicy:
             raise IntegrityError("INSERT ...", {}, Exception("duplicate key"))
 
         with pytest.raises(IntegrityError):
+            migration_runtime.run_with_lock_retries(
+                operation, attempts=5, delay_bounds=(0.0, 0.0), sleep=lambda _: None
+            )
+        assert calls == [1]
+
+    def test_a_statement_timeout_is_not_retried(self) -> None:
+        """57014 means the revision is too slow, which no retry can fix.
+
+        Twenty attempts at a revision the cluster `statement_timeout` kills
+        would take the target table's exclusive lock twenty more times, each
+        for the full timeout, with live traffic queued behind every one. It
+        belongs in the "drain the API first" path instead.
+        """
+        assert "57014" not in migration_runtime.RETRYABLE_SQLSTATES
+        calls: list[int] = []
+
+        def operation() -> None:
+            calls.append(1)
+            raise _error("57014")
+
+        with pytest.raises(OperationalError):
+            migration_runtime.run_with_lock_retries(
+                operation, attempts=5, delay_bounds=(0.0, 0.0), sleep=lambda _: None
+            )
+        assert calls == [1]
+
+    def test_an_interrupt_stops_the_release_immediately(self) -> None:
+        """A cancelled Job must not sleep and try again."""
+        calls: list[int] = []
+
+        def operation() -> None:
+            calls.append(1)
+            raise KeyboardInterrupt()
+
+        with pytest.raises(KeyboardInterrupt):
             migration_runtime.run_with_lock_retries(
                 operation, attempts=5, delay_bounds=(0.0, 0.0), sleep=lambda _: None
             )

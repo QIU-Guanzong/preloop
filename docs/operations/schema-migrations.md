@@ -31,9 +31,13 @@ that table for a minute.
 
 **A bounded retry loop** (`migrationJob.maxAttempts`, default 20, with
 `migrationJob.retryMinSeconds` to `migrationJob.retryMaxSeconds` of jittered
-backoff). Only lock contention is retried: deadlocks, lock timeouts and
-serialization failures. A revision with a bug fails on the first attempt with
-its own error, because retrying it twenty times would only delay the report.
+backoff). Only lock contention is retried: deadlocks (`40P01`), lock timeouts
+(`55P03`) and serialization failures (`40001`). A revision with a bug fails on
+the first attempt with its own error, because retrying it twenty times would
+only delay the report. So does a revision killed by the cluster
+`statement_timeout` (`57014`): that one is too slow rather than unlucky, it
+would fail identically on every attempt, and each attempt would hold the
+exclusive lock for the full timeout. Drain the API for it instead.
 
 Together these turn "the release fails after six long attempts" into "a
 revision that loses a lock race gives up in five seconds and wins on the next
@@ -95,6 +99,8 @@ The defaults are meant to make draining unnecessary. Drain anyway when:
 - **the retry budget is exhausted** and the Job has failed. Draining is the
   answer, not a longer `lockTimeout`: a longer wait makes the stall worse, not
   shorter;
+- **a revision was cancelled by `statement_timeout`** (SQLSTATE `57014` in the
+  Job log). It is not retried, on purpose;
 - **the release notes say so** for a specific revision.
 
 To drain, scale the serving deployments to zero, run the upgrade, then scale

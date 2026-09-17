@@ -48,6 +48,7 @@ def _socket(
     db_session: Session,
     messages: List[Dict[str, Any]],
     in_transaction_at_receive: List[bool],
+    in_transaction_at_send: List[bool] | None = None,
 ) -> MagicMock:
     """A socket that records whether a transaction is open while it waits."""
     queued = list(messages)
@@ -60,9 +61,15 @@ def _socket(
             raise WebSocketDisconnect()
         return queued.pop(0)
 
+    async def send_json(payload: Dict[str, Any]) -> None:
+        # Sending waits too: a connected runner that has stopped reading
+        # applies backpressure and parks the handler right here.
+        if in_transaction_at_send is not None:
+            in_transaction_at_send.append(db_session.in_transaction())
+
     websocket = MagicMock()
     websocket.accept = AsyncMock()
-    websocket.send_json = AsyncMock()
+    websocket.send_json = AsyncMock(side_effect=send_json)
     websocket.receive_json = AsyncMock(side_effect=receive_json)
     monkeypatch.setattr(runners, "_authenticate_runner", lambda *args: runner)
     monkeypatch.setattr(runners, "emit_runner_updated", MagicMock())
@@ -112,6 +119,38 @@ async def test_repeated_heartbeats_stay_out_of_transactions(
 
     assert len(observed) == 4
     assert not any(observed)
+
+
+@pytest.mark.asyncio
+async def test_the_hello_and_ack_sends_hold_no_locks_either(
+    db_session: Session,
+    connected_runner: models.FlowRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runner that is connected but not reading must not park a lock.
+
+    The hello payload and the heartbeat ack are both built from reads
+    (`db.refresh`, the assignment replay), and both are then written to a peer
+    that controls how long the write takes. Same failure as the receive gap,
+    with a rarer trigger.
+    """
+    observed_receive: List[bool] = []
+    observed_send: List[bool] = []
+    websocket = _socket(
+        monkeypatch,
+        connected_runner,
+        db_session,
+        [{"type": "heartbeat", "concurrency": 2}],
+        observed_receive,
+        observed_send,
+    )
+
+    await runners.runner_ws(websocket, connected_runner.id, db_session)
+
+    # The hello and the ack.
+    assert len(observed_send) == 2
+    assert not any(observed_send)
+    assert not any(observed_receive)
 
 
 @pytest.mark.asyncio

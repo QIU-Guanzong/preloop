@@ -19,7 +19,8 @@ migrationJob:
   # -- Per-session lock_timeout for the migration connection. Short on
   # purpose: a pending ACCESS EXCLUSIVE request also blocks every query that
   # queues behind it, so waiting a minute for a lock stalls live traffic for
-  # a minute.
+  # a minute. An integer with an optional unit (us, ms, s, min, h); a bare
+  # number is milliseconds. Anything else falls back to the default.
   lockTimeout: "5s"
   # -- How many times the whole `upgrade head` is retried when a revision
   # loses a lock race. A retry resumes at the first revision that did not

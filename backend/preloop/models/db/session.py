@@ -96,7 +96,13 @@ def release_transaction(db: Session) -> None:
             db.rollback()
         except SQLAlchemyError as rollback_exc:
             logger.warning(f"Rollback after failed release failed: {rollback_exc}")
-            db.invalidate()
+            # Last resort, and it must stay quiet: the caller is about to wait
+            # on a socket, and raising from the cleanup path would take down
+            # the handler this function exists to protect.
+            try:
+                db.invalidate()
+            except SQLAlchemyError as invalidate_exc:
+                logger.warning(f"Invalidating the session failed: {invalidate_exc}")
 
 
 def _safe_close_db_session(db: Session) -> None:
