@@ -63,9 +63,9 @@ export const FALLBACK_LADDER: NudgeLadder = {
  * The server's ladder when it sent a usable one, else this build's.
  *
  * The threshold is taken as stated. It used to be lowered to the smallest
- * band, which quietly made the bands the real threshold: a server saying
- * "nudge from 0.9" while sending no bands got this build's 0.5 instead, and
- * the console spoke about limits the server had decided were not worth
+ * band, so a server saying "nudge from 0.9" while publishing the usual
+ * 0.5/0.8/1.0 ladder to re-nudge on came back out of here as 0.5, and the
+ * console spoke about limits the server had decided were not worth
  * mentioning. Bands are the re-nudge ladder, not the gate.
  */
 export function nudgeLadder(payload: UsageNudges): NudgeLadder {
@@ -105,7 +105,12 @@ export function nudgeDismissalsKey(userId: string): string {
 }
 
 /**
- * The band a ratio has reached, or null below the threshold.
+ * The band a ratio has reached, or null below the first band.
+ *
+ * The first band is not the threshold: the threshold is the server's gate on
+ * whether a limit is worth a sentence, and `visibleNudges()` applies it.
+ * This answers the other question, how loud the news is, and a ratio over
+ * the threshold but under the lowest band simply has no band yet.
  *
  * A band, not the raw ratio: 0.51 and 0.79 are the same news, and a nudge
  * that reappears for every percent is an alarm nobody reads.
