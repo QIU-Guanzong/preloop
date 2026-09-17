@@ -7,8 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Highlights: **Alibaba Cloud Model Studio (Qwen)** and **AWS Bedrock** join the
-model providers with live discovery and honest cost estimates, **operator
+Highlights: **Alibaba Cloud Model Studio (Qwen)** support is complete, with
+regional discovery, a full chat adapter and native catalog prices, **AWS
+Bedrock** joins the model providers, both with honest cost estimates, **operator
 notes** steer a running agent at its next turn boundary from the console, the
 CLI or another agent, **session search** makes transcripts findable by keyword
 or embedding with saved searches and an index that retention and legal holds
@@ -699,7 +700,8 @@ avatars.
   a label now normalizes to `issue_labeled` (remove-only is
   `issue_unlabeled`). Filter field `added_labels` is set on GitHub and
   GitLab.
-- **Alibaba Cloud Model Studio (Qwen)** as a model provider: the add-model
+- **Alibaba Cloud Model Studio (Qwen)** support completed (the provider
+  itself arrived in 0.14 and 0.15): the add-model
   dialog names it, existing rows keep the provider id `qwen`, and Fetch
   Models lists the live catalog for the region the API URL names (Beijing,
   Singapore International, a Singapore workspace host, US), with the key
