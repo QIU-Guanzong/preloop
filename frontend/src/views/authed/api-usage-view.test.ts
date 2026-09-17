@@ -758,6 +758,54 @@ describe('ApiUsageView', () => {
     );
   });
 
+  // The same account as the banner test: a per-seat plan that is not in the
+  // public ladder, with a 365 day window. The row states the window the
+  // server sent, and no plan table on this side gets to shorten it.
+  it('states the window of a plan the public ladder does not carry', async () => {
+    fetchStub.callsFake(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/billing/nudges')) {
+        return jsonResponse({
+          nudges: [
+            {
+              key: 'analytics_window_days',
+              ratio: 0.1338,
+              used: 48.85,
+              limit: 365.0,
+              unit: 'days',
+              plan_id: 'teams',
+              unlocks_at_plan: 'team',
+            },
+          ],
+          analytics_window: { days: 365, unlocks_at_plan: 'team' },
+          threshold: 0.5,
+          bands: [0.5, 0.8, 1.0],
+        });
+      }
+      return await defaultUsageFetch(input);
+    });
+
+    const element = (await fixture(
+      html`<api-usage-view></api-usage-view>`
+    )) as ApiUsageView;
+    await waitUntil(
+      () => !(element as any).loading && (element as any).summary !== null,
+      'API usage view did not finish loading'
+    );
+    await waitUntil(
+      () => (element as any).historyWindow !== null,
+      'the analytics window never landed'
+    );
+    await element.updateComplete;
+
+    const row = element.shadowRoot?.querySelector('history-cutoff-row');
+    expect(row).to.not.equal(null);
+    const text = row!.shadowRoot?.textContent ?? '';
+    expect(text).to.contain('Data older than 365 days');
+    expect(text).to.not.contain('90 days');
+    expect(row!.shadowRoot?.querySelector('button')).to.not.equal(null);
+  });
+
   it('offers the upgrade when a person picks a range their plan hides', async () => {
     const element = (await fixture(
       html`<api-usage-view></api-usage-view>`

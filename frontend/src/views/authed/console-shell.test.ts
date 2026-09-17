@@ -736,6 +736,108 @@ describe('ConsoleShell', () => {
       .exist;
   });
 
+  it('puts Plan directly under Account and above Users', async () => {
+    // What the account pays for belongs with the account, not below the list
+    // of people in it, where it read as a per-person setting.
+    invalidateApiCaches();
+    fetchStub.callsFake(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.endsWith('/api/v1/features')) {
+        return new Response(
+          JSON.stringify({
+            plugins: ['billing'],
+            features: { billing: true, user_management: true },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.endsWith('/api/v1/auth/users/me')) {
+        return new Response(
+          JSON.stringify({
+            username: 'test',
+            email: 'test@example.com',
+            email_verified: true,
+            permissions: null,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const el = (await fixture(
+      html`<console-shell></console-shell>`
+    )) as ConsoleShell;
+    await waitUntil(
+      () =>
+        el.shadowRoot?.querySelector('a[href="/console/settings/plan"]') !==
+        null,
+      'Plan link did not render'
+    );
+
+    const settingsPaths = Array.from(
+      el.shadowRoot?.querySelectorAll<HTMLAnchorElement>(
+        'a[href^="/console/settings/"]'
+      ) ?? []
+    ).map((link) => link.getAttribute('href'));
+    const order = ['account', 'plan', 'users'].map((page) =>
+      settingsPaths.indexOf(`/console/settings/${page}`)
+    );
+    expect(order[0]).to.be.greaterThan(-1);
+    expect(order[1]).to.equal(order[0] + 1);
+    expect(order[2]).to.equal(order[1] + 1);
+  });
+
+  it('still offers the plan page where there is no user management', async () => {
+    // The two conditions are separate: a deployment that sells plans but does
+    // not manage users keeps its way in.
+    invalidateApiCaches();
+    fetchStub.callsFake(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.endsWith('/api/v1/features')) {
+        return new Response(
+          JSON.stringify({
+            plugins: ['billing'],
+            features: { billing: true, user_management: false },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.endsWith('/api/v1/auth/users/me')) {
+        return new Response(
+          JSON.stringify({
+            username: 'test',
+            email: 'test@example.com',
+            email_verified: true,
+            permissions: null,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const el = (await fixture(
+      html`<console-shell></console-shell>`
+    )) as ConsoleShell;
+    await waitUntil(
+      () =>
+        el.shadowRoot?.querySelector('a[href="/console/settings/plan"]') !==
+        null,
+      'Plan link did not render'
+    );
+    expect(el.shadowRoot?.querySelector('a[href="/console/settings/account"]'))
+      .to.not.exist;
+    expect(el.shadowRoot?.querySelector('a[href="/console/settings/users"]')).to
+      .not.exist;
+  });
+
   it('shows All events under Audit when audit_logs is enabled', async () => {
     invalidateApiCaches();
     fetchStub.callsFake(async (input: RequestInfo | URL) => {

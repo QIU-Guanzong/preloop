@@ -1148,6 +1148,7 @@ export class ApiUsageView extends LitElement {
         <history-cutoff-row
           .days=${this.historyWindow?.days ?? null}
           .unlocksAtPlanName=${this.historyWindow?.unlocks_at_plan_name ?? null}
+          .unlocksAtPlan=${this.historyWindow?.unlocks_at_plan ?? null}
         ></history-cutoff-row>
         ${days.map(
           (day) => html`
