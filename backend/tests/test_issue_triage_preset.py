@@ -212,6 +212,145 @@ class TestLoaderIntegration:
         assert flow.git_clone_config is None
 
 
+# Invariants the *effective* preset must satisfy, whatever directory it came
+# from. ``PRELOOP_PRESETS_PATH`` lets a later directory replace a preset by
+# slug, so an enterprise or operator overlay that still carries an older
+# triage design would silently become the shipped behavior.
+def assert_effective_triage_contract(entry: dict) -> None:
+    """Fail when an effective catalog entry is not the shipped triage design."""
+    assert entry["name"] == "Issue Triage Assistant"
+    assert set(entry.get("trigger_event_types") or []) == {
+        "issue_opened",
+        "issue_updated",
+    }, "triage must still run on new and updated issues"
+    names = [tool["name"] for tool in entry.get("allowed_mcp_tools") or []]
+    assert "get_issue" in names and "update_issue" in names, (
+        "the bounded context and apply tools are inherited together"
+    )
+    assert REMOVED_TOOLS.isdisjoint(names), "the folded triage tools are gone"
+    for tool, reason in FORBIDDEN_TOOLS.items():
+        assert tool not in names, f"{tool} must stay out of the allowlist: {reason}"
+    prompt = _norm(entry.get("prompt_template") or "")
+    lowered = prompt.lower()
+    for banned in (
+        "agent-ready",
+        "complexity:*",
+        "task:*",
+        "readiness:*",
+        "spec-first",
+    ):
+        assert banned not in lowered, f"{banned} is an install-specific taxonomy"
+    assert "Select one exact name from complexity_scheme.labels" in prompt, (
+        "the project's own vocabulary decides the label"
+    )
+    assert "/workspace/result.json" in prompt, "the completion contract is required"
+    assert "Record Completion (MANDATORY FINAL ACT)" in prompt
+
+
+def _load_layered_catalog(directories: list) -> list:
+    from unittest.mock import patch
+
+    from preloop.flow_presets import load_flow_presets
+
+    with patch("preloop.flow_presets.PRESETS_DIRS", directories):
+        load_flow_presets.cache_clear()
+        catalog = load_flow_presets()
+    load_flow_presets.cache_clear()
+    return catalog
+
+
+def _triage_entry(catalog: list) -> dict:
+    entry = next(
+        (item for item in catalog if item["name"] == "Issue Triage Assistant"), None
+    )
+    assert entry is not None, "the triage preset disappeared from the catalog"
+    return entry
+
+
+class TestLayeredCatalogContract:
+    """A later preset directory may override, but not weaken, this preset."""
+
+    def test_shipped_preset_satisfies_the_effective_contract(self) -> None:
+        from preloop.flow_presets import DEFAULT_PRESETS_DIR
+
+        assert_effective_triage_contract(
+            _triage_entry(_load_layered_catalog([DEFAULT_PRESETS_DIR]))
+        )
+
+    def test_an_overlay_directory_without_this_slug_keeps_the_shipped_preset(
+        self, tmp_path
+    ) -> None:
+        from preloop.flow_presets import DEFAULT_PRESETS_DIR
+
+        overlay = tmp_path / "enterprise"
+        overlay.mkdir()
+        (overlay / "020-other-preset.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "slug": "other-preset",
+                    "name": "Other Preset",
+                    "prompt_template": "do something else",
+                    "agent_type": "codex",
+                    "is_preset": True,
+                }
+            )
+        )
+        catalog = _load_layered_catalog([DEFAULT_PRESETS_DIR, overlay])
+        assert {item["name"] for item in catalog} >= {
+            "Issue Triage Assistant",
+            "Other Preset",
+        }
+        assert_effective_triage_contract(_triage_entry(catalog))
+
+    @pytest.mark.parametrize(
+        "damage,expected",
+        [
+            (
+                {"trigger_event_types": ["issue_opened"]},
+                "new and updated issues",
+            ),
+            (
+                {"allowed_mcp_tools": [{"name": "get_issue"}]},
+                "inherited together",
+            ),
+            (
+                {
+                    "allowed_mcp_tools": [
+                        {"name": "get_issue"},
+                        {"name": "update_issue"},
+                        {"name": "create_issue"},
+                    ]
+                },
+                "create_issue",
+            ),
+            (
+                {"prompt_template": "Apply agent-ready and readiness:* labels."},
+                "install-specific",
+            ),
+        ],
+    )
+    def test_a_stale_overlay_is_caught(
+        self, tmp_path, preset: dict, damage: dict, expected: str
+    ) -> None:
+        """The same identity from a later directory replaces the shipped file.
+
+        Each case is an older overlay design: dropping the update event,
+        inheriting the context tool without the apply tool, restoring broad
+        issue mutation, or prescribing an install-specific taxonomy.
+        """
+        from preloop.flow_presets import DEFAULT_PRESETS_DIR
+
+        overlay = tmp_path / "enterprise"
+        overlay.mkdir()
+        (overlay / "001-issue-triage-assistant.yaml").write_text(
+            yaml.safe_dump({**preset, **damage}, allow_unicode=True)
+        )
+        entry = _triage_entry(_load_layered_catalog([DEFAULT_PRESETS_DIR, overlay]))
+        with pytest.raises(AssertionError) as caught:
+            assert_effective_triage_contract(entry)
+        assert expected in str(caught.value)
+
+
 class TestEvidenceAndAssessmentContract:
     def test_records_source_and_issue_revision(self, prompt: str) -> None:
         for field in (
