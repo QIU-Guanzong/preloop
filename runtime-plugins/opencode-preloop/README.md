@@ -1,10 +1,28 @@
-# @preloop-ai/opencode-plugin
+# Govern your OpenCode agent: approvals on your phone, spend you can see
 
-Preloop Agent Control plugin for [OpenCode](https://opencode.ai). It keeps the
-Agent Control WebSocket connected from inside OpenCode's plugin host and
-routes every tool-permission prompt OpenCode raises through Preloop's
-approval system, so operators can approve or deny tool calls from the Preloop
-console (web/mobile) while the agent keeps working.
+Your agent decides to run `kubectl delete deployment api`. You are not at the
+keyboard. Right now it just runs.
+
+`@preloop-ai/opencode-plugin` connects [OpenCode](https://opencode.ai) to
+[Preloop](https://github.com/preloop/preloop), the open-source AI agent control
+plane.
+
+- **Dangerous commands wait for you instead of just running.** Every native tool
+  call is gated in `tool.execute.before`, regardless of what OpenCode's own
+  `permission` config says, so an `opencode.json` full of `"allow"` does not
+  quietly opt you out.
+- **Approve from wherever you actually are.** Push to phone or watch, Slack,
+  Mattermost, email, an outbound webhook, or the Preloop console.
+- **Nothing runs ungoverned when Preloop is down.** The gate fails closed by
+  default; a timed-out approval denies the call.
+- **Talk to an agent that is already running.** Send a turn into a live OpenCode
+  session or abort it, from the console or the mobile apps.
+- **A record of what the agent did, and who let it**, with per-agent spend and
+  budget ceilings once the agent is also onboarded to Preloop.
+
+It is Apache-2.0, and it works against either the open-source
+[Preloop](https://github.com/preloop/preloop) control plane you host yourself,
+or the hosted [Preloop Cloud](https://preloop.ai).
 
 The plugin mirrors the contract of the other Preloop runtime plugins
 (`@preloop-ai/openclaw-plugin`, `@preloop-ai/claude-plugin`,
@@ -72,23 +90,23 @@ The plugin also steers the local OpenCode agent from the Preloop console, so an
 operator can drive it remotely like `@preloop-ai/openclaw-plugin`,
 `@preloop-ai/claude-plugin` and `preloop-hermes-plugin`:
 
-- **Send a turn** — a `send_message` command is forwarded as a user prompt into
+- **Send a turn.** A `send_message` command is forwarded as a user prompt into
   the targeted OpenCode session. The plugin prefers the async SDK
   `client.session.chat(...)` surface and falls back to the documented blocking
   [`client.session.prompt({ path, body })`](https://opencode.ai/docs/sdk/)
   (`parts: [{ type: "text", text }]`), bounded by `turn_timeout_ms` (default
-  300 s) so a hung turn cannot stall the acknowledgement forever — the session
+  300 s) so a hung turn cannot stall the acknowledgement forever. The session
   itself keeps running.
-- **Stop / interrupt** — a `stop` or `interrupt` command (or a `send_message`
+- **Stop or interrupt.** A `stop` or `interrupt` command (or a `send_message`
   with `payload.interrupt: true`) maps to
   [`client.session.abort({ path })`](https://opencode.ai/docs/sdk/), which
   aborts the running session.
-- **Session targeting** — the target session id comes from the envelope
+- **Session targeting.** The target session id comes from the envelope
   (`target_session_id`, `session_reference`, `runtime_session_id`) with a
   fallback to `preloop.control.session_reference`. OpenCode sessions are
   addressed by their native session id; the plugin steers existing sessions and
   does not create new ones (`new_session: false` in its presence payload).
-- **Status events** — every command emits a `command_result` frame on success
+- **Status events.** Every command emits a `command_result` frame on success
   (which the backend accepts as the command ack) or `command_error` on
   failure, mirroring the other runtime plugins. Replayed `message_id`s are
   acknowledged as completed duplicates without re-executing.
@@ -103,10 +121,10 @@ when `session.abort` is available.
 ### A note on OpenCode's plugin API
 
 OpenCode documents a typed `permission.ask` hook, but as of 2026 the
-permission system never triggers it (see anomalyco/opencode issues #7006 and
-#9229). The supported surface — used here — is the generic `event` hook with
-`permission.asked` / `permission.replied` events plus an SDK reply, which is
-the same integration path OpenCode's own ACP bridge uses.
+permission system never triggers it (see anomalyco/opencode issues #7006
+and #9229). The supported surface, used here, is the generic `event` hook
+with `permission.asked` / `permission.replied` events plus an SDK reply,
+which is the same integration path OpenCode's own ACP bridge uses.
 
 ## Install
 
