@@ -130,7 +130,9 @@ head pipeline, otherwise the newest pipeline for that exact SHA) and that
 pipeline's jobs. Retried attempts, jobs from another SHA and jobs from another
 project are discarded, and the newest attempt of each job name decides. For at
 most three failing jobs, a bounded redacted tail of the job trace is read as
-diagnostic evidence; a missing or forbidden trace is simply absent. When the
+diagnostic evidence. The trace is streamed and discarded as it arrives, so an
+enormous log never enters memory whole, and credentials are redacted before the
+tail is cut. A missing or forbidden trace is simply absent. When the
 pipeline has no readable job (a configuration error, or jobs the token cannot
 list), its own status is the evidence instead. Job and pipeline reads stay inside
 one provider page, like notes and statuses.

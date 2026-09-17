@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
+from contextlib import closing
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 from types import SimpleNamespace
@@ -21,10 +23,16 @@ from sqlalchemy.orm import Session
 # Bounded diagnostic tail kept per failing job. Traces are untrusted task data,
 # so only the end of the log (where the failing command reports) is retained.
 JOB_TRACE_TAIL_BYTES = 4000
+# Bytes of a job log held in memory while reading. A provider may cap traces at
+# hundreds of megabytes, so the response is streamed and only this tail is kept.
+JOB_TRACE_READ_BYTES = 64000
 # Failing jobs whose trace is read during one reconciliation.
 MAX_JOB_TRACES = 3
 # GitLab job/pipeline reads stay inside one page, like notes and statuses.
 PROVIDER_PAGE_SIZE = 100
+# A diagnostic read of a resource that is absent or not visible to this
+# installation is no evidence; every other status stays an error.
+MISSING_OR_DENIED = frozenset({403, 404})
 
 
 @dataclass
@@ -60,11 +68,13 @@ def redact(text: str) -> str:
 
 
 def bounded_trace(value: Any) -> str:
-    """Keep a redacted tail of a job log; an oversized trace is never stored whole."""
-    text = str(value or "")
-    if len(text) > JOB_TRACE_TAIL_BYTES:
-        text = text[-JOB_TRACE_TAIL_BYTES:]
-    return redact(text)
+    """Keep a redacted tail of a job log; an oversized trace is never stored whole.
+
+    Redaction runs before the tail is cut: cutting first would drop the
+    `token=` prefix of a credential that straddles the cut and leave its value
+    verbatim in the kept text. The read already bounds how much arrives here.
+    """
+    return redact(str(value or ""))[-JOB_TRACE_TAIL_BYTES:]
 
 
 def receipt(
@@ -302,9 +312,43 @@ async def _optional(read: Any) -> Any:
     except TrackerPermissionError:
         return None
     except TrackerResponseError as error:
-        if re.search(r"error:\s*(404|403)\b", str(error)):
+        status = getattr(error, "status_code", None)
+        if status in MISSING_OR_DENIED:
+            return None
+        # Call sites that do not carry the status still report it in the
+        # message; anything else (429, 5xx, connection loss) propagates.
+        if status is None and re.search(r"error:\s*(404|403)\b", str(error)):
             return None
         raise
+
+
+def _read_tail(response: Any) -> str:
+    """Consume a streamed body chunk by chunk, holding only its tail."""
+    tail = bytearray()
+    with closing(response):
+        for chunk in response.iter_content(chunk_size=8192):
+            tail += chunk if isinstance(chunk, bytes) else str(chunk).encode()
+            if len(tail) > JOB_TRACE_READ_BYTES:
+                del tail[:-JOB_TRACE_READ_BYTES]
+    return tail.decode("utf-8", "replace")
+
+
+async def _trace_tail(trace: Any) -> str | None:
+    """The end of one job log, never the whole body of an unbounded log.
+
+    A streamed response is drained in a worker thread so the event loop keeps
+    running and memory stays at the tail size regardless of the log length.
+    """
+    if trace is None:
+        return None
+    if callable(getattr(trace, "iter_content", None)):
+        return await asyncio.to_thread(_read_tail, trace)
+    text = getattr(trace, "text", trace)
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    if not isinstance(text, str):
+        return None
+    return text[-JOB_TRACE_READ_BYTES:]
 
 
 def _pipeline_only(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
@@ -574,8 +618,10 @@ class FeedbackProvider:
         return state
 
     async def _gitlab(self) -> FeedbackState:
-        async def get(path: str) -> Any:
-            return await self.client._make_request(self.client.gl.http_get, path)
+        async def get(path: str, **options: Any) -> Any:
+            return await self.client._make_request(
+                self.client.gl.http_get, path, **options
+            )
 
         repo = f"/projects/{quote(self.thread.repository_id, safe='')}"
         base = f"{repo}/merge_requests/{quote(self.thread.pr_number, safe='')}"
@@ -708,9 +754,9 @@ class FeedbackProvider:
         for job in failed[:MAX_JOB_TRACES]:
             if not job.get("id"):
                 continue
-            trace = await _optional(get(f"{repo}/jobs/{job['id']}/trace"))
-            text = getattr(trace, "text", trace)
-            if isinstance(text, bytes):
-                text = text.decode("utf-8", "replace")
-            if isinstance(text, str) and text.strip():
+            trace = await _optional(
+                get(f"{repo}/jobs/{job['id']}/trace", streamed=True)
+            )
+            text = await _trace_tail(trace)
+            if text and text.strip():
                 job["trace"] = text

@@ -46,9 +46,16 @@ class TrackerRateLimitError(TrackerError):
 
 
 class TrackerResponseError(TrackerError):
-    """Raised when a tracker API returns an error response."""
+    """Raised when a tracker API returns an error response.
 
-    pass
+    `status_code` carries the provider status when the raising call site knows
+    it, so callers can branch on the response structurally instead of parsing
+    the message. It stays None for the call sites that only have a message.
+    """
+
+    def __init__(self, *args: object, status_code: int | None = None) -> None:
+        super().__init__(*args)
+        self.status_code = status_code
 
 
 class TrackerPermissionError(TrackerResponseError):

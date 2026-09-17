@@ -1,5 +1,6 @@
 """Provider snapshots, gate freshness and trusted reviewer identities."""
 
+from collections.abc import Iterator
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
@@ -195,6 +196,23 @@ async def test_github_check_output_is_the_bounded_diagnostic(
         assert len(diagnostic) <= 4000 and "super-secret" not in diagnostic
 
 
+class StreamedTrace:
+    """The streamed response python-gitlab returns for a job log."""
+
+    def __init__(self, body: str) -> None:
+        self.body = body.encode()
+        self.chunks = 0
+        self.closed = False
+
+    def iter_content(self, chunk_size: int = 8192) -> Iterator[bytes]:
+        for start in range(0, len(self.body), chunk_size):
+            self.chunks += 1
+            yield self.body[start : start + chunk_size]
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def gitlab_fixture(
     *,
     statuses: list[dict[str, Any]] | None = None,
@@ -218,8 +236,10 @@ def gitlab_fixture(
     if head_pipeline is not None:
         mr["head_pipeline"] = head_pipeline
 
-    async def request(method: Any, path: str) -> Any:
+    async def request(method: Any, path: str, **options: Any) -> Any:
         paths.append(path)
+        # A job log is unbounded, so it is only ever fetched as a stream.
+        assert options.get("streamed", False) is ("/trace" in path)
         for fragment, error in (errors or {}).items():
             if fragment in path:
                 raise error
@@ -240,7 +260,8 @@ def gitlab_fixture(
         if "/jobs?" in path:
             return deepcopy(jobs if jobs is not None else [])
         if "/trace" in path:
-            return (traces or {})[int(path.split("/jobs/")[1].split("/")[0])]
+            body = (traces or {})[int(path.split("/jobs/")[1].split("/")[0])]
+            return StreamedTrace(body) if isinstance(body, str) else body
         raise AssertionError(path)
 
     client = SimpleNamespace(
@@ -461,6 +482,68 @@ async def test_gitlab_pipeline_of_another_project_is_not_read() -> None:
     state = await provider.read()
     assert state.blocked_reason == "ci_failure_unclassified"
     assert not [path for path in paths if "/pipelines/" in path]
+
+
+@pytest.mark.asyncio
+async def test_gitlab_trace_credential_is_redacted_across_the_kept_boundary() -> None:
+    """A secret split by the tail cut must not survive without its prefix."""
+    secret = "S" * 100
+    provider, _ = gitlab_fixture(
+        statuses=[],
+        head_pipeline={"id": 900, "sha": "head", "project_id": 123},
+        jobs=[gitlab_job(2, status="failed", failure_reason="script_failure")],
+        traces={2: "z" * 5000 + f"\ntoken={secret}\n" + "y" * 3950},
+    )
+    state = await provider.read()
+    (item,) = [event for event in state.feedback if event["kind"] == "ci"]
+    diagnostic = item["payload"]["diagnostic"]
+    assert len(diagnostic) == 4000
+    assert "[REDACTED]" in diagnostic and "S" * 8 not in diagnostic
+
+
+@pytest.mark.asyncio
+async def test_gitlab_trace_stream_is_drained_in_chunks_and_closed() -> None:
+    """The log is never buffered whole; only its tail reaches the receipt."""
+    trace = StreamedTrace("x" * 400000 + "\nassert failed")
+    provider, _ = gitlab_fixture(
+        statuses=[],
+        head_pipeline={"id": 900, "sha": "head", "project_id": 123},
+        jobs=[gitlab_job(2, status="failed", failure_reason="script_failure")],
+        traces={2: trace},
+    )
+    state = await provider.read()
+    (item,) = [event for event in state.feedback if event["kind"] == "ci"]
+    assert item["payload"]["diagnostic"].endswith("assert failed")
+    assert len(item["payload"]["diagnostic"]) == 4000
+    assert trace.chunks > 1 and trace.closed
+
+
+@pytest.mark.asyncio
+async def test_gitlab_absent_evidence_is_decided_by_the_response_status() -> None:
+    """Missing or denied reads come from the status, not from message text."""
+    from preloop.sync.exceptions import TrackerResponseError
+
+    missing = TrackerResponseError("GitLab API error", status_code=404)
+    provider, _ = gitlab_fixture(
+        statuses=[{"id": 1, "name": "job-2", "status": "failed"}],
+        head_pipeline={"id": 900, "sha": "head", "project_id": 123},
+        jobs=[gitlab_job(2, status="failed", failure_reason="script_failure")],
+        errors={"/trace": missing},
+    )
+    state = await provider.read()
+    (item,) = [event for event in state.feedback if event["kind"] == "ci"]
+    assert "diagnostic" not in item["payload"]
+
+    served = TrackerResponseError(
+        "GitLab API error: 500 - job 404 handler crashed", status_code=500
+    )
+    provider, _ = gitlab_fixture(
+        statuses=[{"id": 1, "name": "job-2", "status": "failed"}],
+        head_pipeline={"id": 900, "sha": "head", "project_id": 123},
+        errors={"/jobs?": served},
+    )
+    with pytest.raises(TrackerResponseError):
+        await provider.read()
 
 
 @pytest.mark.asyncio
