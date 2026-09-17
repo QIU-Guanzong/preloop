@@ -17,6 +17,7 @@ from preloop.services.runner_service import (
     mark_queued_or_fail,
     runner_blocked_notice,
     runner_wait_notice,
+    unwrap_agent_config,
     workspace_owner_runner_id,
 )
 
@@ -315,12 +316,7 @@ class RemoteRunnerExecutor(AgentExecutor):
             agent_config = getattr(flow, "agent_config", None)
         if agent_config is None:
             agent_config = self.config
-        if (
-            isinstance(agent_config, dict)
-            and set(agent_config) == {"agent_config"}
-            and isinstance(agent_config["agent_config"], dict)
-        ):
-            agent_config = agent_config["agent_config"]
+        agent_config = unwrap_agent_config(agent_config)
         if isinstance(agent_config, dict):
             agent_config = dict(agent_config)
         else:

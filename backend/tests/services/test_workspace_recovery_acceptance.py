@@ -28,6 +28,7 @@ from preloop.services.runner_service import (
     lease_job,
     runner_blocked_notice,
     runner_wait_notice,
+    unwrap_agent_config,
     workspace_owner_runner_id,
 )
 
@@ -594,3 +595,25 @@ async def test_a_failed_owner_lookup_waits_instead_of_leasing_anywhere(
 
     assert status is AgentStatus.PENDING
     assert execution.status == "PENDING"
+
+
+@pytest.mark.parametrize(
+    "config,expected",
+    [
+        ({"agent_config": {"runner": {}}}, {"runner": {}}),
+        ({"runner": {}}, {"runner": {}}),
+        ({"agent_config": {}, "image": "x"}, {"agent_config": {}, "image": "x"}),
+        ({"agent_config": "not-a-dict"}, {"agent_config": "not-a-dict"}),
+        (None, None),
+    ],
+)
+def test_one_unwrapping_serves_the_lease_payload_and_the_owner_lookup(
+    config: object, expected: object
+) -> None:
+    """Two readers of the same stored shape must never disagree.
+
+    Drift between a payload-side unwrap and a lookup-side unwrap is exactly
+    how a host-bound continuation reads as free on one path and pinned on
+    the other, so both now call this.
+    """
+    assert unwrap_agent_config(config) == expected
