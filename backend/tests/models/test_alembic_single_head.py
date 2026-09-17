@@ -232,4 +232,6 @@ def test_flow_runners_revision_chains_onto_approval_rule_context() -> None:
     assert trial_prompt.down_revision == "20260916_runner_concurrency"
     onboarding_claim = script.get_revision("20260917_onboarding_claim")
     assert onboarding_claim.down_revision == "20260916_trial_prompt"
-    assert script.get_heads() == ["20260917_onboarding_claim"]
+    plan_choice = script.get_revision("20260917_plan_choice")
+    assert plan_choice.down_revision == "20260917_onboarding_claim"
+    assert script.get_heads() == ["20260917_plan_choice"]

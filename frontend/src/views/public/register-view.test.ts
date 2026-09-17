@@ -5,6 +5,7 @@ import {
   RegisterView,
   humanizeRegisterError,
   parseBootstrapFragment,
+  parsePlanChoice,
 } from './register-view';
 import { invalidateApiCaches } from '../../api';
 
@@ -524,6 +525,116 @@ describe('RegisterView', () => {
       expect(notice?.textContent?.replace(/\s+/g, ' ')).to.contain(
         'Setup link required'
       );
+    });
+  });
+
+  describe('parsePlanChoice', () => {
+    it('reads the plan id the pricing page put on the link', () => {
+      expect(parsePlanChoice('?plan=free')).to.equal('free');
+      expect(parsePlanChoice('?foo=1&plan=Pro')).to.equal('pro');
+      expect(parsePlanChoice('?plan=legacy_teams-2')).to.equal(
+        'legacy_teams-2'
+      );
+    });
+
+    it('drops anything that is not a plan id rather than fail a signup', () => {
+      expect(parsePlanChoice('')).to.equal('');
+      expect(parsePlanChoice('?plan=')).to.equal('');
+      expect(parsePlanChoice('?other=free')).to.equal('');
+      expect(parsePlanChoice('?plan=<script>')).to.equal('');
+      expect(parsePlanChoice('?plan=-nope')).to.equal('');
+      expect(parsePlanChoice(`?plan=${'a'.repeat(65)}`)).to.equal('');
+    });
+  });
+
+  describe('plan carried from the pricing page', () => {
+    /** Submit the form on `el` with throwaway credentials. */
+    async function submit(el: RegisterView) {
+      const username = el.shadowRoot?.querySelector<any>('#username');
+      const email = el.shadowRoot?.querySelector<any>('#email');
+      const password = el.shadowRoot?.querySelector<any>('#password');
+      username.value = 'newperson';
+      email.value = 'new@example.com';
+      password.value = 'password123';
+      const form = el.shadowRoot?.querySelector('form') as HTMLFormElement;
+      form.dispatchEvent(
+        new SubmitEvent('submit', { bubbles: true, cancelable: true })
+      );
+      await waitUntil(
+        () =>
+          fetchStub
+            .getCalls()
+            .some((c: any) => String(c.args[0]).includes('/auth/register')),
+        'expected a registration request'
+      );
+      return JSON.parse(
+        fetchStub
+          .getCalls()
+          .find((c: any) => String(c.args[0]).includes('/auth/register'))
+          .args[1].body
+      );
+    }
+
+    /** Mount the form as if the browser were at `search`. */
+    async function mountAt(search: string): Promise<RegisterView> {
+      history.replaceState(null, '', `/register${search}`);
+      fetchStub.callsFake(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.includes('/api/v1/features')) {
+          return new Response(
+            JSON.stringify({ plugins: [], features: { registration: true } }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        // No token back: the view falls through to the sign-in page instead
+        // of driving the router into the console from a unit test.
+        return new Response(JSON.stringify({}), { status: 200 });
+      });
+      invalidateApiCaches();
+      return (await fixture(
+        html`<register-view></register-view>`
+      )) as RegisterView;
+    }
+
+    afterEach(() => {
+      history.replaceState(null, '', '/register');
+      localStorage.removeItem('accessToken');
+      localStorage.removeItem('refreshToken');
+    });
+
+    it('records the plan from ?plan= on the new account', async () => {
+      const el = await mountAt('?plan=free');
+      const body = await submit(el);
+      // The answer travels on the row, so it survives the verification email
+      // opened in another browser. That is the whole reason it is sent here
+      // instead of being kept in this tab.
+      expect(body.plan_choice).to.equal('free');
+    });
+
+    it('sends nothing for a plain signup, which is what asks on first login', async () => {
+      const el = await mountAt('');
+      const body = await submit(el);
+      expect(body).to.not.have.property('plan_choice');
+    });
+
+    it('ignores a mangled plan parameter instead of refusing the signup', async () => {
+      const el = await mountAt('?plan=%20%20');
+      const body = await submit(el);
+      expect(body).to.not.have.property('plan_choice');
+      expect(body.username).to.equal('newperson');
+    });
+
+    it('never asks for a card here, whatever the link said', async () => {
+      const el = await mountAt('?plan=pro');
+      await submit(el);
+      // Paid plans reach Stripe from the pricing page, never from this form.
+      expect(
+        fetchStub
+          .getCalls()
+          .some((c: any) =>
+            String(c.args[0]).includes('create-checkout-session')
+          )
+      ).to.equal(false);
     });
   });
 });

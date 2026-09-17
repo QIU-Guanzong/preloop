@@ -136,6 +136,20 @@ let userProfileEpoch = 0;
  */
 const inFlightGets = new Map<string, Promise<Response>>();
 
+/**
+ * Drop the cached profile, and nothing else.
+ *
+ * `invalidateApiCaches` is the sign-out broom: it also clears features and a
+ * list of sessionStorage keys, which is far more than a caller who changed
+ * one field on the user wants to pay for. This is for exactly that case, so
+ * the next read of the profile agrees with the server.
+ */
+export function invalidateUserProfileCache(): void {
+  userProfileCache = null;
+  userProfileInflight = null;
+  userProfileEpoch += 1;
+}
+
 export function invalidateApiCaches(): void {
   featuresCache = null;
   featuresInflight = null;
@@ -705,80 +719,75 @@ export async function getEntitlements(): Promise<Entitlements> {
   return response.json();
 }
 
-/** One plan the post-signup trial offer can start. */
-export interface TrialPromptPlan {
-  id: string;
-  name: string;
-  price_monthly: number | null;
-  price_annually: number | null;
-}
-
 /**
- * The one-time trial offer for the signed-in user.
+ * The first-login plan choice, as the billing plugin decides it.
  *
- * `show` is the server's decision, not a hint the client re-derives:
- * eligibility depends on the account's subscription history and the person's
- * billing rights, neither of which the console can see. `reason` names the
- * case for support and tests.
+ * `show` is the server's decision, not a hint the client re-derives: it
+ * depends on the account's subscription history and on whether this person
+ * may buy for the account, neither of which the console can see. `reason`
+ * names the case for support and for tests.
  */
-export interface TrialPrompt {
+export interface PlanChoiceState {
   show: boolean;
   reason: string;
+  /** Configured trial length, so the screen states the terms it offers. */
   trial_days: number;
-  plans: TrialPromptPlan[];
 }
 
-const NO_TRIAL_PROMPT: TrialPrompt = {
+const NO_PLAN_CHOICE: PlanChoiceState = {
   show: false,
   reason: 'unavailable',
   trial_days: 0,
-  plans: [],
 };
 
 /**
- * Ask whether to show the post-signup trial step.
+ * Ask whether this person still owes the product a plan decision.
  *
- * The endpoint lives on the billing plugin, so an instance without billing
- * answers 404 and this resolves to "do not show". Never throws: an offer is
- * not worth an error state in the console shell.
+ * Only ever called when the `billing` feature is on AND the core profile
+ * already said the choice is open, so an OSS console and a settled account
+ * both issue zero requests here. The endpoint lives on the billing plugin,
+ * so an instance without billing answers 404 and this resolves to "do not
+ * ask". Never throws: a failed question must not become an error screen in
+ * front of the console.
  *
- * Passive, like every other question the console asks on its own behalf: the
- * shell asks this on load, and a rate limit or a gate on an offer nobody
- * requested must not interrupt the page with a dialog.
+ * Passive, like every other question the console asks on its own behalf: a
+ * rate limit on a request nobody made must not raise a dialog.
  */
-export async function getTrialPrompt(): Promise<TrialPrompt> {
+export async function getPlanChoice(): Promise<PlanChoiceState> {
   try {
-    const response = await fetchWithAuth('/api/v1/billing/trial-prompt', {
+    const response = await fetchWithAuth('/api/v1/billing/plan-choice', {
       passive: true,
     });
-    if (!response.ok) return NO_TRIAL_PROMPT;
+    if (!response.ok) return NO_PLAN_CHOICE;
     const body = await response.json();
     return {
       show: body?.show === true,
       reason: typeof body?.reason === 'string' ? body.reason : 'unavailable',
       trial_days: Number(body?.trial_days) || 0,
-      plans: Array.isArray(body?.plans) ? body.plans : [],
     };
   } catch {
-    return NO_TRIAL_PROMPT;
+    return NO_PLAN_CHOICE;
   }
 }
 
 /**
- * Record that the user answered the trial offer, so it is asked once.
+ * Record that this person chose the free plan.
  *
- * Called for both answers, including before opening Stripe: cancelling there
- * leaves the account on Free and must not bring the step back. The answer is
- * stored on the user server-side, so a new browser does not re-ask.
+ * Only the free arm calls this. A paid choice is recorded server-side when
+ * the checkout completes, so that backing out at Stripe returns to the
+ * choice screen instead of leaving somebody on Free who meant to pay.
+ *
+ * Throws on a failed write, unlike most of this file: the caller is about to
+ * take the screen down, and taking it down over a write that did not happen
+ * would send the person into the console and then ask again on the next
+ * load, which reads as a bug rather than as onboarding.
  */
-export async function dismissTrialPrompt(): Promise<void> {
-  try {
-    await fetchWithAuth('/api/v1/billing/trial-prompt/dismiss', {
-      method: 'POST',
-    });
-  } catch {
-    // The offer is optional; failing to record the answer must not block the
-    // console. The worst case is the step being offered once more.
+export async function recordFreePlanChoice(): Promise<void> {
+  const response = await fetchWithAuth('/api/v1/billing/plan-choice', {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    throw new Error('Could not record your choice. Try again.');
   }
 }
 
@@ -2961,6 +2970,16 @@ export interface UserProfile {
   permissions?: string[] | null;
   avatar_url?: string | null;
   avatar_source?: string | null;
+  /**
+   * Whether this person has already chosen a plan.
+   *
+   * Absent or true means "never ask", which is what an older server and
+   * every settled account both produce. Only an explicit false sends the
+   * console on to the billing plugin for the authoritative answer, so the
+   * first-login plan choice costs one extra request exactly once, to the
+   * people it is for.
+   */
+  plan_choice_made?: boolean;
   /**
    * Teams the caller belongs to in account_id. Intersect with an approval
    * workflow's approver_team_ids to tell whether an approval waits on them.

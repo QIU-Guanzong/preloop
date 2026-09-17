@@ -46,6 +46,23 @@ export function parseBootstrapFragment(hash: string): string {
   return match ? decodeURIComponent(match[1]) : '';
 }
 
+/**
+ * The plan this visitor already picked, from `?plan=` on the pricing page.
+ *
+ * Kept to a plan id shape, and silently dropped otherwise, because the value
+ * comes from a link somebody may have mangled and a broken query string must
+ * never be able to stop a signup. The server applies the same rule again; it
+ * is repeated here so the request does not carry rubbish in the first place.
+ *
+ * Only the free plan arrives this way. Every paid plan on the pricing page
+ * goes to Stripe first and comes back as an account that already exists.
+ */
+export function parsePlanChoice(search: string): string {
+  const raw = new URLSearchParams(search || '').get('plan') || '';
+  const candidate = raw.trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(candidate) ? candidate : '';
+}
+
 @customElement('register-view')
 export class RegisterView extends LitElement {
   @state()
@@ -75,6 +92,11 @@ export class RegisterView extends LitElement {
   // Token from the setup link fragment (#bootstrap=<token>). Held in memory
   // only; the fragment is stripped from the URL immediately on load.
   private bootstrapToken = '';
+
+  // The plan chosen on the pricing page, if this visitor came from there.
+  // Empty for anyone who opened the signup page directly, which is exactly
+  // the group the console asks to choose a plan on first login.
+  private planChoice = '';
 
   static styles = [
     formStyles,
@@ -162,6 +184,7 @@ export class RegisterView extends LitElement {
     // Setup link: read the bootstrap token out of the fragment, keep it in
     // memory only, and strip it from the URL immediately (history, referrer
     // and share safety).
+    this.planChoice = parsePlanChoice(window.location.search);
     this.bootstrapToken = parseBootstrapFragment(window.location.hash);
     if (this.bootstrapToken) {
       history.replaceState(
@@ -204,6 +227,13 @@ export class RegisterView extends LitElement {
       if (this.bootstrapToken) {
         payload.bootstrap_token = this.bootstrapToken;
       }
+      if (this.planChoice) {
+        // Somebody who arrived from the pricing page already answered the
+        // plan question. Sending it here records the answer on the new user,
+        // which is what keeps the first-login plan choice off their screen
+        // even after they follow a verification link in another browser.
+        payload.plan_choice = this.planChoice;
+      }
       const registerResult = await post('/api/v1/auth/register', payload);
 
       // If the backend returns an error in the payload instead of throwing an HTTP error
@@ -214,8 +244,9 @@ export class RegisterView extends LitElement {
       // Completed registration is the primary conversion goal.
       trackGoal('Signup');
 
-      // Signup is card-free (T2 paywall move): no Stripe checkout here.
-      // Premium features request the card in-product via the upgrade modal.
+      // No Stripe checkout here. A paid plan chosen on the pricing page goes
+      // to Stripe first and never reaches this form; a signup that arrives
+      // with no plan is asked to choose one on its first console visit.
 
       // Try to auto-log-in the user using the credentials they just submitted
       // and continue any pending flow (eg. CLI OAuth consent at

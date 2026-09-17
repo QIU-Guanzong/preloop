@@ -23,13 +23,16 @@ import '../../components/usage-nudge-banner';
 import consoleStyles from '../../styles/console-styles.css?inline';
 import {
   getFeatures,
+  getPlanChoice,
   getUserProfile,
   hasAnyPermission,
+  invalidateUserProfileCache,
   type FeaturesResponse,
   type UserPermissions,
+  type UserProfile,
 } from '../../api';
 import '../../components/permission-denied';
-import '../../components/trial-prompt';
+import '../../components/plan-choice-screen';
 import { consoleDialogStyles } from '../../styles/console-dialog';
 import { LOCATION_CHANGED, Router } from '../../router';
 import { planPageUrl, premiumFeatureLabel } from '../../utils/premium-features';
@@ -107,6 +110,24 @@ export class ConsoleShell extends LitElement {
 
   @state()
   private _isSuperuser = false;
+
+  /**
+   * The first-login plan choice, as a small state machine.
+   *
+   * `settled` is the answer for everybody except a brand new account, and it
+   * is reached without a single extra request: the profile the shell already
+   * fetches carries `plan_choice_made`, and the migration that shipped this
+   * stamped every account that existed beforehand. `checking` and `required`
+   * both take the console off the screen, because a console behind a
+   * question the person has not answered is exactly the half-open state this
+   * replaces.
+   */
+  @state()
+  private _planChoice: 'settled' | 'checking' | 'required' = 'settled';
+
+  /** Configured trial length, from the plugin, for the screen's own copy. */
+  @state()
+  private _planChoiceTrialDays = 0;
 
   @state()
   private _sidebarOpen = false;
@@ -455,6 +476,7 @@ export class ConsoleShell extends LitElement {
       this.features = featuresResponse.features;
       this._permissions = profile?.permissions ?? null;
       this._isSuperuser = profile?.is_superuser === true;
+      this._startPlanChoiceCheck(profile);
     } catch (error) {
       console.error('Failed to fetch features:', error);
       // Default to empty features if fetch fails
@@ -466,6 +488,47 @@ export class ConsoleShell extends LitElement {
       this._permissionsLoaded = true;
     }
   }
+
+  /**
+   * Decide whether this person still owes the product a plan choice.
+   *
+   * Two gates, in this order, and both have to be open before anything is
+   * asked of the server:
+   *
+   * 1. The `billing` feature. Without the billing plugin this deployment
+   *    sells nothing, so there is no plan to choose, no screen, and NO
+   *    REQUEST. That is the OSS contract and it is asserted in the tests.
+   * 2. The profile's `plan_choice_made`. False only for an account created
+   *    after this shipped by somebody who did not pick a plan on the way in.
+   *    Everybody else is settled here, for free, on a response the shell had
+   *    already fetched.
+   *
+   * Only then does the billing plugin get the last word, because only it can
+   * see a subscription row or whether this member may buy for the account.
+   */
+  private _startPlanChoiceCheck(profile: UserProfile | null): void {
+    if (this.features['billing'] !== true) return;
+    if (profile?.plan_choice_made !== false) return;
+    this._planChoice = 'checking';
+    void (async () => {
+      const decision = await getPlanChoice();
+      this._planChoiceTrialDays = decision.trial_days;
+      this._planChoice = decision.show ? 'required' : 'settled';
+    })();
+  }
+
+  /**
+   * The choice was made. Drop the screen and let the route underneath render.
+   *
+   * The router never moved, so whatever the person was going to see (the
+   * overview, or a deep link such as the CLI consent page) is what appears.
+   * The cached profile is dropped so the next read of it agrees with the
+   * server rather than re-triggering this from a stale `false`.
+   */
+  private _handlePlanChoiceMade = () => {
+    this._planChoice = 'settled';
+    invalidateUserProfileCache();
+  };
 
   private _canAccess(href: string): boolean {
     const required = NAV_PERMISSIONS[href];
@@ -646,6 +709,21 @@ export class ConsoleShell extends LitElement {
   }
 
   render() {
+    // The plan choice replaces the console outright: no sidebar, no header,
+    // no banners, no routed view underneath it. The route is untouched, so
+    // answering reveals whatever the person was on their way to, including a
+    // deep link such as the CLI consent page. `checking` renders it too (the
+    // screen shows its own spinner), because painting the console and then
+    // pulling it away one request later is worse than waiting.
+    if (this._planChoice !== 'settled') {
+      return html`
+        <plan-choice-screen
+          .trialDays=${this._planChoiceTrialDays}
+          @plan-choice-made=${this._handlePlanChoiceMade}
+        ></plan-choice-screen>
+      `;
+    }
+
     return html`
       <sl-dialog id="upgrade-modal" label="Upgrade Your Plan">
         ${
@@ -673,12 +751,6 @@ export class ConsoleShell extends LitElement {
           Upgrade now
         </sl-button>
       </sl-dialog>
-
-      <!-- The one-time post-signup trial offer. Gated on the billing feature,
-           so an OSS console never renders it and never asks the server. -->
-      <trial-prompt
-        .enabled=${this._featuresLoaded && this.features['billing'] === true}
-      ></trial-prompt>
 
       <global-notice></global-notice>
 

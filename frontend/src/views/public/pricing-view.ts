@@ -342,8 +342,19 @@ export class PublicPricingView extends LitElement {
     // Free costs nothing, so there is no checkout to open. A visitor needs an
     // account; a signed-in person is asking to move plans, which is a change
     // to a live subscription and belongs on the plan page.
+    //
+    // The plan id rides along to the signup form, which sends it on to the
+    // register call, which records the choice on the new user. That is what
+    // makes this a Free SIGNUP rather than a signup that is then asked to
+    // choose a plan it already chose, and recording it server-side is what
+    // carries it through the email verification round trip and onto every
+    // other device the person uses.
     if (this._isFree(plan)) {
-      this._navigate(signedIn ? this._planChangePath(planId) : '/register');
+      this._navigate(
+        signedIn
+          ? this._planChangePath(planId)
+          : `/register?plan=${encodeURIComponent(planId)}`
+      );
       return;
     }
 
