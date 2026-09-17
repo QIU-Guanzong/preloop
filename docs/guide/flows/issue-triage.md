@@ -81,7 +81,11 @@ due-date edit as a plain issue update, and triage has nothing new to read in one
 The check needs a provider change set: a delivery without one (Jira, a replayed
 payload, a manual run) still runs. Only flows created from this preset are held
 back, so a GitLab assignment still reaches other flows that subscribe to issue
-updates.
+updates. A flow counts as one of those when it records this preset as its
+source, or, for flows created before that link existed, when its name is exactly
+the preset's name. A hand-built flow renamed to `Issue Triage Assistant`
+therefore inherits the same skip; give such a flow a different name if it must
+see every update.
 
 ## Manual runs
 

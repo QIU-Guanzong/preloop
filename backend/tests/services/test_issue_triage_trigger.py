@@ -218,6 +218,51 @@ class TestTriageFlowIdentity:
             assert skip_triage_flow_for_event(mock_db, triage, content) is False
             assert skip_triage_flow_for_event(mock_db, other, metadata) is False
 
+    async def test_a_precomputed_relevance_decision_gives_the_same_answer(
+        self, mock_db, account_id
+    ):
+        """A caller filtering many flows evaluates the delivery once."""
+        triage = _flow(name=TRIAGE_PRESET_NAME)
+        metadata = gitlab_update_event(
+            {"assignees": {"previous": [], "current": [{"id": 1}]}},
+            account_id=account_id,
+        )
+        with patch(
+            "preloop.flow_presets.PRESET_SLUGS",
+            {"issue-triage-assistant": TRIAGE_PRESET_NAME},
+        ):
+            assert (
+                skip_triage_flow_for_event(
+                    mock_db, triage, metadata, event_touches_content=False
+                )
+                is True
+            )
+            # A caller claiming the delivery is relevant keeps the flow, so the
+            # hoisted decision, not a second read of the payload, decides.
+            assert (
+                skip_triage_flow_for_event(
+                    mock_db, triage, metadata, event_touches_content=True
+                )
+                is False
+            )
+
+    async def test_a_custom_flow_named_like_the_preset_inherits_the_gate(
+        self, mock_db, account_id
+    ):
+        """Documented tradeoff of the name fallback, pinned so it stays visible."""
+        look_alike = _flow(name=TRIAGE_PRESET_NAME)
+        metadata = gitlab_update_event(
+            {"assignees": {"previous": [], "current": [{"id": 1}]}},
+            account_id=account_id,
+        )
+        with patch(
+            "preloop.flow_presets.PRESET_SLUGS",
+            {"issue-triage-assistant": TRIAGE_PRESET_NAME},
+        ):
+            assert skip_triage_flow_for_event(mock_db, look_alike, metadata) is True
+            look_alike.name = "Assignment triage"
+            assert skip_triage_flow_for_event(mock_db, look_alike, metadata) is False
+
 
 class TestProcessEventSkipsIrrelevantTriage:
     """The gate is applied where flows are filtered, before any execution."""
@@ -295,3 +340,24 @@ class TestProcessEventSkipsIrrelevantTriage:
             ),
         )
         started.assert_awaited_once()
+
+    async def test_the_shipped_gate_is_this_helper(self, service, account_id):
+        """process_event must route through the helper, not inline its rule.
+
+        Without this, an edit to the inlined condition would change the shipped
+        behavior while the helper's own tests kept passing.
+        """
+        with patch(
+            "preloop.services.flow_trigger_service.skip_triage_flow_for_event",
+            return_value=True,
+        ) as gate:
+            started = await self._run(
+                service,
+                _flow(name="Automated Issue Implementation"),
+                gitlab_update_event(
+                    {"description": {"previous": "a", "current": "b"}},
+                    account_id=account_id,
+                ),
+            )
+        gate.assert_called_once()
+        started.assert_not_awaited()

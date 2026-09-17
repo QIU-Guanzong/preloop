@@ -41,8 +41,8 @@ from preloop.utils.workspace_seed import attach_workspace_file_paths
 from preloop.models.db.session import get_session_factory
 from preloop.schemas.issue_triage import provider_revision
 from preloop.services.issue_triage_trigger import (
-    is_triage_preset_flow,
     issue_update_touches_content,
+    skip_triage_flow_for_event,
 )
 
 logger = logging.getLogger(__name__)
@@ -1519,7 +1519,12 @@ class FlowTriggerService:
                     )
                     continue
 
-                if not triage_content_change and is_triage_preset_flow(self.db, flow):
+                if skip_triage_flow_for_event(
+                    self.db,
+                    flow,
+                    event_data,
+                    event_touches_content=triage_content_change,
+                ):
                     logger.info(
                         "Skipping triage flow %s: this issue update changed "
                         "neither the title nor the description, so triage has "
