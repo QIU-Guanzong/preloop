@@ -157,6 +157,9 @@ export function invalidateApiCaches(): void {
   userProfileCache = null;
   userProfileInflight = null;
   userProfileEpoch += 1;
+  // Whose plan question is settled is a fact about one person; signing out
+  // and back in as somebody else must not inherit it.
+  planChoiceSettled = null;
   // Drop coalesced GETs so a later caller cannot join a response that started
   // under a previous session or fetch stub.
   inFlightGets.clear();
@@ -741,6 +744,21 @@ const NO_PLAN_CHOICE: PlanChoiceState = {
 };
 
 /**
+ * A durable "no" from the plugin, remembered for this tab.
+ *
+ * The core profile flag only flips when something is written down, and the
+ * plugin has refusals that write nothing: a member who cannot buy for the
+ * account, or an account whose subscription was created by a path that did
+ * not stamp the user. Those people would otherwise re-ask on every console
+ * load for the life of the account, forever, to be told the same thing.
+ *
+ * `unavailable` is deliberately not durable. That is the answer for a 404,
+ * a 500 or a dropped connection, and re-asking after the plugin comes back
+ * is the behaviour that heals itself.
+ */
+let planChoiceSettled: PlanChoiceState | null = null;
+
+/**
  * Ask whether this person still owes the product a plan decision.
  *
  * Only ever called when the `billing` feature is on AND the core profile
@@ -752,19 +770,28 @@ const NO_PLAN_CHOICE: PlanChoiceState = {
  *
  * Passive, like every other question the console asks on its own behalf: a
  * rate limit on a request nobody made must not raise a dialog.
+ *
+ * A durable refusal is remembered for the tab, so the cohorts the plugin
+ * turns away without writing anything down ask once rather than on every
+ * page load.
  */
 export async function getPlanChoice(): Promise<PlanChoiceState> {
+  if (planChoiceSettled) return planChoiceSettled;
   try {
     const response = await fetchWithAuth('/api/v1/billing/plan-choice', {
       passive: true,
     });
     if (!response.ok) return NO_PLAN_CHOICE;
     const body = await response.json();
-    return {
+    const state: PlanChoiceState = {
       show: body?.show === true,
       reason: typeof body?.reason === 'string' ? body.reason : 'unavailable',
       trial_days: Number(body?.trial_days) || 0,
     };
+    if (!state.show && state.reason !== 'unavailable') {
+      planChoiceSettled = state;
+    }
+    return state;
   } catch {
     return NO_PLAN_CHOICE;
   }
@@ -2974,10 +3001,13 @@ export interface UserProfile {
    * Whether this person has already chosen a plan.
    *
    * Absent or true means "never ask", which is what an older server and
-   * every settled account both produce. Only an explicit false sends the
-   * console on to the billing plugin for the authoritative answer, so the
-   * first-login plan choice costs one extra request exactly once, to the
-   * people it is for.
+   * every settled account both produce, at no cost: no request is made at
+   * all. Only an explicit false sends the console on to the billing plugin
+   * for the authoritative answer, and that costs at most one request per
+   * page load, only while the account is still being asked. The plugin's
+   * durable refusals are remembered by {@link getPlanChoice} for the tab, so
+   * the cohorts it turns away without writing anything down do not re-ask on
+   * every route change either.
    */
   plan_choice_made?: boolean;
   /**

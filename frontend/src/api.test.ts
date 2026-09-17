@@ -1204,6 +1204,12 @@ describe('api', () => {
   });
 
   describe('plan choice', () => {
+    beforeEach(() => {
+      // The durable "no" is remembered per tab, which in a test file is per
+      // module. Each case starts from a console that has not asked yet.
+      invalidateApiCaches();
+    });
+
     it('reads the decision the server made', async () => {
       fetchStub.resolves(
         new Response(
@@ -1251,6 +1257,75 @@ describe('api', () => {
       expect(decision.show).to.equal(false);
       const [, options] = fetchStub.firstCall.args;
       expect(options).to.not.have.property('passive');
+    });
+
+    it('asks again after an unreachable plugin, and only once after a no', async () => {
+      // Two different kinds of "false". A 404 or a 500 is the plugin being
+      // absent or broken, and the question has to heal itself when it comes
+      // back. A reasoned refusal (a member who cannot buy, an account that
+      // already subscribes) writes nothing down on the core profile, so
+      // without this memo those people would re-ask on every route change
+      // for the life of the account, to be told the same thing.
+      fetchStub.resolves(new Response('boom', { status: 500 }));
+      expect((await getPlanChoice()).reason).to.equal('unavailable');
+      expect((await getPlanChoice()).reason).to.equal('unavailable');
+      expect(fetchStub.callCount).to.equal(2);
+
+      fetchStub.resolves(
+        new Response(
+          JSON.stringify({
+            show: false,
+            reason: 'not_billing_actor',
+            trial_days: 14,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+      expect((await getPlanChoice()).reason).to.equal('not_billing_actor');
+      expect(fetchStub.callCount).to.equal(3);
+
+      const again = await getPlanChoice();
+      expect(again.reason).to.equal('not_billing_actor');
+      expect(again.trial_days).to.equal(14);
+      expect(fetchStub.callCount, 'answered from the memo').to.equal(3);
+    });
+
+    it('keeps asking while the answer is still yes', async () => {
+      // An open question is not settled, so nothing is remembered: the screen
+      // has to be able to appear on a later load.
+      fetchStub.resolves(
+        new Response(
+          JSON.stringify({ show: true, reason: 'eligible', trial_days: 14 }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+
+      await getPlanChoice();
+      await getPlanChoice();
+
+      expect(fetchStub.callCount).to.equal(2);
+    });
+
+    it('forgets the answer when the session does', async () => {
+      // Signing out and in as somebody else must not inherit the previous
+      // person's settled question.
+      fetchStub.resolves(
+        new Response(
+          JSON.stringify({
+            show: false,
+            reason: 'subscription_exists',
+            trial_days: 14,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+      await getPlanChoice();
+      await getPlanChoice();
+      expect(fetchStub.callCount).to.equal(1);
+
+      invalidateApiCaches();
+      await getPlanChoice();
+      expect(fetchStub.callCount).to.equal(2);
     });
 
     it('posts the free choice and throws when the write is refused', async () => {

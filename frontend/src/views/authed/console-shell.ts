@@ -505,6 +505,11 @@ export class ConsoleShell extends LitElement {
    *
    * Only then does the billing plugin get the last word, because only it can
    * see a subscription row or whether this member may buy for the account.
+   * Its refusals that write nothing down (a member who cannot buy, an account
+   * already subscribed) are remembered by `getPlanChoice` for the tab, so
+   * those cohorts ask once per page load and not once per route change. A
+   * plugin that is simply unreachable is not remembered, so the question
+   * heals itself when it comes back.
    */
   private _startPlanChoiceCheck(profile: UserProfile | null): void {
     if (this.features['billing'] !== true) return;
