@@ -31,6 +31,7 @@ from preloop.models.crud import (
 )
 from preloop.models.crud.flow_runner import crud_flow_runner
 from preloop.models.db.session import get_db_session as get_db
+from preloop.models.db.session import release_transaction
 
 from preloop.services.flow_pr_binding import record_runner_handoff_markers
 from preloop.services.runner_service import (
@@ -519,6 +520,13 @@ async def runner_ws(
 
     try:
         while True:
+            # A heartbeat arrives every few seconds; between two of them this
+            # handler must not be "idle in transaction". The reads that build
+            # the previous reply (runner, assignments, executions) would
+            # otherwise keep AccessShareLock on those tables for the whole
+            # quiet gap, which is long enough to block an `ALTER TABLE` during
+            # a rolling upgrade and, through it, every query behind it.
+            release_transaction(db)
             raw = await websocket.receive_json()
             msg_type = str(raw.get("type") or "")
             runner = crud_flow_runner.get(db, id=runner_id)

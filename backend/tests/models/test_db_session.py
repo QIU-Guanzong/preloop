@@ -304,3 +304,51 @@ def test_get_health_engine_is_created_once_under_concurrency(mock_engine_depende
         assert len({id(engine) for engine in engines}) == 1
     finally:
         session_module._health_engine = None
+
+
+class TestReleaseTransaction:
+    """`release_transaction` is what keeps a waiting session out of a lock.
+
+    A session left "idle in transaction" holds AccessShareLock on every table
+    it read, which blocks DDL and, through the blocked DDL, every query that
+    arrives after it.
+    """
+
+    def test_a_pending_transaction_is_committed(self) -> None:
+        session = MagicMock(spec=Session)
+        session.in_transaction.return_value = True
+
+        session_module.release_transaction(session)
+
+        session.commit.assert_called_once_with()
+        session.rollback.assert_not_called()
+
+    def test_an_idle_session_is_left_alone(self) -> None:
+        session = MagicMock(spec=Session)
+        session.in_transaction.return_value = False
+
+        session_module.release_transaction(session)
+
+        session.commit.assert_not_called()
+        session.rollback.assert_not_called()
+
+    def test_a_failed_commit_still_releases_the_locks(self) -> None:
+        """Rolling back is worse than committing, and far better than holding."""
+        session = MagicMock(spec=Session)
+        session.in_transaction.return_value = True
+        session.commit.side_effect = SQLAlchemyError("serialization failure")
+
+        session_module.release_transaction(session)
+
+        session.rollback.assert_called_once_with()
+        session.invalidate.assert_not_called()
+
+    def test_a_connection_that_cannot_roll_back_is_invalidated(self) -> None:
+        session = MagicMock(spec=Session)
+        session.in_transaction.return_value = True
+        session.commit.side_effect = SQLAlchemyError("commit failed")
+        session.rollback.side_effect = SQLAlchemyError("connection is gone")
+
+        session_module.release_transaction(session)
+
+        session.invalidate.assert_called_once_with()

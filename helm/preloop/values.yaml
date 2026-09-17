@@ -9,6 +9,29 @@ image:
   pullPolicy: Always
   tag: "latest"  # Overrides the image tag
 
+# Schema migrations. The pre-upgrade hook runs `alembic upgrade head` while
+# the previous API pods and sync workers are still serving, so the migration
+# competes for locks with live traffic. Each revision commits on its own, the
+# migration session uses a short lock_timeout (NOT the cluster-wide
+# database.cnpg.resilience.lock_timeout, which stays as configured), and the
+# upgrade is retried when a lock is busy. See helm/preloop/README.md.
+migrationJob:
+  # -- Per-session lock_timeout for the migration connection. Short on
+  # purpose: a pending ACCESS EXCLUSIVE request also blocks every query that
+  # queues behind it, so waiting a minute for a lock stalls live traffic for
+  # a minute.
+  lockTimeout: "5s"
+  # -- How many times the whole `upgrade head` is retried when a revision
+  # loses a lock race. A retry resumes at the first revision that did not
+  # commit, so retrying is cheap.
+  maxAttempts: 20
+  # -- Jittered backoff between attempts, in seconds.
+  retryMinSeconds: 3
+  retryMaxSeconds: 15
+  # -- Kubernetes Job retries on top of the in-container retry loop. The loop
+  # already covers lock contention, so this only exists for a crashed pod.
+  backoffLimit: 2
+
 worker:
   # -- Defines a list of worker pools to be deployed.
   # Each pool can have its own replica count and a list of allowed tasks.

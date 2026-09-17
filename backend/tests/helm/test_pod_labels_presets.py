@@ -76,8 +76,11 @@ def test_upgrade_migration_is_schema_only_and_runs_before_new_pods() -> None:
     )[0]
     assert job["metadata"]["annotations"]["helm.sh/hook"] == "pre-upgrade"
     container = job["spec"]["template"]["spec"]["containers"][0]
+    # The wrapper, not bare alembic: it commits one transaction per revision
+    # and retries a lock race against the pods that are still serving.
+    # See backend/tests/helm/test_migration_job_locks.py.
     assert container["args"] == [
-        "cd /app/backend/preloop/models && alembic upgrade head"
+        "cd /app/backend/preloop/models && python -m preloop.models.migrate"
     ]
     db_env = next(item for item in container["env"] if item["name"] == "DATABASE_URL")
     assert db_env["valueFrom"]["secretKeyRef"] == {
