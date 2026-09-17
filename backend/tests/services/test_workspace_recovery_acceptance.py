@@ -17,7 +17,7 @@ import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 from uuid import uuid4
 
 import pytest
@@ -442,3 +442,155 @@ async def test_the_queue_deadline_blocks_for_an_operator_and_keeps_the_host(
     assert "build-box-2" in execution.error_message
     assert "does not upload private workspaces" in execution.error_message
     assert str(prior) in execution.error_message
+
+
+def test_a_doubly_wrapped_config_still_pins_the_continuation() -> None:
+    """Some stored flow configs nest agent_config inside agent_config.
+
+    The lease payload builder unwraps that shape before a runner sees it. If
+    this lookup did not agree, a host-bound continuation would read as free
+    and an idle peer could lease work it cannot serve.
+    """
+    owner = uuid4()
+    prior = uuid4()
+    db = MagicMock()
+    with patch(
+        "preloop.models.crud.crud_flow_execution.get",
+        rows_by_id({prior: owned_by(prior, owner)}),
+    ):
+        pinned = workspace_owner_runner_id(
+            db,
+            payload={
+                "resume_from": str(prior),
+                "agent_config": {
+                    "agent_config": {"runner": {"persist_workspace": True}}
+                },
+            },
+        )
+    assert pinned == owner
+
+
+@pytest.mark.asyncio
+async def test_a_poll_pins_from_the_payload_the_runner_will_receive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The row alone can understate the pin; the delivered payload cannot."""
+    from preloop.agents.remote_runner import RemoteRunnerExecutor
+
+    owner = uuid4()
+    prior = uuid4()
+    execution_id = uuid4()
+    wrapped = {"agent_config": {"runner": {"persist_workspace": True}}}
+    execution = SimpleNamespace(
+        id=execution_id,
+        flow_id=uuid4(),
+        runner_id=None,
+        agent_session_reference=f"runner:queued:local:{execution_id}",
+        start_time=datetime.now(timezone.utc),
+        status="PENDING",
+        error_message=None,
+        end_time=None,
+        resolved_input_prompt="continue",
+        model_output_summary=None,
+        result=None,
+        trigger_event_details={"_resume": {"execution_id": str(prior)}},
+    )
+    leases: list = []
+
+    def _lease(db, **kwargs):
+        leases.append(kwargs.get("required_runner_id"))
+        return None
+
+    monkeypatch.setattr("preloop.agents.remote_runner.lease_job", _lease)
+    monkeypatch.setattr(
+        "preloop.models.crud.crud_flow_execution.get",
+        rows_by_id({execution_id: execution, prior: owned_by(prior, owner)}),
+    )
+    monkeypatch.setattr(
+        "preloop.agents.remote_runner.crud_flow_execution.get_stop_request",
+        lambda *args, **kwargs: None,
+    )
+
+    executor = RemoteRunnerExecutor(
+        "codex",
+        wrapped,
+        db=MagicMock(),
+        pool="local",
+        account_id=uuid4(),
+        flow=SimpleNamespace(
+            agent_config=wrapped,
+            ai_model=None,
+            git_clone_config=None,
+            custom_commands=None,
+            allowed_mcp_servers=[],
+            allowed_mcp_tools=[],
+            agent_type="codex",
+        ),
+        execution=execution,
+    )
+    await executor.get_status(execution.agent_session_reference)
+
+    assert leases == [owner]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_owner_lookup_waits_instead_of_leasing_anywhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not knowing the owner is not the same answer as having no owner.
+
+    Leasing unpinned on a lookup error would consume a peer's slot and end
+    the continuation on a host that does not hold its workspace. The next
+    poll retries the lookup, so waiting costs one interval.
+    """
+    from preloop.agents.base import AgentStatus
+    from preloop.agents.remote_runner import RemoteRunnerExecutor
+
+    prior = uuid4()
+    execution_id = uuid4()
+    execution = SimpleNamespace(
+        id=execution_id,
+        flow_id=uuid4(),
+        runner_id=None,
+        agent_session_reference=f"runner:queued:local:{execution_id}",
+        start_time=datetime.now(timezone.utc),
+        status="PENDING",
+        error_message=None,
+        end_time=None,
+        resolved_input_prompt="continue",
+        model_output_summary=None,
+        result=None,
+        trigger_event_details={"_resume": {"execution_id": str(prior)}},
+    )
+
+    def _must_not_lease(*args, **kwargs):  # pragma: no cover - guard
+        raise AssertionError("an unresolved owner must not lease anywhere")
+
+    def _explode(*args, **kwargs):
+        raise RuntimeError("database is unreachable")
+
+    monkeypatch.setattr("preloop.agents.remote_runner.lease_job", _must_not_lease)
+    monkeypatch.setattr(
+        "preloop.agents.remote_runner.workspace_owner_runner_id", _explode
+    )
+    monkeypatch.setattr(
+        "preloop.models.crud.crud_flow_execution.get",
+        rows_by_id({execution_id: execution}),
+    )
+    monkeypatch.setattr(
+        "preloop.agents.remote_runner.crud_flow_execution.get_stop_request",
+        lambda *args, **kwargs: None,
+    )
+
+    executor = RemoteRunnerExecutor(
+        "codex",
+        {"runner": {"persist_workspace": True}},
+        db=MagicMock(),
+        pool="local",
+        account_id=uuid4(),
+        flow=SimpleNamespace(agent_config={"runner": {"persist_workspace": True}}),
+    )
+    status = await executor.get_status(execution.agent_session_reference)
+
+    assert status is AgentStatus.PENDING
+    assert execution.status == "PENDING"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -179,7 +179,9 @@ class RemoteRunnerExecutor(AgentExecutor):
             queued = mark_queued_or_fail(
                 queued_since=started, timeout=DEFAULT_QUEUE_TIMEOUT
             )
-            owner_id = self._owner_runner_id(execution) if execution else None
+            owner_id, owner_resolved = (
+                self._owner_runner_id(execution) if execution else (None, True)
+            )
             if queued == "FAILED":
                 if execution:
                     execution.status = "FAILED"
@@ -207,7 +209,7 @@ class RemoteRunnerExecutor(AgentExecutor):
                     self.db.commit()
                 return AgentStatus.FAILED
             # A runner may have come online; try to lease now.
-            if execution:
+            if execution and owner_resolved:
                 flow = self._flow_for_execution(execution)
                 payload = self._lease_payload(
                     execution_id=execution.id,
@@ -215,6 +217,12 @@ class RemoteRunnerExecutor(AgentExecutor):
                     prompt=execution.resolved_input_prompt,
                     flow=flow,
                 )
+                if owner_id is None:
+                    # The payload is the shape the runner actually receives,
+                    # so it is the authority on whether this job is host
+                    # bound. Resolving from the row alone can miss a config
+                    # the payload builder normalizes.
+                    owner_id = workspace_owner_runner_id(self.db, payload=payload)
                 runner = lease_job(
                     self.db,
                     account_id=self.account_id,
@@ -427,7 +435,7 @@ class RemoteRunnerExecutor(AgentExecutor):
                 payload["resume_from"] = resume_from
         return payload
 
-    def _owner_runner_id(self, execution: Any) -> Optional[UUID]:
+    def _owner_runner_id(self, execution: Any) -> Tuple[Optional[UUID], bool]:
         """Runner pinned by a persisted-workspace continuation, if any.
 
         Resolved from the row rather than the lease payload so a queued job
@@ -438,17 +446,20 @@ class RemoteRunnerExecutor(AgentExecutor):
             execution: The queued flow execution.
 
         Returns:
-            The owning runner id, or None when the job may run anywhere.
+            ``(owner_id, resolved)``. ``owner_id`` is None when the job may
+            run anywhere. ``resolved`` is False when the lookup itself failed,
+            which is not the same answer: leasing such a job unpinned would
+            hand a host-bound continuation to a peer that cannot serve it.
         """
         resume_from = _resume_from_execution_id({}, execution)
         if not resume_from:
-            return None
+            return None, True
         flow = self._flow_for_execution(execution)
         agent_config = (
             getattr(flow, "agent_config", None) if flow is not None else None
         ) or self.config
         try:
-            return workspace_owner_runner_id(
+            owner = workspace_owner_runner_id(
                 self.db,
                 payload={"resume_from": resume_from, "agent_config": agent_config},
             )
@@ -458,7 +469,8 @@ class RemoteRunnerExecutor(AgentExecutor):
                 getattr(execution, "id", None),
                 exc_info=True,
             )
-            return None
+            return None, False
+        return owner, True
 
     def _flow_for_execution(self, execution: Any) -> Any:
         """Resolve the flow without depending on a loaded ORM relationship."""

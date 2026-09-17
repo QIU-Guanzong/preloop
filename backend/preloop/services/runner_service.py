@@ -305,6 +305,15 @@ def workspace_owner_runner_id(
     if not isinstance(resume_from, str) or not resume_from.strip():
         return None
     config = payload.get("agent_config")
+    if (
+        isinstance(config, dict)
+        and set(config) == {"agent_config"}
+        and isinstance(config["agent_config"], dict)
+    ):
+        # Some stored flow configs carry the doubly wrapped shape. The lease
+        # payload builder unwraps it before the runner ever sees it, so this
+        # lookup has to agree with it or a host-bound job reads as free.
+        config = config["agent_config"]
     runner_config = config.get("runner") if isinstance(config, dict) else None
     if not isinstance(runner_config, dict) or not _truthy(
         runner_config.get("persist_workspace")
