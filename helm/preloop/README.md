@@ -350,6 +350,19 @@ helm uninstall preloop
 | `database.cnpg.queryAnalysis.enabled`    | Enable pg_stat_statements and auto_explain     | `false`     |
 | `database.cnpg.queryAnalysis.autoExplainMinDuration` | Log EXPLAIN for queries slower than (ms) | `1000` |
 
+### Schema migration parameters
+
+The `pre-upgrade` hook runs against the pods that are still serving. See
+[Schema migrations run against live pods](#schema-migrations-run-against-live-pods).
+
+| Name                               | Description                                           | Value       |
+|------------------------------------|-------------------------------------------------------|-------------|
+| `migrationJob.lockTimeout`         | Per-session lock_timeout for the migration connection | `5s`        |
+| `migrationJob.maxAttempts`         | Attempts at `upgrade head` before the Job fails       | `20`        |
+| `migrationJob.retryMinSeconds`     | Lower bound of the jittered backoff between attempts  | `3`         |
+| `migrationJob.retryMaxSeconds`     | Upper bound of the jittered backoff between attempts  | `15`        |
+| `migrationJob.backoffLimit`        | Pod-level Job retries (for a crashed container)       | `2`         |
+
 ### Environment parameters
 
 | Name                           | Description                                           | Value       |
@@ -787,6 +800,34 @@ point in time), they do not restore in place:
 5. Decommission the old cluster only after the new one is verified.
 
 ## Upgrading the Chart
+
+### Schema migrations run against live pods
+
+`helm upgrade` runs `preloop-migration-job` as a `pre-upgrade` hook, before the
+new pods roll out and while the previous API pods, sync workers and connected
+private runners keep serving. The migration competes for locks with live
+traffic, so the Job runs `python -m preloop.models.migrate` rather than bare
+`alembic upgrade head`:
+
+- every revision commits on its own, releasing its locks before the next
+  revision starts (a retry resumes from the last revision that committed);
+- the migration session uses a short `lock_timeout`
+  (`migrationJob.lockTimeout`, default `5s`). This is per-session and does not
+  change `database.cnpg.resilience.lock_timeout`. Short on purpose: a pending
+  ACCESS EXCLUSIVE request blocks every query queued behind it, so a long wait
+  stalls reads of that table for just as long;
+- lock contention (deadlock, lock timeout, serialization failure) is retried up
+  to `migrationJob.maxAttempts` times with `migrationJob.retryMinSeconds` to
+  `migrationJob.retryMaxSeconds` of jittered backoff. Any other error fails on
+  the first attempt.
+
+Drain the API first when a revision rewrites a large table, when the release
+notes say so, or when a run has exhausted its retry budget. Scale the serving
+deployments to zero, upgrade, then scale back: runners reconnect on their own.
+Raising `lockTimeout` instead makes the stall longer, not shorter.
+
+Full operator guide, including the queries for finding a session that is idle
+in a transaction: [docs/operations/schema-migrations.md](../../docs/operations/schema-migrations.md).
 
 ### To 1.0.0
 
