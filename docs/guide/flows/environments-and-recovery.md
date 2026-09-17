@@ -100,10 +100,14 @@ Controlled exits attempt a final checkpoint. Before legacy wrapper publication,
 a failed checkpoint blocks publication. A trusted external publisher must make
 this checkpoint barrier part of its handoff as well.
 
-Restore occurs before setup or agent startup on Docker and Kubernetes. Source,
-commits, staged/unstaged edits and required untracked files are retained.
+Restore occurs before setup or agent startup on Docker and Kubernetes. It logs
+the age of the checkpoint it recovered (`PRELOOP_CHECKPOINT restored
+age_seconds=... created_at=...`), so work lost to node loss is visible rather
+than assumed to be zero. Source, each repository's branch, head and upstream
+base commit, staged/unstaged edits and required untracked files are retained.
 Reproducible dependencies, known credential locations, environment files,
-symlinks, git credential configuration and native session directories are
+symlinks, git configuration (including submodule and worktree copies, which
+carry the same remote URL credential) and native session directories are
 excluded. This exclusion list is not a content-level secret detector; keep
 production credentials out of implementation workspaces. The trusted clone
 configuration recreates remotes. Divergent/newer remote commits are detected
@@ -128,8 +132,14 @@ encryption. `PRELOOP_RUNNER_WORKSPACE_MAX_BYTES` bounds retained workspace bytes
 `.expired` tombstone distinguishes expiry/quota loss from a missing runner.
 `PRELOOP_RUNNER_WORKSPACE_TTL_HOURS=0` disables retention; active jobs are
 protected. Cleanup also runs during idle heartbeats. No private workspace is
-uploaded by this transport. Continuation must stay on its owning runner; a
-missing/offline owner is an operator-visible scheduling constraint.
+uploaded by this transport. A continuation of a persisted workspace is leased
+only to the runner that holds it: while that runner is offline the execution
+stays queued with a message naming it, and after the queue deadline it fails
+for operator action rather than moving to another host. If a job does reach a
+runner without the workspace it was told to resume, the runner refuses it
+(`workspace_recovery_unavailable`) instead of cloning cold and dropping the
+unpublished work; the local `.expired` tombstone distinguishes retention or
+quota loss from a wrong host.
 
 ## Validation
 

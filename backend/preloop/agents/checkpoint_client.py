@@ -84,6 +84,20 @@ def git_value(repo: Path, *args: str) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def is_git_config(path: Path, root: Path) -> bool:
+    """True for any git config file, including submodules and worktrees.
+
+    A runtime remote URL can embed the clone credential. ``.git/config`` is
+    the obvious copy; ``.git/modules/<name>/config`` (submodules) and
+    ``.git/worktrees/<name>/config.worktree`` are the ones a checkpoint used
+    to carry anyway. The trusted clone configuration recreates remotes on
+    restore, so nothing of value is lost by dropping all of them.
+    """
+    if not (path.name == "config" or path.name.startswith("config.")):
+        return False
+    return ".git" in path.relative_to(root).parts
+
+
 def capture(root: Path, *, max_bytes: int) -> bytes:
     """Capture a stable file set, detecting concurrent writes before upload."""
     root = root.resolve()
@@ -110,13 +124,17 @@ def capture(root: Path, *, max_bytes: int) -> bytes:
                     "path": str(repo.relative_to(root)),
                     "branch": git_value(repo, "branch", "--show-current"),
                     "head_sha": git_value(repo, "rev-parse", "HEAD"),
+                    # The commit the unpushed work sits on. Without it a
+                    # reader cannot tell a checkpoint that is only dirty from
+                    # one that also carries commits the remote never saw.
+                    "base_sha": git_value(repo, "rev-parse", "@{upstream}"),
                 }
             )
     buffer = io.BytesIO()
     digest = hashlib.sha256()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         for path, before in files:
-            if path.name == "config" and path.parent.name == ".git":
+            if is_git_config(path, root):
                 # Runtime remotes can embed clone credentials; recreate from
                 # trusted repository configuration when resuming.
                 continue
@@ -428,8 +446,33 @@ def request(
         return body
 
 
-def restore(body: bytes, destination: Path) -> None:
-    """Validate and stage recovery before moving files into the workspace."""
+CHECKPOINT_METADATA_NAME = ".preloop-checkpoint.json"
+
+
+def restored_age_report(metadata: dict) -> str:
+    """Say how old the restored checkpoint is, in the restore log line.
+
+    Recovery is "the last complete checkpoint", not "everything the agent
+    ever wrote". The age is the size of the window whose writes were lost,
+    so it is reported rather than left for the reader to infer. An
+    unreadable or absent ``created_at`` reports ``unknown``, never zero.
+    """
+    created = metadata.get("created_at") if isinstance(metadata, dict) else None
+    try:
+        age = int(max(0.0, time.time() - float(created)))
+    except (TypeError, ValueError):
+        return "age_seconds=unknown created_at=unknown"
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(created)))
+    return "age_seconds=" + str(age) + " created_at=" + stamp
+
+
+def restore(body: bytes, destination: Path) -> dict:
+    """Validate and stage recovery before moving files into the workspace.
+
+    Returns the checkpoint's own metadata document so the caller can report
+    what was recovered and how old it is. ``{}`` when the archive predates
+    the metadata member or carries an unreadable one.
+    """
     total = 0
     limit = int(
         os.environ.get("PRELOOP_CHECKPOINT_EXPANDED_MAX_BYTES", str(2 * 1024**3))
@@ -466,8 +509,18 @@ def restore(body: bytes, destination: Path) -> None:
         staged = Path(staging) / "workspace"
         if not staged.is_dir():
             raise ValueError("checkpoint_missing_workspace")
+        metadata: dict = {}
+        document = staged / CHECKPOINT_METADATA_NAME
+        if document.is_file():
+            try:
+                parsed = json.loads(document.read_text())
+            except (ValueError, OSError, UnicodeDecodeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                metadata = parsed
         for path in staged.iterdir():
             path.rename(destination / path.name)
+        return metadata
 
 
 def main() -> None:
@@ -481,11 +534,14 @@ def main() -> None:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
             if sys.argv[1] == "restore":
-                restore(
+                metadata = restore(
                     request("GET", os.environ["PRELOOP_CHECKPOINT_GET_TOKEN"]),
                     WORKSPACE_ROOT,
                 )
-                print("PRELOOP_CHECKPOINT restored", flush=True)
+                print(
+                    "PRELOOP_CHECKPOINT restored " + restored_age_report(metadata),
+                    flush=True,
+                )
             elif sys.argv[1] == "evidence":
                 # The marker file is agent-writable. Presence is not proof of
                 # a server commit; always pack and PUT. The control plane
