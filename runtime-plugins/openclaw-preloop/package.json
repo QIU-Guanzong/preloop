@@ -1,7 +1,7 @@
 {
   "name": "@preloop-ai/openclaw-plugin",
-  "version": "0.2.1",
-  "description": "Preloop exposure and Agent Control plugin for OpenClaw",
+  "version": "0.3.0",
+  "description": "Approve or deny your OpenClaw agent's dangerous tool calls from your phone, watch, Slack or the web, and talk to a running session from anywhere.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
@@ -19,9 +19,19 @@
   "keywords": [
     "preloop",
     "openclaw",
-    "agent-control",
-    "voice",
+    "approvals",
     "tool-approval",
+    "human-in-the-loop",
+    "governance",
+    "policy",
+    "audit",
+    "budget",
+    "cost-control",
+    "control-plane",
+    "remote-control",
+    "agent-control",
+    "observability",
+    "voice",
     "autonomous-agents"
   ],
   "bin": {
