@@ -7,10 +7,12 @@ keyboard. Right now it just runs.
 [Preloop](https://github.com/preloop/preloop), the open-source AI agent control
 plane.
 
-- **Dangerous commands wait for you instead of just running.** Every native tool
-  call is gated in `tool.execute.before`, regardless of what OpenCode's own
+- **Dangerous commands wait for you instead of just running.** Native tool calls
+  are gated in `tool.execute.before`, regardless of what OpenCode's own
   `permission` config says, so an `opencode.json` full of `"allow"` does not
-  quietly opt you out.
+  quietly opt you out. The one exception is the `safe_read_auto_allow` shortcut
+  for read-only shell commands, on by default and
+  [documented below](#how-approvals-flow).
 - **Approve from wherever you actually are.** Push to phone or watch, Slack,
   Mattermost, email, an outbound webhook, or the Preloop console.
 - **Nothing runs ungoverned when Preloop is down.** The gate fails closed by
