@@ -900,8 +900,8 @@ describe('AccountView', () => {
       billing: true,
       ingestionQuota: {
         plan_id: 'pro',
-        quota_tokens: 100000000,
-        used_tokens: 100000000,
+        quota_tokens: 200000000,
+        used_tokens: 200000000,
         remaining_tokens: 0,
         is_unlimited: false,
         over_quota: true,
@@ -920,7 +920,7 @@ describe('AccountView', () => {
 
     const text = copy(element);
     expect(text).to.contain('Analysis quota');
-    expect(text).to.contain('100M of 100M tokens');
+    expect(text).to.contain('200M of 200M tokens');
     // Product-safety rule: exhausting the BYOK quota degrades analytics
     // detail and nothing else. Copy that says otherwise is a bug.
     expect(text).to.contain('Your agents keep running');

@@ -31,8 +31,8 @@ const AGENTS: UsageNudge = {
 const TOKENS: UsageNudge = {
   key: 'byok_ingest_tokens_monthly',
   ratio: 0.51,
-  used: 51_000_000,
-  limit: 100_000_000,
+  used: 10_200_000,
+  limit: 20_000_000,
   unit: 'tokens',
   plan_id: 'free',
   unlocks_at_plan: 'pro',
@@ -202,7 +202,7 @@ describe('usage-nudge-banner', () => {
     await waitUntil(() => !!el.shadowRoot?.querySelector('.row'));
     const text = el.shadowRoot!.textContent ?? '';
     expect(text).to.contain('2 of 3 agents');
-    expect(text).to.contain('51M of 100M analysis tokens this month');
+    expect(text).to.contain('10.2M of 20M analysis tokens this month');
     const link = el.shadowRoot!.querySelector<HTMLAnchorElement>('a.plans')!;
     expect(link.getAttribute('href')).to.contain('feature=max_agents');
   });
@@ -267,7 +267,7 @@ describe('usage-nudge-banner', () => {
 
       // Unlimited agents and unlimited tokens: the server sent no item, so
       // there is no row, and in particular no Free-plan "3 agents" or
-      // "100M tokens" invented on this side.
+      // "20M tokens" invented on this side.
       expect(
         el.shadowRoot?.querySelector('[data-nudge="max_agents"]')
       ).to.equal(null);

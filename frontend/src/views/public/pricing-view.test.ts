@@ -100,8 +100,8 @@ const LADDER_CONTENT = {
             {
               label: 'BYOK analysis quota / month',
               values: {
-                free: '100M tokens',
-                pro: '1B tokens',
+                free: '20M tokens',
+                pro: '200M tokens',
                 team: '5B tokens',
                 business: '20B tokens',
               },
