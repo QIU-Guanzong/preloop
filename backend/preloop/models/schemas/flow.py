@@ -1229,12 +1229,16 @@ class RunPresetItemResult(BaseModel):
     """Target outcome for a preset run, including dispatch failure receipts."""
 
     issue_id: Optional[str] = None
+    issue_key: Optional[str] = None
     project_id: Optional[str] = None
     number: Optional[int] = None
     execution_id: Optional[str] = None
     execution_status: Optional[str] = None
     execution_url: Optional[str] = None
     error: Optional[str] = None
+    # True when this target already had an active run on the same flow and
+    # this request reused it instead of starting a second one.
+    coalesced: bool = False
 
 
 class RunPresetResponse(BaseModel):

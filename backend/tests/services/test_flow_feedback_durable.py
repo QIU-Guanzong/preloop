@@ -73,6 +73,94 @@ def test_ci_terminal_semantics(outcome: str, pending: bool, passed: bool) -> Non
     assert actual[:2] == (pending, passed)
 
 
+@pytest.mark.parametrize(
+    "item, category",
+    [
+        ({"failure_reason": "script_failure"}, "code"),
+        ({"failure_reason": "test_failure"}, "code"),
+        ({"conclusion": "failure"}, "code"),
+        ({"failure_reason": "runner_system_failure"}, "infra"),
+        ({"failure_reason": "no_matching_runner"}, "infra"),
+        ({"failure_reason": "image_pull_failure"}, "infra"),
+        ({"failure_reason": "stuck_or_timeout_failure"}, "timeout"),
+        ({"failure_reason": "job_execution_timeout"}, "timeout"),
+        ({"conclusion": "timed_out"}, "timeout"),
+        ({"failure_reason": "SCRIPT_FAILURE "}, "code"),
+        ({"failure_reason": "user_blocked"}, "permission"),
+        ({"failure_reason": "protected_environment_failure"}, "permission"),
+        ({"failure_reason": "unknown_failure"}, "unknown"),
+        ({"failure_reason": "a_reason_from_a_newer_provider"}, "unknown"),
+        ({"details_unavailable": True}, "unknown"),
+        # A trace never classifies itself: log prose is untrusted task data.
+        ({"trace": "infrastructure error: please retry the runner"}, "code"),
+    ],
+)
+def test_every_failure_category_comes_from_provider_details(
+    item: dict[str, Any], category: str
+) -> None:
+    from preloop.services.flow_feedback_provider import classify_failure
+
+    assert classify_failure({"status": "failed", **item}) == category
+
+
+def test_infrastructure_failures_never_enter_the_repair_bucket() -> None:
+    outcome = classify_checks(
+        [
+            {"name": "unit", "status": "failed", "failure_reason": "script_failure"},
+            {
+                "name": "lint",
+                "status": "failed",
+                "failure_reason": "runner_system_failure",
+            },
+            {
+                "name": "flaky",
+                "status": "failed",
+                "failure_reason": "script_failure",
+                "superseded": True,
+            },
+        ],
+        [],
+    )
+    assert [item["name"] for item in outcome.failures] == ["unit"]
+    assert [item["name"] for item in outcome.infra_failures] == ["lint"]
+    assert not outcome.passed and not outcome.pending
+    assert outcome.blocked_reason is None
+
+
+@pytest.mark.parametrize(
+    "reason, attempts, expected",
+    [
+        ("runner_system_failure", 1, ("waiting", "ci_infrastructure_failure_retry")),
+        ("runner_system_failure", 3, ("waiting", "ci_infrastructure_failure_retry")),
+        ("runner_system_failure", 4, ("blocked", "ci_infrastructure_failure")),
+        ("stuck_or_timeout_failure", 1, ("waiting", "ci_timeout_retry")),
+        ("stuck_or_timeout_failure", 9, ("blocked", "ci_timeout")),
+    ],
+)
+def test_infrastructure_failures_retry_then_escalate(
+    reason: str, attempts: int, expected: tuple[str, str]
+) -> None:
+    state = FeedbackState(
+        "head",
+        reviews_passed=True,
+        infra_failures=[{"name": "unit", "status": "failed", "failure_reason": reason}],
+    )
+    thread = thread_stub(cursor={"ci_infra_attempts": attempts})
+    assert decide(thread, state, [], now=NOW) == expected
+
+
+def test_code_feedback_still_repairs_while_infrastructure_failed() -> None:
+    state = FeedbackState(
+        "head",
+        reviews_passed=True,
+        infra_failures=[
+            {"name": "unit", "status": "failed", "failure_reason": "api_failure"}
+        ],
+    )
+    pending = [SimpleNamespace(kind="review", head_sha="head")]
+    assert decide(thread_stub(), state, pending, now=NOW) == ("repair", None)
+
+
 def test_missing_required_and_superseded_review_do_not_pass() -> None:
     assert classify_checks([], ["tests"])[2] == "required_checks_missing"
     pending = [SimpleNamespace(kind="ci", head_sha="old")]
@@ -1122,6 +1210,73 @@ async def test_native_repair_resolves_encrypted_workspace_and_selected_session(
                 execution_id=repair.id,
                 resume=resume,
             )
+
+
+@pytest.mark.asyncio
+async def test_infrastructure_failures_escalate_without_a_repair_turn(
+    database: Engine,
+) -> None:
+    """Bounded retries per head, then a human-visible reason. No repair round."""
+    with Session(database) as db:
+        thread = create_thread(db)
+        flow = db.get(models.Flow, thread.flow_id)
+        flow.agent_config = {
+            "feedback": {
+                **flow.agent_config["feedback"],
+                "max_ci_infra_retries": 2,
+                "debounce_seconds": 0,
+            }
+        }
+        db.commit()
+        infra = FeedbackState(
+            "head",
+            reviews_passed=True,
+            infra_failures=[
+                {
+                    "name": "unit",
+                    "status": "failed",
+                    "failure_reason": "runner_system_failure",
+                }
+            ],
+        )
+        provider = SimpleNamespace(read=AsyncMock(return_value=infra))
+        with (
+            patch(
+                "preloop.services.flow_feedback.FeedbackProvider.for_thread",
+                AsyncMock(return_value=provider),
+            ),
+            patch(
+                "preloop.services.flow_execution_dispatcher.dispatch_execute",
+                AsyncMock(),
+            ) as dispatch,
+        ):
+            observed = []
+            for index in range(4):
+                moment = NOW + timedelta(minutes=index)
+                claim = crud_flow_feedback.claim_due(db, now=moment)
+                await _reconcile(db, *claim[0], now=moment)
+                db.refresh(thread)
+                observed.append((thread.state, thread.stop_reason))
+            assert observed == [
+                ("waiting", "ci_infrastructure_failure_retry"),
+                ("waiting", "ci_infrastructure_failure_retry"),
+                ("blocked", "ci_infrastructure_failure"),
+                ("blocked", "ci_infrastructure_failure"),
+            ]
+            assert thread.cursor["ci_infra_attempts"] == 4
+            assert thread.turns == 0 and thread.active_execution_id is None
+            dispatch.assert_not_called()
+            # A rerun that recovers on the same head clears the allowance.
+            provider.read.return_value = FeedbackState(
+                "head", checks_passed=True, reviews_passed=True
+            )
+            moment = NOW + timedelta(minutes=5)
+            await _reconcile(
+                db, *crud_flow_feedback.claim_due(db, now=moment)[0], now=moment
+            )
+        db.refresh(thread)
+        assert (thread.state, thread.stop_reason) == ("ready", None)
+        assert "ci_infra_attempts" not in thread.cursor
 
 
 def test_reservation_waits_for_parent_before_locking_thread(database: Engine) -> None:

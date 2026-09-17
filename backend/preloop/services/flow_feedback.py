@@ -20,6 +20,7 @@ from preloop.services.flow_feedback_provider import (
     FeedbackProvider,
     FeedbackState,
     bounded_text,
+    classify_failure,
 )
 
 logger = logging.getLogger(__name__)
@@ -324,6 +325,18 @@ def decide(
         and not state.blocked_reason
     ):
         return "ready", None
+    if not actionable and state.infra_failures:
+        # Provider infrastructure failures are not the branch's defect. Wait for
+        # the platform a bounded number of reconciliations, then ask a human.
+        attempts = int((thread.cursor or {}).get("ci_infra_attempts", 0))
+        reason = (
+            "ci_timeout"
+            if any(classify_failure(item) == "timeout" for item in state.infra_failures)
+            else "ci_infrastructure_failure"
+        )
+        if attempts > int(thread.policy.get("max_ci_infra_retries", 3)):
+            return "blocked", reason
+        return "waiting", f"{reason}_retry"
     if thread.turns >= int(thread.policy.get("max_turns", 5)):
         return "stopped", "turn_budget_exhausted"
     if thread.cost >= float(thread.policy.get("max_cost", 100)):
@@ -480,6 +493,12 @@ async def _reconcile(
     if cursor.get("head_sha") != state.head_sha or completed_repair:
         cursor.pop("ci_wait_started", None)
         cursor.pop("feedback_ready_at", None)
+        cursor.pop("ci_infra_attempts", None)
+    if state.infra_failures:
+        # Counted per head: a new head starts a fresh infrastructure allowance.
+        cursor["ci_infra_attempts"] = int(cursor.get("ci_infra_attempts", 0)) + 1
+    else:
+        cursor.pop("ci_infra_attempts", None)
     thread.cursor = cursor
     outcome, reason = decide(thread, state, pending, now=now)
     if outcome == "repair":

@@ -230,11 +230,11 @@ class _BoundedReadClient:
             raise ContinuationAdoptionError("Provider preflight permits reads only")
         return await self.client._request(method, path, *args, **kwargs)
 
-    async def _make_request(self, method: Any, path: str) -> Any:
+    async def _make_request(self, method: Any, path: str, **kwargs: Any) -> Any:
         self._take()
         if self.gl is None or method != self.gl.http_get:
             raise ContinuationAdoptionError("Provider preflight permits reads only")
-        return await self.client._make_request(method, path)
+        return await self.client._make_request(method, path, **kwargs)
 
 
 async def _feedback_preflight(
