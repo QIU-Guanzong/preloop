@@ -9,16 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Highlights: **Alibaba Cloud Model Studio (Qwen)** support is complete, with
 regional discovery, a full chat adapter and native catalog prices, **AWS
-Bedrock** joins the model providers, both with honest cost estimates, **operator
-notes** steer a running agent at its next turn boundary from the console, the
-CLI or another agent, **session search** makes transcripts findable by keyword
-or embedding with saved searches and an index that retention and legal holds
-cover, **flow composition** lets one execution start another through
-`run_flow` with an execution tree, a cost rollup and a parent that parks on
-`WAITING_FOR_CHILDREN`, **runners** hold several executions each and gain a
-one-shot ephemeral mode behind a `run-flow` GitHub Action, **OTLP export**
-ships gateway and MCP telemetry to any collector, a **repo review preset
-family** adds architecture, code health, standards, docs currency and
+Bedrock** joins the model providers, both with honest cost estimates,
+**operator notes** steer a running agent at its next turn boundary from the
+console, the CLI or another agent, **session search** makes transcripts
+findable by keyword or embedding with saved searches and an index that
+retention and legal holds cover, **flow composition** lets one execution start
+another through `run_flow` with an execution tree, a cost rollup and a parent
+that parks on `WAITING_FOR_CHILDREN`, **runners** hold several executions each
+and gain a one-shot ephemeral mode behind a `run-flow` GitHub Action, **OTLP
+export** ships gateway and MCP telemetry to any collector, a **repo review
+preset family** adds architecture, code health, standards, docs currency and
 portfolio lenses with one-page verdict covers, and the **console** gains an
 Activity feed, an Inventory box, model prices you can read and set, and user
 avatars.
