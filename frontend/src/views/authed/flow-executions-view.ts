@@ -397,6 +397,20 @@ export class FlowExecutionsView extends AuthedElement {
   private flowOptions: Array<{ id: string; name: string }> = [];
 
   /**
+   * Full flow rows keyed by id, so retry confirm can name the current
+   * harness and model without a second fetch.
+   */
+  private flowMap = new Map<
+    string,
+    {
+      id: string;
+      name?: string;
+      agent_type?: string;
+      ai_model_name?: string | null;
+    }
+  >();
+
+  /**
    * The account's default runner pool, so a row only says where it ran when
    * that is not where the default would have sent it.
    */
@@ -493,8 +507,21 @@ export class FlowExecutionsView extends AuthedElement {
   private async loadFilterSources(): Promise<void> {
     try {
       const flows = await getFlows();
-      this.flowOptions = (Array.isArray(flows) ? flows : [])
-        .filter((flow) => flow && flow.id)
+      const loaded = (Array.isArray(flows) ? flows : []).filter(
+        (flow) => flow && flow.id
+      );
+      this.flowMap = new Map(
+        loaded.map((flow) => [
+          String(flow.id),
+          {
+            id: String(flow.id),
+            name: flow.name,
+            agent_type: flow.agent_type,
+            ai_model_name: flow.ai_model_name,
+          },
+        ])
+      );
+      this.flowOptions = loaded
         .map((flow) => ({
           id: String(flow.id),
           name: String(flow.name || 'Unnamed flow'),
@@ -507,6 +534,7 @@ export class FlowExecutionsView extends AuthedElement {
       }
     } catch {
       this.flowOptions = [];
+      this.flowMap = new Map();
     }
     try {
       const account = await getAccountOrganization();
@@ -997,7 +1025,7 @@ export class FlowExecutionsView extends AuthedElement {
     const confirmed = await confirmRetryExecution({
       flow_name: flow?.name || execution.flow_name,
       agent_type: flow?.agent_type,
-      model_name: (flow as any)?.ai_model_name,
+      model_name: flow?.ai_model_name,
     });
     if (!confirmed) return;
 

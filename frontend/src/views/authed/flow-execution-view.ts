@@ -134,6 +134,7 @@ interface Flow {
   agent_type: string;
   trigger_event_source: string;
   trigger_event_type: string;
+  ai_model_name?: string | null;
 }
 
 interface ToolActivityEntry {
@@ -3477,7 +3478,7 @@ ${log.payload.content}</pre>
     const confirmed = await confirmRetryExecution({
       flow_name: this.flow?.name,
       agent_type: this.flow?.agent_type,
-      model_name: (this.flow as any)?.ai_model_name,
+      model_name: this.flow?.ai_model_name,
     });
     if (!confirmed) return;
 

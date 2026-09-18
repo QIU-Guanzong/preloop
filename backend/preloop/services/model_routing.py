@@ -430,9 +430,9 @@ def is_model_usable_and_gateway_enabled(
     except ModelRoutingError:
         return False
     model = crud_ai_model.get(db, id=model_id)
-    if not _account_can_use_model(model, getattr(flow, "account_id", None)):
-        return False
     if model is None:
+        return False
+    if not _account_can_use_model(model, getattr(flow, "account_id", None)):
         return False
     meta_data = model.meta_data if isinstance(model.meta_data, dict) else {}
     gateway = meta_data.get("gateway")
@@ -632,6 +632,7 @@ def prepare_execution_routing(
                 # If user-supplied ai_model_id is deleted or no longer gateway-enabled,
                 # fall back to flow model with a note.
                 matrix_retry = dict(persisted_matrix)
+                # Pre-#803 cells have no derived marker and stay pinned.
                 derived = set(matrix_retry.get("derived") or [])
                 for key in derived:
                     matrix_retry.pop(key, None)

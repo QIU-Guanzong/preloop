@@ -382,7 +382,7 @@ class TestPrepareAndTrigger:
         assert "assessment" not in row.trigger_event_details
 
     @pytest.mark.asyncio
-    async def test_retry_pins_recorded_selection(
+    async def test_retry_reresolves_current_selection(
         self, db_session: Session, test_user: User
     ):
         default = _usable_model(db_session, test_user.account_id, name="Default")
@@ -422,9 +422,10 @@ class TestPrepareAndTrigger:
             )
         row = db_session.query(FlowExecution).filter_by(id=retry["id"]).one()
         record = row.trigger_event_details[ROUTING_RECORD_KEY]
-        assert record["ai_model_id"] == str(fast.id)
-        assert record["rule_id"] == "docs"
-        assert record["source"] == "pinned"
+        assert record["ai_model_id"] == str(default.id)
+        assert record.get("rule_id") != "docs"
+        assert record["source"] == "retry"
+        assert "Re-resolved model and harness from current flow" in record["reason"]
 
     @pytest.mark.asyncio
     async def test_resume_pins_prior_execution_record(
