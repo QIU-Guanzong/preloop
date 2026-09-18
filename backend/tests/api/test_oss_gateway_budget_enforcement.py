@@ -365,3 +365,108 @@ def test_legacy_model_policy_lookup_is_account_scoped(
         model_alias="synthetic-model",
     )
     assert [policy.id for policy in found] == [own_id]
+
+
+@pytest.mark.parametrize(
+    "route, body",
+    [
+        (
+            "/openai/v1/chat/completions",
+            {"messages": [{"role": "user", "content": "hello"}]},
+        ),
+        ("/openai/v1/responses", {"input": "hello"}),
+    ],
+)
+def test_unpriced_hard_limit_warning_reaches_streaming_callers(
+    db_session: Session,
+    test_user: models.User,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+    body: dict,
+) -> None:
+    """A ``stream: true`` caller gets the same header as a non-streaming one.
+
+    Most chat traffic streams. The service resolves the model and runs budget
+    preflight before it hands back the SSE body generator, so the warning is
+    known while the headers can still be set; this pins that the endpoint
+    puts it there instead of dropping it (issue #810).
+    """
+    from preloop.services import unpriced_model_alert
+
+    unpriced_model_alert.reset_alert_state_for_tests()
+    monkeypatch.setenv("PRELOOP_SERVICE_ROLE", "gateway")
+    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+    monkeypatch.setattr(settings, "disable_rbac", True)
+    monkeypatch.setattr("preloop.plugins.get_plugin_manager", PluginManager)
+    monkeypatch.setattr("preloop.plugins.base._plugin_manager", None)
+    ai_model = crud_ai_model.create_with_account(
+        db_session,
+        account_id=test_user.account_id,
+        obj_in={
+            "name": "Uncatalogued hosted model",
+            "provider_name": "openai",
+            "model_identifier": "google/gemini-3.8-flash",
+            "api_key": "unused-synthetic-key",
+            "meta_data": {
+                # The mock below is litellm.completion, so keep /responses on
+                # the transcode path rather than a native passthrough POST.
+                "gateway": {"enabled": True, "responses_api": "transcode"},
+                "pricing": {},
+            },
+        },
+    )
+    from preloop.services.model_runtime_resolver import resolve_ai_model_runtime
+
+    requested_alias = resolve_ai_model_runtime(ai_model).model_gateway_model_alias
+    crud_budget_policy.create(
+        db_session,
+        obj_in={
+            "account_id": test_user.account_id,
+            "subject_type": "account",
+            "subject_id": None,
+            "period": models.BudgetPeriod.monthly,
+            "hard_limit_usd": 100.0,
+            "soft_limit_usd": 80.0,
+        },
+    )
+    app = create_app()
+    app.dependency_overrides[get_db_session] = lambda: db_session
+    app.dependency_overrides[get_model_gateway_auth_context] = (
+        lambda: ModelGatewayAuthContext(
+            token="synthetic-authenticated-user", user=test_user
+        )
+    )
+    chunks = [
+        {
+            "id": "chatcmpl_stream",
+            "created": 1710000000,
+            "choices": [{"index": 0, "delta": {"content": "ok"}}],
+        },
+        {
+            "id": "chatcmpl_stream",
+            "created": 1710000000,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    ]
+    with (
+        patch("preloop.services.unpriced_model_alert.notify_admins"),
+        patch(
+            "preloop.services.openai_gateway.litellm.completion",
+            return_value=iter(chunks),
+        ) as provider,
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            route,
+            json={"model": requested_alias, "stream": True, **body},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "data: [DONE]" in response.text
+    assert provider.call_count == 1
+    warning = response.headers["X-Preloop-Warning"]
+    assert "budget_pricing_unavailable" in warning
+    assert requested_alias in warning
+    assert "counted as $0.00 spend" in warning

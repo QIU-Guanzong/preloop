@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 from fastapi import APIRouter, Body, Depends, Header, Request
 from fastapi.responses import JSONResponse
@@ -68,6 +68,30 @@ def _with_gateway_warnings(
             headers={"X-Preloop-Warning": _sanitize_header_value(warning)},
         )
     return result
+
+
+def _streaming_with_gateway_warnings(
+    events: Iterator[str], service: OpenAIGatewayService
+) -> GatewayStreamingResponse:
+    """Attach the request's warning header to a streaming result.
+
+    The service's ``stream_*`` methods are plain functions, not generators:
+    they resolve the model, run budget preflight and open the upstream stream
+    before handing back the body generator. So by the time ``events`` exists
+    every pre-dispatch warning is already recorded on ``service`` and the
+    headers have not been sent yet. Reading ``response_warning`` here, after
+    the argument was evaluated, is what puts the warning on the wire for
+    ``stream: true`` callers (issue #810).
+    """
+    warning = service.response_warning
+    return GatewayStreamingResponse(
+        events,
+        media_type="text/event-stream",
+        headers=(
+            {"X-Preloop-Warning": _sanitize_header_value(warning)} if warning else None
+        ),
+        on_complete=service.flush_deferred_stream_record,
+    )
 
 
 async def get_model_gateway_auth_context(
@@ -141,10 +165,8 @@ def create_chat_completion(
         ),
     )
     if payload.get("stream"):
-        return GatewayStreamingResponse(
-            service.stream_chat_completion(payload),
-            media_type="text/event-stream",
-            on_complete=service.flush_deferred_stream_record,
+        return _streaming_with_gateway_warnings(
+            service.stream_chat_completion(payload), service
         )
     return _with_gateway_warnings(service.create_chat_completion(payload), service)
 
@@ -182,10 +204,8 @@ def create_response(
         ),
     )
     if payload.get("stream"):
-        return GatewayStreamingResponse(
-            service.stream_response(payload),
-            media_type="text/event-stream",
-            on_complete=service.flush_deferred_stream_record,
+        return _streaming_with_gateway_warnings(
+            service.stream_response(payload), service
         )
     return _with_gateway_warnings(service.create_response(payload), service)
 

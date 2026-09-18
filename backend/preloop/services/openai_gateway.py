@@ -941,10 +941,12 @@ class OpenAIGatewayService:
 
         Returns:
             The warnings joined with ``" | "``, or ``None`` when the request
-            produced none. Non-streaming endpoints emit this as
-            ``X-Preloop-Warning``; streaming responses have already sent their
-            headers by the time the body generator runs, so callers on
-            ``stream: true`` do not receive it (see issue #810).
+            produced none. The OpenAI-namespace endpoints emit this as
+            ``X-Preloop-Warning`` on both non-streaming and ``stream: true``
+            responses: the ``stream_*`` methods resolve the model and run
+            budget preflight before returning the body generator, so the
+            value is final before any header is sent. A warning first raised
+            mid-stream would not be delivered; none is today.
         """
         warnings = [
             warning

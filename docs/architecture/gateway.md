@@ -91,9 +91,11 @@ evaluated is not a budget that was exceeded: when the price catalog has no entry
 for the requested model, no dollar comparison is possible, so a configured hard
 limit warns instead of rejecting. The request is served, its spend counts as
 zero, the usage row keeps `pricing_available=false` with real token counts, the
-caller gets `X-Preloop-Warning: budget_pricing_unavailable: ...` on non-streaming
-responses, and an admin is paged on the existing unpriced-model alert path (24h
-per-model cooldown) so the catalog hole gets closed. A priced model over its
+caller gets `X-Preloop-Warning: budget_pricing_unavailable: ...` on both
+non-streaming and `stream: true` responses (the gateway resolves the model and
+runs budget preflight before the SSE headers go out), and an admin is paged on
+the existing unpriced-model alert path (24h per-model cooldown) so the catalog
+hole gets closed. A priced model over its
 hard limit is still refused. Subscription OAuth models with known zero marginal
 cost remain distinct from unpriced API usage. Requests with no applicable hard
 limit remain usable when pricing is unknown.
