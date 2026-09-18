@@ -236,6 +236,25 @@ def _allowlist_entry_for(
     return None
 
 
+def callable_names_hint(flow: Flow, *, limit: int = 10) -> str:
+    """Render the caller's allowlist for a refusal message.
+
+    A reference that does not resolve is almost always a name the agent read
+    out of the wrong column (a result schema id, a preset title, a project
+    path). The refusal is the only place the agent is looking at the time, so
+    it carries the names that would have worked. Empty allowlist renders as a
+    statement of that fact, not as an empty list.
+    """
+    names = [str(entry.flow) for entry in callable_flows_for(flow) if entry.flow]
+    if not names:
+        return "this flow has no callable flows configured"
+    shown = names[:limit]
+    rendered = ", ".join(f"'{name}'" for name in shown)
+    if len(names) > limit:
+        rendered += f" and {len(names) - limit} more"
+    return f"callable flows here: {rendered}"
+
+
 def ancestor_flow_ids(db: Session, execution: FlowExecution) -> List[str]:
     """Flow ids of ``execution`` and of every execution above it.
 
@@ -318,7 +337,8 @@ def evaluate_delegation(
     if target is None:
         raise DelegationRefusedError(
             "flow_not_found",
-            f"'{reference}' does not name a flow in this account",
+            f"'{reference}' does not name a flow in this account; "
+            f"{callable_names_hint(parent_flow)}",
         )
     if not getattr(target, "is_enabled", True):
         raise DelegationRefusedError(
@@ -331,7 +351,7 @@ def evaluate_delegation(
         raise DelegationRefusedError(
             "flow_not_callable",
             f"flow '{target.name}' is not on the callable flows allowlist of "
-            f"'{parent_flow.name}'",
+            f"'{parent_flow.name}'; {callable_names_hint(parent_flow)}",
         )
 
     limit = max_delegation_depth()

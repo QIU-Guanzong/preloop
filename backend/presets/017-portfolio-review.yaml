@@ -106,6 +106,11 @@ prompt_template: |
     the walk refused to descend into because of it.
   - exclude_paths: extra repository-relative prefixes to skip, ADDED to
     the named exclusion list below, never replacing it.
+  - include_paths: repository-relative directories to treat as projects
+    even when no detector matched them (PHASE 1, FORCED INCLUSIONS).
+    A prefix the checkout does not have is recorded in
+    discovery.include_paths_missing, never invented; exclude_paths wins
+    over include_paths.
   - auto_select_threshold: default 3. Below this many discovered
     projects the run processes all of them and asks nothing.
   - projects: an explicit list of project paths to review. Given, it
@@ -155,6 +160,14 @@ prompt_template: |
   at all: discovery is a walk plus git commands, and two runs over the
   same commit must produce the same list in the same order.
 
+  RUN THE WALK. discovery.count, discovery.projects and every fact under
+  them come from commands this execution actually ran and whose output
+  you read. Writing "no projects discovered", or any project row, without
+  having walked the tree is a fabricated report and the worst failure
+  this preset has: a repository of 80 samples and a repository of none
+  look identical in a report nobody walked. Walk first, then write, and
+  keep the walk's raw output in evidence/inventory.json.
+
   A PROJECT IS A DIRECTORY CONTAINING AT LEAST ONE MANIFEST OR BUILD
   DESCRIPTOR FROM THIS CLOSED DETECTOR LIST, and nothing else is a
   project:
@@ -170,10 +183,25 @@ prompt_template: |
     CMakeLists.txt -> cpp
     pubspec.yaml -> dart
     mix.exs -> elixir
-    Package.swift -> swift
+    Package.swift, *.xcodeproj, *.xcworkspace -> swift
     deno.json, deno.jsonc -> deno
   A directory matching no detector is not a project however it looks. A
   detector you invent is a bug: the list above is the whole vocabulary.
+
+  FORCED INCLUSIONS. Every prefix in payload include_paths is a project
+  even when no detector matched it: a directory whose build lives
+  somewhere else (a Python package covered by a parent pyproject.toml,
+  a mobile app built by a parent workspace) is invisible to a manifest
+  walk, and the human who names it knows more than the detector does. A
+  forced project records the manifests it actually has (an empty list is
+  honest), sets stacks from any detector that did match and otherwise
+  the empty list, and carries "source": "include_paths" so the report
+  never presents a human's instruction as a discovery. A prefix that
+  does not exist in the checkout, or that the exclusion list or the
+  depth cap already removed, is recorded in
+  discovery.include_paths_missing and never invented. include_paths
+  never suppresses a detected project and never re-adds one the human
+  also excluded: exclude_paths wins.
 
   NAMED EXCLUSION LIST. The walk never descends into a directory whose
   name is one of:
@@ -274,6 +302,11 @@ prompt_template: |
   ═══════════════════════════════════════════════════════════
   PHASE 3: FIRST QUESTION, WHICH PROJECTS TO REVIEW
   ═══════════════════════════════════════════════════════════
+  THE QUESTION COMES BEFORE THE FAN OUT, ALWAYS. Never probe a lens
+  before it is asked: run_flow is called in PHASE 4, once per selected
+  project, and never as a test. A lens that turns out to be uncallable
+  there is recorded in fan_out.lenses_refused and never a reason to skip
+  the question that was already asked.
   BELOW THE THRESHOLD, DO NOT ASK. If the payload named "projects", the
   selection source is "payload" and no question is asked. Otherwise, if
   the discovered project count is below auto_select_threshold (default
@@ -283,18 +316,57 @@ prompt_template: |
 
   Otherwise make EXACTLY ONE ask_user call for the whole portfolio,
   batched. NEVER one call per project, never a second round, and never
-  ask a human to type JSON into free text. Call the tool by the exact
-  namespaced name your tool catalog lists for the preloop MCP server (a
-  bare "ask_user" does not route on some runtimes); a routing failure is
-  not an answer, it fails closed like an expiry.
+  ask a human to type JSON into free text.
 
-  Pass ONE ROW PER DISCOVERED PROJECT in items, in rank order:
+  HOW TO CALL IT. ask_user is a tool on the preloop MCP server, and the
+  only way to reach it is your harness's tool call. Use the entry your
+  tool catalog lists verbatim: harnesses list it as "ask_user",
+  "preloop/ask_user" or "mcp__preloop__ask_user", and the catalog is
+  right where your memory of the name is not. THE QUESTION CANNOT BE
+  EMULATED: there is no python module to import, no preloop package in
+  the container, no MCP resource to read and no file to write that asks
+  a human anything. A shell command is never a question, and a question
+  you answered yourself is a fabricated answer, which is worse than no
+  answer. If the catalog has no such entry, the question is unroutable:
+  record status "unroutable" with the reason, take the safe default
+  below, and never simulate the human.
+
+  Pass ONE ROW PER DISCOVERED PROJECT in items, in rank order, and
+  above the 150 row question cap below the 150 highest ranked rows:
     {"id": "<project path, exactly as discovery recorded it>",
      "title": "<project path> (<stacks>)",
      "description": "<last commit date, commits in 12 months, file
        count, and the fired triage reasons, verbatim from PHASE 2>",
      "severity": "high|medium|low" (the triage band),
      "badges": ["<stack>", "<triage reason>"]}
+  THOSE FIVE KEYS AND NO OTHER. The question channel accepts exactly
+  id, title, description, severity, badges and href on a row, and
+  REFUSES the whole call when a row carries anything else: rank, path,
+  stacks, triage, manifests and every other discovery field belong in
+  the report, never in an item. The array field in the schema below
+  carries title, description and items, and its items object carries
+  enum and nothing else. Do not rely on an error to catch a stray
+  keyword there: an unknown key inside the items object is dropped in
+  silence, and minItems on the array field is accepted and kept, which
+  puts a floor on a field this preset promises may be answered empty.
+  Send the shape below and nothing around it. If the tool returns a
+  string starting with "Error:", it names what it refused, a key or a
+  ceiling: fix that one thing and make ONE more call with the same
+  question. A second refusal is unroutable, and unroutable fails closed
+  exactly like an expiry (safe default below).
+
+  AT MOST 150 ROWS IN ONE QUESTION. The channel refuses a call carrying
+  more than 200 item rows, or an enum of more than 200 ids, and that
+  refusal names no key, so a retry that sends the same oversized call
+  loses the question and the run falls to inventory only. Above 150
+  discovered projects, send the 150 highest ranked rows, draw the
+  selectable ids from exactly those rows, and say so in the question
+  text ("<n> of <count> projects, the highest ranked"). Every project
+  the question could not show stays in discovery.projects and gets an
+  entry in coverage.not_reviewed with reason "not offered, over the
+  question cap": a portfolio too big for one form is a coverage
+  statement, not a reason to ask nothing. NEVER split the question into
+  a second call, and never drop a project from discovery to make it fit.
   and pass this input_schema (verbatim shape, ids drawn from items):
   {"type": "object",
    "properties": {
@@ -312,9 +384,11 @@ prompt_template: |
      "date": {"type": "string", "format": "date",
        "x-autofill": "date"}},
    "required": []}
-  THE SELECTABLE IDS ARE EXACTLY THE DISCOVERED PROJECT PATHS: no
+  THE SELECTABLE IDS ARE EXACTLY THE IDS OF THE ROWS YOU SENT: no
   extras, no omissions, no invented ids, and the same strings discovery
-  recorded.
+  recorded. Below the 150 row cap that is every discovered project; at
+  the cap it is the rows the form shows, because an id with no row is a
+  checkbox nobody can read.
   DEPTH AND THE CEILING ARE OPTIONAL, AND AN ANSWER THAT OMITS BOTH IS A
   VALID ANSWER: "required" stays empty, an omitted depth is "standard",
   and an omitted ceiling is no ceiling of this run's own. Never require
@@ -383,7 +457,12 @@ prompt_template: |
   YOU ACTUALLY HANDED THE LENS, recorded as you sent it.
 
   THE CALLABLE LENSES ARE EXACTLY THESE, and the payload cannot add to
-  the list:
+  the list. The left column is the lens slug, which is the ONLY string
+  run_flow accepts in "flow"; the right column is the result schema that
+  lens emits, which is what you check on the child's result.json and
+  never a flow name. Passing a schema id as a flow is refused with
+  "flow_not_found", and that refusal names the callable slugs: read it
+  and call the slug rather than reporting the lens as uncallable.
     docs-currency-review    -> preloop.review.docscurrency/v1
     repo-code-health-review -> preloop.review.codehealth/v1
     release-security-audit  -> preloop.cra.releaseaudit/v1
@@ -633,10 +712,10 @@ prompt_template: |
   ═══════════════════════════════════════════════════════════
   With zero candidates, ask nothing and record the question as not
   asked. Otherwise make EXACTLY ONE ask_user call, batched, with the
-  ranked follow ups as rows: {"id": "<follow up id>", "title":
-  "<project>: <title>", "description": "<what the lens found, with its
-  pointer>", "severity": "high|medium|low", "badges": ["<project
-  path>"]} and this input_schema:
+  ranked follow ups as rows (those five keys and no other, the PHASE 3
+  rule): {"id": "<follow up id>", "title": "<project>: <title>",
+  "description": "<what the lens found, with its pointer>", "severity":
+  "high|medium|low", "badges": ["<project path>"]} and this input_schema:
   {"type": "object",
    "properties": {
      "approved": {"type": "array", "title": "Follow ups to keep",
@@ -784,7 +863,7 @@ prompt_template: |
     "tool_versions": { "<tool>": "<version or 'unavailable: reason'>" },
     "inputs_declared": { "<what the payload actually delivered>": "..." },
     "runner": { "kind": null, "id": null },
-    "discovery": { "root": "<root_path>", "depth_cap": <int>, "depth_cap_hit": true|false, "dirs_truncated_at_cap": [ "<dir>" ], "detectors_matched": [ "<manifest filename>" ], "excluded_dirs": [ "<dir name or prefix>" ], "eol_table": "payload" | null, "count": <int>, "projects": [ { "path": "...", "rank": <int>, "stacks": [ "..." ], "manifests": [ "..." ], "runtimes": [ { "name": "...", "version": "...", "source": "<path>" } ], "last_commit_date": "<ISO date>", "commits_12m": <int>, "file_count": <int>, "has_readme": true|false, "has_architecture_doc": true|false, "has_ci": true|false, "has_tests_dir": true|false, "has_licence": true|false, "sbom_paths": [ "<path inside the project>" ], "has_sbom": true|false, "triage": { "score": <int>, "band": "high|medium|low", "reasons": [ "<fired rule name>" ] } } ] },
+    "discovery": { "root": "<root_path>", "depth_cap": <int>, "depth_cap_hit": true|false, "dirs_truncated_at_cap": [ "<dir>" ], "detectors_matched": [ "<manifest filename>" ], "excluded_dirs": [ "<dir name or prefix>" ], "include_paths_missing": [ "<prefix the checkout does not have>" ], "eol_table": "payload" | null, "count": <int>, "projects": [ { "path": "...", "rank": <int>, "stacks": [ "..." ], "manifests": [ "..." ], "runtimes": [ { "name": "...", "version": "...", "source": "<path>" } ], "source": "detector" | "include_paths", "last_commit_date": "<ISO date>", "commits_12m": <int>, "file_count": <int>, "has_readme": true|false, "has_architecture_doc": true|false, "has_ci": true|false, "has_tests_dir": true|false, "has_licence": true|false, "sbom_paths": [ "<path inside the project>" ], "has_sbom": true|false, "triage": { "score": <int>, "band": "high|medium|low", "reasons": [ "<fired rule name>" ] } } ] },
     "selection": { "source": "human" | "auto_below_threshold" | "payload" | "expired_default", "auto_select_threshold": <int>, "project_cap": <int>, "selected": [ "<project path>" ], "over_project_cap": [ "<project path>" ], "depth": "quick" | "standard" | "deep", "depth_source": "human" | "payload" | "default" },
     "budget": { "max_cost_usd": <number or null>, "ceiling_source": "human" | "payload" | null, "measurement": "execution_cost" | "unavailable", "spent_usd": <number or null>, "ceiling_hit": true|false, "stopped_after": "<project path or null>" },
     "questions": [ { "phase": "selection" | "follow_ups", "asked": true|false, "status": "answered" | "expired" | "declined" | "cancelled" | "unroutable" | "not_asked", "reason": "<why it was not asked, else null>", "request_id": "<platform id or null>", "expires_at": "<ISO 8601 or null>", "answered_by": "<platform identity or null>", "answered_at": "<ISO 8601 or null>", "items": [ "<row id>" ], "selectable_ids": [ "<id the input schema offered>" ] } ],
