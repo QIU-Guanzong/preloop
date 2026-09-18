@@ -254,6 +254,14 @@ helm upgrade preloop ./helm/preloop \
   --set gateway.resources.requests.memory=512Mi
 ```
 
+Agents launched as Jobs call the gateway Service directly. The chart renders
+`PRELOOP_MODEL_GATEWAY_URL_K8S` on the API and worker pods as
+`http://<release>-gateway:80/openai/v1`; the API Service is not usable for
+that traffic because API pods run `PRELOOP_SERVICE_ROLE=api` and do not serve
+`/openai/v1`. Point `gateway.inClusterUrl` elsewhere if your gateway is not
+the one this chart deploys. See
+[docs/operations/model-gateway-url.md](../../docs/operations/model-gateway-url.md).
+
 Gateway HPA is on by default (`gateway.autoscaling`, min 2 / max 5). Memory
 target is 90% of an honest 768Mi request: idle RSS on hosted clusters is
 ~650Mi, so a 256Mi request pinned HPA at maxReplicas even with idle CPU.
@@ -377,6 +385,7 @@ The `pre-upgrade` hook runs against the pods that are still serving. See
 | `environment.logLevel`         | Log level                                             | `INFO`      |
 | `environment.logFormat`        | Log format                                            | `json`      |
 | `environment.skipExecutionRecovery` | Skip recovering orphaned executions on startup  | `false`     |
+| `gateway.inClusterUrl`         | In-cluster gateway URL for agents and workers (`PRELOOP_MODEL_GATEWAY_URL_K8S`). Empty means the gateway Service this chart deploys | `""` |
 
 ### OTLP parameters
 

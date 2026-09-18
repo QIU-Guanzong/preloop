@@ -1456,7 +1456,19 @@ export class AIModelDetailView extends LitElement {
       };
       const provider = String(this.model.provider_name || '').toLowerCase();
       const mid = this.model.model_identifier;
+      // Keep whatever the gateway block already carries. `url` in particular
+      // is written by `preloop agents onboard` and is the only thing that
+      // tells a private or self-hosted runtime where the gateway lives;
+      // replacing the block wholesale used to drop it and route the model at
+      // whatever default the server guessed.
+      const previousGateway =
+        meta.gateway &&
+        typeof meta.gateway === 'object' &&
+        !Array.isArray(meta.gateway)
+          ? (meta.gateway as Record<string, unknown>)
+          : {};
       meta.gateway = {
+        ...previousGateway,
         enabled: true,
         provider_adapter: 'preloop',
         model_alias: `${provider}/${mid}`,

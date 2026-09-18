@@ -269,6 +269,17 @@ healthMonitor:
 
 # Gateway resources
 gateway:
+  # Where in-cluster callers reach the model gateway (rendered as
+  # PRELOOP_MODEL_GATEWAY_URL_K8S on the API, worker and agent-launching
+  # pods). Agents run as Jobs inside the cluster and cannot use the public
+  # URL, and models whose meta_data carries no explicit gateway.url fall back
+  # to this one.
+  # Empty means the gateway Service this chart deploys,
+  # http://<release>-gateway:80/openai/v1. The API pods run
+  # PRELOOP_SERVICE_ROLE=api and do not serve /openai/v1, so the API Service
+  # is not a valid value unless you run a combined process there.
+  # See docs/operations/model-gateway-url.md.
+  inClusterUrl: ""
   # Proxy settings applied to the model-gateway routes (/openai, /anthropic,
   # /gemini) at every proxy in front of the gateway. Helm ingress sends those
   # prefixes to the gateway Service (skipping console nginx). Console nginx

@@ -110,6 +110,23 @@ values committed to git.
 {{- end }}
 
 {{/*
+In-cluster model gateway URL.
+
+Agent Jobs, the API and the workers resolve model traffic to this URL when a
+model row carries no explicit meta_data.gateway.url. It must be the gateway
+Service: the API pods run PRELOOP_SERVICE_ROLE=api and never mount
+/openai/v1, so pointing it at the API Service answers 404 Not Found for every
+model call.
+*/}}
+{{- define "preloop.modelGatewayUrlK8s" -}}
+{{- if .Values.gateway.inClusterUrl -}}
+{{- .Values.gateway.inClusterUrl -}}
+{{- else -}}
+http://{{ include "preloop.fullname" . }}-gateway:80/openai/v1
+{{- end -}}
+{{- end }}
+
+{{/*
 Operator-supplied extra env vars (API, gateway, workers, jobs).
 */}}
 {{- define "preloop.extraEnv" -}}

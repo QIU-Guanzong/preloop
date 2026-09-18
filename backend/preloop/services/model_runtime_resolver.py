@@ -10,11 +10,14 @@ from urllib.parse import urlsplit, urlunsplit
 from preloop.models.models.ai_model import AIModel
 from preloop.services.model_api_protocol import model_api_protocol
 from preloop.services.secret_service import get_secret_service
+from preloop.services.service_roles import ALL_ROLES
 
 
 DEFAULT_GATEWAY_PROVIDER = "preloop"
 DEFAULT_GATEWAY_TRANSPORT_MODE = "preloop_gateway"
 DEFAULT_GATEWAY_URL = "http://host.docker.internal:8000/openai/v1"
+API_SERVICE_HOST_SUFFIX = "-api"
+GATEWAY_SERVICE_HOST_SUFFIX = "-gateway"
 GATEWAY_API_PATHS = {
     "openai": "/openai/v1",
     "anthropic": "/anthropic/v1",
@@ -125,8 +128,45 @@ def gateway_url_for_api(gateway_url: Optional[str], api: str) -> Optional[str]:
     return urlunsplit(parsed._replace(path=f"{base_path}{api_path}"))
 
 
+def _gateway_sibling_endpoint(api_service_endpoint: str) -> str:
+    """Return the gateway Service endpoint that sits beside an API Service.
+
+    The chart names the two Services ``<release>-api`` and
+    ``<release>-gateway``, so the gateway is reachable by swapping the
+    hostname's trailing ``-api``. An endpoint that does not follow that
+    convention is returned unchanged: guessing further would only trade one
+    wrong host for another.
+    """
+    parsed = urlsplit(api_service_endpoint)
+    host, separator, port = parsed.netloc.partition(":")
+    if not host.endswith(API_SERVICE_HOST_SUFFIX):
+        return api_service_endpoint
+
+    gateway_host = host[: -len(API_SERVICE_HOST_SUFFIX)] + GATEWAY_SERVICE_HOST_SUFFIX
+    return urlunsplit(parsed._replace(netloc=f"{gateway_host}{separator}{port}"))
+
+
 def default_model_gateway_url() -> str:
-    """Resolve the default gateway URL for the current runtime environment."""
+    """Resolve the default gateway URL for the current runtime environment.
+
+    Precedence, highest first:
+
+    1. ``PRELOOP_MODEL_GATEWAY_URL`` - an explicit URL for every environment.
+    2. ``PRELOOP_MODEL_GATEWAY_URL_K8S`` - the in-cluster URL; the chart sets
+       it on the API and worker pods to the gateway Service.
+    3. Under Kubernetes, ``PRELOOP_API_SERVICE_HTTP_ENDPOINT`` with
+       ``/openai/v1`` appended. A split deployment runs the API pods with
+       ``PRELOOP_SERVICE_ROLE=api``, and those pods never mount the gateway
+       routes, so the API Service would answer 404 for them: the sibling
+       ``-gateway`` Service is used instead. Only an explicit
+       ``PRELOOP_SERVICE_ROLE=all`` (one process serving both surfaces) keeps
+       the API Service as the gateway host.
+    4. ``DEFAULT_GATEWAY_URL`` - the compose/single-node host default.
+
+    Returns:
+        The base URL agents and execution contexts should call for OpenAI
+        shaped gateway traffic.
+    """
     configured_url = os.getenv("PRELOOP_MODEL_GATEWAY_URL")
     if configured_url:
         return configured_url
@@ -138,9 +178,19 @@ def default_model_gateway_url() -> str:
     if os.getenv("KUBERNETES_SERVICE_HOST"):
         api_service_endpoint = os.getenv("PRELOOP_API_SERVICE_HTTP_ENDPOINT")
         if api_service_endpoint:
+            # Workers leave PRELOOP_SERVICE_ROLE unset, so "unset" cannot be
+            # read as "this deployment is combined"; only the explicit
+            # all-in-one role is.
+            combined_role = (
+                os.getenv("PRELOOP_SERVICE_ROLE", "").strip().lower() == ALL_ROLES
+            )
+            gateway_endpoint = (
+                api_service_endpoint
+                if combined_role
+                else _gateway_sibling_endpoint(api_service_endpoint)
+            )
             return (
-                gateway_url_for_api(api_service_endpoint, "openai")
-                or DEFAULT_GATEWAY_URL
+                gateway_url_for_api(gateway_endpoint, "openai") or DEFAULT_GATEWAY_URL
             )
 
     return DEFAULT_GATEWAY_URL

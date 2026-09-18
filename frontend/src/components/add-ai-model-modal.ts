@@ -413,9 +413,20 @@ export class AddAIModelModal extends LitElement {
       modelKind === 'llm' &&
       this._preloopGatewayEnabled &&
       this._canEnablePreloopGateway;
+    // Editing a model must not discard the rest of its gateway block. `url`
+    // is written by `preloop agents onboard` for runtimes that cannot reach
+    // the default gateway host, and a saved edit that dropped it sent the
+    // model's traffic somewhere else.
+    const previousGateway =
+      baseMeta.gateway &&
+      typeof baseMeta.gateway === 'object' &&
+      !Array.isArray(baseMeta.gateway)
+        ? (baseMeta.gateway as Record<string, unknown>)
+        : {};
     return {
       ...baseMeta,
       gateway: {
+        ...previousGateway,
         enabled: gatewayEnabled,
         provider_adapter: 'preloop',
         model_alias: `${String(provider).toLowerCase()}/${modelId}`,

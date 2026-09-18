@@ -72,6 +72,11 @@ spec:
               value: {{ .Values.environment.mallocArenaMax | quote }}
             - name: PRELOOP_API_SERVICE_HTTP_ENDPOINT
               value: "http://{{ include "preloop.fullname" . }}-api:80"
+            # This pod serves PRELOOP_SERVICE_ROLE=api and does not mount
+            # /openai/v1, so agents it launches must be told the gateway
+            # Service instead of the API Service.
+            - name: PRELOOP_MODEL_GATEWAY_URL_K8S
+              value: {{ include "preloop.modelGatewayUrlK8s" . | quote }}
             - name: AGENT_EXECUTION_NAMESPACE
               value: {{ .Values.agentExecution.namespace.create | ternary .Values.agentExecution.namespace.name .Release.Namespace | quote }}
             - name: USE_KUBERNETES
