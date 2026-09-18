@@ -464,7 +464,14 @@ config:
     host: ""
     port: 587
     username: ""
+    # Deprecated in favour of passwordSecret. When set, the chart copies it
+    # into its own Secret and the pods read it with a secretKeyRef, so it is
+    # no longer visible in the pod spec, but it still lives in values.
     password: ""
+    # Operator-supplied Secret holding the SMTP password. Preferred.
+    passwordSecret:
+      name: ""
+      key: "smtp-password"
     from: ""
     fromName: "Preloop"
 
@@ -551,8 +558,17 @@ database:
     name: ""
     instances: 1  # Set to 2+ for HA (primary + replicas). Requires adequate storage and nodes.
     imageName: registry.spacecode.ai/spacecode/pgvector:16
+    # Keep the postgres superuser password enabled. Set to false once the
+    # application connects as its own user: CNPG then disables the password
+    # and `kubectl cnpg psql` stays available for operators. Rotation and
+    # migration steps are in docs/operations/database-credentials.md.
+    enableSuperuserAccess: true
     auth:
       username: postgres
+      # The default below is a placeholder, not a password. Any real
+      # deployment must override it (or move the whole URL into a Secret
+      # with database.urlFromSecret) before the first install: this value
+      # is what the superuser password and DATABASE_URL are built from.
       password: postgres
       database: preloop
     bootstrap:
@@ -839,21 +855,106 @@ agentExecution:
     # If true, creates Role and RoleBinding for agent management
     create: true
 
-  # NetworkPolicy configuration for agent isolation
+  # NetworkPolicy configuration for agent isolation.
+  # Agent pods carry the label app=agent-execution, so the policy applies
+  # whether they run in a dedicated namespace or in the release namespace.
+  # A CNI that enforces NetworkPolicy (Cilium, Calico, Antrea, ...) is
+  # required; on a CNI that ignores policies these objects render and do
+  # nothing. See docs/security/agent-isolation.md.
   networkPolicy:
-    # If true, creates NetworkPolicy for agent namespace
+    # If true, creates the NetworkPolicy that isolates agent pods
     enabled: true
-    # Allow agent pods to call Preloop API for MCP tools
+    # Where DNS lives. The defaults match a stock kube-dns/CoreDNS install.
+    # Set podSelectorLabels to {} to allow the whole namespace. Helm merges
+    # maps, so to point at a different namespace or pod label, null the
+    # default key and add yours, for example on OpenShift:
+    #   namespaceSelectorLabels: {kubernetes.io/metadata.name: null, name: openshift-dns}
+    #   podSelectorLabels: {k8s-app: null, dns.operator.openshift.io/daemonset-dns: default}
+    # The Cilium variant renders these keys with the k8s: label source
+    # prefix. A key that already carries a source prefix is used as is.
+    dns:
+      namespaceSelectorLabels:
+        kubernetes.io/metadata.name: kube-system
+      podSelectorLabels:
+        k8s-app: kube-dns
+      ports:
+        - 53
+    # Allow agent pods to call the Preloop API (MCP tools) and the model
+    # gateway. Turning this off breaks MCP tools and hosted model calls.
     allowPreloopAPI: true
-    # Allow agent pods to call external LLM APIs (Anthropic, OpenAI)
+    # Allow agent pods to reach the public internet: model providers, git
+    # remotes, package registries. The cluster CIDRs below are carved out.
     allowExternalLLMAPIs: true
-    # CIDR ranges to exclude from external egress (internal cluster networks)
-    # Adjust these based on your cluster's network configuration
-    excludeCIDRs:
-      - "10.0.0.0/8"      # Private network (adjust if your cluster uses this)
-      - "172.16.0.0/12"   # Private network (adjust if your cluster uses this)
-      - "192.168.0.0/16"  # Private network (adjust if your cluster uses this)
-    # Additional egress rules (optional)
+    # Pod and service CIDRs of this cluster. Everything listed here is
+    # removed from the 0.0.0.0/0 egress rule, which is what keeps the
+    # "internet" rule from also reaching the database and NATS. Read them
+    # with:
+    #   kubectl cluster-info dump | grep -E 'cluster-cidr|service-cluster-ip-range'
+    # Empty means: use the deprecated excludeCIDRs list if one is set, and
+    # otherwise the three RFC1918 ranges plus 169.254.169.254/32, the cloud
+    # instance metadata address. That fallback is conservative: it blocks
+    # every private address, including any private endpoint an agent
+    # legitimately needs (add those under extraEgress).
+    clusterCidrs: []
+    # Ports the agent may open towards the API and gateway pods. Both the
+    # service port and the container port are listed because a ClusterIP
+    # connection is translated to the pod IP and target port before policy
+    # is evaluated on most CNIs.
+    controlPlanePorts:
+      - 80
+      - 8000
+    # Restrict internet egress to these ports. Empty means all ports, which
+    # is what git over SSH and package registries on odd ports need.
+    # Entries are {port, protocol}.
+    internetPorts: []
+    # Extra egress rules, appended verbatim (NetworkPolicyEgressRule list).
+    extraEgress: []
+    # Ingress to agent pods is denied. The one legitimate source is the
+    # kubelet, which runs the startup probe of environment sidecars from
+    # the node's own address. Cilium, Calico and Antrea all admit traffic
+    # from the local host to its pods regardless of policy, so this stays
+    # empty on those. On a CNI that does enforce node-sourced traffic, list
+    # the node CIDRs here and they are re-admitted on ingress.
+    nodeCidrs: []
+    # Cilium. A plain NetworkPolicy ipBlock does not match node addresses
+    # on Cilium (policy-cidr-match-mode), so the internet rule above drops
+    # a public address that resolves back to a node, which is what an
+    # ingress in front of this chart looks like from inside the cluster.
+    # Set enabled to true to render a CiliumNetworkPolicy with the same
+    # allow list, expressed with Cilium entities instead of CIDRs.
+    cilium:
+      enabled: false
+      # Entities the internet rule allows. host is the node the pod runs
+      # on, which is where a public address that hairpins into the cluster
+      # lands. Add remote-node if that address can land on another node.
+      internetEntities:
+        - world
+        - host
+      # Admit the host entity on ingress: that is the kubelet running the
+      # startup probe of environment sidecars. Nothing else is admitted.
+      allowHostIngress: true
+      # Addresses denied on egress even though Cilium classes them as
+      # world. The cloud metadata address hands out node credentials.
+      egressDenyCidrs:
+        - "169.254.169.254/32"
+      # Extra CiliumNetworkPolicy egress rules, appended verbatim. The
+      # plain extraEgress list is not translated, the two formats differ.
+      # Prefix label keys inside toEndpoints with k8s:, as the chart does;
+      # Cilium reads a bare key there as any:, which also matches labels
+      # from other sources.
+      extraEgress: []
+    # Second policy: state the agent limit from the control plane side too.
+    # Off by default because it needs the cluster pod CIDRs to avoid
+    # cutting off node-sourced traffic (load balancer health checks,
+    # host-network ingress controllers). Leave it off on Cilium, where the
+    # ipBlock it relies on does not match node addresses.
+    controlPlaneIngress:
+      enabled: false
+      podCidrs: []
+    # Deprecated, kept for backwards compatibility. excludeCIDRs is read
+    # when clusterCidrs is empty, additionalEgressRules when extraEgress
+    # is empty. Both will be removed in a future chart version.
+    excludeCIDRs: []
     additionalEgressRules: []
 
   # ResourceQuota for agent execution namespace
