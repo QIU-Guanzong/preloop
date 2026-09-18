@@ -142,6 +142,19 @@ database:
 builds `DATABASE_URL` from `externalDatabase.*`. For development, keep
 `database.external: false` to deploy in-cluster CloudNativePG.
 
+### Credentials in pod specs
+
+The chart does not render `DATABASE_URL` or `SMTP_PASSWORD` as literal
+environment values. Both are read with a `secretKeyRef`, either from an
+operator Secret (`database.urlFromSecret`, `config.smtp.passwordSecret`) or
+from the Secret the chart builds from values (`<release>-credentials`).
+Deployments carry a `checksum/credentials` annotation so a credential
+change still rolls the pods.
+
+Rotating an already-exposed credential, moving the application off the
+Postgres superuser, and turning `database.cnpg.enableSuperuserAccess` off
+are covered in `docs/operations/database-credentials.md`.
+
 ### Application secrets
 
 ```bash
@@ -334,6 +347,7 @@ helm uninstall preloop
 | `database.externalDatabase.sslMode`  | Optional libpq sslmode on a chart-built URL        | `""`        |
 | `database.urlFromSecret.name`        | Secret containing DATABASE_URL                     | `""`        |
 | `database.urlFromSecret.key`         | Key inside that Secret                             | `database-url` |
+| `database.cnpg.enableSuperuserAccess` | Keep the postgres superuser password enabled     | `true`      |
 | `database.postgresql.auth.username` | PostgreSQL username                                 | `postgres`  |
 | `database.postgresql.auth.password` | PostgreSQL password                                 | `postgres`  |
 | `database.postgresql.auth.database` | PostgreSQL database                                 | `preloop` |
@@ -449,6 +463,27 @@ helm install preloop ./helm/preloop \
 | `autoscaling.minReplicas`      | Minimum number of replicas                            | `1`         |
 | `autoscaling.maxReplicas`      | Maximum number of replicas                            | `5`         |
 | `autoscaling.targetCPUUtilizationPercentage` | Target CPU utilization percentage      | `80`        |
+
+### Agent isolation parameters
+
+| Name                                                        | Description                                                       | Value           |
+|-------------------------------------------------------------|-------------------------------------------------------------------|-----------------|
+| `agentExecution.networkPolicy.enabled`                        | Isolate pods labelled `app=agent-execution`                       | `true`          |
+| `agentExecution.networkPolicy.allowPreloopAPI`                | Allow egress to the API and gateway (MCP, model calls)            | `true`          |
+| `agentExecution.networkPolicy.allowExternalLLMAPIs`           | Allow egress to the internet outside the cluster CIDRs            | `true`          |
+| `agentExecution.networkPolicy.clusterCidrs`                   | Pod and service CIDRs carved out of the internet rule             | RFC1918 ranges  |
+| `agentExecution.networkPolicy.controlPlanePorts`              | Ports an agent may open towards API and gateway pods              | `[80, 8000]`    |
+| `agentExecution.networkPolicy.internetPorts`                  | Restrict internet egress to these ports (empty means all)         | `[]`            |
+| `agentExecution.networkPolicy.extraEgress`                    | Extra egress rules, appended verbatim                             | `[]`            |
+| `agentExecution.networkPolicy.controlPlaneIngress.enabled`    | Also restrict agent ingress on the API and gateway pods           | `false`         |
+| `agentExecution.networkPolicy.controlPlaneIngress.podCidrs`   | Cluster pod CIDRs, required when the policy above is enabled      | `[]`            |
+
+`excludeCIDRs` and `additionalEgressRules` are the previous names of
+`clusterCidrs` and `extraEgress`. They are still read when the new keys are
+empty and will be removed in a future version.
+
+See `docs/security/agent-isolation.md` for what an agent pod can reach with
+and without these policies.
 
 ### Observability
 

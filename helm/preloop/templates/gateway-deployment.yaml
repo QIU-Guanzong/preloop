@@ -24,10 +24,13 @@ spec:
       app.kubernetes.io/component: gateway
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
       annotations:
+        # Roll the pods when a chart-managed credential changes: a
+        # secretKeyRef does not trigger a rollout the way a literal env did.
+        {{- include "preloop.credentialsChecksum" $ | nindent 8 }}
+        {{- with $.Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       labels:
         {{- include "preloop.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: gateway
@@ -132,8 +135,7 @@ spec:
               value: {{ .Values.config.smtp.port | quote }}
             - name: SMTP_USERNAME
               value: {{ .Values.config.smtp.username | quote }}
-            - name: SMTP_PASSWORD
-              value: {{ .Values.config.smtp.password | quote }}
+            {{- include "preloop.smtpPasswordEnv" $ | nindent 12 }}
             - name: SMTP_FROM
               value: {{ .Values.config.smtp.from | quote }}
             - name: SMTP_FROM_NAME

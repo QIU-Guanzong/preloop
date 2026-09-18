@@ -38,6 +38,26 @@
 {{- else }}
    - Using custom database configuration
 {{- end }}
+{{- if and .Values.database.enabled (not .Values.database.external) (not (and .Values.database.urlFromSecret .Values.database.urlFromSecret.name)) }}
+{{- if eq (.Values.database.cnpg.auth.password | default "") "postgres" }}
+
+   WARNING: database.cnpg.auth.password is still the placeholder value.
+   Anything that can reach port 5432 in this cluster can log in as the
+   superuser. Set a real password, or move the URL into a Secret with
+   database.urlFromSecret. See docs/operations/database-credentials.md.
+{{- end }}
+{{- end }}
+
+4. Agent isolation:
+{{- if .Values.agentExecution.networkPolicy.enabled }}
+   - A NetworkPolicy restricts agent pods (app=agent-execution) to DNS, the
+     Preloop API and gateway, and the internet outside
+     agentExecution.networkPolicy.clusterCidrs. Confirm those CIDRs match
+     this cluster, and that your CNI enforces NetworkPolicy.
+{{- else }}
+   - WARNING: agent pods are unrestricted. They can reach the database,
+     NATS, and every other pod in the cluster. See docs/security/agent-isolation.md.
+{{- end }}
 
 See helm/preloop/README.md (Private cluster) for ingress, private registry, extra CA, and OpenAI-compatible upstream setup.
 
