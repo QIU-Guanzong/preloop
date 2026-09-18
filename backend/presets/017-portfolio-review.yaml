@@ -331,7 +331,8 @@ prompt_template: |
   record status "unroutable" with the reason, take the safe default
   below, and never simulate the human.
 
-  Pass ONE ROW PER DISCOVERED PROJECT in items, in rank order:
+  Pass ONE ROW PER DISCOVERED PROJECT in items, in rank order, and
+  above the 150 row question cap below the 150 highest ranked rows:
     {"id": "<project path, exactly as discovery recorded it>",
      "title": "<project path> (<stacks>)",
      "description": "<last commit date, commits in 12 months, file

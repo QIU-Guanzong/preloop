@@ -1165,7 +1165,10 @@ class TestQuestionForms:
     def test_the_questions_use_items_and_an_input_schema(self):
         prompt = _prompt()
         norm = _norm(prompt)
-        assert "Pass ONE ROW PER DISCOVERED PROJECT in items, in rank order" in norm
+        assert (
+            "Pass ONE ROW PER DISCOVERED PROJECT in items, in rank order, and "
+            "above the 150 row question cap below the 150 highest ranked rows" in norm
+        )
         for fragment in (
             '"id": "<project path, exactly as discovery recorded it>"',
             '"severity": "high|medium|low" (the triage band)',
@@ -1242,6 +1245,10 @@ class TestQuestionForms:
             "no key" in norm
         )
         assert "send the 150 highest ranked rows" in norm
+        assert (
+            "ONE ROW PER DISCOVERED PROJECT in items, in rank order, and above "
+            "the 150 row question cap below the 150 highest ranked rows" in norm
+        ), "the row rule and the cap have to agree where the model reads them"
         assert "NEVER split the question into a second call" in norm
 
     def test_a_project_the_question_could_not_show_is_still_counted(self):
