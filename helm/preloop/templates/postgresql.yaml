@@ -71,10 +71,15 @@ spec:
     shared_preload_libraries:
       - pg_stat_statements
     {{- end }}
-  # User management
-  enableSuperuserAccess: true
+  # User management. With enableSuperuserAccess false, CNPG disables the
+  # postgres password entirely and the only way in is `kubectl cnpg psql`,
+  # which is what you want once the application uses its own user. See
+  # docs/operations/database-credentials.md.
+  enableSuperuserAccess: {{ .Values.database.cnpg.enableSuperuserAccess }}
+  {{- if .Values.database.cnpg.enableSuperuserAccess }}
   superuserSecret:
     name: {{ include "preloop.fullname" . }}-db-superuser
+  {{- end }}
   bootstrap:
     initdb:
       database: {{ .Values.database.cnpg.bootstrap.initdb.database }}
@@ -136,6 +141,7 @@ spec:
   resources:
     {{- toYaml .Values.database.cnpg.resources | nindent 4 }}
 
+{{- if .Values.database.cnpg.enableSuperuserAccess }}
 ---
 # Superuser secret
 apiVersion: v1
@@ -146,6 +152,7 @@ type: kubernetes.io/basic-auth
 stringData:
   username: postgres
   password: {{ .Values.database.cnpg.auth.password }}
+{{- end }}
 
 ---
 # Regular user secret

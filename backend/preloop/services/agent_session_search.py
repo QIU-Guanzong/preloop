@@ -461,6 +461,12 @@ def _to_tool_response(response: SessionSearchResponse, *, scope: str) -> Dict[st
         "effective_mode": response.effective_mode,
         "degraded": response.degraded.model_dump(),
         "indexed_through": _isoformat(response.indexed_through),
+        # Both ends of the searched window, for the same reason the degraded
+        # block is passed through: an agent that knows the corpus starts on a
+        # deploy date can say "not indexed" instead of asserting "never
+        # happened" about everything older than it.
+        "indexed_from": _isoformat(response.indexed_from),
+        "backfill_complete": response.backfill_complete,
         "total": response.total,
         "returned": len(results),
         "truncated": bool(omitted),

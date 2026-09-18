@@ -133,8 +133,12 @@ def test_private_overlay_uses_existing_secret_and_does_not_inline_jwt() -> None:
 
 
 def test_sslmode_appended_when_building_external_database_url() -> None:
-    rendered = helm_template(
-        "templates/gateway-deployment.yaml",
+    """The chart-built URL lives in the credentials Secret, not the pod spec.
+
+    The pod reads it with a secretKeyRef, so the assertion follows that
+    reference into the rendered Secret rather than expecting a literal.
+    """
+    rendered = helm_template_all(
         overrides=[
             "database.enabled=true",
             "database.external=true",
@@ -145,9 +149,23 @@ def test_sslmode_appended_when_building_external_database_url() -> None:
             "database.externalDatabase.sslMode=verify-full",
         ],
     )
-    env = _container_env(_docs(rendered)[0])
-    assert "sslmode=verify-full" in env["DATABASE_URL"]["value"]
-    assert "postgres.internal" in env["DATABASE_URL"]["value"]
+    docs = _docs(rendered)
+    gateway = next(
+        doc
+        for doc in _deployments(rendered)
+        if doc["metadata"]["name"].endswith("-gateway")
+    )
+    env = _container_env(gateway)
+    assert "value" not in env["DATABASE_URL"], "DATABASE_URL must not be a literal"
+    ref = env["DATABASE_URL"]["valueFrom"]["secretKeyRef"]
+    secret = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Secret" and doc["metadata"]["name"] == ref["name"]
+    )
+    url = secret["stringData"][ref["key"]]
+    assert "sslmode=verify-full" in url
+    assert "postgres.internal" in url
 
 
 def test_default_render_does_not_inject_extra_ca() -> None:

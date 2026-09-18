@@ -28,6 +28,125 @@ cover.
 | Child cap | `max_children`, default 20, hard cap 25 |
 | Run ceiling | `max_cost_usd` on the selection form; fan out stops when measured spend crosses it |
 
+## Setting it up
+
+A portfolio review is four flows, not one: the orchestrator plus every
+lens it is allowed to start. Nothing here is automatic, so the order
+below is the order a first run needs.
+
+**1. Create the lens flows first.** Open Flows, then Browse presets, and
+clone one flow from each preset the run will use. A run that only checks
+documentation currency needs the first one:
+
+| preset | flow this creates | needed for |
+| --- | --- | --- |
+| `016-docs-currency-review.yaml` | Docs Currency Review | `lenses: ["docs-currency-review"]` |
+| `009-repo-code-health-review.yaml` | Repo Code Health Review | `lenses: ["repo-code-health-review"]` |
+| `006-release-security-audit.yaml` | Release Security Audit | `lenses: ["release-security-audit"]` |
+
+The same thing over the API, one call per lens:
+
+```bash
+curl -X POST "$PRELOOP/api/v1/flows/presets/$PRESET_FLOW_ID/clone" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**2. Create the orchestrator** the same way from
+`017-portfolio-review.yaml`. It arrives with `ask_user`, `run_flow` and
+`get_execution` on its tool allowlist, and with the three lens slugs
+already on its callable list, each carrying its own `max_children` and
+`max_usd_per_child` ceiling:
+
+```json
+"callable_flows": [
+  {"flow": "docs-currency-review", "max_children": 12, "max_usd_per_child": 2.0}
+]
+```
+
+**3. Check the callable picker resolves.** A slug on that list resolves
+to **your account's clone** of that preset, which is why the lens flows
+have to exist first: with no clone of 016 in the account,
+`docs-currency-review` names nothing and every call to it is refused.
+Open the orchestrator and use "Flows this flow may start" to confirm the
+entries point at real flows, or to swap a slug for a flow you renamed. A
+lens that is not on the list is **refused at call time**, recorded in
+`fan_out.lenses_refused`, and the run continues without it; the refusal
+names the flows the caller may start, so a run that named a lens wrongly
+says which names were available.
+
+**4. Give all four flows the same repository.** The orchestrator's
+`git_clone_config.repositories[0]` is the repository under review, and a
+child gets no clone configuration from its parent: each lens flow needs
+the same entry with the **same `clone_path`**, because the working
+directory inside the container is `/workspace/<clone_path>` and that is
+the path the parent hands each child as `target_repo_path`.
+
+```json
+"git_clone_config": {
+  "repositories": [
+    {"url": "https://github.com/<owner>/<repo>",
+     "clone_path": "<repo>",
+     "branch": "main"}
+  ]
+}
+```
+
+**5. Attach a tracker, or turn the two write steps off.** The report
+pull request and the follow up filing are platform steps that run after
+the agent exits, and both need a tracker with write access to the
+repository the report lands in. Without one, set
+`git_clone_config.report_publication.enabled` and
+`git_clone_config.follow_up_filing.enabled` to `false` and the run still
+produces a full report and a ranked follow up list, with
+`publication.status` recording why nothing was pushed. A review of a
+repository you cannot write to (a client's code, a mirror, a public
+sample) is exactly that case.
+
+**6. Trigger it.** The first run on an unfamiliar repository is worth
+doing inventory only: no lens, no child, no spend, and a full project
+register to read before committing a budget.
+
+```bash
+# inventory only: discovery, triage and the selection question, nothing else
+curl -X POST "$PRELOOP/api/v1/flows/$PORTFOLIO_FLOW_ID/trigger" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"payload": {"lenses": [], "max_depth": 3}}'
+
+# a docs lens run over at most three projects, with a ceiling
+curl -X POST "$PRELOOP/api/v1/flows/$PORTFOLIO_FLOW_ID/trigger" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"payload": {"max_projects": 3, "lenses": ["docs-currency-review"],
+                   "depth": "quick", "max_cost_usd": 3}}'
+```
+
+**7. Answer the two questions in Approvals.** The selection question
+arrives as one row per discovered project (title, the triage
+description, the band as severity, stacks and triage reasons as badges),
+or as the 150 highest ranked rows when discovery found more than that,
+plus a form with `selected` (the multi-select whose ids are the project
+paths), `depth` and `max_cost_usd`. Nothing in it is required: submitting
+an empty `selected` reviews nothing. The follow ups question arrives the
+same way after the children finish, one row per candidate follow up. Both
+windows are three days, both park the run while they wait, and both fail
+closed if they expire (inventory only, and keep nothing).
+
+**Known limitation (2026-09-18).** The park is attempted in the agent
+process about 90 seconds after the question is asked, but the agent's
+tool transport can close first, and when it does the run fails while the
+approval sits unanswered in the queue: the three day window is the
+design, not yet the measured behaviour. Track it on issue #792, and
+until it closes answer a portfolio review's questions promptly rather
+than leaving them overnight.
+
+**What a run costs and how long it takes.** Measured on 2026-09-18 on a
+local stack against a public repository of 82 projects (issue #647):
+discovery, triage and the question took 76 to 167 seconds of wall clock
+per run, with 29,000 to 61,000 model tokens for the inventory phase. Cost
+per child, total cost and the fan out's wall clock are **not yet
+measured**: the instance those runs were made on had no model pricing
+configured, so `budget.measurement` came back `unavailable` and
+`spent_usd` was `null`, and no child has yet run end to end.
+
 ## What it is not
 
 - **Not a reviewer.** The parent never reads project source code and
@@ -65,9 +184,18 @@ descriptor from a closed detector list** (`package.json`,
 `pyproject.toml`/`setup.py`/`setup.cfg`/`requirements.txt`, `go.mod`,
 `Cargo.toml`, `pom.xml`/`build.gradle`/`build.gradle.kts`, `build.sbt`,
 `composer.json`, `Gemfile`/`*.gemspec`, `*.csproj`/`*.fsproj`/`*.sln`,
-`CMakeLists.txt`, `pubspec.yaml`, `mix.exs`, `Package.swift`,
+`CMakeLists.txt`, `pubspec.yaml`, `mix.exs`,
+`Package.swift`/`*.xcodeproj`/`*.xcworkspace`,
 `deno.json`/`deno.jsonc`) and nothing else is a project. A detector the
 agent invents is a bug.
+
+A directory whose build lives somewhere else (a package covered by a
+parent `pyproject.toml`, an app built by a parent workspace) is
+invisible to a manifest walk, so payload `include_paths` forces it in:
+each prefix becomes a project carrying `"source": "include_paths"`, with
+the manifests it actually has (an empty list is honest). A prefix the
+checkout does not have is recorded in `discovery.include_paths_missing`
+rather than invented, and `exclude_paths` wins over `include_paths`.
 
 Three rules keep the list honest, applied in this order:
 
@@ -575,6 +703,7 @@ because a flow with no write tools could not have created it.
 | `root_path` | `.` | where the walk starts |
 | `max_depth` | `3` | how deep it descends, with truncation reported |
 | `exclude_paths` | - | extra prefixes to skip, added to the named exclusion list |
+| `include_paths` | - | prefixes to treat as projects even when no detector matched; a missing prefix is reported, never invented |
 | `auto_select_threshold` | `3` | below this many projects, nothing is asked |
 | `projects` | - | explicit selection, replaces the first question |
 | `lenses` | `["docs-currency-review"]` | which callable lenses to run; a name off the list is refused |

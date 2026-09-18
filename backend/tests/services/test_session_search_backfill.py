@@ -16,8 +16,15 @@ from preloop.models.crud import (
 )
 from preloop.models.models.session_search_document import (
     SOURCE_KIND_GATEWAY_INTERACTION,
+    SOURCE_KIND_SESSION_SUMMARY,
     SOURCE_KIND_TOOL_CALL,
 )
+from preloop.schemas.session_search import (
+    BACKFILL_STATE_COMPLETE,
+    BACKFILL_STATE_NOT_STARTED,
+    SessionSearchRequest,
+)
+from preloop.services import session_search
 from preloop.services import session_search_backfill as backfill
 from preloop.services.gateway_usage_search import GatewayUsageSearchService
 
@@ -264,47 +271,39 @@ def test_a_restarted_sweeper_resumes_from_the_watermark(db_session, test_user):
     assert _corpus_count(db_session, test_user.account_id) == 2
 
 
-def test_indexed_through_moves_backwards_as_the_backfill_progresses(
-    db_session, test_user
-):
+def test_indexed_from_moves_backwards_as_the_backfill_progresses(db_session, test_user):
     """The value a search response carries reaches further back each pass."""
     _history(db_session, test_user, sessions=3)
     settings.session_search_backfill_max_rows_per_pass = 1
 
-    before_any = backfill.indexed_through_for_account(
+    before_any = backfill.corpus_coverage_for_account(
         db_session, account_id=test_user.account_id
     )
-    assert before_any.indexed_through is None
+    assert before_any.indexed_from is None
     assert before_any.state == backfill.BACKFILL_STATE_NOT_STARTED
 
     backfill.run_session_search_backfill(db_session, now=NOW)
-    after_first = backfill.indexed_through_for_account(
+    after_first = backfill.corpus_coverage_for_account(
         db_session, account_id=test_user.account_id
     )
     backfill.run_session_search_backfill(db_session, now=NOW)
-    after_second = backfill.indexed_through_for_account(
+    after_second = backfill.corpus_coverage_for_account(
         db_session, account_id=test_user.account_id
     )
 
-    assert after_second.indexed_through < after_first.indexed_through
+    assert after_second.indexed_from < after_first.indexed_from
     assert after_first.state == backfill.BACKFILL_STATE_IN_PROGRESS
     assert after_first.complete is False
-    # The shape the search endpoint returns.
-    assert set(after_first.as_dict()) == {
-        "indexed_through",
-        "backfill_complete",
-        "backfill_state",
-    }
 
     settings.session_search_backfill_max_rows_per_pass = 1000
     backfill.run_session_search_backfill(db_session, now=NOW)
-    finished = backfill.indexed_through_for_account(
+    finished = backfill.corpus_coverage_for_account(
         db_session, account_id=test_user.account_id
     )
 
     assert finished.complete is True
     assert finished.state == backfill.BACKFILL_STATE_COMPLETE
-    assert finished.indexed_through < after_second.indexed_through
+    assert finished.indexed_from < after_second.indexed_from
 
 
 def test_a_completed_account_is_skipped_without_scanning_its_sessions(
@@ -524,3 +523,68 @@ def test_a_locked_account_is_not_recorded_as_failed(db_session, test_user, monke
     assert summary.accounts_failed == 0
     assert summary.accounts == 0
     assert _state(db_session, test_user.account_id) is None
+
+
+def test_history_written_before_search_existed_answers_on_its_title_alone(
+    db_session, test_user
+):
+    """The shape an operator hits on a deployment that never ran the backfill.
+
+    A session older than the corpus has no chunks of its own, but the console
+    generates titles for whatever is on the list page, and a generated title
+    writes a ``session_summary`` chunk. So the corpus ends up holding the one
+    line that describes the session and none of what happened in it, and a
+    search over that account answers on titles and nothing else. That is not
+    a ranking bug: it is a corpus with no history in it, and the answer says
+    so through the coverage floor rather than leaving a reader to guess.
+    """
+    with _history_written_before_search_existed():
+        session = _session(
+            db_session,
+            test_user.account_id,
+            source_id="pre-deploy",
+            started_at=NOW - timedelta(days=30),
+        )
+        _gateway_interaction(
+            db_session,
+            account_id=test_user.account_id,
+            user_id=test_user.id,
+            session=session,
+            timestamp=NOW - timedelta(days=30),
+        )
+    crud_runtime_session.update_session_title(
+        db_session,
+        account_id=str(test_user.account_id),
+        runtime_session_id=str(session.id),
+        title="Nightly ledger reconciliation",
+    )
+    db_session.flush()
+
+    def _search(query: str):
+        return session_search.search_sessions(
+            db_session,
+            account_id=test_user.account_id,
+            request=SessionSearchRequest(query=query),
+        )
+
+    on_title = _search("ledger")
+    on_content = _search("console")
+
+    assert on_title.total == 1
+    assert [row.source_kind for row in on_title.results[0].snippets] == [
+        SOURCE_KIND_SESSION_SUMMARY
+    ]
+    # The words are in the gateway payload on disk and in no chunk, so the
+    # keyword half cannot reach them.
+    assert on_content.total == 0
+    assert on_title.backfill_state == BACKFILL_STATE_NOT_STARTED
+    assert on_title.backfill_complete is False
+
+    backfill.run_session_search_backfill(db_session, now=NOW)
+    after = _search("console")
+
+    assert after.total == 1
+    assert after.results[0].snippets[0].source_kind == SOURCE_KIND_GATEWAY_INTERACTION
+    assert after.backfill_state == BACKFILL_STATE_COMPLETE
+    assert after.backfill_complete is True
+    assert after.indexed_from is not None
