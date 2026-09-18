@@ -2,8 +2,20 @@
 
 Checks are preflight estimates, not atomic spend reservations. Concurrent calls
 can exceed a limit before their final usage is recorded.
+
+A budget that cannot be evaluated is not a budget that was exceeded. When the
+price catalog has no entry for the requested model, the estimate is ``None``
+and no dollar comparison is possible. That used to be a 403: an account with a
+$100 monthly hard limit and $0 of spend was refused outright because a new
+model (``google/gemini-3.8-flash``) had not reached the catalog yet. The
+missing price is Preloop's gap, not the customer's overspend, so the request is
+allowed, its spend counts as zero, the usage row keeps
+``pricing_available=false``, the caller gets an ``X-Preloop-Warning``, and an
+admin is paged on the existing unpriced-model path so the catalog hole gets
+closed instead of being silently paid for by refused traffic.
 """
 
+import logging
 import uuid
 from typing import Any, Dict, Optional, List, Tuple
 from datetime import datetime, timezone
@@ -23,6 +35,34 @@ from preloop.models.crud.budget import (
     get_period_start,
     spend_bucket_for_policy,
 )
+
+logger = logging.getLogger(__name__)
+
+#: Warning code echoed to gateway clients when a hard-limit budget could not be
+#: enforced because the model has no known price. Kept as the old refusal code
+#: so dashboards and log filters built against it keep matching; only the
+#: outcome changed from "blocked" to "allowed and flagged".
+UNPRICED_BUDGET_WARNING_CODE = "budget_pricing_unavailable"
+
+
+def unpriced_budget_warning(model_alias: Optional[str]) -> str:
+    """Warning text for an unpriced request under a hard-limit policy.
+
+    Args:
+        model_alias: Alias the request resolved to, for the operator who has
+            to go and price it.
+
+    Returns:
+        A single-line, header-safe warning naming the code, the model, and
+        what the customer's spend numbers will and will not show.
+    """
+    return (
+        f"{UNPRICED_BUDGET_WARNING_CODE}: no known price for "
+        f"'{model_alias or 'unknown'}', so its budget hard limit could not be "
+        "enforced. The request was allowed and counted as $0.00 spend. "
+        "Configure model pricing or a per-account price override to restore "
+        "enforcement."
+    )
 
 
 def _estimate_request_cost_with_optional_override(
@@ -127,8 +167,24 @@ class ModelGatewayBudgetEnforcer:
         auth_context: ModelGatewayAuthContext,
         ai_model: models.AIModel,
         payload: Dict[str, Any],
-    ) -> None:
-        """Check budgets and raise 403 if hard limit exceeded."""
+    ) -> Optional[str]:
+        """Check budgets and raise 403 if a priced hard limit is exceeded.
+
+        Args:
+            db: Database session.
+            auth_context: Authenticated gateway principal.
+            ai_model: The model the request resolved to.
+            payload: The gateway request body.
+
+        Returns:
+            A warning to surface to the caller when the request was allowed
+            but a configured hard limit could not be enforced (no known
+            price), or ``None`` when every applicable budget was evaluated.
+
+        Raises:
+            ModelGatewayAPIError: 403 when a priced request would cross a
+                configured hard limit.
+        """
         # 1. Estimate cost
         budget_service = ModelGatewayBudgetService(db, auth_context)
         estimated_cost = _estimate_request_cost_with_optional_override(
@@ -137,7 +193,7 @@ class ModelGatewayBudgetEnforcer:
             payload,
         )
         if estimated_cost is not None and estimated_cost <= 0:
-            return
+            return None
 
         if estimated_cost is not None:
             self._enforce_additional_constraints(
@@ -163,7 +219,7 @@ class ModelGatewayBudgetEnforcer:
             api_key_id=auth_context.api_key.id if auth_context.api_key else None,
         )
         if not candidates:
-            return
+            return None
         subject_types = {policy.subject_type for policy in candidates}
         managed_agent_id = (
             _resolve_managed_agent_id(db, auth_context)
@@ -217,6 +273,7 @@ class ModelGatewayBudgetEnforcer:
             ]
         ] = set()
 
+        unenforceable_hard_limit = False
         for policy in policies_by_id.values():
             if (
                 policy.model_alias
@@ -229,15 +286,8 @@ class ModelGatewayBudgetEnforcer:
                 continue
 
             if estimated_cost is None and policy.hard_limit_usd is not None:
-                raise ModelGatewayAPIError(
-                    provider=provider,
-                    status_code=403,
-                    message=(
-                        "Cannot enforce the configured budget because this model "
-                        "has no known price. Configure model pricing before retrying."
-                    ),
-                    code="budget_pricing_unavailable",
-                )
+                # Warn, never block: an uncatalogued price is Preloop's gap.
+                unenforceable_hard_limit = True
 
             p_start = get_period_start(now, policy.period)
             spend_type, spend_id, spend_model_alias = spend_bucket_for_policy(policy)
@@ -258,10 +308,21 @@ class ModelGatewayBudgetEnforcer:
                 seen_buckets.add(bucket_key)
                 buckets_to_fetch.append(bucket_key)
 
-        # Unpriced requests without an applicable hard limit remain usable;
-        # soft-only limits cannot evaluate projected dollar spend.
+        # Unpriced requests remain usable whatever the policy says: no dollar
+        # comparison is possible, so nothing can be shown to be exceeded. A
+        # hard limit that went unenforced is reported to the caller and paged
+        # to admins; a soft-only limit is silent, as it always was.
         if estimated_cost is None:
-            return
+            if not unenforceable_hard_limit:
+                return None
+            self._alert_unpriced_model(
+                db,
+                account_id=account_id,
+                ai_model=ai_model,
+                model_alias=model_alias,
+                provider=provider,
+            )
+            return unpriced_budget_warning(model_alias)
 
         spend_map: Dict[
             Tuple[
@@ -331,6 +392,57 @@ class ModelGatewayBudgetEnforcer:
                     ),
                     code="budget_limit_exceeded",
                 )
+
+        return None
+
+    @staticmethod
+    def _alert_unpriced_model(
+        db: Session,
+        *,
+        account_id: Any,
+        ai_model: models.AIModel,
+        model_alias: Optional[str],
+        provider: str,
+    ) -> None:
+        """Page admins that a budget went unenforced for want of a price.
+
+        Reuses the recording path's alert so the (model, provider) cooldown,
+        the cross-replica dedup marker and the "is this a customer-owned
+        endpoint we will never catalog" filter are shared rather than
+        reimplemented. Never raises: a missing alert must not cost the
+        customer their request.
+
+        Args:
+            db: Database session.
+            account_id: Account whose budget could not be evaluated.
+            ai_model: The model the request resolved to.
+            model_alias: Alias recorded for the request.
+            provider: Normalized provider name.
+        """
+        if not model_alias:
+            return
+        try:
+            from preloop.services.unpriced_model_alert import (
+                notify_unpriced_model,
+                should_page_unpriced_model,
+            )
+
+            if not should_page_unpriced_model(ai_model):
+                return
+            notify_unpriced_model(
+                db,
+                account_id=str(account_id),
+                model_alias=model_alias,
+                provider_name=provider,
+                total_tokens=0,
+                ai_model=ai_model,
+            )
+        except Exception:  # noqa: BLE001 - alerting never fails a request
+            logger.exception(
+                "Unpriced-budget alert failed for provider %s alias %s",
+                provider,
+                model_alias,
+            )
 
     def _enforce_additional_constraints(
         self,

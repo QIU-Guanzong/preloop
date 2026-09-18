@@ -29,6 +29,13 @@ ERROR_CLASS_UPSTREAM_PROTOCOL = "upstream_protocol"
 ERROR_CLASS_UPSTREAM_ERROR = "upstream_error"
 ERROR_CLASS_UPSTREAM_DISCONNECT = "upstream_disconnect"
 ERROR_CLASS_CLIENT_CANCELLED = "client_cancelled"
+# A deployment-provided hosted model the operator has not given a verified
+# fixed USD tariff. Nothing upstream was ever contacted: the gateway refused
+# because its own configuration is incomplete. It is 503-shaped, which is why
+# it used to be recorded as ``upstream_error``, retried by the gateway, and
+# then retried five more times by the agent harness. It is deterministic and
+# must never be retried; the fix is an operator tariff or BYOK.
+ERROR_CLASS_HOSTED_TARIFF_UNCONFIGURED = "hosted_tariff_unconfigured"
 # The client was already gone when the gateway tried to write the FIRST byte
 # of a streaming response, so the response generator never ran. Distinct from
 # ``client_cancelled`` (client left part-way through a stream it was reading):
@@ -81,6 +88,16 @@ _OVERLOAD_MARKERS = (
     "engine_overloaded",
     "at capacity",
     "server is busy",
+)
+
+# The gateway's own refusal to serve a hosted model it has no operator tariff
+# for. Matched on text as well as on ``error_class`` because the agent-side
+# classifiers (:mod:`preloop.agents.failure_analysis`,
+# :mod:`preloop.services.flow_failure_category`) only ever see the message.
+# Both spellings are ours: the OpenAI-shaped ``error.code`` and the sentence.
+HOSTED_TARIFF_UNCONFIGURED_MARKERS = (
+    ERROR_CLASS_HOSTED_TARIFF_UNCONFIGURED,
+    "no operator tariff",
 )
 
 # Explicit capability errors are deterministic even when a provider reports
@@ -207,6 +224,13 @@ def classify_upstream_error(exc: Exception) -> Optional[UpstreamErrorClass]:
     status = _status_code(exc)
     retry_after = _retry_after_seconds(exc)
 
+    if _contains(text, HOSTED_TARIFF_UNCONFIGURED_MARKERS):
+        return UpstreamErrorClass(
+            error_class=ERROR_CLASS_HOSTED_TARIFF_UNCONFIGURED,
+            status_code=status if status in (502, 503) else 503,
+            terminal=True,
+        )
+
     if _contains(text, _PROTOCOL_MISMATCH_MARKERS):
         return UpstreamErrorClass(
             error_class=ERROR_CLASS_UPSTREAM_PROTOCOL,
@@ -317,6 +341,7 @@ _RETRYABLE_MARKERS = (
 # Client / model-capability errors. Retrying these cannot succeed and burns
 # quota (glm-5.3 parallel_tool_calls, auth, bad params).
 _NON_RETRYABLE_MARKERS = (
+    *HOSTED_TARIFF_UNCONFIGURED_MARKERS,
     "does not support parameters",
     "unsupported parameter",
     "unsupported_parameter",
@@ -347,12 +372,29 @@ _NON_RETRYABLE_ERROR_CLASSES = frozenset(
         ERROR_CLASS_UPSTREAM_QUOTA_EXHAUSTED,
         ERROR_CLASS_CLIENT_CANCELLED,
         ERROR_CLASS_STREAM_ABANDONED,
+        ERROR_CLASS_HOSTED_TARIFF_UNCONFIGURED,
     }
 )
 
 _RETRYABLE_STATUS_CODES = frozenset(
     {408, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529}
 )
+
+
+def is_terminal_error_class(error_class: Optional[str]) -> bool:
+    """Whether a recorded ``error_class`` means "do not try this again".
+
+    The 5xx-shaped members of this set are why it exists: a quota exhaustion
+    and a hosted model with no operator tariff both arrive with a status code
+    that reads as a provider hiccup, and both are hopeless until a human acts.
+
+    Args:
+        error_class: A value from this module's taxonomy, or ``None``.
+
+    Returns:
+        True when no further attempt can change the outcome.
+    """
+    return error_class in _NON_RETRYABLE_ERROR_CLASSES
 
 
 def is_retryable_upstream_failure(exc: Exception) -> bool:
@@ -426,6 +468,8 @@ def classify_recorded_error(
     if status_code < 400:
         return None
     text = (error_detail or "").lower()
+    if _contains(text, HOSTED_TARIFF_UNCONFIGURED_MARKERS):
+        return ERROR_CLASS_HOSTED_TARIFF_UNCONFIGURED
     if status_code == 499:
         return ERROR_CLASS_CLIENT_CANCELLED
     if status_code == 429:

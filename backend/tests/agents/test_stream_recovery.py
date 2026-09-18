@@ -181,7 +181,8 @@ def test_generated_launch_resumes_parent_and_publishes_once(
 
 @pytest.mark.parametrize("harness", ["codex", "opencode", "gemini"])
 @pytest.mark.parametrize(
-    "scenario", ["auth", "missing_session", "cancelled", "completed"]
+    "scenario",
+    ["auth", "missing_session", "cancelled", "completed", "hosted_tariff"],
 )
 def test_generated_launch_refuses_unsafe_recovery(
     tmp_path: Path, harness: str, scenario: str
@@ -191,6 +192,16 @@ def test_generated_launch_refuses_unsafe_recovery(
         "missing_session": {"missing_session": True},
         "cancelled": {"initial_exit": 130},
         "completed": {"message": "FLOW_EXECUTION_SUCCESS\nupstream_disconnect"},
+        # A hosted model the deployment never priced. It arrives dressed as a
+        # 503, which is why the container used to resume against it; the
+        # refusal sentence is terminal and wins over the transient shape.
+        "hosted_tariff": {
+            "message": (
+                "http 503 service unavailable: Hosted model "
+                "google/gemini-3.8-flash has no operator tariff; use your "
+                "own provider key or pick another model."
+            )
+        },
     }[scenario]
     result, calls, published = _run_generated(tmp_path, harness, **kwargs)
     assert result.returncode != 0

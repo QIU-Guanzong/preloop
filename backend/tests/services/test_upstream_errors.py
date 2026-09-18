@@ -17,9 +17,11 @@ from preloop.services.upstream_errors import (
     ERROR_CLASS_UPSTREAM_QUOTA_EXHAUSTED,
     ERROR_CLASS_UPSTREAM_RATE_LIMITED,
     ERROR_CLASS_CLIENT_CANCELLED,
+    ERROR_CLASS_HOSTED_TARIFF_UNCONFIGURED,
     classify_recorded_error,
     classify_upstream_error,
     is_retryable_upstream_failure,
+    is_terminal_error_class,
 )
 
 
@@ -243,3 +245,33 @@ def test_mapped_upstream_error_502_is_not_retryable():
 )
 def test_classify_recorded_error(status_code, detail, expected):
     assert classify_recorded_error(status_code, detail) == expected
+
+
+def test_hosted_tariff_refusal_is_terminal_not_an_upstream_hiccup() -> None:
+    """The gateway's own 503 refusal must not read as a provider outage.
+
+    Three agent runs in a row each retried five times against a hosted model
+    the deployment had simply never priced.
+    """
+    refusal = ModelGatewayAPIError(
+        provider="openai",
+        status_code=503,
+        message=(
+            "Hosted model google/gemini-3.8-flash has no operator tariff; "
+            "use your own provider key or pick another model."
+        ),
+        code="hosted_tariff_unconfigured",
+    )
+    classified = classify_upstream_error(refusal)
+    assert classified is not None
+    assert classified.error_class == ERROR_CLASS_HOSTED_TARIFF_UNCONFIGURED
+    assert classified.terminal is True
+    assert is_retryable_upstream_failure(refusal) is False
+    assert is_terminal_error_class(ERROR_CLASS_HOSTED_TARIFF_UNCONFIGURED) is True
+    # Recorded rows carry only status plus detail; the sentence still decides.
+    assert (
+        classify_recorded_error(503, refusal.message)
+        == ERROR_CLASS_HOSTED_TARIFF_UNCONFIGURED
+    )
+    # An ordinary 503 is still a transient overload.
+    assert is_terminal_error_class(ERROR_CLASS_UPSTREAM_OVERLOADED) is False

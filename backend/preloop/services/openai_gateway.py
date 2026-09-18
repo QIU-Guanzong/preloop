@@ -127,6 +127,7 @@ from preloop.services.model_gateway_errors import (
 from preloop.services.model_gateway_stream_observer import ObservedGatewayStream
 from preloop.services.upstream_errors import (
     ERROR_CLASS_CLIENT_CANCELLED,
+    ERROR_CLASS_HOSTED_TARIFF_UNCONFIGURED,
     ERROR_CLASS_NETWORK,
     ERROR_CLASS_STREAM_ABANDONED,
     ERROR_CLASS_UPSTREAM_DISCONNECT,
@@ -907,6 +908,12 @@ class OpenAIGatewayService:
         # an X-Preloop-Warning response header) so a silent misroute like the
         # zai/glm-5.3 collision is visible at the client, not just in logs.
         self.alias_collision_warning: Optional[str] = None
+        # Human-readable warning set when a configured budget could not be
+        # enforced for this request (the model has no known price, so the
+        # hard limit has nothing to compare against). Surfaced beside the
+        # alias-collision warning so "your limit did not apply here" reaches
+        # the caller instead of only the admin mailbox.
+        self.budget_warning: Optional[str] = None
         # Usage row stashed until the ASGI body has been finished
         # (``GatewayStreamingResponse.on_complete``). None when the generator
         # is still mid-stream or recording already ran.
@@ -923,6 +930,21 @@ class OpenAIGatewayService:
     def db(self, session: Session) -> None:
         """Support caller-owned construction and existing service factories."""
         self._db = session
+
+    @property
+    def response_warning(self) -> Optional[str]:
+        """Every non-fatal warning this request produced, as one header value.
+
+        Returns:
+            The warnings joined with ``" | "``, or ``None`` when the request
+            produced none. Endpoints emit this as ``X-Preloop-Warning``.
+        """
+        warnings = [
+            warning
+            for warning in (self.alias_collision_warning, self.budget_warning)
+            if warning
+        ]
+        return " | ".join(warnings) if warnings else None
 
     def _close_owned_db(self) -> None:
         """Roll back unfinished work without allocating another Session."""
@@ -9303,7 +9325,7 @@ class OpenAIGatewayService:
             retry_of_api_usage_id=retry_of_api_usage_id,
             error_detail=error_detail,
             error_type=(
-                self._audit_error_type(status_code, error_detail)
+                self._audit_error_type(status_code, error_detail, error_class)
                 if status_code >= 400
                 else None
             ),
@@ -9809,9 +9831,12 @@ class OpenAIGatewayService:
         # Execute plugin budget enforcement (HTTP 403 on limit exceeded)
         if hasattr(self.budget_enforcer, "enforce_or_raise"):
             try:
-                self.budget_enforcer.enforce_or_raise(
+                warning = self.budget_enforcer.enforce_or_raise(
                     self.db, self.auth_context, ai_model, payload
                 )
+                # Enforcers predating the unpriced-model ruling return None.
+                if isinstance(warning, str) and warning:
+                    self.budget_warning = warning
             except ModelGatewayAPIError as exc:
                 raise self._normalize_budget_gateway_error(
                     exc, gateway_provider=gateway_provider
@@ -9926,7 +9951,26 @@ class OpenAIGatewayService:
         return "failed"
 
     @staticmethod
-    def _audit_error_type(status_code: int, error_detail: Optional[str]) -> str:
+    def _audit_error_type(
+        status_code: int,
+        error_detail: Optional[str],
+        error_class: Optional[str] = None,
+    ) -> str:
+        """Name the audit-visible kind of a failed gateway request.
+
+        Args:
+            status_code: Status returned to the client.
+            error_detail: Message recorded with the failure.
+            error_class: Shared upstream-error classification, when the
+                caller had one. Deterministic classes win over the status
+                code: a refusal the deployment caused is not an upstream
+                fault just because it is 5xx-shaped.
+
+        Returns:
+            A stable audit ``error_type``.
+        """
+        if error_class == ERROR_CLASS_HOSTED_TARIFF_UNCONFIGURED:
+            return ERROR_CLASS_HOSTED_TARIFF_UNCONFIGURED
         if status_code == 403 and is_model_not_allowed_detail(error_detail):
             return MODEL_NOT_ALLOWED_ERROR_CODE
         if (
