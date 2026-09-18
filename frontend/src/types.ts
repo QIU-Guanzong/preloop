@@ -2000,7 +2000,11 @@ export interface QuestionItem {
   id: string;
   title?: string;
   description?: string;
-  /** critical | high | medium | low | info. Rendered as a chip. */
+  /**
+   * Optional chip. Known values are lowercased
+   * (critical | high | medium | low | info | unknown). Anything else is
+   * passed through and rendered as a neutral chip.
+   */
   severity?: string;
   badges?: string[];
   /** http(s) source link. The server refuses anything else. */

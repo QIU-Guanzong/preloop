@@ -24,12 +24,23 @@ QUESTION_ITEMS_SCHEMA: Dict[str, Any] = {
     "items": {
         "type": "object",
         "properties": {
-            "id": {"type": "string", "description": "Stable id an answer refers to"},
+            "id": {
+                "type": "string",
+                "description": (
+                    "Stable id an answer refers to. At most 200 characters; "
+                    "longer ids are refused."
+                ),
+            },
             "title": {"type": "string", "description": "One-line label for the row"},
             "description": {"type": "string", "description": "Supporting detail"},
             "severity": {
                 "type": "string",
-                "description": "critical | high | medium | low | info",
+                "description": (
+                    "Optional display chip: critical | high | medium | low | "
+                    "info | unknown. Known values are lowercased; other values "
+                    "are kept and rendered as a neutral chip. Not a reason to "
+                    "refuse the question."
+                ),
             },
             "badges": {
                 "type": "array",
@@ -54,7 +65,9 @@ QUESTION_INPUT_SCHEMA_SCHEMA: Dict[str, Any] = {
         '{"enum": [...]} for a multi-select, array of {"type": "object", '
         '"properties": {...}} for per-row fields (give the row an "id" '
         "property whose enum lists the item ids to get the item table with a "
-        "reason per row), and object for a named group of scalars. A string "
+        "reason per row), and object for a named group of scalars. If an enum "
+        "value matches an item id, every value of that enum must name an item "
+        "row; a non-overlapping enum is a plain choice list. A string "
         'field may carry "x-autofill": "author" or "date"; the platform fills '
         "those from the deciding identity and the decision time and the human "
         "cannot type them. The answer comes back as validated JSON."

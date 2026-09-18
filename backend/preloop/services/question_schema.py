@@ -11,12 +11,18 @@ a user interface, and a hand-typed array is not evidence anybody can audit.
 So a question may now carry:
 
 * ``items``: the rows the question is about (findings, files, hosts). Each row
-  is ``{id, title, description?, severity?, badges?, href?}``. The console
-  renders them as a table, so the human reads the finding instead of matching
-  an opaque id against a paragraph of prose.
+  is ``{id, title, description?, severity?, badges?, href?}``. Extra keys on a
+  row are dropped rather than refusing the question. ``id`` is at most
+  ``MAX_ITEM_ID_LENGTH`` characters (longer ids are refused by name).
+  ``severity`` is optional display metadata: known values are lowercased,
+  anything else is kept as-is so the console can render a neutral chip.
+  The console renders the rows as a table, so the human reads the finding
+  instead of matching an opaque id against a paragraph of prose.
 * ``input_schema``: the shape of the answer, in the subset below. The console
   renders it as a form, the server validates the submitted answer against it,
-  and the agent receives the validated JSON.
+  and the agent receives the validated JSON. When an enum value matches an
+  item id, every value of that enum must name an item row; a non-overlapping
+  enum is a plain choice list even if ``items`` is also present.
 
 The subset (deliberately small)
 -------------------------------
@@ -67,7 +73,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 #: Hard ceilings. A question is a form for a human, not a data transfer
 #: format: anything past these numbers is a mistake or an abuse, and both are
@@ -79,6 +85,8 @@ MAX_ANSWER_BYTES = 64 * 1024
 MAX_ARRAY_ITEMS = 500
 MAX_STRING_LENGTH = 8000
 MAX_TITLE_LENGTH = 200
+# Ids ride in answers; a truncated id cannot be matched back to a row.
+MAX_ITEM_ID_LENGTH = 200
 MAX_DESCRIPTION_LENGTH = 1000
 MAX_BADGES = 6
 
@@ -361,6 +369,31 @@ def normalize_input_schema(raw: Any) -> Optional[Dict[str, Any]]:
     )
 
 
+def _item_id_key(value: Any) -> str:
+    """Canonical id used when matching schema enum values to item rows."""
+    return str(value).strip()
+
+
+def _require_overlapping_enum_item_ids(
+    enum_values: Any, item_ids: Set[str], path: str
+) -> None:
+    """If any enum value names an item, every value must name an item row.
+
+    A non-overlapping enum is a plain choice list (multi-select, radios) and
+    is left alone even when ``items`` is also present.
+    """
+    if not isinstance(enum_values, list):
+        return
+    enum_vals = [_item_id_key(value) for value in enum_values]
+    if not any(value in item_ids for value in enum_vals):
+        return
+    for val in enum_vals:
+        if val not in item_ids:
+            raise QuestionSchemaError(
+                f"{path} names id '{val}' with no matching item row"
+            )
+
+
 def validate_schema_items(
     schema: Optional[Dict[str, Any]], items: List[Dict[str, Any]]
 ) -> None:
@@ -368,7 +401,7 @@ def validate_schema_items(
     if not schema or not items:
         return
     item_ids = {
-        str(item["id"])
+        _item_id_key(item["id"])
         for item in items
         if isinstance(item, dict) and "id" in item and item["id"]
     }
@@ -387,76 +420,51 @@ def validate_schema_items(
         if spec_type == "array":
             items_spec = spec.get("items")
             if isinstance(items_spec, dict):
-                # Checklist: array items with enum
-                if "enum" in items_spec and isinstance(items_spec["enum"], list):
-                    for val in items_spec["enum"]:
-                        val_str = str(val)
-                        if val_str not in item_ids:
-                            raise QuestionSchemaError(
-                                f"{path}.items.enum names id '{val_str}' with no matching item row"
-                            )
+                # Checklist: array items with enum. Overlap first: a plain
+                # multi-select is legal even when items are also present.
+                if "enum" in items_spec:
+                    _require_overlapping_enum_item_ids(
+                        items_spec["enum"], item_ids, f"{path}.items.enum"
+                    )
                 # Per-row table: array items of type object with an 'id' property enum
                 elif items_spec.get("type") == "object":
                     row_props = items_spec.get("properties")
                     if isinstance(row_props, dict):
                         id_spec = row_props.get("id")
-                        if (
-                            isinstance(id_spec, dict)
-                            and "enum" in id_spec
-                            and isinstance(id_spec["enum"], list)
-                        ):
-                            for val in id_spec["enum"]:
-                                val_str = str(val)
-                                if val_str not in item_ids:
-                                    raise QuestionSchemaError(
-                                        f"{path}.items.properties.id.enum names id '{val_str}' with no matching item row"
-                                    )
+                        if isinstance(id_spec, dict) and "enum" in id_spec:
+                            _require_overlapping_enum_item_ids(
+                                id_spec["enum"],
+                                item_ids,
+                                f"{path}.items.properties.id.enum",
+                            )
 
         # Nested object
         elif spec_type == "object":
             sub_props = spec.get("properties")
             if isinstance(sub_props, dict):
                 for sub_name, sub_spec in sub_props.items():
-                    if (
-                        isinstance(sub_spec, dict)
-                        and "enum" in sub_spec
-                        and isinstance(sub_spec["enum"], list)
-                    ):
-                        enum_vals = [str(v) for v in sub_spec["enum"]]
-                        if any(v in item_ids for v in enum_vals):
-                            for val in enum_vals:
-                                if val not in item_ids:
-                                    raise QuestionSchemaError(
-                                        f"{path}.{sub_name}.enum names id '{val}' with no matching item row"
-                                    )
-
-        # Top-level scalar enum referencing items
-        elif "enum" in spec and isinstance(spec["enum"], list):
-            enum_vals = [str(v) for v in spec["enum"]]
-            if any(v in item_ids for v in enum_vals) or name in (
-                "id",
-                "item_id",
-                "item",
-                "finding",
-                "finding_id",
-            ):
-                for val in enum_vals:
-                    if val not in item_ids:
-                        raise QuestionSchemaError(
-                            f"{path}.enum names id '{val}' with no matching item row"
+                    if isinstance(sub_spec, dict) and "enum" in sub_spec:
+                        _require_overlapping_enum_item_ids(
+                            sub_spec["enum"],
+                            item_ids,
+                            f"{path}.{sub_name}.enum",
                         )
+
+        # Top-level scalar enum referencing items (overlap only; a field
+        # named id/item_id is still a plain choice if values are not item ids)
+        elif "enum" in spec:
+            _require_overlapping_enum_item_ids(spec["enum"], item_ids, f"{path}.enum")
 
 
 def normalize_items(
     raw: Any,
     *,
-    dropped_keys: Optional[Any] = None,
-    input_schema: Optional[Dict[str, Any]] = None,
+    dropped_keys: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Validate the rows a question is about. Empty list when none given.
 
     Extra unsupported keys on rows are dropped rather than refusing the call.
-    Dropped keys are appended to ``dropped_keys`` when a set or list is passed.
+    Dropped keys are added to ``dropped_keys`` when a set is passed.
     """
     if raw is None:
         return []
@@ -480,16 +488,17 @@ def normalize_items(
             raise QuestionSchemaError(f"{path} must be an object")
         unknown = set(entry) - _ITEM_KEYS
         if unknown and dropped_keys is not None:
-            if isinstance(dropped_keys, set):
-                dropped_keys.update(unknown)
-            elif isinstance(dropped_keys, list):
-                for k in sorted(unknown):
-                    if k not in dropped_keys:
-                        dropped_keys.append(k)
+            dropped_keys.update(unknown)
 
-        item_id = _clean_text(entry.get("id"), MAX_TITLE_LENGTH)
-        if not item_id:
+        raw_id = entry.get("id")
+        raw_id_text = "" if raw_id is None else str(raw_id).strip()
+        if not raw_id_text:
             raise QuestionSchemaError(f"{path}.id is required")
+        if len(raw_id_text) > MAX_ITEM_ID_LENGTH:
+            raise QuestionSchemaError(
+                f"{path}.id is longer than {MAX_ITEM_ID_LENGTH} characters"
+            )
+        item_id = raw_id_text
         if item_id in seen:
             raise QuestionSchemaError(f"{path}.id '{item_id}' is not unique")
         seen.add(item_id)
@@ -502,13 +511,13 @@ def normalize_items(
             row["description"] = description
         severity = _clean_text(entry.get("severity"), 32)
         if severity:
+            # Optional display metadata. Lowercase known values so chips match
+            # the console; pass the rest through the way the console already
+            # does (neutral chip for anything it does not recognise).
             norm_severity = severity.lower()
-            if norm_severity not in ITEM_SEVERITIES:
-                raise QuestionSchemaError(
-                    f"{path}.severity '{severity}' is outside the vocabulary: "
-                    f"{', '.join(sorted(ITEM_SEVERITIES))}"
-                )
-            row["severity"] = norm_severity
+            row["severity"] = (
+                norm_severity if norm_severity in ITEM_SEVERITIES else severity
+            )
         badges = entry.get("badges")
         if badges is not None:
             if not isinstance(badges, list):
@@ -528,9 +537,6 @@ def normalize_items(
                 raise QuestionSchemaError(f"{path}.href must be http(s)")
             row["href"] = href
         out.append(row)
-
-    if input_schema:
-        validate_schema_items(input_schema, out)
 
     return out
 
