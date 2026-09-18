@@ -983,15 +983,11 @@ def test_responses_stream_midstream_failure_emits_sse_error_event(
     assert "data: [DONE]" in response.text
 
 
-def test_alias_collision_warning_header_present_and_sanitized(
-    app, client, db_session, test_user
-):
-    """A collision surfaces ``X-Preloop-Warning`` on the real HTTP response.
+def _create_alias_collision(db_session, test_user):
+    """Two models answering to ``zai/glm-5.3``, the legacy pre-validation shape.
 
-    The shadowed import carries a non-latin-1 name (CJK + emoji): without
-    sanitization Starlette's latin-1 header encoding raises
-    ``UnicodeEncodeError`` and the completion 500s on exactly the path this
-    header exists to make visible.
+    The shadowed import carries a non-latin-1 name (CJK + emoji) so the
+    resulting warning exercises header sanitization.
     """
     user_created = crud_ai_model.create_with_account(
         db=db_session,
@@ -1035,7 +1031,19 @@ def test_alias_collision_warning_header_present_and_sanitized(
         "gateway": {**imported.meta_data["gateway"], "model_alias": "zai/glm-5.3"},
     }
     db_session.flush()
+    return user_created, imported
 
+
+def test_alias_collision_warning_header_present_and_sanitized(
+    app, client, db_session, test_user
+):
+    """A collision surfaces ``X-Preloop-Warning`` on the real HTTP response.
+
+    Without sanitization Starlette's latin-1 header encoding raises
+    ``UnicodeEncodeError`` on the imported model's name and the completion
+    500s on exactly the path this header exists to make visible.
+    """
+    user_created, imported = _create_alias_collision(db_session, test_user)
     app.dependency_overrides[get_model_gateway_auth_context] = lambda: (
         ModelGatewayAuthContext(token="runtime-token", user=test_user)
     )
@@ -1307,3 +1315,60 @@ def test_chat_completions_endpoint_allows_display_name_allowlist_match(
 
     assert response.status_code == 200, response.text
     mock_completion.assert_called_once()
+
+
+def test_alias_collision_warning_header_present_on_streaming_response(
+    app, client, db_session, test_user
+):
+    """``stream: true`` carries the same ``X-Preloop-Warning`` as a JSON reply.
+
+    The service resolves the alias before it returns the SSE generator, so the
+    collision is known before the headers are sent; this pins that the
+    endpoint puts it on the streaming response too (issue #810).
+    """
+    user_created, imported = _create_alias_collision(db_session, test_user)
+    app.dependency_overrides[get_model_gateway_auth_context] = lambda: (
+        ModelGatewayAuthContext(token="runtime-token", user=test_user)
+    )
+    with patch(
+        "preloop.services.openai_gateway.litellm.completion",
+        return_value=iter(
+            [
+                {
+                    "id": "chatcmpl_123",
+                    "created": 1710000000,
+                    "choices": [{"index": 0, "delta": {"content": "Hello"}}],
+                },
+                {
+                    "id": "chatcmpl_123",
+                    "created": 1710000000,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 4,
+                        "total_tokens": 7,
+                    },
+                },
+            ]
+        ),
+    ):
+        response = client.post(
+            "/openai/v1/chat/completions",
+            headers={"Authorization": "Bearer ignored"},
+            json={
+                "model": "zai/glm-5.3",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "data: [DONE]" in response.text
+    warning = response.headers.get("X-Preloop-Warning")
+    assert warning, "collision warning header must be present on the stream"
+    assert str(user_created.id) in warning
+    assert str(imported.id) in warning
+    assert "\r" not in warning and "\n" not in warning
+    warning.encode("ascii")  # must not raise
+    assert len(warning) <= 256

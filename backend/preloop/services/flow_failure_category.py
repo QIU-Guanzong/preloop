@@ -41,7 +41,10 @@ it*, not about severity:
     vocabulary so executions classified before it still read as something.
 ``model_config``
     The model rejected the request as configured (unsupported parameters,
-    model not bound to the caller's credentials).
+    model not bound to the caller's credentials), or the gateway refused it
+    because the deployment gave the hosted model no operator tariff. All of
+    these are deterministic: the answer is a different model or a BYOK key,
+    never another attempt.
 ``no_confirmation``
     The agent exited 0 but never confirmed completion on either channel. The
     work may well have succeeded; this is Preloop's contract failing, not the
@@ -79,6 +82,7 @@ import re
 from typing import Any, Mapping, Optional
 
 from preloop.services.upstream_errors import (
+    ERROR_CLASS_HOSTED_TARIFF_UNCONFIGURED,
     ERROR_CLASS_NETWORK,
     ERROR_CLASS_STREAM_ABANDONED,
     ERROR_CLASS_UPSTREAM_AUTH,
@@ -148,6 +152,9 @@ _ERROR_CLASS_CATEGORIES = {
     ERROR_CLASS_STREAM_ABANDONED: FAILURE_CATEGORY_MODEL_TRANSIENT,
     ERROR_CLASS_UPSTREAM_QUOTA_EXHAUSTED: FAILURE_CATEGORY_PROVIDER_BILLING,
     ERROR_CLASS_UPSTREAM_AUTH: FAILURE_CATEGORY_MODEL_AUTH,
+    # The deployment never gave this hosted model a tariff. Nothing upstream
+    # failed, and no retry can change it: it is a configuration fault.
+    ERROR_CLASS_HOSTED_TARIFF_UNCONFIGURED: FAILURE_CATEGORY_MODEL_CONFIG,
 }
 
 # --- Message patterns, most specific first -------------------------------
@@ -208,6 +215,15 @@ _PROVIDER_BILLING_RE = re.compile(
     r"|payment required"
     r"|\bhttp[ /]?402\b|\b402 payment required\b"
     r"|status(?:_code)?[ =:]+402\b",
+    re.IGNORECASE,
+)
+# "Hosted model openai/gpt-5.4 has no operator tariff; use your own provider
+# key or pick another model." The gateway's own 503-shaped refusal for a
+# hosted model the deployment never priced. Matched structurally, before the
+# executor's verdict, because the surrounding log is full of the harness
+# reconnecting five times against what it read as a provider outage.
+_HOSTED_TARIFF_RE = re.compile(
+    r"hosted_tariff_unconfigured|has no operator tariff",
     re.IGNORECASE,
 )
 # "zai does not support parameters: ['parallel_tool_calls']",
@@ -295,6 +311,7 @@ _AGENT_ERROR_RE = re.compile(
 # the completion contract is that thing even if the logs also contain a
 # transient blip the executor's analyser latched onto.
 _STRUCTURAL_MESSAGE_RULES = (
+    (_HOSTED_TARIFF_RE, FAILURE_CATEGORY_MODEL_CONFIG),
     (_PROVIDER_BILLING_RE, FAILURE_CATEGORY_PROVIDER_BILLING),
     (_SETUP_FAILED_RE, FAILURE_CATEGORY_SETUP_FAILED),
     (_VERIFICATION_BLOCKED_RE, FAILURE_CATEGORY_VERIFICATION_BLOCKED),

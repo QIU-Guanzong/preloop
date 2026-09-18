@@ -59,6 +59,17 @@ STAGING_MESSAGES = [
         "stream error: Upstream provider disconnected mid-stream after 41s",
         "model_transient",
     ),
+    # Production 2026-09-18: the gateway refused a hosted model the operator
+    # had never priced, and the harness read the 503 as a provider outage and
+    # reconnected five times. The surrounding transient noise is exactly why
+    # this must be matched structurally, before the executor's verdict.
+    (
+        "Upstream model provider returned an error (HTTP 503) after 5 "
+        "attempts. Reconnecting... 5/5. Hosted model google/gemini-3.8-flash "
+        "has no operator tariff; use your own provider key or pick another "
+        "model.",
+        "model_config",
+    ),
     (
         "Upstream model provider timed out (HTTP 504) after 3 attempts.",
         "model_transient",
