@@ -123,10 +123,12 @@ np=$(helm template t "$CHART" \
   --show-only templates/agent-networkpolicy.yaml | grep -v '^ *#')
 echo "$np" | grep -q '10.244.0.0/16' || fail "clusterCidrs not rendered when both keys are set"
 echo "$np" | grep -q '100.64.0.0/10' && fail "excludeCIDRs still read although clusterCidrs is set"
-out=$(helm template t "$CHART" \
-  --set 'agentExecution.networkPolicy.excludeCIDRs={100.64.0.0/10}' --show-only templates/NOTES.txt 2>/dev/null || true)
 helm template t "$CHART" --set 'agentExecution.networkPolicy.excludeCIDRs={100.64.0.0/10}' >/dev/null \
   || fail "chart does not render with a legacy excludeCIDRs value"
+# helm template does not emit NOTES.txt, so the deprecation notice is checked
+# in the template source, the way backend/tests/helm/test_agent_isolation.py does.
+grep -q 'excludeCIDRs is deprecated' "$CHART/templates/NOTES.txt" \
+  || fail "NOTES.txt lost the excludeCIDRs deprecation notice"
 
 echo "==> agent isolation: legacy additionalEgressRules still appended"
 np=$(helm template t "$CHART" \
@@ -141,6 +143,29 @@ np=$(helm template t "$CHART" \
 echo "$np" | grep -q 'ingress: \[\]' && fail "ingress still empty although nodeCidrs is set"
 echo "$np" | grep -A3 '^  ingress:' | grep -q 'ipBlock' || fail "nodeCidrs did not render an ingress ipBlock"
 echo "$np" | grep -q '10.0.0.0/24' || fail "node CIDR missing from the ingress rule"
+
+# Every label key inside a Cilium toEndpoints or fromEndpoints selector must
+# name its source. Cilium reads a bare key there as any:, which also matches
+# labels from other sources; k8s: is the pod label and the documented form.
+bare_endpoint_keys() {
+  echo "$1" | grep -v '^ *#' | awk '
+    { match($0, /^ */); indent = RLENGTH }
+    inside && indent <= stop { inside = 0 }
+    labels && indent <= ldepth { labels = 0 }
+    /(to|from)Endpoints:/ { inside = 1; stop = ($0 ~ /^ *- /) ? indent + 2 : indent; next }
+    inside && /matchLabels:/ { labels = 1; ldepth = ($0 ~ /^ *- /) ? indent + 2 : indent; next }
+    inside && labels && NF > 0 && $1 !~ /^k8s:/ { print }
+  '
+}
+assert_prefixed_endpoints() {
+  bare=$(bare_endpoint_keys "$1")
+  [ -z "$bare" ] || fail "un-prefixed label key inside a Cilium endpoint selector: $bare"
+}
+# The guard must catch a bare key and pass a prefixed one, or it proves nothing.
+[ -n "$(bare_endpoint_keys "$(printf '    - toEndpoints:\n        - matchLabels:\n            app: x\n')")" ] \
+  || fail "the endpoint selector guard does not catch a bare key"
+[ -z "$(bare_endpoint_keys "$(printf '    - toEndpoints:\n        - matchLabels:\n            k8s:app: x\n      toPorts: []\n')")" ] \
+  || fail "the endpoint selector guard flags a prefixed key or a sibling field"
 
 echo "==> agent isolation: Cilium variant replaces the plain policy"
 out=$(helm template t "$CHART" --namespace preloop \
@@ -158,11 +183,13 @@ echo "$cnp" | grep -A2 '^  ingress:' | grep -q 'fromEntities' || fail "Cilium in
 echo "$cnp" | grep -A3 '^  ingress:' | grep -q '\- host' || fail "Cilium ingress does not admit the host (kubelet)"
 echo "$cnp" | grep -q 'ingressDeny' && fail "ingressDeny rendered while allowHostIngress is true"
 echo "$cnp" | grep -q 'k8s:io.kubernetes.pod.namespace: kube-system' || fail "Cilium DNS rule missing"
-echo "$cnp" | grep -q 'k8s-app: kube-dns' || fail "Cilium DNS rule not pinned to the DNS pods"
+echo "$cnp" | grep -q 'k8s:k8s-app: kube-dns' || fail "Cilium DNS rule not pinned to the DNS pods"
 echo "$cnp" | grep -q 'port: "53"' || fail "Cilium DNS port missing"
 echo "$cnp" | grep -q 'k8s:io.kubernetes.pod.namespace: preloop' || fail "Cilium control plane rule not scoped to the release namespace"
-echo "$cnp" | grep -q 'app.kubernetes.io/component: api' || fail "Cilium policy has no egress to the API"
-echo "$cnp" | grep -q 'app.kubernetes.io/component: gateway' || fail "Cilium policy has no egress to the gateway"
+echo "$cnp" | grep -q 'k8s:app.kubernetes.io/component: api' || fail "Cilium policy has no egress to the API"
+echo "$cnp" | grep -q 'k8s:app.kubernetes.io/component: gateway' || fail "Cilium policy has no egress to the gateway"
+echo "$cnp" | grep -q 'k8s:app.kubernetes.io/name: preloop' || fail "Cilium control plane rule lost the chart name label"
+echo "$cnp" | grep -q 'k8s:app.kubernetes.io/instance: t' || fail "Cilium control plane rule lost the release label"
 echo "$cnp" | grep -q 'port: "8000"' || fail "Cilium policy omits the container port"
 echo "$cnp" | grep -A3 'toEntities:' | grep -q '\- world' || fail "Cilium internet rule missing world"
 echo "$cnp" | grep -A3 'toEntities:' | grep -q '\- host' || fail "Cilium internet rule missing host (public hairpin)"
@@ -171,6 +198,7 @@ echo "$cnp" | grep -q 'ipBlock' && fail "Cilium policy contains an ipBlock, whic
 echo "$cnp" | grep -q '5432' && fail "Cilium policy allows the database port"
 echo "$cnp" | grep -q '4222' && fail "Cilium policy allows the NATS port"
 echo "$cnp" | grep -q 'component: console' && fail "Cilium policy allows the console"
+assert_prefixed_endpoints "$cnp"
 
 echo "==> agent isolation: Cilium variant, strict ingress and knobs"
 cnp=$(helm template t "$CHART" --namespace preloop \
@@ -185,6 +213,16 @@ echo "$cnp" | grep -A2 'ingressDeny:' | grep -q '\- all' || fail "strict Cilium 
 echo "$cnp" | grep -A4 'toEntities:' | grep -q '\- remote-node' || fail "internetEntities override not rendered"
 echo "$cnp" | grep -q 'port: "443"' || fail "internetPorts not applied to the Cilium internet rule"
 echo "$cnp" | grep -q '203.0.113.0/24' || fail "cilium.extraEgress not appended"
+assert_prefixed_endpoints "$cnp"
+cnp=$(helm template t "$CHART" --namespace preloop \
+  --set agentExecution.networkPolicy.cilium.enabled=true \
+  --set 'agentExecution.networkPolicy.dns.podSelectorLabels.k8s-app=null' \
+  --set 'agentExecution.networkPolicy.dns.podSelectorLabels.app=coredns' \
+  --set 'agentExecution.networkPolicy.dns.podSelectorLabels.any:tier=dns' \
+  --show-only templates/agent-ciliumnetworkpolicy.yaml | grep -v '^ *#')
+echo "$cnp" | grep -q 'k8s:app: coredns' || fail "custom DNS pod label not rendered with the k8s: source"
+echo "$cnp" | grep -q '^ *any:tier: dns' || fail "a caller-supplied label source was not kept as is"
+echo "$cnp" | grep -q 'k8s:any:tier' && fail "a caller-supplied label source was prefixed twice"
 
 echo "==> agent isolation: Cilium variant keeps the namespace-wide deny in a dedicated namespace"
 out=$(helm template t "$CHART" \
@@ -193,6 +231,7 @@ out=$(helm template t "$CHART" \
 echo "$out" | grep -q 'kind: CiliumNetworkPolicy' || fail "Cilium policy missing in dedicated namespace mode"
 echo "$out" | grep -q 'name: agent-execution-isolation' || fail "namespace default-deny dropped in Cilium mode"
 echo "$out" | grep -q 'namespace: agent-executions' || fail "Cilium policy not placed in the agent namespace"
+assert_prefixed_endpoints "$out"
 
 echo "==> agent isolation: quota does not depend on the network policy"
 out=$(helm template t "$CHART" --set agentExecution.namespace.create=true \

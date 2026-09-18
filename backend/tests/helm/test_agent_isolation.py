@@ -382,7 +382,7 @@ def test_cilium_variant_allows_dns_and_control_plane_by_endpoint() -> None:
         {
             "matchLabels": {
                 "k8s:io.kubernetes.pod.namespace": "kube-system",
-                "k8s-app": "kube-dns",
+                "k8s:k8s-app": "kube-dns",
             }
         }
     ]
@@ -395,13 +395,14 @@ def test_cilium_variant_allows_dns_and_control_plane_by_endpoint() -> None:
         }
     ]
     components = sorted(
-        endpoint["matchLabels"]["app.kubernetes.io/component"]
+        endpoint["matchLabels"]["k8s:app.kubernetes.io/component"]
         for endpoint in control_plane["toEndpoints"]
     )
     assert components == ["api", "gateway"]
     for endpoint in control_plane["toEndpoints"]:
         assert endpoint["matchLabels"]["k8s:io.kubernetes.pod.namespace"] == "default"
-        assert endpoint["matchLabels"]["app.kubernetes.io/name"] == "preloop"
+        assert endpoint["matchLabels"]["k8s:app.kubernetes.io/name"] == "preloop"
+        assert "k8s:app.kubernetes.io/instance" in endpoint["matchLabels"]
     assert control_plane["toPorts"] == [
         {
             "ports": [
@@ -455,7 +456,7 @@ def test_cilium_variant_knobs(tmp_path) -> None:
         {
             "matchLabels": {
                 "k8s:io.kubernetes.pod.namespace.labels.name": "openshift-dns",
-                "dns.operator.openshift.io/daemonset-dns": "default",
+                "k8s:dns.operator.openshift.io/daemonset-dns": "default",
             }
         }
     ]
@@ -469,6 +470,44 @@ def test_cilium_variant_never_names_the_database_or_message_bus() -> None:
     text = yaml.safe_dump(_cilium_policy()["spec"])
     for needle in ("5432", "4222", "component: console", "component: database", "nats"):
         assert needle not in text
+
+
+def _endpoint_selector_keys(policy: Dict) -> List[str]:
+    """Every label key used inside a toEndpoints or fromEndpoints selector."""
+    keys: List[str] = []
+    for direction in ("ingress", "egress", "ingressDeny", "egressDeny"):
+        for rule in policy["spec"].get(direction) or []:
+            for field in ("toEndpoints", "fromEndpoints"):
+                for selector in rule.get(field) or []:
+                    keys.extend(selector.get("matchLabels") or {})
+                    keys.extend(
+                        req["key"] for req in selector.get("matchExpressions") or []
+                    )
+    return keys
+
+
+def test_cilium_variant_prefixes_every_label_key_in_endpoint_selectors() -> None:
+    """Cilium reads a bare key inside toEndpoints as any:, which also matches
+    labels from other sources. k8s: names the pod label. The render must not
+    fall back to the bare form in either layout or with custom DNS labels."""
+    custom_dns = [
+        "agentExecution.networkPolicy.dns.podSelectorLabels.k8s-app=null",
+        "agentExecution.networkPolicy.dns.podSelectorLabels.app=coredns",
+    ]
+    for overrides in ([], [SEPARATE], custom_dns):
+        keys = _endpoint_selector_keys(_cilium_policy(overrides))
+        assert keys, "no endpoint selector rendered"
+        assert all(key.startswith("k8s:") for key in keys), keys
+
+
+def test_cilium_variant_keeps_a_caller_supplied_label_source() -> None:
+    policy = _cilium_policy(
+        ["agentExecution.networkPolicy.dns.podSelectorLabels.any:tier=dns"]
+    )
+    dns = policy["spec"]["egress"][0]["toEndpoints"][0]["matchLabels"]
+    assert dns["any:tier"] == "dns"
+    assert dns["k8s:k8s-app"] == "kube-dns"
+    assert "k8s:any:tier" not in dns
 
 
 # --- documentation that the templates depend on ----------------------------

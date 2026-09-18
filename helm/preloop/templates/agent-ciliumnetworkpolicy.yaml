@@ -22,6 +22,11 @@
 # console and other agent pods are never part of it. The one address that
 # is world and must still be unreachable, the cloud metadata service, is
 # named in egressDeny, which takes precedence over every allow.
+#
+# Label keys inside toEndpoints carry their source. Cilium reads a bare key
+# there as any:, which matches the label from any source; k8s: names the pod
+# label, is the form the Cilium documentation uses, and is what the render
+# checks assert. endpointSelector is exempt and matches the plain policy.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -63,8 +68,8 @@ spec:
             k8s:io.kubernetes.pod.namespace.labels.{{ $key }}: {{ $value }}
             {{- end }}
             {{- end }}
-            {{- with $dns.podSelectorLabels }}
-            {{- toYaml . | nindent 12 }}
+            {{- range $key, $value := $dns.podSelectorLabels }}
+            {{ include "preloop.ciliumLabelKey" $key }}: {{ $value | toYaml }}
             {{- end }}
       toPorts:
         - ports:
@@ -80,14 +85,14 @@ spec:
     # the service port and the container port are listed for parity with
     # the plain policy; Cilium sees the container port after DNAT.
     - toEndpoints:
+        {{- range $component := list "api" "gateway" }}
         - matchLabels:
-            k8s:io.kubernetes.pod.namespace: {{ .Release.Namespace }}
-            {{- include "preloop.selectorLabels" . | nindent 12 }}
-            app.kubernetes.io/component: api
-        - matchLabels:
-            k8s:io.kubernetes.pod.namespace: {{ .Release.Namespace }}
-            {{- include "preloop.selectorLabels" . | nindent 12 }}
-            app.kubernetes.io/component: gateway
+            k8s:io.kubernetes.pod.namespace: {{ $.Release.Namespace }}
+            {{- range $key, $value := include "preloop.selectorLabels" $ | fromYaml }}
+            k8s:{{ $key }}: {{ $value }}
+            {{- end }}
+            k8s:app.kubernetes.io/component: {{ $component }}
+        {{- end }}
       toPorts:
         - ports:
             {{- range $controlPlanePorts }}

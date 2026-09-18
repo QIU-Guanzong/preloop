@@ -51,6 +51,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Label key for a Cilium endpoint selector inside an ingress or egress rule.
+Cilium reads a bare key there as any:, which matches the label from any
+source; k8s: names the pod label and is the form its documentation uses.
+A key that already carries a source (contains a colon) is left alone.
+*/}}
+{{- define "preloop.ciliumLabelKey" -}}
+{{- if contains ":" . }}{{ . }}{{ else }}k8s:{{ . }}{{ end -}}
+{{- end }}
+
+{{/*
 Create the name of the service account to use
 */}}
 {{- define "preloop.serviceAccountName" -}}

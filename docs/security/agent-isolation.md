@@ -145,7 +145,11 @@ list expressed in Cilium's terms:
 - egress to the DNS pods, selected by namespace and pod label
   (`k8s:io.kubernetes.pod.namespace` plus `dns.podSelectorLabels`);
 - egress to the API and gateway pods, selected by the chart's labels in
-  the release namespace, on `controlPlanePorts`;
+  the release namespace, on `controlPlanePorts`. Every label key inside
+  these `toEndpoints` selectors carries the `k8s:` source prefix. Cilium
+  reads a bare key there as `any:`, which matches the label from any
+  source rather than the pod label alone; the prefixed form is the one
+  Cilium documents, and the render checks fail on a bare key;
 - egress to `toEntities: [world, host]` (`cilium.internetEntities`).
   `world` is every address outside the cluster, so the CIDR carve-out is
   unnecessary: the database, NATS, the console, and other pods are cluster
@@ -156,7 +160,8 @@ list expressed in Cilium's terms:
   metadata address, which Cilium classes as `world` and which a deny rule
   removes regardless of the allow above;
 - `cilium.extraEgress`, appended verbatim. These are CiliumNetworkPolicy
-  egress rules; the plain `extraEgress` list is not translated.
+  egress rules; the plain `extraEgress` list is not translated, and label
+  keys inside their `toEndpoints` should carry `k8s:` like the chart's own.
 
 The namespace-wide default deny for a dedicated agent namespace stays a
 plain NetworkPolicy in both modes; it selects pods, not addresses, so

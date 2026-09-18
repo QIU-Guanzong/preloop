@@ -524,7 +524,9 @@ address, which is `world` to Cilium, is denied by name. Add `remote-node`
 to `cilium.internetEntities` when the public address can land on a node
 other than the one the pod runs on. `cilium.extraEgress` takes
 CiliumNetworkPolicy egress rules; the plain `extraEgress` list is not
-translated.
+translated. Label keys inside `toEndpoints` should carry the `k8s:` source
+prefix, as the chart's own selectors do; Cilium reads a bare key there as
+`any:`.
 
 Leave `controlPlaneIngress` off on Cilium: it relies on the same `ipBlock`
 to re-admit node-sourced traffic to the API and gateway.

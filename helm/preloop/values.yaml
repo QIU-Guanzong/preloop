@@ -859,6 +859,8 @@ agentExecution:
     # default key and add yours, for example on OpenShift:
     #   namespaceSelectorLabels: {kubernetes.io/metadata.name: null, name: openshift-dns}
     #   podSelectorLabels: {k8s-app: null, dns.operator.openshift.io/daemonset-dns: default}
+    # The Cilium variant renders these keys with the k8s: label source
+    # prefix. A key that already carries a source prefix is used as is.
     dns:
       namespaceSelectorLabels:
         kubernetes.io/metadata.name: kube-system
@@ -926,6 +928,9 @@ agentExecution:
         - "169.254.169.254/32"
       # Extra CiliumNetworkPolicy egress rules, appended verbatim. The
       # plain extraEgress list is not translated, the two formats differ.
+      # Prefix label keys inside toEndpoints with k8s:, as the chart does;
+      # Cilium reads a bare key there as any:, which also matches labels
+      # from other sources.
       extraEgress: []
     # Second policy: state the agent limit from the control plane side too.
     # Off by default because it needs the cluster pod CIDRs to avoid
