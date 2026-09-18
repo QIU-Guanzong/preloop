@@ -51,6 +51,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Label key for a Cilium endpoint selector inside an ingress or egress rule.
+Cilium reads a bare key there as any:, which matches the label from any
+source; k8s: names the pod label and is the form its documentation uses.
+A key that already carries a source (contains a colon) is left alone.
+*/}}
+{{- define "preloop.ciliumLabelKey" -}}
+{{- if contains ":" . }}{{ . }}{{ else }}k8s:{{ . }}{{ end -}}
+{{- end }}
+
+{{/*
 Create the name of the service account to use
 */}}
 {{- define "preloop.serviceAccountName" -}}
@@ -94,19 +104,57 @@ jwt-secret (and other keys) from that Secret instead of the chart-generated one.
 {{- end }}
 
 {{/*
-DATABASE_URL env entry. Prefer urlFromSecret so the URL is not stored in
-values committed to git.
+Name of the Secret holding credentials the chart derives from values
+(DATABASE_URL, SMTP password). Separate from preloop.secretName so that an
+operator-supplied existingSecret does not have to carry these keys.
+*/}}
+{{- define "preloop.credentialsSecretName" -}}
+{{- printf "%s-credentials" (include "preloop.fullname" .) -}}
+{{- end }}
+
+{{/*
+DATABASE_URL env entry. Always a secretKeyRef: either the operator's own
+Secret (database.urlFromSecret, which also keeps the URL out of values) or
+the chart-managed credentials Secret. Never a literal in the pod spec.
 */}}
 {{- define "preloop.databaseUrlEnv" -}}
 - name: DATABASE_URL
-{{- if and .Values.database.urlFromSecret .Values.database.urlFromSecret.name }}
   valueFrom:
     secretKeyRef:
+{{- if and .Values.database.urlFromSecret .Values.database.urlFromSecret.name }}
       name: {{ .Values.database.urlFromSecret.name | quote }}
       key: {{ default "database-url" .Values.database.urlFromSecret.key | quote }}
 {{- else }}
-  value: {{ include "preloop.databaseUrl" . | quote }}
+      name: {{ include "preloop.credentialsSecretName" . | quote }}
+      key: "database-url"
 {{- end }}
+{{- end }}
+
+{{/*
+SMTP_PASSWORD env entry, same rule as DATABASE_URL. Call with the root
+context ($) so it also works inside a range.
+*/}}
+{{- define "preloop.smtpPasswordEnv" -}}
+{{- $smtpSecret := .Values.config.smtp.passwordSecret | default dict -}}
+- name: SMTP_PASSWORD
+  valueFrom:
+    secretKeyRef:
+{{- if $smtpSecret.name }}
+      name: {{ $smtpSecret.name | quote }}
+      key: {{ default "smtp-password" $smtpSecret.key | quote }}
+{{- else }}
+      name: {{ include "preloop.credentialsSecretName" . | quote }}
+      key: "smtp-password"
+{{- end }}
+{{- end }}
+
+{{/*
+Annotation that rolls pods when a chart-managed credential changes. Env
+literals used to do this implicitly; a Secret reference does not, so the
+checksum has to be carried on the pod template. Call with the root context.
+*/}}
+{{- define "preloop.credentialsChecksum" -}}
+checksum/credentials: {{ include (print $.Template.BasePath "/secret-credentials.yaml") . | sha256sum }}
 {{- end }}
 
 {{/*
