@@ -12991,15 +12991,38 @@ components:
           - type: 'null'
           title: Updated At
           description: When this AI model row was last updated
+        credentials_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Credentials Status
+          description: Status of the model's credential secret
+        credentials_last_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Credentials Last Error
+          description: Summary of the last credential refresh error
+        credentials_last_error_code:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Credentials Last Error Code
+          description: Error code from the last credential refresh attempt
+        credentials_last_failed_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Credentials Last Failed At
+          description: Timestamp of the last failed credential refresh
         credentials_last_verified_at:
           anyOf:
           - type: string
             format: date-time
           - type: 'null'
           title: Credentials Last Verified At
-          description: When the attached credential secret last verified successfully.
-            For rotating OAuth grants this is the live-lineage signal; it moves on
-            gateway refresh even when the AI model row does not.
+          description: Timestamp when credentials were last verified or refreshed
         has_api_key:
           type: boolean
           title: Has Api Key
@@ -18968,6 +18991,11 @@ components:
             type: object
           - type: 'null'
           title: Schedule State
+        ai_model_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Ai Model Name
       type: object
       required:
       - id

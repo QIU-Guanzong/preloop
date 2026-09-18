@@ -24,8 +24,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from preloop.services.upstream_errors import (
-    ERROR_CLASS_UPSTREAM_QUOTA_EXHAUSTED,
     classify_recorded_error,
+    is_terminal_error_class,
 )
 from preloop.utils.execve_limits import PROMPT_NOT_DELIVERED_MARKER
 from preloop.utils.secret_scrubbing import scrub_secrets
@@ -471,9 +471,8 @@ def _reanalyze_generated_message(text: str) -> Optional[AgentFailureAnalysis]:
         classify_recorded_error(status, stripped) if status is not None else None
     )
     if status is not None:
-        transient = (
-            status in _TRANSIENT_STATUSES
-            and error_class != ERROR_CLASS_UPSTREAM_QUOTA_EXHAUSTED
+        transient = status in _TRANSIENT_STATUSES and not is_terminal_error_class(
+            error_class
         )
     else:
         # "Upstream model provider was unreachable" — a transport failure.
@@ -607,9 +606,8 @@ def analyze_agent_failure(logs_text: str) -> AgentFailureAnalysis:
             else None
         )
         if status is not None:
-            transient = (
-                status in _TRANSIENT_STATUSES
-                and error_class != ERROR_CLASS_UPSTREAM_QUOTA_EXHAUSTED
+            transient = status in _TRANSIENT_STATUSES and not is_terminal_error_class(
+                error_class
             )
         else:
             # Attempts were reported but no status: only treat as transient

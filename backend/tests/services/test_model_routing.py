@@ -382,7 +382,7 @@ class TestPrepareAndTrigger:
         assert "assessment" not in row.trigger_event_details
 
     @pytest.mark.asyncio
-    async def test_retry_pins_recorded_selection(
+    async def test_retry_reresolves_current_selection(
         self, db_session: Session, test_user: User
     ):
         default = _usable_model(db_session, test_user.account_id, name="Default")
@@ -422,9 +422,10 @@ class TestPrepareAndTrigger:
             )
         row = db_session.query(FlowExecution).filter_by(id=retry["id"]).one()
         record = row.trigger_event_details[ROUTING_RECORD_KEY]
-        assert record["ai_model_id"] == str(fast.id)
-        assert record["rule_id"] == "docs"
-        assert record["source"] == "pinned"
+        assert record["ai_model_id"] == str(default.id)
+        assert record.get("rule_id") != "docs"
+        assert record["source"] == "retry"
+        assert "Re-resolved model and harness from current flow" in record["reason"]
 
     @pytest.mark.asyncio
     async def test_resume_pins_prior_execution_record(
@@ -1112,7 +1113,9 @@ class TestRoutingReviewRegressions:
         original = prepare_execution_routing(db_session, flow, {})
         prior = FlowExecution(flow_id=flow.id, trigger_event_details=original)
         flow.ai_model_id = _usable_model(db_session, test_user.account_id).id
-        pinned = prepare_execution_routing(db_session, flow, {}, source_execution=prior)
+        pinned = prepare_execution_routing(
+            db_session, flow, {}, source_execution=prior, pin_kind="continuation"
+        )
         assert pinned[ROUTING_RECORD_KEY]["ai_model_id"] == str(model.id)
 
     def test_malformed_source_id_does_not_query_database(self) -> None:

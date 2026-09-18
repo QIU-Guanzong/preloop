@@ -981,6 +981,52 @@ describe('AddAIModelModal edit payload', () => {
     expect((el as any)._formError).to.equal(null);
   });
 
+  it('keeps a stored gateway URL when the edit is saved', async () => {
+    // `preloop agents onboard` stamps the URL the runtime can reach. Saving
+    // an unrelated edit in the console used to rebuild meta_data.gateway from
+    // three fields and drop the URL with it, silently re-routing the model.
+    const el: AddAIModelModal = await fixture(
+      html`<add-ai-model-modal
+        .model=${
+          {
+            ...storedModel,
+            meta_data: {
+              gateway: {
+                enabled: true,
+                url: 'https://gateway.example/openai/v1',
+                model_alias: 'moonshot/kimi-k3',
+              },
+            },
+          } as any
+        }
+        ?open=${true}
+      ></add-ai-model-modal>`
+    );
+    await el.updateComplete;
+    (el as any)._syncFormFromDom = () => {};
+    (el as any)._currentModel.name = 'Kimi K3 renamed';
+
+    await (el as any)._handleFormSubmit(new Event('submit'));
+
+    const payload = updatePayloads()[0];
+    expect(payload.meta_data.gateway.url).to.equal(
+      'https://gateway.example/openai/v1'
+    );
+    expect(payload.meta_data.gateway.provider_adapter).to.equal('preloop');
+    expect(payload.meta_data.gateway.model_alias).to.equal('moonshot/kimi-k3');
+  });
+
+  it('invents no gateway URL for a model that has none', async () => {
+    const el = await editFixture();
+    (el as any)._currentModel.name = 'Kimi K3 renamed';
+
+    await (el as any)._handleFormSubmit(new Event('submit'));
+
+    // Absent means "let the server resolve the right gateway for this
+    // deployment", which is not the same as a guessed host.
+    expect(updatePayloads()[0].meta_data.gateway).to.not.have.property('url');
+  });
+
   it('sends only api_key when the user typed a new key', async () => {
     const el = await editFixture();
     (el as any)._currentModel.api_key = 'sk-new-moonshot-key';

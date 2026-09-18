@@ -107,6 +107,7 @@ export interface Flow {
   agent_type?: string;
   agent_config?: Record<string, unknown>;
   ai_model_id?: string;
+  ai_model_name?: string | null;
   trigger_event_source?: string;
   trigger_event_types?: string[];
   trigger_organization_id?: string;
@@ -162,6 +163,11 @@ export interface AIModel {
   supports_server_side_generation?: boolean;
   credentials_secret_id?: string | null;
   credentials_backend_type?: string | null;
+  credentials_status?: string | null;
+  credentials_last_error?: string | null;
+  credentials_last_error_code?: string | null;
+  credentials_last_failed_at?: string | null;
+  credentials_last_verified_at?: string | null;
   api_endpoint?: string;
   model_identifier: string;
   alias?: string;

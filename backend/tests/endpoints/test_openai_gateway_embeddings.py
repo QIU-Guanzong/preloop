@@ -563,7 +563,7 @@ def test_embeddings_pass_derived_parent_to_gateway_service(
         with patch(
             "preloop.api.endpoints.openai_gateway.OpenAIGatewayService"
         ) as service_cls:
-            service_cls.return_value.alias_collision_warning = None
+            service_cls.return_value.response_warning = None
             service_cls.return_value.create_embedding.return_value = {
                 "object": "list",
                 "data": [],

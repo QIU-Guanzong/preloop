@@ -140,6 +140,61 @@ class AIModel(Base):
         return self.has_api_key and not self.is_principal_bound_oauth
 
     @property
+    def credentials_status(self) -> Optional[str]:
+        """Status of the configured credential secret, if any."""
+        if self.credentials_secret:
+            return self.credentials_secret.status
+        return None
+
+    @property
+    def credentials_last_error(self) -> Optional[str]:
+        """Summary of the last credential refresh error, if any."""
+        if (
+            self.credentials_status == "error"
+            and self.credentials_secret
+            and isinstance(self.credentials_secret.meta_data, dict)
+        ):
+            return self.credentials_secret.meta_data.get("last_refresh_error")
+        return None
+
+    @property
+    def credentials_last_error_code(self) -> Optional[str]:
+        """Error code from the last credential refresh attempt, if any."""
+        if (
+            self.credentials_status == "error"
+            and self.credentials_secret
+            and isinstance(self.credentials_secret.meta_data, dict)
+        ):
+            code = self.credentials_secret.meta_data.get("last_refresh_code")
+            return str(code) if code is not None else None
+        return None
+
+    @property
+    def credentials_last_failed_at(self) -> Optional[datetime]:
+        """Timestamp of the last failed credential refresh attempt, if any."""
+        if (
+            self.credentials_status == "error"
+            and self.credentials_secret
+            and isinstance(self.credentials_secret.meta_data, dict)
+        ):
+            val = self.credentials_secret.meta_data.get("last_refresh_failed_at")
+            if isinstance(val, str) and val.strip():
+                try:
+                    return datetime.fromisoformat(val)
+                except (ValueError, TypeError):
+                    return None
+            elif isinstance(val, datetime):
+                return val
+        return None
+
+    @property
+    def credentials_last_verified_at(self) -> Optional[datetime]:
+        """Timestamp when the credentials were last verified or refreshed."""
+        if self.credentials_secret:
+            return self.credentials_secret.last_verified_at
+        return None
+
+    @property
     def credentials_backend_type(self) -> Optional[str]:
         """Return the backend type for the configured credentials."""
         if self.credentials_secret:
@@ -156,18 +211,6 @@ class AIModel(Base):
         if self.credentials_secret:
             return self.credentials_secret.external_ref
         return None
-
-    @property
-    def credentials_last_verified_at(self) -> Optional[datetime]:
-        """Return when the attached credential secret last verified successfully.
-
-        Gateway OAuth refresh writes SecretReference.last_verified_at; the AI
-        model row itself is not updated on refresh, so sibling lineage
-        selection must read this instead of ai_model.updated_at.
-        """
-        if self.credentials_secret is None:
-            return None
-        return self.credentials_secret.last_verified_at
 
     def __repr__(self):
         return f"<AIModel(id={self.id}, name='{self.name}')>"

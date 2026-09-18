@@ -132,6 +132,48 @@ def test_get_flows_by_account(
     assert flow_name2 in flow_names
 
 
+def test_list_queries_eager_load_ai_model(db_session: Session, create_account) -> None:
+    """Flow list paths join ai_model so ai_model_name is not N+1."""
+    from sqlalchemy import inspect as sa_inspect
+
+    from preloop.models.crud import crud_ai_model
+
+    account: Account = create_account()
+    model = crud_ai_model.create_with_account(
+        db=db_session,
+        obj_in={
+            "name": "List Model",
+            "provider_name": "openai",
+            "model_identifier": "gpt-4o",
+            "api_key": "test_key",
+        },
+        account_id=account.id,
+    )
+    flow_in = FlowCreate(
+        name=f"Eager Flow {uuid4()}",
+        trigger_event_source="test_source",
+        trigger_event_types=["test_event"],
+        prompt_template="prompt",
+        agent_type="openhands",
+        agent_config={"agent": "Agent"},
+        account_id=account.id,
+        ai_model_id=model.id,
+    )
+    crud_flow.create(db=db_session, flow_in=flow_in, account_id=account.id)
+    db_session.expire_all()
+
+    listed = crud_flow.get_multi(db=db_session, account_id=account.id)
+    assert listed
+    assert "ai_model" not in sa_inspect(listed[0]).unloaded
+    assert listed[0].ai_model_name == "List Model"
+
+    db_session.expire_all()
+    by_account = crud_flow.get_by_account(db=db_session, account_id=account.id)
+    assert by_account
+    assert "ai_model" not in sa_inspect(by_account[0]).unloaded
+    assert by_account[0].ai_model_name == "List Model"
+
+
 def test_update_flow(db_session: Session, create_account) -> None:
     """Test updating an existing flow."""
     account: Account = create_account()

@@ -1229,6 +1229,18 @@ class FlowExecutionOrchestrator:
                 else effective_ai_model_id
             )
             self.ai_model = crud_ai_model.get(self.db, id=ai_model_id_str)
+            if (
+                not self.ai_model
+                and self.flow.ai_model_id
+                and str(self.flow.ai_model_id) != ai_model_id_str
+            ):
+                self.ai_model = crud_ai_model.get(
+                    self.db, id=str(self.flow.ai_model_id)
+                )
+                if self.ai_model:
+                    logger.warning(
+                        f"Recorded routing model {effective_ai_model_id} is not available; falling back to flow model {self.flow.ai_model_id}."
+                    )
             if not self.ai_model:
                 routing_record = (self.trigger_event_data or {}).get(
                     ROUTING_RECORD_KEY

@@ -64,10 +64,30 @@ def test_gateway_url_for_api_resolves_sibling_gateway_endpoints():
     )
 
 
-def test_default_model_gateway_url_uses_k8s_service(monkeypatch):
-    """Kubernetes agents should not inherit Docker-only host defaults."""
+def test_default_model_gateway_url_uses_k8s_gateway_service(monkeypatch):
+    """A split deployment must address the gateway Service, not the API one.
+
+    The API pods run ``PRELOOP_SERVICE_ROLE=api`` and never mount
+    ``/openai/v1``, so sending agent traffic to the API Service returns
+    ``404 Not Found`` for every model call.
+    """
     monkeypatch.delenv("PRELOOP_MODEL_GATEWAY_URL", raising=False)
     monkeypatch.delenv("PRELOOP_MODEL_GATEWAY_URL_K8S", raising=False)
+    monkeypatch.delenv("PRELOOP_SERVICE_ROLE", raising=False)
+    monkeypatch.setenv(
+        "PRELOOP_API_SERVICE_HTTP_ENDPOINT",
+        "http://release-preloop-api:80",
+    )
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+    assert default_model_gateway_url() == "http://release-preloop-gateway:80/openai/v1"
+
+
+def test_default_model_gateway_url_keeps_api_service_for_combined_role(monkeypatch):
+    """One process serving both surfaces is reachable at the API Service."""
+    monkeypatch.delenv("PRELOOP_MODEL_GATEWAY_URL", raising=False)
+    monkeypatch.delenv("PRELOOP_MODEL_GATEWAY_URL_K8S", raising=False)
+    monkeypatch.setenv("PRELOOP_SERVICE_ROLE", "all")
     monkeypatch.setenv(
         "PRELOOP_API_SERVICE_HTTP_ENDPOINT",
         "http://release-preloop-api:80",
@@ -75,6 +95,37 @@ def test_default_model_gateway_url_uses_k8s_service(monkeypatch):
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
 
     assert default_model_gateway_url() == "http://release-preloop-api:80/openai/v1"
+
+
+def test_default_model_gateway_url_leaves_unconventional_host_alone(monkeypatch):
+    """An endpoint outside the chart's naming stays as configured."""
+    monkeypatch.delenv("PRELOOP_MODEL_GATEWAY_URL", raising=False)
+    monkeypatch.delenv("PRELOOP_MODEL_GATEWAY_URL_K8S", raising=False)
+    monkeypatch.delenv("PRELOOP_SERVICE_ROLE", raising=False)
+    monkeypatch.setenv(
+        "PRELOOP_API_SERVICE_HTTP_ENDPOINT",
+        "http://preloop-control-plane:8000",
+    )
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+    assert default_model_gateway_url() == "http://preloop-control-plane:8000/openai/v1"
+
+
+def test_default_model_gateway_url_prefers_the_k8s_override(monkeypatch):
+    """The chart's explicit in-cluster URL wins over any derivation."""
+    monkeypatch.delenv("PRELOOP_MODEL_GATEWAY_URL", raising=False)
+    monkeypatch.delenv("PRELOOP_SERVICE_ROLE", raising=False)
+    monkeypatch.setenv(
+        "PRELOOP_MODEL_GATEWAY_URL_K8S",
+        "http://release-preloop-gateway:80/openai/v1",
+    )
+    monkeypatch.setenv(
+        "PRELOOP_API_SERVICE_HTTP_ENDPOINT",
+        "http://release-preloop-api:80",
+    )
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+    assert default_model_gateway_url() == "http://release-preloop-gateway:80/openai/v1"
 
 
 def test_default_model_gateway_url_prefers_configured_values(monkeypatch):
@@ -102,6 +153,7 @@ def test_resolve_gateway_enabled_model_uses_k8s_default_when_url_unset(
     """Gateway metadata without a URL should be safe in Kubernetes pods."""
     monkeypatch.delenv("PRELOOP_MODEL_GATEWAY_URL", raising=False)
     monkeypatch.delenv("PRELOOP_MODEL_GATEWAY_URL_K8S", raising=False)
+    monkeypatch.delenv("PRELOOP_SERVICE_ROLE", raising=False)
     monkeypatch.setenv(
         "PRELOOP_API_SERVICE_HTTP_ENDPOINT",
         "http://release-preloop-api:80",
@@ -135,8 +187,8 @@ def test_resolve_gateway_enabled_model_uses_k8s_default_when_url_unset(
     resolved = resolve_ai_model_runtime(ai_model)
 
     assert resolved.model_gateway_enabled is True
-    assert resolved.model_gateway_url == "http://release-preloop-api:80/openai/v1"
-    assert resolved.model_endpoint == "http://release-preloop-api:80/openai/v1"
+    assert resolved.model_gateway_url == "http://release-preloop-gateway:80/openai/v1"
+    assert resolved.model_endpoint == "http://release-preloop-gateway:80/openai/v1"
 
 
 def test_resolve_ai_model_runtime_for_direct_provider_model(db_session: Session):

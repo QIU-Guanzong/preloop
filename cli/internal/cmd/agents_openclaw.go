@@ -355,8 +355,12 @@ type aiModelResponse struct {
 	MetaData                  map[string]interface{} `json:"meta_data"`
 	CredentialType            string                 `json:"credential_type"`
 	CredentialsSecretID       string                 `json:"credentials_secret_id"`
-	CredentialsLastVerifiedAt string                 `json:"credentials_last_verified_at"`
-	UpdatedAt                 string                 `json:"updated_at"`
+	CredentialsStatus         string                 `json:"credentials_status"`
+	CredentialsLastError      string                 `json:"credentials_last_error"`
+	CredentialsLastErrorCode  string                 `json:"credentials_last_error_code"`
+	CredentialsLastFailedAt   *api.Time              `json:"credentials_last_failed_at"`
+	CredentialsLastVerifiedAt *api.Time              `json:"credentials_last_verified_at"`
+	UpdatedAt                 *api.Time              `json:"updated_at"`
 	HasAPIKey                 bool                   `json:"has_api_key"`
 	IsDefault                 bool                   `json:"is_default"`
 }
@@ -5871,7 +5875,7 @@ func oauthSiblingLiveness(model *aiModelResponse) time.Time {
 	if model == nil {
 		return time.Time{}
 	}
-	if liveAt := parseOAuthSiblingTime(model.CredentialsLastVerifiedAt); !liveAt.IsZero() {
+	if liveAt := apiTimeValue(model.CredentialsLastVerifiedAt); !liveAt.IsZero() {
 		return liveAt
 	}
 	if model.MetaData != nil {
@@ -5881,7 +5885,14 @@ func oauthSiblingLiveness(model *aiModelResponse) time.Time {
 			}
 		}
 	}
-	return parseOAuthSiblingTime(model.UpdatedAt)
+	return apiTimeValue(model.UpdatedAt)
+}
+
+func apiTimeValue(value *api.Time) time.Time {
+	if value == nil || value.IsZero() {
+		return time.Time{}
+	}
+	return value.UTC()
 }
 
 func parseOAuthSiblingTime(value interface{}) time.Time {

@@ -11,6 +11,15 @@ import (
 	"github.com/preloop/preloop/cli/internal/api"
 )
 
+func apiTimePtr(value string) *api.Time {
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		panic(err)
+	}
+	wrapped := api.Time{Time: parsed.UTC()}
+	return &wrapped
+}
+
 func codexManagedOAuthSiblingForTest(id, identifier, alias, secretID string) aiModelResponse {
 	return aiModelResponse{
 		ID:                  id,
@@ -259,8 +268,8 @@ func TestFindManagedOAuthCredentialSiblingPrefersFresherOverFirstMatch(t *testin
 		"openai/o3-mini",
 		"secret-stale",
 	)
-	staleFirst.UpdatedAt = "2026-09-01T00:00:00Z"
-	staleFirst.CredentialsLastVerifiedAt = "2026-09-01T00:00:00Z"
+	staleFirst.UpdatedAt = apiTimePtr("2026-09-01T00:00:00Z")
+	staleFirst.CredentialsLastVerifiedAt = apiTimePtr("2026-09-01T00:00:00Z")
 
 	freshLater := codexManagedOAuthSiblingForTest(
 		"codex-fresh-later",
@@ -268,8 +277,8 @@ func TestFindManagedOAuthCredentialSiblingPrefersFresherOverFirstMatch(t *testin
 		"openai/gpt-4o",
 		"secret-live",
 	)
-	freshLater.UpdatedAt = "2026-09-18T00:00:00Z"
-	freshLater.CredentialsLastVerifiedAt = "2026-09-18T12:00:00Z"
+	freshLater.UpdatedAt = apiTimePtr("2026-09-18T00:00:00Z")
+	freshLater.CredentialsLastVerifiedAt = apiTimePtr("2026-09-18T12:00:00Z")
 
 	got := findManagedOAuthCredentialSibling(
 		[]aiModelResponse{staleFirst, freshLater},
@@ -292,8 +301,8 @@ func TestSyncManagedGatewayAIModelCreateReusesFresherCodexSiblingSecret(t *testi
 		"openai/o3-mini",
 		"secret-stale",
 	)
-	staleFirst.CredentialsLastVerifiedAt = "2026-09-01T00:00:00Z"
-	staleFirst.UpdatedAt = "2026-09-01T00:00:00Z"
+	staleFirst.CredentialsLastVerifiedAt = apiTimePtr("2026-09-01T00:00:00Z")
+	staleFirst.UpdatedAt = apiTimePtr("2026-09-01T00:00:00Z")
 
 	freshLater := codexManagedOAuthSiblingForTest(
 		"codex-fresh-later",
@@ -301,8 +310,8 @@ func TestSyncManagedGatewayAIModelCreateReusesFresherCodexSiblingSecret(t *testi
 		"openai/gpt-5",
 		"secret-live",
 	)
-	freshLater.CredentialsLastVerifiedAt = "2026-09-18T12:00:00Z"
-	freshLater.UpdatedAt = "2026-09-18T12:00:00Z"
+	freshLater.CredentialsLastVerifiedAt = apiTimePtr("2026-09-18T12:00:00Z")
+	freshLater.UpdatedAt = apiTimePtr("2026-09-18T12:00:00Z")
 
 	writes := []recordedAIModelWrite{}
 	server := newCodexFamilyLineageServer(t, []aiModelResponse{staleFirst, freshLater}, &writes)

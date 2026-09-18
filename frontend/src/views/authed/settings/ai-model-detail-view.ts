@@ -830,10 +830,18 @@ export class AIModelDetailView extends LitElement {
         // today: a key of our own invention would not match the dismissal the
         // inbox stores for the same failures.
         failureAlias: this.summary?.last_failure_alias,
-        providerName: this.summary?.provider_name,
+        modelAlias: this.model?.alias,
+        modelId: this.model?.id,
+        providerName: this.summary?.provider_name || this.model?.provider_name,
         failedRequests: this.summary?.failed_requests || 0,
         lastFailureAt: this.summary?.last_failure_at,
         failedRequestsSince: this.summary?.failed_requests_since,
+        credentialsStatus: this.model?.credentials_status,
+        credentialsLastError: this.model?.credentials_last_error,
+        credentialsLastErrorCode: this.model?.credentials_last_error_code,
+        credentialsLastFailedAt: this.model?.credentials_last_failed_at,
+        credentialsLastVerifiedAt: this.model?.credentials_last_verified_at,
+        credentialType: this.model?.credential_type,
         aliasFailures: (this.summary?.alias_failures || []).map((group) => ({
           failureAlias: group.alias,
           lastFailureAt: group.last_failure_at,
@@ -1456,7 +1464,19 @@ export class AIModelDetailView extends LitElement {
       };
       const provider = String(this.model.provider_name || '').toLowerCase();
       const mid = this.model.model_identifier;
+      // Keep whatever the gateway block already carries. `url` in particular
+      // is written by `preloop agents onboard` and is the only thing that
+      // tells a private or self-hosted runtime where the gateway lives;
+      // replacing the block wholesale used to drop it and route the model at
+      // whatever default the server guessed.
+      const previousGateway =
+        meta.gateway &&
+        typeof meta.gateway === 'object' &&
+        !Array.isArray(meta.gateway)
+          ? (meta.gateway as Record<string, unknown>)
+          : {};
       meta.gateway = {
+        ...previousGateway,
         enabled: true,
         provider_adapter: 'preloop',
         model_alias: `${provider}/${mid}`,
@@ -1794,6 +1814,20 @@ export class AIModelDetailView extends LitElement {
         }
         ${this.renderDismiss(state)}
       </div>
+      ${
+        state.reasonText
+          ? html`<div class="meta-line" data-testid="credentials-error-message">
+              ${state.reasonText}
+            </div>`
+          : null
+      }
+      ${
+        state.remediationText
+          ? html`<div class="meta-line" data-testid="credentials-remediation">
+              ${state.remediationText}
+            </div>`
+          : null
+      }
       ${
         this.dismissError
           ? html`<div class="meta-line" data-testid="dismiss-error">

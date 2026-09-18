@@ -235,8 +235,8 @@ def test_create_ai_model_with_structured_credentials(
     assert response_model.credential_type == "oauth_openai_codex"
     assert response_model.has_api_key is True
     assert response_model.updated_at is not None
-    assert response_model.credentials_last_verified_at is None
-
+    # Secret create stamps last_verified_at; overwrite it so the read
+    # schema is shown to follow the secret, not the model row.
     verified_at = datetime(2026, 9, 18, 12, 0, 0)
     ai_model.credentials_secret.last_verified_at = verified_at
     db_session.add(ai_model.credentials_secret)

@@ -2060,14 +2060,18 @@ async def retry_flow_execution(
         )
 
     # Trigger a new execution with the same trigger event data
+    from preloop.models.models.flow_execution import ROUTING_RECORD_KEY
     from preloop.services.flow_trigger_service import FlowTriggerService
+
+    trigger_data = dict(original.trigger_event_details or {})
+    trigger_data.pop(ROUTING_RECORD_KEY, None)
 
     trigger_service = FlowTriggerService(db)
     try:
         result = await trigger_service.trigger_flow(
             flow_id=original.flow_id,
             test_mode=False,
-            trigger_event_data=original.trigger_event_details,
+            trigger_event_data=trigger_data,
             retry_of_execution_id=original.id,
             triggered_by=_display_name(current_user),
         )

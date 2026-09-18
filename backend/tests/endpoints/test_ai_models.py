@@ -722,3 +722,148 @@ async def test_fetch_ai_model_pricing_maps_provider_failures(
             )
         )
     assert unavailable.value.status_code == 502
+
+
+def test_ai_models_credential_health_and_secret_redaction(mock_account, mocker):
+    """GET /api/v1/ai-models and /ai-models/{id} return the five new credential health fields.
+
+    Also asserts that no secret material (access, refresh, encrypted_value,
+    external_ref, api_key) appears in any response.
+    """
+    from datetime import datetime, timezone
+    from fastapi.testclient import TestClient
+    from preloop.api.app import create_app
+    from preloop.models.db.session import get_db_session
+    from preloop.api.auth import get_current_active_user
+    from preloop.models.models.ai_model import AIModel
+    from preloop.models.models.secret_reference import SecretReference
+
+    now = datetime.now(timezone.utc)
+    failed_iso = now.isoformat()
+
+    secret_error = SecretReference(
+        id=uuid.uuid4(),
+        account_id=mock_account.account_id,
+        name="Codex Secret Error",
+        backend_type="local_encrypted",
+        secret_kind="ai_model_credentials",
+        status="error",
+        encrypted_value="secret-token-payload",
+        external_ref="secret/vault/path",
+        last_verified_at=now,
+        meta_data={
+            "credential_type": "oauth_openai_codex",
+            "last_refresh_error": "openai refresh failed (status=401, code=invalid_grant)",
+            "last_refresh_code": "invalid_grant",
+            "last_refresh_status_code": 401,
+            "last_refresh_failed_at": failed_iso,
+        },
+    )
+
+    model_error = AIModel(
+        id=uuid.uuid4(),
+        account_id=mock_account.account_id,
+        name="Codex Model Error",
+        provider_name="openai",
+        model_identifier="gpt-5.5",
+        is_default=False,
+        created_at=now,
+        updated_at=now,
+    )
+    model_error.credentials_secret = secret_error
+
+    secret_active = SecretReference(
+        id=uuid.uuid4(),
+        account_id=mock_account.account_id,
+        name="Claude Secret Active",
+        backend_type="local_encrypted",
+        secret_kind="ai_model_credentials",
+        status="active",
+        encrypted_value="active-token-payload",
+        external_ref="secret/vault/active",
+        last_verified_at=now,
+        meta_data={
+            "credential_type": "oauth_anthropic_claude_code",
+        },
+    )
+
+    model_active = AIModel(
+        id=uuid.uuid4(),
+        account_id=mock_account.account_id,
+        name="Claude Model Active",
+        provider_name="anthropic",
+        model_identifier="claude-sonnet-4",
+        is_default=False,
+        created_at=now,
+        updated_at=now,
+    )
+    model_active.credentials_secret = secret_active
+
+    mock_crud = mocker.patch("preloop.api.endpoints.ai_models.crud_ai_model")
+    mock_crud.get_by_account.return_value = [model_error, model_active]
+    mock_crud.get.side_effect = lambda db, id: (
+        model_error
+        if id == model_error.id
+        else (model_active if id == model_active.id else None)
+    )
+
+    app = create_app()
+    app.dependency_overrides[get_db_session] = lambda: mocker.MagicMock()
+    app.dependency_overrides[get_current_active_user] = lambda: mock_account
+
+    client = TestClient(app)
+
+    # 1. GET /api/v1/ai-models
+    res_list = client.get("/api/v1/ai-models")
+    assert res_list.status_code == 200
+    list_json = res_list.json()
+    assert len(list_json) == 2
+
+    error_row = next(m for m in list_json if m["id"] == str(model_error.id))
+    active_row = next(m for m in list_json if m["id"] == str(model_active.id))
+
+    assert error_row["credentials_status"] == "error"
+    assert (
+        error_row["credentials_last_error"]
+        == "openai refresh failed (status=401, code=invalid_grant)"
+    )
+    assert error_row["credentials_last_error_code"] == "invalid_grant"
+    assert error_row["credentials_last_failed_at"] is not None
+    assert error_row["credentials_last_verified_at"] is not None
+
+    assert active_row["credentials_status"] == "active"
+    assert active_row["credentials_last_error"] is None
+    assert active_row["credentials_last_error_code"] is None
+    assert active_row["credentials_last_failed_at"] is None
+    assert active_row["credentials_last_verified_at"] is not None
+
+    # 2. GET /api/v1/ai-models/{id} (error)
+    res_detail_err = client.get(f"/api/v1/ai-models/{model_error.id}")
+    assert res_detail_err.status_code == 200
+    detail_err_json = res_detail_err.json()
+
+    assert detail_err_json["credentials_status"] == "error"
+    assert (
+        detail_err_json["credentials_last_error"]
+        == "openai refresh failed (status=401, code=invalid_grant)"
+    )
+    assert detail_err_json["credentials_last_error_code"] == "invalid_grant"
+    assert detail_err_json["credentials_last_failed_at"] is not None
+    assert detail_err_json["credentials_last_verified_at"] is not None
+
+    # 3. GET /api/v1/ai-models/{id} (active)
+    res_detail_act = client.get(f"/api/v1/ai-models/{model_active.id}")
+    assert res_detail_act.status_code == 200
+    detail_act_json = res_detail_act.json()
+
+    assert detail_act_json["credentials_status"] == "active"
+    assert detail_act_json["credentials_last_error"] is None
+    assert detail_act_json["credentials_last_error_code"] is None
+    assert detail_act_json["credentials_last_failed_at"] is None
+    assert detail_act_json["credentials_last_verified_at"] is not None
+
+    # 4. Assert no secret keys appear in any payload
+    forbidden_keys = {"access", "refresh", "encrypted_value", "external_ref", "api_key"}
+    for payload in list_json + [detail_err_json, detail_act_json]:
+        present = forbidden_keys.intersection(payload.keys())
+        assert not present, f"Forbidden keys appeared in response: {present}"

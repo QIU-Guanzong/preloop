@@ -217,13 +217,20 @@ class AIModelInDBBase(BaseModel):
     updated_at: Optional[datetime] = Field(
         None, description="When this AI model row was last updated"
     )
+    credentials_status: Optional[str] = Field(
+        None, description="Status of the model's credential secret"
+    )
+    credentials_last_error: Optional[str] = Field(
+        None, description="Summary of the last credential refresh error"
+    )
+    credentials_last_error_code: Optional[str] = Field(
+        None, description="Error code from the last credential refresh attempt"
+    )
+    credentials_last_failed_at: Optional[datetime] = Field(
+        None, description="Timestamp of the last failed credential refresh"
+    )
     credentials_last_verified_at: Optional[datetime] = Field(
-        None,
-        description=(
-            "When the attached credential secret last verified successfully. "
-            "For rotating OAuth grants this is the live-lineage signal; it "
-            "moves on gateway refresh even when the AI model row does not."
-        ),
+        None, description="Timestamp when credentials were last verified or refreshed"
     )
     has_api_key: bool = Field(
         False, description="Whether this model has credentials configured"

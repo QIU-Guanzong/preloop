@@ -1098,25 +1098,78 @@ describe('FlowExecutionsView', () => {
       await tick(20);
     });
 
-    it('says so when a retry comes back without a run to open', async () => {
-      fetchStub = sinon.stub(window, 'fetch').callsFake(async (input) => {
-        if (String(input).includes('/retry')) {
+    function stubFailedRetry(flows: unknown[]) {
+      const executions = [
+        {
+          id: 'exec-failed',
+          flow_id: 'flow-1',
+          flow_name: 'Nightly Sync',
+          status: 'FAILED',
+          start_time: '2026-03-09T10:00:00Z',
+          end_time: '2026-03-09T10:01:00Z',
+        },
+      ];
+      return sinon.stub(window, 'fetch').callsFake(async (input) => {
+        const url = String(input);
+        if (url.includes('/retry')) {
           return new Response(JSON.stringify({}), { status: 200 });
         }
-        return new Response(
-          JSON.stringify([
-            {
-              id: 'exec-failed',
-              flow_id: 'flow-1',
-              flow_name: 'Nightly Sync',
-              status: 'FAILED',
-              start_time: '2026-03-09T10:00:00Z',
-              end_time: '2026-03-09T10:01:00Z',
-            },
-          ]),
-          { status: 200 }
-        );
+        if (url.includes('/api/v1/flows/executions')) {
+          return new Response(JSON.stringify(executions), { status: 200 });
+        }
+        if (url.includes('/api/v1/flows')) {
+          return new Response(JSON.stringify(flows), { status: 200 });
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
       });
+    }
+
+    it('opens retry confirm with the current flow model from the flows list', async () => {
+      fetchStub = stubFailedRetry([
+        {
+          id: 'flow-1',
+          name: 'Nightly Sync',
+          agent_type: 'codex',
+          ai_model_name: 'gpt-4o-mini',
+        },
+      ]);
+      const el = await render();
+      await waitUntil(
+        () =>
+          fetchStub.getCalls().some((call) => {
+            const url = String(call.args[0]);
+            return (
+              url.includes('/api/v1/flows') && !url.includes('/executions')
+            );
+          }),
+        'flows list loaded for retry confirm',
+        { timeout: 4000 }
+      );
+      await tick(20);
+
+      actionById(el, 'retry').onClick?.();
+      await tick(20);
+
+      const dialog = document.body.querySelector(
+        'confirm-dialog'
+      ) as ConfirmDialog;
+      expect(dialog, 'confirm-dialog is mounted').to.exist;
+      await dialog.updateComplete;
+      const text = dialog.shadowRoot?.textContent || '';
+      expect(text).to.contain('codex');
+      expect(text).to.contain('gpt-4o-mini');
+      expect(text).to.contain('re-resolved from the current flow definition');
+    });
+
+    it('says so when a retry comes back without a run to open', async () => {
+      fetchStub = stubFailedRetry([
+        {
+          id: 'flow-1',
+          name: 'Nightly Sync',
+          agent_type: 'codex',
+          ai_model_name: 'gpt-4o-mini',
+        },
+      ]);
       const el = await render();
       const toasts: string[] = [];
       el.addEventListener('show-toast', (event) => {
@@ -1124,6 +1177,8 @@ describe('FlowExecutionsView', () => {
       });
 
       actionById(el, 'retry').onClick?.();
+      await tick(20);
+      await clickDialogButton('Retry run');
       await tick();
 
       expect(toasts).to.eql([
