@@ -30,8 +30,6 @@ Use the Lit.dev framework for frontend code. If you create new web components en
 
 ## Git Workflow
 
-- **NEVER use git push in any form unless explicitly requested by the user**
-- After making changes, present them to the user for review before any git operations beyond committing locally
 - After making significant changes, consider their impact on README.md and ARCHITECTURE.md and update these files accordingly.
 
 ### Pull request completion contract
@@ -39,7 +37,7 @@ Use the Lit.dev framework for frontend code. If you create new web components en
 Opening a pull request is not the end of the task. An agent that opens or updates a PR stays on it until the PR is clean or the wait runs out:
 
 - Poll the PR every 2 minutes. On each pass check, against the **current head**: unresolved review threads, unaddressed items in the reviewer's summary comment, CI checks (failed or still pending), merge conflicts with the base branch, and code-quality or security findings (CodeQL, the PR reviewer's severity markers).
-- Address every item: fix it with a test, or reply with a reason and resolve the thread. Never resolve a thread silently, and never dismiss a finding without saying why.
+- Address every item: fix it or reply with a reason and resolve the thread. Never resolve a thread silently, and never dismiss a finding without saying why.
 - Every push resets the wait, because a fix can introduce a new finding. Re-run `pre-commit run --files <changed files>` before each commit.
 - Exit only when (a) all five checks are clean on the current head, or (b) 30 minutes have passed with no new review, comment or check result and nothing is pending, or (c) a hard ceiling of 90 minutes is reached.
 - Report which exit fired, with the head SHA: "clean", "timed out waiting for review", or "ceiling reached with N open items". A PR that was left with open items is reported as unfinished, not as done.
