@@ -136,6 +136,8 @@ DETECTORS = {
     "pubspec.yaml": "dart",
     "mix.exs": "elixir",
     "Package.swift": "swift",
+    "*.xcodeproj": "swift",
+    "*.xcworkspace": "swift",
     "deno.json": "deno",
     "deno.jsonc": "deno",
 }
@@ -811,6 +813,51 @@ class TestPresetDefinition:
         )
         assert "A detector you invent is a bug" in norm
 
+    def test_an_xcode_project_directory_is_a_swift_project(self):
+        """Gap found in the 2026-09-18 dogfood (issue #647): a partner
+        monorepo of iOS apps discovered nothing, because an Xcode project
+        carries no Package.swift and the detector list did not name the
+        bundle directories that stand in for one."""
+        prompt = _prompt()
+        assert "Package.swift, *.xcodeproj, *.xcworkspace -> swift" in prompt
+
+    def test_include_paths_forces_a_project_the_detectors_missed(self):
+        """Second gap from the same dogfood: a directory whose build lives
+        in a parent manifest is invisible to a manifest walk, and before
+        this knob the only way to review it was to invent a detector."""
+        norm = _norm(_prompt())
+        assert (
+            "include_paths: repository-relative directories to treat as "
+            "projects even when no detector matched them" in norm
+        )
+        assert "FORCED INCLUSIONS" in norm
+        assert (
+            'carries "source": "include_paths" so the report never presents '
+            "a human's instruction as a discovery" in norm
+        )
+        assert (
+            "A prefix that does not exist in the checkout, or that the "
+            "exclusion list or the depth cap already removed, is recorded in "
+            "discovery.include_paths_missing and never invented" in norm
+        )
+        assert "exclude_paths wins" in norm
+        assert '"include_paths_missing": [' in _prompt()
+
+    def test_the_walk_has_to_have_run(self):
+        """Measured on 2026-09-18 (issue #647): one dogfood run wrote
+        "count": 0 for a repository of 82 projects without walking it, and
+        the report read exactly like an honest empty one."""
+        norm = _norm(_prompt())
+        assert "RUN THE WALK" in norm
+        assert (
+            "come from commands this execution actually ran and whose output "
+            "you read" in norm
+        )
+        assert (
+            "a repository of 80 samples and a repository of none look "
+            "identical in a report nobody walked" in norm
+        )
+
     def test_exclusion_list_is_the_one_the_preset_declares(self):
         prompt = _prompt()
         for directory in EXCLUDED_DIRS:
@@ -912,6 +959,25 @@ class TestPresetDefinition:
         )
         for schema_id in LENS_SCHEMAS.values():
             assert schema_id in norm, f"lens schema not named: {schema_id}"
+
+    def test_the_lens_slug_is_the_only_string_run_flow_takes(self):
+        """Measured on 2026-09-18 (issue #647): a dogfood run read the
+        right hand column of the lens table as the flow name, called
+        run_flow with a schema id, took the flow_not_found refusal as
+        proof the lens was uncallable and fanned out to nothing."""
+        norm = _norm(_prompt())
+        assert (
+            "The left column is the lens slug, which is the ONLY string "
+            'run_flow accepts in "flow"' in norm
+        )
+        assert (
+            "the right column is the result schema that lens emits, which is "
+            "what you check on the child's result.json and never a flow name" in norm
+        )
+        assert (
+            'Passing a schema id as a flow is refused with "flow_not_found", '
+            "and that refusal names the callable slugs" in norm
+        )
 
     def test_the_caps_are_declared_with_their_ceilings(self):
         """A project cap and a child cap, each with the hard ceiling it
@@ -1067,12 +1133,33 @@ class TestQuestionForms:
         assert "NEVER one call per project, never a second round" in norm
         assert "never ask a human to type JSON into free text" in norm
         assert "Otherwise make EXACTLY ONE ask_user call, batched, with the" in norm
+        assert "HOW TO CALL IT" in norm
         assert (
-            "Call the tool by the exact namespaced name your tool catalog "
-            "lists for the preloop MCP server" in norm
+            "Use the entry your tool catalog lists verbatim: harnesses list "
+            'it as "ask_user", "preloop/ask_user" or "mcp__preloop__ask_user"' in norm
+        )
+
+    def test_the_question_may_not_be_emulated(self):
+        """Measured on 2026-09-18 (issue #647): three dogfood runs answered
+        their own question after failing to route the tool, once by importing
+        a preloop module that does not exist in the container. A simulated
+        answer is worse than no answer, so the preset names every shape of
+        it."""
+        norm = _norm(_prompt())
+        assert "THE QUESTION CANNOT BE EMULATED" in norm
+        assert (
+            "there is no python module to import, no preloop package in the "
+            "container, no MCP resource to read and no file to write that "
+            "asks a human anything" in norm
         )
         assert (
-            "a routing failure is not an answer, it fails closed like an expiry" in norm
+            "A shell command is never a question, and a question you answered "
+            "yourself is a fabricated answer" in norm
+        )
+        assert (
+            'the question is unroutable: record status "unroutable" with the '
+            "reason, take the safe default below, and never simulate the "
+            "human" in norm
         )
 
     def test_the_questions_use_items_and_an_input_schema(self):
@@ -1091,6 +1178,65 @@ class TestQuestionForms:
         ):
             assert fragment in prompt, f"missing question form fragment: {fragment}"
         assert "THE SELECTABLE IDS ARE EXACTLY THE DISCOVERED PROJECT PATHS" in norm
+
+    def test_the_item_rows_carry_only_the_keys_the_channel_accepts(self):
+        """Measured on 2026-09-18 (issue #647): a dogfood run sent the
+        discovery row as the question row, the channel refused the whole
+        call for the extra keys, and the run degraded to inventory only
+        without ever telling the human a question had been meant."""
+        norm = _norm(_prompt())
+        assert "THOSE FIVE KEYS AND NO OTHER" in norm
+        assert (
+            "accepts exactly id, title, description, severity, badges and "
+            "href on a row, and REFUSES the whole call when a row carries "
+            "anything else: rank, path, stacks, triage, manifests" in norm
+        )
+        assert "uniqueItems, minItems and friends are refused the same way" in norm
+        assert (
+            'If the tool returns a string starting with "Error:", it named '
+            "the offending key: remove that key and make ONE more call with "
+            "the same question" in norm
+        )
+        assert "A second refusal is unroutable" in norm
+
+    def test_the_documented_row_is_one_the_platform_accepts(self):
+        """The prose above is only worth what the validator says: the row
+        the preset documents goes through normalize_items unchanged, and
+        the discovery row the dogfood sent does not."""
+        from preloop.services.question_schema import (
+            QuestionSchemaError,
+            normalize_items,
+        )
+
+        documented = {
+            "id": "apps/checkout",
+            "title": "apps/checkout (node)",
+            "description": "Last commit 2024-02-01, 0 commits in 12 months.",
+            "severity": "high",
+            "badges": ["node", "stale_365"],
+        }
+        assert normalize_items([documented]) == [documented]
+
+        with pytest.raises(QuestionSchemaError):
+            normalize_items([dict(documented, rank=1)])
+        with pytest.raises(QuestionSchemaError):
+            normalize_items([dict(documented, path="apps/checkout")])
+
+    def test_the_question_comes_before_the_fan_out(self):
+        """Measured on 2026-09-18 (issue #647): a dogfood run probed a lens
+        with run_flow first, read the refusal as a reason to skip the
+        question, and reviewed nothing while reporting success."""
+        norm = _norm(_prompt())
+        assert "THE QUESTION COMES BEFORE THE FAN OUT, ALWAYS" in norm
+        assert (
+            "run_flow is called in PHASE 4, once per selected project, and "
+            "never as a test" in norm
+        )
+        assert (
+            "A lens that turns out to be uncallable there is recorded in "
+            "fan_out.lenses_refused and never a reason to skip the question "
+            "that was already asked" in norm
+        )
 
     def test_a_long_window_parks_the_run(self):
         norm = _norm(_prompt())
@@ -1191,6 +1337,66 @@ class TestResultSchema:
         assert result["flow"] == FLOW_SLUG
         assert result["status"] == "success"
         assert result["disclaimer"] == DISCLAIMER
+
+    def _discovery_row(self, **overrides) -> dict:
+        """One discovery row, detected, with every required key present."""
+        row = {
+            "path": "apps/checkout",
+            "rank": 1,
+            "stacks": ["node"],
+            "manifests": ["apps/checkout/package.json"],
+            "runtimes": [],
+            "last_commit_date": "2026-01-04",
+            "commits_12m": 2,
+            "file_count": 31,
+            "has_readme": True,
+            "has_architecture_doc": False,
+            "has_ci": False,
+            "has_tests_dir": False,
+            "has_licence": False,
+            "sbom_paths": [],
+            "has_sbom": False,
+            "triage": {"score": 4, "band": "medium", "reasons": ["no_ci"]},
+        }
+        row.update(overrides)
+        return row
+
+    def _project_validator(self) -> Draft202012Validator:
+        schema = json.loads(SCHEMA_FILE.read_text())
+        items = schema["properties"]["discovery"]["properties"]["projects"]["items"]
+        return Draft202012Validator(items)
+
+    def test_a_forced_inclusion_is_a_project_without_a_manifest(self):
+        """include_paths names a directory the detectors cannot see, so a
+        forced row carries no manifest and no stack, and says where it came
+        from rather than passing a human's instruction off as a discovery."""
+        validator = self._project_validator()
+        forced = self._discovery_row(
+            path="apps/mobile",
+            stacks=[],
+            manifests=[],
+            source="include_paths",
+        )
+        assert list(validator.iter_errors(forced)) == []
+
+    def test_a_detected_project_still_has_to_carry_its_manifest(self):
+        """The knob widens discovery for the paths a human named, and for
+        nothing else: a detected project with no manifest is still a bug."""
+        validator = self._project_validator()
+        detected = self._discovery_row(stacks=[], manifests=[], source="detector")
+        assert list(validator.iter_errors(detected)) != []
+        unlabelled = self._discovery_row(stacks=[], manifests=[])
+        assert list(validator.iter_errors(unlabelled)) != []
+
+    def test_the_prefixes_the_checkout_does_not_have_are_recorded(self):
+        """A missing include_paths prefix is reported, never invented."""
+        schema = json.loads(SCHEMA_FILE.read_text())
+        discovery = schema["properties"]["discovery"]
+        assert discovery["properties"]["include_paths_missing"] == {
+            "type": "array",
+            "items": {"type": "string"},
+        }
+        assert "include_paths_missing" not in discovery["required"]
 
     def test_fixtures_are_synthetic(self, scenario):
         repo, result, children = scenario

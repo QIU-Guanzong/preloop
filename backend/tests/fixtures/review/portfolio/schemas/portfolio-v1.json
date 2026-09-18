@@ -85,11 +85,38 @@
           "type": "integer",
           "minimum": 0
         },
+        "include_paths_missing": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "projects": {
           "type": "array",
           "items": {
             "type": "object",
             "additionalProperties": false,
+            "if": {
+              "properties": {
+                "source": {
+                  "const": "include_paths"
+                }
+              },
+              "required": [
+                "source"
+              ]
+            },
+            "then": {},
+            "else": {
+              "properties": {
+                "stacks": {
+                  "minItems": 1
+                },
+                "manifests": {
+                  "minItems": 1
+                }
+              }
+            },
             "required": [
               "path",
               "rank",
@@ -136,15 +163,19 @@
                     "swift",
                     "deno"
                   ]
-                },
-                "minItems": 1
+                }
+              },
+              "source": {
+                "enum": [
+                  "detector",
+                  "include_paths"
+                ]
               },
               "manifests": {
                 "type": "array",
                 "items": {
                   "type": "string"
-                },
-                "minItems": 1
+                }
               },
               "runtimes": {
                 "type": "array",
