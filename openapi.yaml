@@ -18952,6 +18952,11 @@ components:
             type: object
           - type: 'null'
           title: Schedule State
+        ai_model_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Ai Model Name
       type: object
       required:
       - id

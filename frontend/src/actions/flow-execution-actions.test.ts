@@ -1,5 +1,8 @@
 import { expect } from '@open-wc/testing';
-import { flowExecutionActions } from './flow-execution-actions';
+import {
+  confirmRetryExecution,
+  flowExecutionActions,
+} from './flow-execution-actions';
 import { actionIds, intersectActions } from './registry';
 
 const ctx = {
@@ -87,5 +90,9 @@ describe('flowExecutionActions', () => {
     expect(actionIds(intersectActions([running, failed]))).to.deep.equal([
       'open',
     ]);
+  });
+
+  it('exposes confirmRetryExecution function', () => {
+    expect(confirmRetryExecution).to.be.a('function');
   });
 });

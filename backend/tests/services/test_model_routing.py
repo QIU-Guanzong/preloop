@@ -1112,7 +1112,9 @@ class TestRoutingReviewRegressions:
         original = prepare_execution_routing(db_session, flow, {})
         prior = FlowExecution(flow_id=flow.id, trigger_event_details=original)
         flow.ai_model_id = _usable_model(db_session, test_user.account_id).id
-        pinned = prepare_execution_routing(db_session, flow, {}, source_execution=prior)
+        pinned = prepare_execution_routing(
+            db_session, flow, {}, source_execution=prior, pin_kind="continuation"
+        )
         assert pinned[ROUTING_RECORD_KEY]["ai_model_id"] == str(model.id)
 
     def test_malformed_source_id_does_not_query_database(self) -> None:

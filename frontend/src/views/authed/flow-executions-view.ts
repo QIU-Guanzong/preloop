@@ -10,7 +10,10 @@ import {
 } from '../../api';
 import { AuthedElement } from '../../api';
 import { unifiedWebSocketManager } from '../../services/unified-websocket-manager';
-import { confirmStopExecution } from '../../actions/flow-execution-actions';
+import {
+  confirmStopExecution,
+  confirmRetryExecution,
+} from '../../actions/flow-execution-actions';
 import '@shoelace-style/shoelace/dist/components/alert/alert.js';
 import '@shoelace-style/shoelace/dist/components/badge/badge.js';
 import '@shoelace-style/shoelace/dist/components/button/button.js';
@@ -990,6 +993,14 @@ export class FlowExecutionsView extends AuthedElement {
   }
 
   private async retryExecution(execution: FlowExecution): Promise<void> {
+    const flow = this.flowMap.get(execution.flow_id);
+    const confirmed = await confirmRetryExecution({
+      flow_name: flow?.name || execution.flow_name,
+      agent_type: flow?.agent_type,
+      model_name: (flow as any)?.ai_model_name,
+    });
+    if (!confirmed) return;
+
     try {
       const result = await retryFlowExecution(execution.id);
       if (result?.id) {
