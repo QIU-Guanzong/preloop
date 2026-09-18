@@ -344,11 +344,28 @@ prompt_template: |
   stacks, triage, manifests and every other discovery field belong in
   the report, never in an item. The array field in the schema below
   carries title, description and items, and its items object carries
-  enum and nothing else: uniqueItems, minItems and friends are refused
-  the same way. If the tool returns a string starting with "Error:", it
-  named the offending key: remove that key and make ONE more call with
-  the same question. A second refusal is unroutable, and unroutable
-  fails closed exactly like an expiry (safe default below).
+  enum and nothing else. Do not rely on an error to catch a stray
+  keyword there: an unknown key inside the items object is dropped in
+  silence, and minItems on the array field is accepted and kept, which
+  puts a floor on a field this preset promises may be answered empty.
+  Send the shape below and nothing around it. If the tool returns a
+  string starting with "Error:", it names what it refused, a key or a
+  ceiling: fix that one thing and make ONE more call with the same
+  question. A second refusal is unroutable, and unroutable fails closed
+  exactly like an expiry (safe default below).
+
+  AT MOST 150 ROWS IN ONE QUESTION. The channel refuses a call carrying
+  more than 200 item rows, or an enum of more than 200 ids, and that
+  refusal names no key, so a retry that sends the same oversized call
+  loses the question and the run falls to inventory only. Above 150
+  discovered projects, send the 150 highest ranked rows, draw the
+  selectable ids from exactly those rows, and say so in the question
+  text ("<n> of <count> projects, the highest ranked"). Every project
+  the question could not show stays in discovery.projects and gets an
+  entry in coverage.not_reviewed with reason "not offered, over the
+  question cap": a portfolio too big for one form is a coverage
+  statement, not a reason to ask nothing. NEVER split the question into
+  a second call, and never drop a project from discovery to make it fit.
   and pass this input_schema (verbatim shape, ids drawn from items):
   {"type": "object",
    "properties": {
@@ -366,9 +383,11 @@ prompt_template: |
      "date": {"type": "string", "format": "date",
        "x-autofill": "date"}},
    "required": []}
-  THE SELECTABLE IDS ARE EXACTLY THE DISCOVERED PROJECT PATHS: no
+  THE SELECTABLE IDS ARE EXACTLY THE IDS OF THE ROWS YOU SENT: no
   extras, no omissions, no invented ids, and the same strings discovery
-  recorded.
+  recorded. Below the 150 row cap that is every discovered project; at
+  the cap it is the rows the form shows, because an id with no row is a
+  checkbox nobody can read.
   DEPTH AND THE CEILING ARE OPTIONAL, AND AN ANSWER THAT OMITS BOTH IS A
   VALID ANSWER: "required" stays empty, an omitted depth is "standard",
   and an omitted ceiling is no ceiling of this run's own. Never require

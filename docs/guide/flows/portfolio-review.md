@@ -121,13 +121,22 @@ curl -X POST "$PRELOOP/api/v1/flows/$PORTFOLIO_FLOW_ID/trigger" \
 
 **7. Answer the two questions in Approvals.** The selection question
 arrives as one row per discovered project (title, the triage
-description, the band as severity, stacks and triage reasons as badges)
+description, the band as severity, stacks and triage reasons as badges),
+or as the 150 highest ranked rows when discovery found more than that,
 plus a form with `selected` (the multi-select whose ids are the project
 paths), `depth` and `max_cost_usd`. Nothing in it is required: submitting
 an empty `selected` reviews nothing. The follow ups question arrives the
 same way after the children finish, one row per candidate follow up. Both
 windows are three days, both park the run while they wait, and both fail
 closed if they expire (inventory only, and keep nothing).
+
+**Known limitation (2026-09-18).** The park is attempted in the agent
+process about 90 seconds after the question is asked, but the agent's
+tool transport can close first, and when it does the run fails while the
+approval sits unanswered in the queue: the three day window is the
+design, not yet the measured behaviour. Track it on issue #792, and
+until it closes answer a portfolio review's questions promptly rather
+than leaving them overnight.
 
 **What a run costs and how long it takes.** Measured on 2026-09-18 on a
 local stack against a public repository of 82 projects (issue #647):

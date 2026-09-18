@@ -1177,7 +1177,7 @@ class TestQuestionForms:
             '"x-autofill": "date"',
         ):
             assert fragment in prompt, f"missing question form fragment: {fragment}"
-        assert "THE SELECTABLE IDS ARE EXACTLY THE DISCOVERED PROJECT PATHS" in norm
+        assert "THE SELECTABLE IDS ARE EXACTLY THE IDS OF THE ROWS YOU SENT" in norm
 
     def test_the_item_rows_carry_only_the_keys_the_channel_accepts(self):
         """Measured on 2026-09-18 (issue #647): a dogfood run sent the
@@ -1191,13 +1191,69 @@ class TestQuestionForms:
             "href on a row, and REFUSES the whole call when a row carries "
             "anything else: rank, path, stacks, triage, manifests" in norm
         )
-        assert "uniqueItems, minItems and friends are refused the same way" in norm
         assert (
-            'If the tool returns a string starting with "Error:", it named '
-            "the offending key: remove that key and make ONE more call with "
-            "the same question" in norm
+            "an unknown key inside the items object is dropped in silence, "
+            "and minItems on the array field is accepted and kept" in norm
+        )
+        assert (
+            'If the tool returns a string starting with "Error:", it names '
+            "what it refused, a key or a ceiling: fix that one thing and "
+            "make ONE more call with the same question" in norm
         )
         assert "A second refusal is unroutable" in norm
+
+    def test_the_prose_about_stray_keywords_matches_the_validator(self):
+        """PR #795 review: the preset used to promise a refusal for every
+        stray keyword. The validator strips unknown keys inside an items
+        object without a word, and keeps minItems, so the prose now warns
+        instead of promising an error."""
+        from preloop.services.question_schema import normalize_input_schema
+
+        schema = normalize_input_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "selected": {
+                        "type": "array",
+                        "title": "Projects to review",
+                        "items": {"enum": ["a", "b"], "uniqueItems": True},
+                        "minItems": 1,
+                    }
+                },
+            }
+        )
+        field = schema["properties"]["selected"]
+        assert "uniqueItems" not in field["items"], "silently stripped, not refused"
+        assert field["minItems"] == 1, "kept, and it floors an optional field"
+
+    def test_the_question_stops_at_the_row_the_channel_accepts(self):
+        """PR #795 review: the channel hard-refuses more than MAX_ITEMS rows
+        and the message names no key, so a preset that always sends one row
+        per project loses the question on a portfolio bigger than the cap."""
+        from preloop.services.question_schema import MAX_ENUM_VALUES, MAX_ITEMS
+
+        norm = _norm(_prompt())
+        assert "AT MOST 150 ROWS IN ONE QUESTION" in norm
+        assert 150 < MAX_ITEMS, "the preset cap has to sit under the platform's"
+        assert 150 < MAX_ENUM_VALUES, "and under the enum ceiling too"
+        assert (
+            f"refuses a call carrying more than {MAX_ITEMS} item rows, or an "
+            f"enum of more than {MAX_ENUM_VALUES} ids, and that refusal names "
+            "no key" in norm
+        )
+        assert "send the 150 highest ranked rows" in norm
+        assert "NEVER split the question into a second call" in norm
+
+    def test_a_project_the_question_could_not_show_is_still_counted(self):
+        """Over the cap the run is still honest: the project stays in
+        discovery and lands in coverage.not_reviewed with a reason."""
+        norm = _norm(_prompt())
+        assert (
+            "Every project the question could not show stays in "
+            "discovery.projects and gets an entry in coverage.not_reviewed "
+            'with reason "not offered, over the question cap"' in norm
+        )
+        assert "never drop a project from discovery to make it fit" in norm
 
     def test_the_documented_row_is_one_the_platform_accepts(self):
         """The prose above is only worth what the validator says: the row
