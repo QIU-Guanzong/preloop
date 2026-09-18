@@ -25,7 +25,14 @@ into `<release>-credentials` under `smtp-password`.
 
 Pods do not restart when a Secret changes, so the deployments carry a
 `checksum/credentials` annotation. Changing a credential through values
-rolls the pods the way a literal env value used to.
+rolls the pods the way a literal env value used to. The annotation hashes
+only the chart-managed Secret: after rotating an operator Secret
+(`database.urlFromSecret`, `config.smtp.passwordSecret`) the hash does not
+move, so restart the deployments yourself:
+
+```bash
+kubectl -n <namespace> rollout restart deployment -l app.kubernetes.io/instance=<release>
+```
 
 ## Rotating the CNPG superuser
 

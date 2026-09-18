@@ -1,0 +1,129 @@
+{{- $np := .Values.agentExecution.networkPolicy -}}
+{{- $cilium := $np.cilium | default dict -}}
+{{- if and $np.enabled $cilium.enabled -}}
+{{- $agentNamespace := .Values.agentExecution.namespace.create | ternary .Values.agentExecution.namespace.name .Release.Namespace -}}
+{{- $controlPlanePorts := $np.controlPlanePorts | default (list 80 8000) -}}
+{{- $dns := $np.dns | default dict -}}
+{{- $dnsNamespaceLabels := $dns.namespaceSelectorLabels | default (dict "kubernetes.io/metadata.name" "kube-system") -}}
+{{- $dnsPorts := $dns.ports | default (list 53) -}}
+{{- $internetEntities := $cilium.internetEntities | default (list "world" "host") -}}
+---
+# Agent execution isolation, Cilium flavour.
+#
+# Same allow list as the plain NetworkPolicy in agent-networkpolicy.yaml,
+# rendered as a CiliumNetworkPolicy because Cilium does not match a plain
+# ipBlock against node addresses (policy-cidr-match-mode). A public address
+# that resolves back to a node, which is what an ingress in front of this
+# chart looks like from inside the cluster, is therefore dropped by the
+# plain policy and admitted here through the host entity.
+#
+# Cilium identities do the carving out that CIDRs do in the plain policy:
+# "world" is everything outside the cluster, so the database, NATS, the
+# console and other agent pods are never part of it. The one address that
+# is world and must still be unreachable, the cloud metadata service, is
+# named in egressDeny, which takes precedence over every allow.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "preloop.fullname" . }}-agent-execution
+  namespace: {{ $agentNamespace }}
+  labels:
+    {{- include "preloop.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-execution
+spec:
+  endpointSelector:
+    matchLabels:
+      app: agent-execution
+
+  {{- if $cilium.allowHostIngress }}
+  # INGRESS: the host entity only, which is the kubelet running the startup
+  # probe of environment sidecars. Naming one source denies every other.
+  ingress:
+    - fromEntities:
+        - host
+  {{- else }}
+  # INGRESS: deny all. The empty rule puts the endpoint under ingress
+  # enforcement; the deny rule states the intent and wins over any allow
+  # another policy might add.
+  ingress:
+    - {}
+  ingressDeny:
+    - fromEntities:
+        - all
+  {{- end }}
+
+  egress:
+    # DNS. Without this nothing else resolves.
+    - toEndpoints:
+        - matchLabels:
+            {{- range $key, $value := $dnsNamespaceLabels }}
+            {{- if eq $key "kubernetes.io/metadata.name" }}
+            k8s:io.kubernetes.pod.namespace: {{ $value }}
+            {{- else }}
+            k8s:io.kubernetes.pod.namespace.labels.{{ $key }}: {{ $value }}
+            {{- end }}
+            {{- end }}
+            {{- with $dns.podSelectorLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      toPorts:
+        - ports:
+            {{- range $dnsPorts }}
+            - port: {{ . | quote }}
+              protocol: UDP
+            - port: {{ . | quote }}
+              protocol: TCP
+            {{- end }}
+
+    {{- if $np.allowPreloopAPI }}
+    # Control plane: MCP tools on the API, model calls on the gateway. Both
+    # the service port and the container port are listed for parity with
+    # the plain policy; Cilium sees the container port after DNAT.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Release.Namespace }}
+            {{- include "preloop.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: api
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Release.Namespace }}
+            {{- include "preloop.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: gateway
+      toPorts:
+        - ports:
+            {{- range $controlPlanePorts }}
+            - port: {{ . | quote }}
+              protocol: TCP
+            {{- end }}
+    {{- end }}
+
+    {{- if $np.allowExternalLLMAPIs }}
+    # The public internet, and the node the pod runs on so that a public
+    # address which hairpins into the cluster still works.
+    - toEntities:
+        {{- range $internetEntities }}
+        - {{ . }}
+        {{- end }}
+      {{- with $np.internetPorts }}
+      toPorts:
+        - ports:
+            {{- range . }}
+            - port: {{ .port | quote }}
+              protocol: {{ .protocol | default "TCP" }}
+            {{- end }}
+      {{- end }}
+    {{- end }}
+
+    {{- with $cilium.extraEgress }}
+    # Operator-supplied rules, appended verbatim.
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+
+  {{- with $cilium.egressDenyCidrs }}
+  # Denied even though Cilium classes these addresses as world.
+  egressDeny:
+    - toCIDR:
+        {{- range . }}
+        - {{ . | quote }}
+        {{- end }}
+  {{- end }}
+{{- end }}

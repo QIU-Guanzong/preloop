@@ -17,7 +17,7 @@ namespace otherwise. The second case is the easy one to deploy and the
 dangerous one to leave unguarded, because the database, NATS, the console,
 and the other tenants' agent pods are then neighbours.
 
-Nothing dials into an agent pod. Output leaves it two ways:
+Nothing in the cluster dials into an agent pod. Output leaves it two ways:
 
 - the pod log stream, which the runner reads through the API server
   (`read_namespaced_pod_log`), carrying the result artifact, the evidence
@@ -26,7 +26,31 @@ Nothing dials into an agent pod. Output leaves it two ways:
   upload is enabled (`backend/preloop/services/checkpoint_runtime.py`),
   which are outbound HTTP calls to the public Preloop URL.
 
-So ingress can be denied outright, and the policy does.
+The kubelet does dial in. Flows with an environment profile get native
+sidecar containers in the same pod, each with a TCP `startupProbe`
+(`_environment_sidecars` in `container.py`), and the kubelet runs that
+probe from the node's own network namespace. So the policy denies ingress
+from every pod and relies on the CNI admitting the local host, which the
+three CNIs the chart names all do:
+
+- Cilium: host-to-local-endpoint traffic is governed by `--allow-localhost`
+  (default `auto`), not by NetworkPolicy; the Cilium variant below also
+  names the `host` entity explicitly.
+- Calico: "Calico allows connections the host makes to the workloads
+  running on that host. Some orchestrators like Kubernetes depend on this
+  connectivity for health checking the workload." (Calico docs, Protect
+  hosts.)
+- Antrea: node-to-local-pod traffic "will always be allowed to make sure
+  that agents on a Node (e.g. system daemons, kubelet) can communicate with
+  all Pods on that Node to perform liveness and readiness probes" (Antrea
+  network policy docs; the OVS pipeline marks probe packets and bypasses
+  the ingress tables for them).
+
+On a CNI that does enforce node-sourced traffic, list the node addresses
+in `agentExecution.networkPolicy.nodeCidrs` and the policy re-admits them
+on ingress; nothing else is admitted either way. A probe that fails under
+the policy shows up as a sidecar that never becomes ready and a Job that
+ends with the sidecar's `startupProbe` failure in `kubectl describe pod`.
 
 ## Without a NetworkPolicy
 
@@ -50,15 +74,20 @@ None of that is needed to run an agent.
 `helm/preloop/templates/agent-networkpolicy.yaml` selects pods labelled
 `app=agent-execution` and:
 
-- denies all ingress;
-- allows egress to kube-dns on 53;
+- denies all ingress (or admits only `nodeCidrs`, see above);
+- allows egress to the DNS pods on 53, selected by
+  `agentExecution.networkPolicy.dns.*` (kube-dns in `kube-system` by
+  default; Helm merges maps, so a cluster whose DNS lives elsewhere nulls
+  the default label keys and adds its own, as the values comment shows);
 - allows egress to the API and gateway pods on the HTTP ports. Both 80 and
   8000 are listed: a ClusterIP connection is translated to the pod IP and
   target port before policy is evaluated on most CNIs, so a rule naming
   only the service port silently drops the traffic;
 - allows egress to `0.0.0.0/0` minus the cluster pod and service CIDRs
-  (`agentExecution.networkPolicy.clusterCidrs`), which is what model
-  providers, git remotes, and package registries need;
+  (`agentExecution.networkPolicy.clusterCidrs`; when that is empty the
+  deprecated `excludeCIDRs`, and when both are empty the three RFC1918
+  ranges plus `169.254.169.254/32`), which is what model providers, git
+  remotes, and package registries need;
 - allows nothing else in-cluster. The database, NATS, the console, and
   other agent pods fall off the list.
 
@@ -76,6 +105,64 @@ host-network ingress controllers.
 
 Policies only do something on a CNI that enforces them. Cilium, Calico, and
 Antrea do. On a CNI that does not, these objects render and have no effect.
+
+## Upgrading from the previous chart
+
+The previous template read `excludeCIDRs` and `additionalEgressRules`. The
+new keys, `clusterCidrs` and `extraEgress`, ship empty and fall back to
+the old ones, so a release that customised either list (a cluster on
+`100.64.0.0/10`, say) keeps it across the upgrade without touching values.
+Helm lays saved values over the new chart's defaults, which is why the new
+defaults have to be empty: a populated `clusterCidrs` default would win
+over a saved `excludeCIDRs` every time. `helm upgrade` prints a notice
+while the deprecated key is the one in use.
+
+## Cilium
+
+Cilium evaluates policy against identities, not addresses, and by default
+does not match a NetworkPolicy `ipBlock` against anything inside the
+cluster: "By default, ipBlock rules in NetworkPolicy do not match
+intra-cluster IPs (such as Pod or Node IPs). Setting the
+`--policy-cidr-match-mode` option (or equivalent Helm value
+`policyCIDRMatchMode`) to `pods` or `nodes` allows ipBlock rules to match
+intra-cluster IPs." (Cilium docs, Kubernetes NetworkPolicy.)
+
+The consequence for the plain policy: the `0.0.0.0/0` rule never matches a
+node. When the deployment's public URL resolves to an address that an
+ingress or load balancer terminates on a node, which is the usual shape
+of a default install, an agent pod calling that URL is calling a node,
+and the plain policy drops it. Checkpoint uploads, evidence uploads, and
+any flow that uses the public URL for MCP or the gateway fail with a
+connection timeout while the database stays correctly unreachable.
+
+`agentExecution.networkPolicy.cilium.enabled=true` renders a
+`CiliumNetworkPolicy` in place of the plain object, with the same allow
+list expressed in Cilium's terms:
+
+- ingress: `fromEntities: [host]`, the kubelet, and nothing else
+  (`cilium.allowHostIngress=false` denies all ingress instead, with an
+  explicit `ingressDeny` from `all`);
+- egress to the DNS pods, selected by namespace and pod label
+  (`k8s:io.kubernetes.pod.namespace` plus `dns.podSelectorLabels`);
+- egress to the API and gateway pods, selected by the chart's labels in
+  the release namespace, on `controlPlanePorts`;
+- egress to `toEntities: [world, host]` (`cilium.internetEntities`).
+  `world` is every address outside the cluster, so the CIDR carve-out is
+  unnecessary: the database, NATS, the console, and other pods are cluster
+  identities and never match. `host` is the node the pod runs on, which is
+  where the public hairpin lands. Add `remote-node` if that address can
+  land on a different node than the one running the pod;
+- `egressDeny: toCIDR` for `cilium.egressDenyCidrs`, by default the cloud
+  metadata address, which Cilium classes as `world` and which a deny rule
+  removes regardless of the allow above;
+- `cilium.extraEgress`, appended verbatim. These are CiliumNetworkPolicy
+  egress rules; the plain `extraEgress` list is not translated.
+
+The namespace-wide default deny for a dedicated agent namespace stays a
+plain NetworkPolicy in both modes; it selects pods, not addresses, so
+Cilium enforces it as written. `controlPlaneIngress` should stay off on
+Cilium, since it relies on an `ipBlock` to re-admit node-sourced traffic
+to the API and gateway.
 
 ## The credential an agent carries
 
@@ -114,11 +201,12 @@ of the primary user's.
 
 ## Residual risks
 
-- **Cloud metadata service.** 169.254.169.254 is link-local, so it is not
-  covered by the cluster CIDR carve-out and stays reachable unless the node
-  pool blocks it (IMDSv2 hop limit 1, GKE metadata concealment, or an
-  explicit `extraEgress` deny is not expressible in NetworkPolicy; use a
-  CiliumNetworkPolicy or the node configuration).
+- **Cloud metadata service.** 169.254.169.254 is link-local, so a cluster
+  CIDR carve-out does not cover it. The chart's fallback list and the
+  Cilium variant's `egressDenyCidrs` both exclude it by default; an
+  operator who sets `clusterCidrs` explicitly has to keep it in the list,
+  and the node pool should block it as well (IMDSv2 hop limit 1, GKE
+  metadata concealment), since a NetworkPolicy cannot express a deny.
 - **Other namespaces.** The policy names the release namespace for the
   control plane and the internet for everything else. A workload in a third
   namespace with a routable ClusterIP is unreachable, but a workload

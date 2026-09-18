@@ -74,6 +74,7 @@ echo "$np" | grep -A2 'podSelector:' | grep -q 'app: agent-execution' \
   || fail "agent policy does not select app=agent-execution pods"
 echo "$np" | grep -q 'ingress: \[\]' || fail "agent policy does not deny ingress"
 echo "$np" | grep -q 'port: 53' || fail "agent policy blocks DNS"
+echo "$np" | grep -q 'k8s-app: kube-dns' || fail "DNS rule is not pinned to the DNS pods"
 echo "$np" | grep -q 'app.kubernetes.io/component: api' \
   || fail "agent policy has no egress to the API"
 echo "$np" | grep -q 'app.kubernetes.io/component: gateway' \
@@ -82,6 +83,7 @@ echo "$np" | grep -q 'port: 8000' \
   || fail "agent policy omits the container port (ClusterIP traffic is DNATed to it)"
 echo "$np" | grep -q 'cidr: 0.0.0.0/0' || fail "agent policy has no internet egress"
 echo "$np" | grep -q '10.0.0.0/8' || fail "cluster CIDRs not carved out of the internet rule"
+echo "$np" | grep -q '169.254.169.254/32' || fail "metadata address not carved out of the internet rule"
 # Negative assertions: the reason this policy exists.
 echo "$np" | grep -q '5432' && fail "agent policy allows the database port"
 echo "$np" | grep -q '4222' && fail "agent policy allows the NATS port"
@@ -99,11 +101,104 @@ out=$(helm template t "$CHART" --set agentExecution.networkPolicy.enabled=false)
 echo "$out" | grep -q "kind: NetworkPolicy" \
   && fail "NetworkPolicy rendered while networkPolicy.enabled=false"
 
-echo "==> agent isolation: internet egress without cluster CIDRs must fail fast"
-if helm template t "$CHART" --set 'agentExecution.networkPolicy.clusterCidrs=null' \
-  --set 'agentExecution.networkPolicy.excludeCIDRs=null' >/dev/null 2>&1; then
-  fail "template rendered an internet egress rule with no cluster CIDRs"
-fi
+echo "==> agent isolation: no CIDR value at all falls back to RFC1918 plus metadata"
+np=$(helm template t "$CHART" --set 'agentExecution.networkPolicy.clusterCidrs=null' \
+  --set 'agentExecution.networkPolicy.excludeCIDRs=null' \
+  --show-only templates/agent-networkpolicy.yaml | grep -v '^ *#')
+for cidr in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.169.254/32; do
+  echo "$np" | grep -q "$cidr" || fail "fallback carve-out missing $cidr"
+done
+
+echo "==> agent isolation: a legacy excludeCIDRs list survives the upgrade unchanged"
+# Helm lays saved values over the new chart defaults, so the only way the
+# deprecated key can still be read is for the new key to default to empty.
+np=$(helm template t "$CHART" \
+  --set 'agentExecution.networkPolicy.excludeCIDRs={100.64.0.0/10}' \
+  --show-only templates/agent-networkpolicy.yaml | grep -v '^ *#')
+echo "$np" | grep -q '100.64.0.0/10' || fail "legacy excludeCIDRs carve-out dropped"
+echo "$np" | grep -q '10.0.0.0/8' && fail "legacy excludeCIDRs was merged with the fallback instead of replacing it"
+np=$(helm template t "$CHART" \
+  --set 'agentExecution.networkPolicy.clusterCidrs={10.244.0.0/16}' \
+  --set 'agentExecution.networkPolicy.excludeCIDRs={100.64.0.0/10}' \
+  --show-only templates/agent-networkpolicy.yaml | grep -v '^ *#')
+echo "$np" | grep -q '10.244.0.0/16' || fail "clusterCidrs not rendered when both keys are set"
+echo "$np" | grep -q '100.64.0.0/10' && fail "excludeCIDRs still read although clusterCidrs is set"
+out=$(helm template t "$CHART" \
+  --set 'agentExecution.networkPolicy.excludeCIDRs={100.64.0.0/10}' --show-only templates/NOTES.txt 2>/dev/null || true)
+helm template t "$CHART" --set 'agentExecution.networkPolicy.excludeCIDRs={100.64.0.0/10}' >/dev/null \
+  || fail "chart does not render with a legacy excludeCIDRs value"
+
+echo "==> agent isolation: legacy additionalEgressRules still appended"
+np=$(helm template t "$CHART" \
+  --set 'agentExecution.networkPolicy.additionalEgressRules[0].to[0].ipBlock.cidr=10.42.7.0/24' \
+  --show-only templates/agent-networkpolicy.yaml | grep -v '^ *#')
+echo "$np" | grep -q '10.42.7.0/24' || fail "legacy additionalEgressRules dropped"
+
+echo "==> agent isolation: nodeCidrs re-admits kubelet probes and nothing else"
+np=$(helm template t "$CHART" \
+  --set 'agentExecution.networkPolicy.nodeCidrs={10.0.0.0/24}' \
+  --show-only templates/agent-networkpolicy.yaml | grep -v '^ *#')
+echo "$np" | grep -q 'ingress: \[\]' && fail "ingress still empty although nodeCidrs is set"
+echo "$np" | grep -A3 '^  ingress:' | grep -q 'ipBlock' || fail "nodeCidrs did not render an ingress ipBlock"
+echo "$np" | grep -q '10.0.0.0/24' || fail "node CIDR missing from the ingress rule"
+
+echo "==> agent isolation: Cilium variant replaces the plain policy"
+out=$(helm template t "$CHART" --namespace preloop \
+  --set agentExecution.networkPolicy.cilium.enabled=true)
+echo "$out" | grep -B2 -A6 'kind: NetworkPolicy' | grep -q 'name: t-preloop-agent-execution' \
+  && fail "plain agent NetworkPolicy still rendered alongside the Cilium policy"
+cnp=$(helm template t "$CHART" --namespace preloop \
+  --set agentExecution.networkPolicy.cilium.enabled=true \
+  --show-only templates/agent-ciliumnetworkpolicy.yaml | grep -v '^ *#')
+echo "$cnp" | grep -q 'kind: CiliumNetworkPolicy' || fail "CiliumNetworkPolicy missing"
+echo "$cnp" | grep -q 'name: t-preloop-agent-execution' || fail "Cilium policy has the wrong name"
+echo "$cnp" | grep -A2 'endpointSelector:' | grep -q 'app: agent-execution' \
+  || fail "Cilium policy does not select app=agent-execution"
+echo "$cnp" | grep -A2 '^  ingress:' | grep -q 'fromEntities' || fail "Cilium ingress rule missing"
+echo "$cnp" | grep -A3 '^  ingress:' | grep -q '\- host' || fail "Cilium ingress does not admit the host (kubelet)"
+echo "$cnp" | grep -q 'ingressDeny' && fail "ingressDeny rendered while allowHostIngress is true"
+echo "$cnp" | grep -q 'k8s:io.kubernetes.pod.namespace: kube-system' || fail "Cilium DNS rule missing"
+echo "$cnp" | grep -q 'k8s-app: kube-dns' || fail "Cilium DNS rule not pinned to the DNS pods"
+echo "$cnp" | grep -q 'port: "53"' || fail "Cilium DNS port missing"
+echo "$cnp" | grep -q 'k8s:io.kubernetes.pod.namespace: preloop' || fail "Cilium control plane rule not scoped to the release namespace"
+echo "$cnp" | grep -q 'app.kubernetes.io/component: api' || fail "Cilium policy has no egress to the API"
+echo "$cnp" | grep -q 'app.kubernetes.io/component: gateway' || fail "Cilium policy has no egress to the gateway"
+echo "$cnp" | grep -q 'port: "8000"' || fail "Cilium policy omits the container port"
+echo "$cnp" | grep -A3 'toEntities:' | grep -q '\- world' || fail "Cilium internet rule missing world"
+echo "$cnp" | grep -A3 'toEntities:' | grep -q '\- host' || fail "Cilium internet rule missing host (public hairpin)"
+echo "$cnp" | grep -A3 'egressDeny:' | grep -q '169.254.169.254/32' || fail "Cilium policy does not deny the metadata address"
+echo "$cnp" | grep -q 'ipBlock' && fail "Cilium policy contains an ipBlock, which Cilium does not match against nodes"
+echo "$cnp" | grep -q '5432' && fail "Cilium policy allows the database port"
+echo "$cnp" | grep -q '4222' && fail "Cilium policy allows the NATS port"
+echo "$cnp" | grep -q 'component: console' && fail "Cilium policy allows the console"
+
+echo "==> agent isolation: Cilium variant, strict ingress and knobs"
+cnp=$(helm template t "$CHART" --namespace preloop \
+  --set agentExecution.networkPolicy.cilium.enabled=true \
+  --set agentExecution.networkPolicy.cilium.allowHostIngress=false \
+  --set 'agentExecution.networkPolicy.cilium.internetEntities={world,host,remote-node}' \
+  --set 'agentExecution.networkPolicy.internetPorts[0].port=443' \
+  --set 'agentExecution.networkPolicy.cilium.extraEgress[0].toCIDR[0]=203.0.113.0/24' \
+  --show-only templates/agent-ciliumnetworkpolicy.yaml | grep -v '^ *#')
+echo "$cnp" | grep -A1 '^  ingress:' | grep -q '\- {}' || fail "strict Cilium ingress missing the empty rule"
+echo "$cnp" | grep -A2 'ingressDeny:' | grep -q '\- all' || fail "strict Cilium ingress missing the deny from all"
+echo "$cnp" | grep -A4 'toEntities:' | grep -q '\- remote-node' || fail "internetEntities override not rendered"
+echo "$cnp" | grep -q 'port: "443"' || fail "internetPorts not applied to the Cilium internet rule"
+echo "$cnp" | grep -q '203.0.113.0/24' || fail "cilium.extraEgress not appended"
+
+echo "==> agent isolation: Cilium variant keeps the namespace-wide deny in a dedicated namespace"
+out=$(helm template t "$CHART" \
+  --set agentExecution.networkPolicy.cilium.enabled=true \
+  --set agentExecution.namespace.create=true)
+echo "$out" | grep -q 'kind: CiliumNetworkPolicy' || fail "Cilium policy missing in dedicated namespace mode"
+echo "$out" | grep -q 'name: agent-execution-isolation' || fail "namespace default-deny dropped in Cilium mode"
+echo "$out" | grep -q 'namespace: agent-executions' || fail "Cilium policy not placed in the agent namespace"
+
+echo "==> agent isolation: quota does not depend on the network policy"
+out=$(helm template t "$CHART" --set agentExecution.namespace.create=true \
+  --set agentExecution.networkPolicy.enabled=false)
+echo "$out" | grep -q 'kind: ResourceQuota' || fail "ResourceQuota dropped when networkPolicy.enabled=false"
+echo "$out" | grep -q 'kind: NetworkPolicy' && fail "NetworkPolicy rendered while networkPolicy.enabled=false"
 
 echo "==> control plane ingress policy: opt in, needs pod CIDRs"
 if helm template t "$CHART" \

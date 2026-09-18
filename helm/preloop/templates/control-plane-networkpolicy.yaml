@@ -19,6 +19,11 @@
 # not agents (any namespace), and addresses outside the pod network, which
 # is where host-network ingress controllers, kubelet probes, and load
 # balancer health checks come from.
+#
+# Not for Cilium: the ipBlock in the second rule does not match node
+# addresses there (policy-cidr-match-mode), so node-sourced traffic to the
+# API and gateway would be dropped. NOTES.txt warns when both this and
+# agentExecution.networkPolicy.cilium.enabled are set.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
