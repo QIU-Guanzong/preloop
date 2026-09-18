@@ -935,13 +935,20 @@ class OpenAIGatewayService:
     def response_warning(self) -> Optional[str]:
         """Every non-fatal warning this request produced, as one header value.
 
+        The budget warning comes first because it is the money-significant one:
+        the header is capped at 256 characters, and a collision warning carries
+        model UUIDs that would push the budget sentence past the cap.
+
         Returns:
             The warnings joined with ``" | "``, or ``None`` when the request
-            produced none. Endpoints emit this as ``X-Preloop-Warning``.
+            produced none. Non-streaming endpoints emit this as
+            ``X-Preloop-Warning``; streaming responses have already sent their
+            headers by the time the body generator runs, so callers on
+            ``stream: true`` do not receive it (see issue #810).
         """
         warnings = [
             warning
-            for warning in (self.alias_collision_warning, self.budget_warning)
+            for warning in (self.budget_warning, self.alias_collision_warning)
             if warning
         ]
         return " | ".join(warnings) if warnings else None

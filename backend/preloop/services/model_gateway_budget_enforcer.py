@@ -13,6 +13,14 @@ allowed, its spend counts as zero, the usage row keeps
 ``pricing_available=false``, the caller gets an ``X-Preloop-Warning``, and an
 admin is paged on the existing unpriced-model path so the catalog hole gets
 closed instead of being silently paid for by refused traffic.
+
+The accepted cost of that ruling: while a model is unpriced, a hard limit does
+not brake it, and the per-model alert has a 24h cooldown, so an account willing
+to rotate uncatalogued aliases can run up spend no dollar comparison can see.
+Every such request still lands a usage row with real token counts and
+``pricing_available=false``, so it is countable after the fact and repriced
+once the catalog learns the model. A volume backstop for unpriced traffic is
+deliberately not part of this change.
 """
 
 import logging

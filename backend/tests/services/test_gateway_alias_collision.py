@@ -325,3 +325,39 @@ def test_whitespace_padded_alias_agrees_between_validation_and_runtime(
             obj_in=_model_payload("collides"),
             account_id=test_user.account_id,
         )
+
+
+# ---------------------------------------------------------------------------
+# Header composition
+# ---------------------------------------------------------------------------
+
+
+def test_the_budget_warning_survives_a_collision_warning(db_session, test_user):
+    """The header is capped, so the money-significant warning goes first.
+
+    A collision warning embeds model UUIDs and runs past 100 characters; the
+    budget warning is what tells a caller their hard limit did not apply.
+    """
+    from preloop.api.endpoints.openai_gateway import _WARNING_HEADER_MAX_LEN
+    from preloop.services.model_gateway_budget_enforcer import (
+        unpriced_budget_warning,
+    )
+
+    service = _service(db_session, test_user)
+    assert service.response_warning is None
+
+    service.budget_warning = unpriced_budget_warning("google/gemini-3.8-flash")
+    service.alias_collision_warning = (
+        f"Alias zai/glm-5.3 matches more than one model: "
+        f"{test_user.account_id}, {test_user.id}"
+    )
+    header = service.response_warning
+    assert header is not None
+    assert header.startswith("budget_pricing_unavailable")
+    # What the caller acts on has to fit inside the header the endpoint sends.
+    kept = header[:_WARNING_HEADER_MAX_LEN]
+    assert "google/gemini-3.8-flash" in kept
+    assert "counted as $0.00 spend" in kept
+    # A collision on its own still reaches the caller unchanged.
+    service.budget_warning = None
+    assert service.response_warning == service.alias_collision_warning
