@@ -16,7 +16,7 @@ class CRUDFlow(CRUDBase[models.Flow]):
         super().__init__(model=models.Flow)
 
     def _query_with_ai_model(self, db: Session) -> Query:
-        """List/detail queries that serialize ``ai_model_name`` join the model."""
+        """List queries that serialize ``ai_model_name`` join the model."""
         return db.query(self.model).options(joinedload(self.model.ai_model))
 
     def get(
@@ -41,11 +41,9 @@ class CRUDFlow(CRUDBase[models.Flow]):
         # Convert to string if UUID
         id_str = str(id) if isinstance(id, UUID) else id
 
-        query = self._query_with_ai_model(db).filter(
-            cast(self.model.id, String) == id_str
-        )
+        query = db.query(self.model).filter(cast(self.model.id, String) == id_str)
         if refresh:
-            query = query.populate_existing()
+            query = query.populate_existing().options(joinedload(self.model.ai_model))
 
         if account_id:
             account_id_str = (
