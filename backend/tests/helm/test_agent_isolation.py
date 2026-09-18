@@ -488,16 +488,18 @@ def _endpoint_selector_keys(policy: Dict) -> List[str]:
 
 def test_cilium_variant_prefixes_every_label_key_in_endpoint_selectors() -> None:
     """Cilium reads a bare key inside toEndpoints as any:, which also matches
-    labels from other sources. k8s: names the pod label. The render must not
-    fall back to the bare form in either layout or with custom DNS labels."""
+    labels from other sources. k8s: names the pod label, while caller-supplied
+    sources stay explicit. Neither layout may fall back to a bare key."""
     custom_dns = [
         "agentExecution.networkPolicy.dns.podSelectorLabels.k8s-app=null",
         "agentExecution.networkPolicy.dns.podSelectorLabels.app=coredns",
+        "agentExecution.networkPolicy.dns.podSelectorLabels.any:tier=dns",
+        "agentExecution.networkPolicy.dns.podSelectorLabels.container:app=dns",
     ]
     for overrides in ([], [SEPARATE], custom_dns):
         keys = _endpoint_selector_keys(_cilium_policy(overrides))
         assert keys, "no endpoint selector rendered"
-        assert all(key.startswith("k8s:") for key in keys), keys
+        assert all(":" in key for key in keys), keys
 
 
 def test_cilium_variant_keeps_a_caller_supplied_label_source() -> None:

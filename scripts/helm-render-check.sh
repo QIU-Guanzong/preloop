@@ -154,7 +154,7 @@ bare_endpoint_keys() {
     labels && indent <= ldepth { labels = 0 }
     /(to|from)Endpoints:/ { inside = 1; stop = ($0 ~ /^ *- /) ? indent + 2 : indent; next }
     inside && /matchLabels:/ { labels = 1; ldepth = ($0 ~ /^ *- /) ? indent + 2 : indent; next }
-    inside && labels && NF > 0 && $1 !~ /^k8s:/ { print }
+    inside && labels && NF > 0 && substr($1, 1, length($1) - 1) !~ /:/ { print }
   '
 }
 assert_prefixed_endpoints() {
@@ -164,7 +164,7 @@ assert_prefixed_endpoints() {
 # The guard must catch a bare key and pass a prefixed one, or it proves nothing.
 [ -n "$(bare_endpoint_keys "$(printf '    - toEndpoints:\n        - matchLabels:\n            app: x\n')")" ] \
   || fail "the endpoint selector guard does not catch a bare key"
-[ -z "$(bare_endpoint_keys "$(printf '    - toEndpoints:\n        - matchLabels:\n            k8s:app: x\n      toPorts: []\n')")" ] \
+[ -z "$(bare_endpoint_keys "$(printf '    - toEndpoints:\n        - matchLabels:\n            k8s:app: x\n            any:tier: dns\n            container:app: x\n      toPorts: []\n')")" ] \
   || fail "the endpoint selector guard flags a prefixed key or a sibling field"
 
 echo "==> agent isolation: Cilium variant replaces the plain policy"
@@ -223,6 +223,7 @@ cnp=$(helm template t "$CHART" --namespace preloop \
 echo "$cnp" | grep -q 'k8s:app: coredns' || fail "custom DNS pod label not rendered with the k8s: source"
 echo "$cnp" | grep -q '^ *any:tier: dns' || fail "a caller-supplied label source was not kept as is"
 echo "$cnp" | grep -q 'k8s:any:tier' && fail "a caller-supplied label source was prefixed twice"
+assert_prefixed_endpoints "$cnp"
 
 echo "==> agent isolation: Cilium variant keeps the namespace-wide deny in a dedicated namespace"
 out=$(helm template t "$CHART" \
