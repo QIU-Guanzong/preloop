@@ -4,7 +4,7 @@ import {
   modelAttentionFingerprint,
   modelAttentionItemId,
 } from './attention';
-import { parseUTCDate } from './date';
+import { formatRelativeTime, parseUTCDate } from './date';
 
 /**
  * The Models page and the model detail page say "needs attention" from a
@@ -222,7 +222,9 @@ function modelAttentionStateForAlias(
       parts.push(summary.credentialsLastError);
     }
     if (summary.credentialsLastFailedAt) {
-      parts.push(`(${summary.credentialsLastFailedAt})`);
+      parts.push(
+        `(last ${formatRelativeTime(summary.credentialsLastFailedAt, now)})`
+      );
     }
     reasonText = parts.join(' ') || 'Credential refresh failed';
     remediationText = modelCredentialRemediation(summary.credentialType);

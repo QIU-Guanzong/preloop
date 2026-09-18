@@ -165,6 +165,113 @@ Authorization = "Bearer codex-durable-token"
 	}
 }
 
+func TestAgentsValidateIgnoresUnrelatedModelCredentialError(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+
+	codexDir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("failed to create codex dir: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents":
+			_ = json.NewEncoder(w).Encode(managedAgentListResponse{
+				Items: []managedAgentSummary{{
+					ID:                "agent-codex-1",
+					DisplayName:       "Codex CLI",
+					SessionSourceType: "codex",
+					SessionSourceID:   runtimePrincipalIDForAgent(AgentConfig{Name: "Codex CLI", ConfigPath: filepath.Join(codexDir, "config.toml")}),
+					LifecycleState:    "active",
+				}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/agent-codex-1":
+			_ = json.NewEncoder(w).Encode(managedAgentDetailResponse{
+				Agent: managedAgentSummary{
+					ID:                "agent-codex-1",
+					DisplayName:       "Codex CLI",
+					SessionSourceType: "codex",
+					LifecycleState:    "active",
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/ai-models":
+			_ = json.NewEncoder(w).Encode([]aiModelResponse{{
+				ID:                   "model-claude-unrelated",
+				Name:                 "Claude Sonnet",
+				ProviderName:         "anthropic",
+				ModelIdentifier:      "claude-sonnet-4",
+				CredentialType:       "oauth_anthropic_claude_code",
+				CredentialsStatus:    "error",
+				CredentialsLastError: "anthropic refresh failed (status=401, code=invalid_grant)",
+				HasAPIKey:            true,
+				IsDefault:            true,
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	configContent := fmt.Sprintf(`model = "openai/gpt-5.4"
+model_provider = "preloop"
+
+[model_providers.preloop]
+base_url = "%s/openai/v1"
+experimental_bearer_token = "codex-durable-token"
+wire_api = "responses"
+
+[mcp_servers.preloop]
+url = "%s/mcp/v1"
+
+[mcp_servers.preloop.http_headers]
+Authorization = "Bearer codex-durable-token"
+`, server.URL, server.URL)
+
+	if err := os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte(configContent), 0o644); err != nil {
+		t.Fatalf("failed to write codex config: %v", err)
+	}
+
+	oldURL := FlagURL
+	oldToken := FlagToken
+	FlagURL = server.URL
+	FlagToken = "test-token"
+	defer func() {
+		FlagURL = oldURL
+		FlagToken = oldToken
+	}()
+
+	rPipe, wPipe, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = wPipe
+
+	runErr := runAgentsValidate(agentsValidateCmd, []string{"Codex CLI"})
+
+	wPipe.Close()
+	os.Stdout = origStdout
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, rPipe)
+	output := buf.String()
+
+	if runErr != nil {
+		t.Fatalf("expected validation to succeed despite an unrelated model in error, got %v. Output:\n%s", runErr, output)
+	}
+	if strings.Contains(output, "validation_failed") {
+		t.Errorf("expected validation not to fail on an unrelated model, got:\n%s", output)
+	}
+	if strings.Contains(output, "Claude Sonnet") {
+		t.Errorf("validate must not name an unrelated fallback model, got:\n%s", output)
+	}
+	if !strings.Contains(output, "model_status: unknown") {
+		t.Errorf("expected fallback match to report model_status unknown, got:\n%s", output)
+	}
+}
+
 func TestAgentsStatusCodexCLIModelCredentialHealth(t *testing.T) {
 	home := t.TempDir()
 	testenv.SetHome(t, home)

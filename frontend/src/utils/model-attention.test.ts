@@ -220,8 +220,11 @@ describe('modelAttentionState', () => {
 
     expect(state.status).to.equal('failing');
     expect(state.dismissable).to.equal(true);
-    expect(state.reasonText).to.contain('openai refresh failed');
-    expect(state.reasonText).to.contain('(2026-09-15T10:00:00Z)');
+    expect(state.reasonText).to.equal(
+      'openai refresh failed (status=401, code=invalid_grant) (last 2h ago)'
+    );
+    expect(state.reasonText).to.not.contain('2026-09-15T10:00:00Z');
+    expect(state.credentialsLastFailedAt).to.equal('2026-09-15T10:00:00Z');
     expect(state.remediationText).to.contain('Codex CLI');
   });
 

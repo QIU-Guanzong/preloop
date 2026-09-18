@@ -1829,24 +1829,32 @@ func runAgentsValidate(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		agentModels := resolveAgentModelRows(client, agent, agentDetail, document)
-		for _, m := range agentModels {
-			mStatus := m.CredentialsStatus
-			if mStatus == "" {
-				mStatus = "active"
-			}
-			summary := m.CredentialsLastError
-			if summary == "" {
-				summary = "healthy"
-			}
-			result["model_status"] = mStatus
-			result["model_summary"] = summary
-			if strings.EqualFold(mStatus, "error") {
-				status = "validation_failed"
-				if result["error"] == nil {
-					result["error"] = fmt.Sprintf("model %s credential error: %s", m.Name, summary)
+		agentModels, matchKind := resolveAgentModelMatch(client, agent, agentDetail, document)
+		if matchKind == agentModelMatchFallback {
+			// Default-model / all-models fallbacks are not models this agent
+			// uses. Surface them as unknown rather than failing validate on
+			// an unrelated credential error.
+			result["model_status"] = "unknown"
+			result["model_summary"] = "no configured model match"
+		} else {
+			for _, m := range agentModels {
+				mStatus := m.CredentialsStatus
+				if mStatus == "" {
+					mStatus = "active"
 				}
-				break
+				summary := m.CredentialsLastError
+				if summary == "" {
+					summary = "healthy"
+				}
+				result["model_status"] = mStatus
+				result["model_summary"] = summary
+				if strings.EqualFold(mStatus, "error") {
+					status = "validation_failed"
+					if result["error"] == nil {
+						result["error"] = fmt.Sprintf("model %s credential error: %s", m.Name, summary)
+					}
+					break
+				}
 			}
 		}
 
@@ -6709,18 +6717,40 @@ func parseServerMapFromTOML(data []byte) (map[string]MCPDef, error) {
 	return parseServerMapFromDocument(doc), nil
 }
 
+// agentModelMatchKind says how resolveAgentModelMatch picked the rows.
+// Validate may fail on exact and provider matches, but not on fallbacks
+// (account default or every model), which are not models the agent uses.
+type agentModelMatchKind int
+
+const (
+	agentModelMatchNone agentModelMatchKind = iota
+	agentModelMatchExact
+	agentModelMatchProvider
+	agentModelMatchFallback
+)
+
 func resolveAgentModelRows(
 	client *api.Client,
 	agent AgentConfig,
 	detail *managedAgentDetailResponse,
 	document map[string]interface{},
 ) []aiModelResponse {
+	rows, _ := resolveAgentModelMatch(client, agent, detail, document)
+	return rows
+}
+
+func resolveAgentModelMatch(
+	client *api.Client,
+	agent AgentConfig,
+	detail *managedAgentDetailResponse,
+	document map[string]interface{},
+) ([]aiModelResponse, agentModelMatchKind) {
 	if client == nil || !client.IsAuthenticated() {
-		return nil
+		return nil, agentModelMatchNone
 	}
 	var allModels []aiModelResponse
 	if err := client.Get("/api/v1/ai-models", &allModels); err != nil || len(allModels) == 0 {
-		return nil
+		return nil, agentModelMatchNone
 	}
 
 	// 1. If detail has ConfiguredModels, match by AIModelID
@@ -6741,7 +6771,7 @@ func resolveAgentModelRows(
 			}
 		}
 		if len(matched) > 0 {
-			return matched
+			return matched, agentModelMatchExact
 		}
 	}
 
@@ -6758,7 +6788,7 @@ func resolveAgentModelRows(
 			}
 		}
 		if len(matched) > 0 {
-			return matched
+			return matched, agentModelMatchExact
 		}
 	}
 
@@ -6809,7 +6839,7 @@ func resolveAgentModelRows(
 					strings.EqualFold(strings.TrimSpace(m.Name), alias) ||
 					strings.EqualFold(strings.TrimSpace(gatewayAliasForAIModel(m)), alias) ||
 					strings.EqualFold(strings.TrimPrefix(alias, "preloop/"), strings.TrimSpace(m.ModelIdentifier)) {
-					return []aiModelResponse{m}
+					return []aiModelResponse{m}, agentModelMatchExact
 				}
 			}
 		}
@@ -6833,15 +6863,16 @@ func resolveAgentModelRows(
 		}
 	}
 	if len(typeMatched) > 0 {
-		return typeMatched
+		return typeMatched, agentModelMatchProvider
 	}
 
-	// 5. Default model fallback
+	// 5-6. Account default, then every model. These are not models the
+	// agent uses; validate reports unknown and does not fail on them.
 	for _, m := range allModels {
 		if m.IsDefault {
-			return []aiModelResponse{m}
+			return []aiModelResponse{m}, agentModelMatchFallback
 		}
 	}
 
-	return allModels
+	return allModels, agentModelMatchFallback
 }
