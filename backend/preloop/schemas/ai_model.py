@@ -215,6 +215,21 @@ class AIModelInDBBase(TimestampMixin, BaseModel):
     credential_type: Optional[str] = Field(
         None, description="Logical credential type stored for the model"
     )
+    credentials_status: Optional[str] = Field(
+        None, description="Status of the model's credential secret"
+    )
+    credentials_last_error: Optional[str] = Field(
+        None, description="Summary of the last credential refresh error"
+    )
+    credentials_last_error_code: Optional[str] = Field(
+        None, description="Error code from the last credential refresh attempt"
+    )
+    credentials_last_failed_at: Optional[datetime] = Field(
+        None, description="Timestamp of the last failed credential refresh"
+    )
+    credentials_last_verified_at: Optional[datetime] = Field(
+        None, description="Timestamp when credentials were last verified or refreshed"
+    )
     has_api_key: bool = Field(
         False, description="Whether this model has credentials configured"
     )

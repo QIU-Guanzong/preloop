@@ -1,6 +1,7 @@
 """AIModel model for storing model configurations."""
 
 import uuid
+from datetime import datetime
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from sqlalchemy import Boolean, ForeignKey, String, Text
@@ -137,6 +138,61 @@ class AIModel(Base):
     def supports_server_side_generation(self) -> bool:
         """Whether Preloop can run its own generation calls with this model."""
         return self.has_api_key and not self.is_principal_bound_oauth
+
+    @property
+    def credentials_status(self) -> Optional[str]:
+        """Status of the configured credential secret, if any."""
+        if self.credentials_secret:
+            return self.credentials_secret.status
+        return None
+
+    @property
+    def credentials_last_error(self) -> Optional[str]:
+        """Summary of the last credential refresh error, if any."""
+        if (
+            self.credentials_status == "error"
+            and self.credentials_secret
+            and isinstance(self.credentials_secret.meta_data, dict)
+        ):
+            return self.credentials_secret.meta_data.get("last_refresh_error")
+        return None
+
+    @property
+    def credentials_last_error_code(self) -> Optional[str]:
+        """Error code from the last credential refresh attempt, if any."""
+        if (
+            self.credentials_status == "error"
+            and self.credentials_secret
+            and isinstance(self.credentials_secret.meta_data, dict)
+        ):
+            code = self.credentials_secret.meta_data.get("last_refresh_code")
+            return str(code) if code is not None else None
+        return None
+
+    @property
+    def credentials_last_failed_at(self) -> Optional[datetime]:
+        """Timestamp of the last failed credential refresh attempt, if any."""
+        if (
+            self.credentials_status == "error"
+            and self.credentials_secret
+            and isinstance(self.credentials_secret.meta_data, dict)
+        ):
+            val = self.credentials_secret.meta_data.get("last_refresh_failed_at")
+            if isinstance(val, str) and val.strip():
+                try:
+                    return datetime.fromisoformat(val)
+                except (ValueError, TypeError):
+                    return None
+            elif isinstance(val, datetime):
+                return val
+        return None
+
+    @property
+    def credentials_last_verified_at(self) -> Optional[datetime]:
+        """Timestamp when the credentials were last verified or refreshed."""
+        if self.credentials_secret:
+            return self.credentials_secret.last_verified_at
+        return None
 
     @property
     def credentials_backend_type(self) -> Optional[str]:

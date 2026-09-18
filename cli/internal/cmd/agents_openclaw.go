@@ -347,16 +347,21 @@ type gatewayUsageSearchItem struct {
 }
 
 type aiModelResponse struct {
-	ID                  string                 `json:"id"`
-	Name                string                 `json:"name"`
-	ProviderName        string                 `json:"provider_name"`
-	ModelIdentifier     string                 `json:"model_identifier"`
-	APIEndpoint         string                 `json:"api_endpoint"`
-	MetaData            map[string]interface{} `json:"meta_data"`
-	CredentialType      string                 `json:"credential_type"`
-	CredentialsSecretID string                 `json:"credentials_secret_id"`
-	HasAPIKey           bool                   `json:"has_api_key"`
-	IsDefault           bool                   `json:"is_default"`
+	ID                        string                 `json:"id"`
+	Name                      string                 `json:"name"`
+	ProviderName              string                 `json:"provider_name"`
+	ModelIdentifier           string                 `json:"model_identifier"`
+	APIEndpoint               string                 `json:"api_endpoint"`
+	MetaData                  map[string]interface{} `json:"meta_data"`
+	CredentialType            string                 `json:"credential_type"`
+	CredentialsSecretID       string                 `json:"credentials_secret_id"`
+	CredentialsStatus         string                 `json:"credentials_status"`
+	CredentialsLastError      string                 `json:"credentials_last_error"`
+	CredentialsLastErrorCode  string                 `json:"credentials_last_error_code"`
+	CredentialsLastFailedAt   *api.Time              `json:"credentials_last_failed_at"`
+	CredentialsLastVerifiedAt *api.Time              `json:"credentials_last_verified_at"`
+	HasAPIKey                 bool                   `json:"has_api_key"`
+	IsDefault                 bool                   `json:"is_default"`
 }
 
 type aiModelCreateRequest struct {

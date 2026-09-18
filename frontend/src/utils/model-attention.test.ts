@@ -203,4 +203,64 @@ describe('modelAttentionState', () => {
       inboxBoth.items.filter((item) => item.kind === 'model')
     ).to.have.length(0);
   });
+  it('flags a model as failing when credentials refresh fails even with zero failed requests', () => {
+    const state = modelAttentionState(
+      summary({
+        failedRequests: 0,
+        lastFailureAt: null,
+        credentialsStatus: 'error',
+        credentialsLastError:
+          'openai refresh failed (status=401, code=invalid_grant)',
+        credentialsLastFailedAt: '2026-09-15T10:00:00Z',
+        credentialType: 'oauth_openai_codex',
+      }),
+      [],
+      NOW
+    );
+
+    expect(state.status).to.equal('failing');
+    expect(state.dismissable).to.equal(true);
+    expect(state.reasonText).to.contain('openai refresh failed');
+    expect(state.reasonText).to.contain('(2026-09-15T10:00:00Z)');
+    expect(state.remediationText).to.contain('Codex CLI');
+  });
+
+  it('provides tailored remediation text based on credential type', () => {
+    const claudeState = modelAttentionState(
+      summary({
+        credentialsStatus: 'error',
+        credentialType: 'oauth_anthropic_claude_code',
+      }),
+      [],
+      NOW
+    );
+    expect(claudeState.remediationText).to.contain('Claude Code');
+
+    const genericState = modelAttentionState(
+      summary({
+        credentialsStatus: 'error',
+        credentialType: 'api_key',
+      }),
+      [],
+      NOW
+    );
+    expect(genericState.remediationText).to.contain('Rotate the API key');
+  });
+
+  it('does not flag active credentials as failing when request count is zero', () => {
+    const state = modelAttentionState(
+      summary({
+        failedRequests: 0,
+        lastFailureAt: null,
+        credentialsStatus: 'active',
+        credentialsLastVerifiedAt: '2026-09-15T10:00:00Z',
+      }),
+      [],
+      NOW
+    );
+
+    expect(state.status).to.equal('quiet');
+    expect(state.reasonText).to.be.null;
+    expect(state.remediationText).to.be.null;
+  });
 });
