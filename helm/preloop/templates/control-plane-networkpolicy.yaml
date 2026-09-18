@@ -1,0 +1,81 @@
+{{- if .Values.agentExecution.networkPolicy.controlPlaneIngress.enabled -}}
+{{- $np := .Values.agentExecution.networkPolicy -}}
+{{- $cpi := $np.controlPlaneIngress -}}
+{{- $podCidrs := $cpi.podCidrs | default (list) -}}
+{{- $controlPlanePorts := $np.controlPlanePorts | default (list 80 8000) -}}
+{{- if not $podCidrs }}
+{{- fail "agentExecution.networkPolicy.controlPlaneIngress.podCidrs must list the cluster pod CIDRs when controlPlaneIngress.enabled is true; without them this policy would also cut off node-sourced traffic such as load balancer health checks" }}
+{{- end }}
+# Defence in depth for the API and gateway pods.
+#
+# The agent egress policy already limits which ports an agent pod may open
+# towards the control plane. This one states the same limit from the other
+# side, so a pod that escapes the agent policy (wrong namespace, missing
+# label, a CNI that does not enforce egress) still reaches only the HTTP
+# ports.
+#
+# Selecting a pod for Ingress denies every source that no rule names, so
+# the first two rules deliberately re-admit everyone else: pods that are
+# not agents (any namespace), and addresses outside the pod network, which
+# is where host-network ingress controllers, kubelet probes, and load
+# balancer health checks come from.
+#
+# Not for Cilium: the ipBlock in the second rule does not match node
+# addresses there (policy-cidr-match-mode), so node-sourced traffic to the
+# API and gateway would be dropped. NOTES.txt warns when both this and
+# agentExecution.networkPolicy.cilium.enabled are set.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "preloop.fullname" . }}-control-plane-ingress
+  labels:
+    {{- include "preloop.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "preloop.selectorLabels" . | nindent 6 }}
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          - api
+          - gateway
+
+  policyTypes:
+    - Ingress
+
+  ingress:
+    # Every pod that is not an agent pod. A pod with no `app` label matches
+    # NotIn, which is what the console and the workers rely on.
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchExpressions:
+              - key: app
+                operator: NotIn
+                values:
+                  - agent-execution
+
+    # Anything sourced outside the pod network: nodes, host-network
+    # ingress controllers, external load balancers.
+    - from:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range $podCidrs }}
+              - {{ . | quote }}
+              {{- end }}
+
+    # Agent pods, HTTP only.
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app: agent-execution
+      ports:
+        {{- range $controlPlanePorts }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+{{- end }}

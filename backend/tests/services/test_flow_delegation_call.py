@@ -265,6 +265,67 @@ async def test_an_unknown_reference_is_refused(
     assert record["metadata"]["preloop.ai/refusalReason"] == "flow_not_found"
 
 
+async def test_an_unknown_reference_names_the_flows_the_caller_may_call(
+    db_session, test_user, parent_flow, parent_execution
+):
+    """Measured on 2026-09-18 (issue #647): an orchestrator called a lens
+    by the result schema the lens emits rather than by its flow name, read
+    "does not name a flow in this account" as proof the lens was
+    uncallable, and reviewed nothing. The refusal now carries the
+    allowlist, so the next call can be the right one."""
+    record = await _refuse(
+        db_session, test_user.account_id, parent_execution, "preloop.review.x/v1"
+    )
+    text = record["status"]["message"]["parts"][0]["text"]
+    assert record["metadata"]["preloop.ai/refusalReason"] == "flow_not_found"
+    assert "callable flows here: 'Child Flow'" in text
+
+
+async def test_an_unlisted_target_names_the_flows_the_caller_may_call(
+    db_session, test_user, parent_flow, parent_execution
+):
+    """The same hint on the other refusal: the flow exists, it is just not
+    one this caller may start."""
+    _flow(db_session, name="Unlisted Flow", account_id=test_user.account_id)
+    record = await _refuse(
+        db_session, test_user.account_id, parent_execution, "Unlisted Flow"
+    )
+    text = record["status"]["message"]["parts"][0]["text"]
+    assert record["metadata"]["preloop.ai/refusalReason"] == "flow_not_callable"
+    assert "callable flows here: 'Child Flow'" in text
+
+
+async def test_a_caller_with_no_allowlist_says_so_rather_than_listing_nothing(
+    db_session, test_user
+):
+    """An empty allowlist is a configuration answer, not an empty list."""
+    caller = _flow(db_session, name="Lonely Flow", account_id=test_user.account_id)
+    execution = _execution(db_session, caller)
+    record = await _refuse(
+        db_session, test_user.account_id, execution, "Anything At All"
+    )
+    text = record["status"]["message"]["parts"][0]["text"]
+    assert "this flow has no callable flows configured" in text
+
+
+async def test_the_hint_stops_at_ten_names_and_counts_the_rest(db_session, test_user):
+    """A portfolio orchestrator may call many lenses; the refusal stays a
+    sentence rather than becoming a catalogue."""
+    from preloop.services.flow_delegation_call import callable_names_hint
+
+    caller = _flow(
+        db_session,
+        name="Wide Flow",
+        account_id=test_user.account_id,
+        callable_flows=[{"flow": f"Lens {index}"} for index in range(13)],
+    )
+    hint = callable_names_hint(caller)
+    assert "'Lens 0'" in hint
+    assert "'Lens 9'" in hint
+    assert "'Lens 10'" not in hint
+    assert hint.endswith("and 3 more")
+
+
 async def test_a_flow_in_another_account_is_refused_as_not_found(
     db_session, test_user, parent_flow, parent_execution
 ):

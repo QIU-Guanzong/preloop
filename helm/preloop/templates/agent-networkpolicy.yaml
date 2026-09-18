@@ -1,8 +1,161 @@
-{{- if and .Values.agentExecution.networkPolicy.enabled .Values.agentExecution.namespace.create -}}
-{{- $agentNamespace := .Values.agentExecution.namespace.name -}}
+{{- if .Values.agentExecution.networkPolicy.enabled -}}
+{{- $np := .Values.agentExecution.networkPolicy -}}
+{{- $agentNamespace := .Values.agentExecution.namespace.create | ternary .Values.agentExecution.namespace.name .Release.Namespace -}}
+{{- /*
+Cluster CIDRs carved out of the internet rule. The chart default is empty
+so that a release which set the previous key, excludeCIDRs, keeps its
+carve-out across the upgrade: Helm lays saved values over the new chart
+defaults, so a populated default here would shadow the legacy key for
+every existing install. The last fallback is the three RFC1918 ranges plus
+the cloud metadata address.
+*/ -}}
+{{- $clusterCidrs := $np.clusterCidrs | default $np.excludeCIDRs | default (list "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "169.254.169.254/32") -}}
+{{- $extraEgress := $np.extraEgress | default $np.additionalEgressRules -}}
+{{- $controlPlanePorts := $np.controlPlanePorts | default (list 80 8000) -}}
+{{- $dns := $np.dns | default dict -}}
+{{- $dnsNamespaceLabels := $dns.namespaceSelectorLabels | default (dict "kubernetes.io/metadata.name" "kube-system") -}}
+{{- $dnsPorts := $dns.ports | default (list 53) -}}
+{{- $cilium := $np.cilium | default dict -}}
+{{- if not $cilium.enabled }}
 ---
-# NetworkPolicy for agent execution namespace - enforces strict network isolation
-# Only created when using a separate namespace for agent execution
+# Agent execution isolation.
+#
+# Agent pods run untrusted, model-authored code. They are labelled
+# app=agent-execution by the executor
+# (backend/preloop/agents/container.py, pod template labels), whether they
+# land in a dedicated namespace or in the release namespace, so this policy
+# selects that label rather than the whole namespace and holds in both
+# topologies.
+#
+# Egress is an allow list: DNS, the Preloop control plane (MCP plus the
+# model gateway), the public internet, and whatever the operator adds. The
+# database, NATS, the console, and other agent pods are not on it.
+#
+# Ingress is denied. Nothing in the cluster dials an agent pod: results and
+# logs leave through the pod log stream that the runner reads from the API
+# server, and checkpoints and evidence are pushed out by the pod itself
+# (backend/preloop/services/checkpoint_runtime.py). The kubelet does dial
+# in, to run the startup probe of environment sidecars; Cilium, Calico and
+# Antrea admit that host-sourced traffic regardless of policy, and
+# nodeCidrs re-admits it explicitly on a CNI that does not.
+#
+# On Cilium the ipBlock below does not match node addresses, so a public
+# address that resolves back into the cluster is unreachable from agent
+# pods. agentExecution.networkPolicy.cilium.enabled renders a
+# CiliumNetworkPolicy in place of this object.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "preloop.fullname" . }}-agent-execution
+  namespace: {{ $agentNamespace }}
+  labels:
+    {{- include "preloop.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-execution
+spec:
+  podSelector:
+    matchLabels:
+      app: agent-execution
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  {{- with $np.nodeCidrs }}
+  # INGRESS: node addresses only, for kubelet probes on a CNI that
+  # enforces node-sourced traffic. No port restriction: the probe targets
+  # whichever port the sidecar declares.
+  ingress:
+    - from:
+        {{- range . }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+  {{- else }}
+  # INGRESS: deny all. An empty rule list means "no source is allowed".
+  ingress: []
+  {{- end }}
+
+  egress:
+    # DNS. Without this nothing else resolves.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml $dnsNamespaceLabels | nindent 14 }}
+          {{- with $dns.podSelectorLabels }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+      ports:
+        {{- range $dnsPorts }}
+        - protocol: UDP
+          port: {{ . }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+
+    {{- if $np.allowPreloopAPI }}
+    # Control plane: MCP tools on the API, model calls on the gateway.
+    #
+    # Both the service port (80) and the container port (8000) are allowed:
+    # a ClusterIP connection is translated to the backing pod IP and its
+    # target port before policy is evaluated on most CNIs, so a rule that
+    # only names 80 drops the traffic it meant to permit.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              {{- include "preloop.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              {{- include "preloop.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: gateway
+      ports:
+        {{- range $controlPlanePorts }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    {{- end }}
+
+    {{- if $np.allowExternalLLMAPIs }}
+    # The public internet: model providers, git remotes, package registries.
+    # Everything inside the cluster is carved out, so this rule cannot be
+    # used to reach the database, NATS, or another tenant's agent pod.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range $clusterCidrs }}
+              - {{ . | quote }}
+              {{- end }}
+      {{- with $np.internetPorts }}
+      ports:
+        {{- range . }}
+        - protocol: {{ .protocol | default "TCP" }}
+          port: {{ .port }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+
+    {{- with $extraEgress }}
+    # Operator-supplied rules (an in-cluster registry, a node-local DNS
+    # cache on a link-local address, a private artifact store).
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+
+{{- if .Values.agentExecution.namespace.create }}
+---
+# Default deny for every other pod in the dedicated agent namespace.
+# NetworkPolicies are additive, so this rule set (deny both directions,
+# no exceptions) leaves the allow list above untouched for agent pods and
+# isolates anything else that lands in the namespace.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -12,72 +165,20 @@ metadata:
     {{- include "preloop.labels" . | nindent 4 }}
     app.kubernetes.io/component: agent-execution
 spec:
-  # Apply to all pods in the agent-execution namespace
   podSelector: {}
-
   policyTypes:
     - Ingress
     - Egress
-
-  # INGRESS: Deny all incoming connections
-  # Agent containers should not receive any inbound connections
   ingress: []
-
-  # EGRESS: Allow only specific outbound connections
-  egress:
-    # Allow DNS resolution (required for all network operations)
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-      ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
-
-    {{- if .Values.agentExecution.networkPolicy.allowPreloopAPI }}
-    # Allow connections to Preloop API (for MCP tool calls)
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ .Release.Namespace }}
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: {{ include "preloop.name" . }}
-              app.kubernetes.io/component: api
-      ports:
-        - protocol: TCP
-          port: {{ .Values.service.port }}
-    {{- end }}
-
-    {{- if .Values.agentExecution.networkPolicy.allowExternalLLMAPIs }}
-    # Allow connections to external LLM APIs (Anthropic, OpenAI, etc.)
-    # This allows egress to any external IP on HTTPS port
-    - to:
-        - namespaceSelector: {}
-      ports:
-        - protocol: TCP
-          port: 443
-      # Exclude internal cluster networks
-      {{- if .Values.agentExecution.networkPolicy.excludeCIDRs }}
-      except:
-        {{- range .Values.agentExecution.networkPolicy.excludeCIDRs }}
-        - namespaceSelector: {}
-          ipBlock:
-            cidr: {{ . }}
-        {{- end }}
-      {{- end }}
-    {{- end }}
-
-    {{- if .Values.agentExecution.networkPolicy.additionalEgressRules }}
-    # Additional custom egress rules
-    {{- toYaml .Values.agentExecution.networkPolicy.additionalEgressRules | nindent 4 }}
-    {{- end }}
-
+  egress: []
+{{- end }}
+{{- end }}
+{{- if .Values.agentExecution.namespace.create }}
+{{- $agentNamespace := .Values.agentExecution.namespace.name }}
 ---
 # ResourceQuota for agent execution namespace - prevent resource exhaustion
-# Only created when using a separate namespace for agent execution
+# Namespace-wide, so it only exists when agents have a namespace of their
+# own. It does not depend on the NetworkPolicy being enabled.
 apiVersion: v1
 kind: ResourceQuota
 metadata:
