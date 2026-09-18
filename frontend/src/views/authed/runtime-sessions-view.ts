@@ -1541,12 +1541,26 @@ export class RuntimeSessionsView extends LitElement {
     if (startTime !== null && markerTime <= startTime) {
       return null;
     }
+    // A floor past the end of the range is not suppressed: it means none of
+    // the range is indexed, which is the strongest version of this warning,
+    // not the absence of one. renderSearchNotices() says so in its own words.
+    return marker;
+  }
+
+  /**
+   * Whether the corpus starts after the end of the range being searched.
+   *
+   * Then nothing in the range is indexed at all, so an empty answer carries
+   * no information about what happened: it is a statement about the corpus.
+   */
+  private searchedRangeEndsBelowFloor(): boolean {
+    const marker = this.coverageFloorFrom();
+    if (!marker) {
+      return false;
+    }
     const end = this.rangeEndIso();
     const endTime = end ? new Date(end).getTime() : Date.now();
-    if (markerTime > endTime) {
-      return null;
-    }
-    return marker;
+    return new Date(marker).getTime() > endTime;
   }
 
   /**
@@ -1569,6 +1583,7 @@ export class RuntimeSessionsView extends LitElement {
   private renderSearchNotices() {
     const coverage = this.partialCoverageThrough();
     const floor = this.coverageFloorFrom();
+    const floorCoversNothing = this.searchedRangeEndsBelowFloor();
     const degraded = this.degradedNotice();
     if (!coverage && !floor && !degraded) {
       return '';
@@ -1579,15 +1594,24 @@ export class RuntimeSessionsView extends LitElement {
           floor
             ? html`
                 <sl-alert
-                  variant="neutral"
+                  variant=${floorCoversNothing ? 'warning' : 'neutral'}
                   open
                   data-testid="coverage-floor-notice"
                 >
                   <sl-icon slot="icon" name="clock-history"></sl-icon>
-                  Search reaches back to ${this.formatDateTime(floor)}. Sessions
-                  older than that are not indexed yet, so they cannot match
-                  whatever they contain. An operator switches on the history
-                  backfill to widen this.
+                  ${
+                    floorCoversNothing
+                      ? html`Nothing in this date range is indexed: search
+                        reaches back only to ${this.formatDateTime(floor)}. An
+                        empty answer here means not indexed, not that nothing
+                        happened. An operator switches on the history backfill
+                        to widen this.`
+                      : html`Search reaches back to
+                        ${this.formatDateTime(floor)}. Sessions older than that
+                        are not indexed yet, so they cannot match whatever they
+                        contain. An operator switches on the history backfill to
+                        widen this.`
+                  }
                 </sl-alert>
               `
             : ''

@@ -1388,6 +1388,57 @@ describe('RuntimeSessionsView', () => {
       ).to.equal(null);
     });
 
+    it('warns hardest when the whole range searched predates the corpus', async () => {
+      // A custom range that ends before the corpus starts: every session in it
+      // is unindexed, so an empty answer says nothing about what happened.
+      const daysAgo = (days: number) =>
+        new Date(Date.now() - days * 24 * 3_600_000).toISOString();
+      const isoDay = (days: number) => daysAgo(days).slice(0, 10);
+      fetchStub.withArgs(SEARCH_URL, sinon.match.any).callsFake(
+        async () =>
+          new Response(
+            JSON.stringify(
+              searchResponse({
+                indexed_from: daysAgo(2),
+                indexed_through: daysAgo(0),
+                backfill_complete: false,
+                backfill_state: 'not_started',
+              })
+            ),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+      );
+
+      const element = (await fixture(
+        html`<runtime-sessions-view></runtime-sessions-view>`
+      )) as RuntimeSessionsView;
+      await waitUntil(
+        () => !(element as any).loading,
+        'Runtime sessions view did not finish loading'
+      );
+      (element as any).startDate = isoDay(30);
+      (element as any).endDate = isoDay(10);
+      await element.updateComplete;
+      await typeQuery(element, 'rollout plan');
+      await waitUntil(
+        () => searchCalls().length > 0,
+        'Search did not reach the content search endpoint',
+        { timeout: 3000 }
+      );
+      await waitUntil(
+        () => !(element as any).searchLoading,
+        'Search did not settle'
+      );
+      await element.updateComplete;
+
+      const notice = element.shadowRoot!.querySelector(
+        '[data-testid="coverage-floor-notice"]'
+      );
+      expect(notice).to.not.equal(null);
+      expect(notice!.textContent).to.contain('Nothing in this date range');
+      expect(notice!.getAttribute('variant')).to.equal('warning');
+    });
+
     it('surfaces a degraded semantic half rather than implying completeness', async () => {
       fetchStub.withArgs(SEARCH_URL, sinon.match.any).callsFake(
         async () =>

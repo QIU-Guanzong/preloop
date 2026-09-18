@@ -15,7 +15,7 @@ they asked for, and they have no way to tell.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, get_args
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -98,11 +98,14 @@ BACKFILL_STATE_IN_PROGRESS = "in_progress"
 #: index, so an empty answer is an honest "no session did that".
 BACKFILL_STATE_COMPLETE = "complete"
 
-BACKFILL_STATES = (
-    BACKFILL_STATE_NOT_STARTED,
-    BACKFILL_STATE_IN_PROGRESS,
-    BACKFILL_STATE_COMPLETE,
-)
+#: The closed set as a type, so the generated schema publishes the three
+#: values the way it publishes the search modes, and a client can exhaust it.
+#: A constant above that drifts from one of these fails validation the first
+#: time a response carries it, which is why the tuple is derived rather than
+#: written out a second time.
+SessionSearchBackfillState = Literal["not_started", "in_progress", "complete"]
+
+BACKFILL_STATES: tuple[str, ...] = get_args(SessionSearchBackfillState)
 
 #: Longest query accepted. Past this a caller is pasting a document, not
 #: searching for one.
@@ -431,7 +434,7 @@ class SessionSearchResponse(BaseModel):
             "backwards, or that no backfill has been run."
         ),
     )
-    backfill_state: str = Field(
+    backfill_state: SessionSearchBackfillState = Field(
         BACKFILL_STATE_NOT_STARTED,
         description=(
             "One of: " + ", ".join(BACKFILL_STATES) + ". ``not_started`` on a "

@@ -294,12 +294,6 @@ def test_indexed_from_moves_backwards_as_the_backfill_progresses(db_session, tes
     assert after_second.indexed_from < after_first.indexed_from
     assert after_first.state == backfill.BACKFILL_STATE_IN_PROGRESS
     assert after_first.complete is False
-    # The shape the search endpoint returns.
-    assert set(after_first.as_dict()) == {
-        "indexed_from",
-        "backfill_complete",
-        "backfill_state",
-    }
 
     settings.session_search_backfill_max_rows_per_pass = 1000
     backfill.run_session_search_backfill(db_session, now=NOW)

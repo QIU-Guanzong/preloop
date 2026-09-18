@@ -105,16 +105,6 @@ class CorpusCoverage:
     complete: bool = False
     state: str = BACKFILL_STATE_NOT_STARTED
 
-    def as_dict(self) -> Dict[str, Any]:
-        """Return the value in the shape a search response carries."""
-        return {
-            "indexed_from": (
-                self.indexed_from.isoformat() if self.indexed_from else None
-            ),
-            "backfill_complete": self.complete,
-            "backfill_state": self.state,
-        }
-
 
 @dataclass
 class AccountBackfillResult:

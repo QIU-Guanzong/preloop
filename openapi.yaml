@@ -27054,6 +27054,10 @@ components:
           default: false
         backfill_state:
           type: string
+          enum:
+          - not_started
+          - in_progress
+          - complete
           title: Backfill State
           description: 'One of: not_started, in_progress, complete. ``not_started``
             on a deployment where the operator has not switched the backfill on, which

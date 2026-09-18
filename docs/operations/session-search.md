@@ -25,7 +25,7 @@ Two switches decide whether anything is written at all:
 | Variable | Default | Role |
 | --- | --- | --- |
 | `SESSION_SEARCH_INDEX_ENABLED` | true | Whether any chunk is written as content is stored |
-| `MODEL_GATEWAY_CAPTURE_CONTENT` | false | Whether prompt and response bodies are kept at all. Off means gateway chunks carry metadata only, and a search for a word inside a prompt cannot match |
+| `MODEL_GATEWAY_CAPTURE_CONTENT` | true | Whether prompt and response bodies are kept at all. Off means gateway chunks carry metadata only, and a search for a word inside a prompt cannot match. A deployment that turns it off for privacy gets title and metadata search and nothing more |
 
 The consequence operators hit first: **indexing on write covers new sessions
 only**. On the day search is deployed, nothing older than the deploy is in
