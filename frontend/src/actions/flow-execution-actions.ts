@@ -87,6 +87,28 @@ export function confirmStopExecution(execution: {
   });
 }
 
+/**
+ * Confirmation asked before a run is retried.
+ *
+ * States the model and harness the retry will use (re-resolved from current flow).
+ */
+export function confirmRetryExecution(options: {
+  flow_name?: string | null;
+  agent_type?: string | null;
+  model_name?: string | null;
+}): Promise<boolean> {
+  const harness = options.agent_type || 'default harness';
+  const model = options.model_name || 'default model';
+  return confirmDialog({
+    title: 'Retry run',
+    message: `Retry the run of "${options.flow_name || 'this flow'}"?`,
+    detail: `The retry will run with ${harness} using ${model}, re-resolved from the current flow definition.`,
+    confirmLabel: 'Retry run',
+    cancelLabel: 'Cancel',
+    variant: 'primary',
+  });
+}
+
 export function canRetryExecution(
   execution: FlowExecutionActionResource
 ): boolean {

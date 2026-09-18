@@ -413,6 +413,37 @@ def _persisted_matrix(execution: models.FlowExecution) -> Optional[Dict[str, Any
     return None
 
 
+def is_model_usable_and_gateway_enabled(
+    db: Session,
+    flow: models.Flow,
+    ai_model_id: Any,
+    agent_type: str,
+) -> bool:
+    """Check whether a model exists, is account-visible, and usable by the harness.
+
+    Also checks that if gateway is configured, gateway.enabled is not False.
+    """
+    if not ai_model_id:
+        return False
+    try:
+        model_id = _model_uuid(ai_model_id)
+    except ModelRoutingError:
+        return False
+    model = crud_ai_model.get(db, id=model_id)
+    if model is None:
+        return False
+    if not _account_can_use_model(model, getattr(flow, "account_id", None)):
+        return False
+    meta_data = model.meta_data if isinstance(model.meta_data, dict) else {}
+    gateway = meta_data.get("gateway")
+    if isinstance(gateway, dict) and gateway.get("enabled") is False:
+        return False
+    harness = (agent_type or "").strip().lower()
+    if harness != "cursor":
+        return model_usable_for_agent(model, harness)
+    return getattr(model, "model_kind", "llm") == "llm"
+
+
 def validate_authorized_matrix(
     db: Session, flow: models.Flow, cell: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -435,9 +466,19 @@ def validate_authorized_matrix(
     """
     if not isinstance(cell, dict):
         raise ModelRoutingError("authorized matrix cell must be an object")
-    cell["agent_type"] = cell.get("agent_type") or flow.agent_type
-    model_id = cell.get("ai_model_id") or flow.ai_model_id
-    cell["ai_model_id"] = str(model_id) if model_id else None
+    derived: List[str] = list(cell.get("derived") or [])
+    if not cell.get("agent_type") and flow.agent_type:
+        cell["agent_type"] = flow.agent_type
+        if "agent_type" not in derived:
+            derived.append("agent_type")
+    if not cell.get("ai_model_id") and flow.ai_model_id:
+        cell["ai_model_id"] = str(flow.ai_model_id)
+        if "ai_model_id" not in derived:
+            derived.append("ai_model_id")
+    elif cell.get("ai_model_id"):
+        cell["ai_model_id"] = str(cell["ai_model_id"])
+    if derived:
+        cell["derived"] = derived
     agent_type = cell.get("agent_type")
     if agent_type:
         harness = _require_hosted_routing_harness(agent_type)
@@ -577,22 +618,96 @@ def prepare_execution_routing(
         if str(source_execution.flow_id) != str(flow.id):
             raise ModelRoutingError("source execution does not belong to this flow")
         persisted_matrix = _persisted_matrix(source_execution)
+        persisted_record = _persisted_routing_record(source_execution)
+        if persisted_matrix is None and persisted_record is None:
+            raise ModelRoutingError(
+                "Prior execution model/harness identity is unavailable; start an explicit new execution."
+            )
+
+        if pin_kind == "retry":
+            if persisted_matrix is not None:
+                # Acceptance criteria 3, 4, 5:
+                # Strip derived overrides so they re-resolve from the current flow.
+                # Keep index, batch_id, and user-supplied agent_type.
+                # If user-supplied ai_model_id is deleted or no longer gateway-enabled,
+                # fall back to flow model with a note.
+                matrix_retry = dict(persisted_matrix)
+                # Pre-#803 cells have no derived marker and stay pinned.
+                derived = set(matrix_retry.get("derived") or [])
+                for key in derived:
+                    matrix_retry.pop(key, None)
+                matrix_retry.pop("derived", None)
+
+                note = None
+                if "ai_model_id" in matrix_retry:
+                    candidate_model_id = matrix_retry["ai_model_id"]
+                    candidate_harness = (
+                        matrix_retry.get("agent_type") or flow.agent_type or "codex"
+                    )
+                    if not is_model_usable_and_gateway_enabled(
+                        db, flow, candidate_model_id, candidate_harness
+                    ):
+                        matrix_retry["ai_model_id"] = (
+                            str(flow.ai_model_id) if flow.ai_model_id else None
+                        )
+                        note = f"Matrix model override {candidate_model_id} unavailable or gateway-disabled; fell back to flow model."
+
+                validated = validate_authorized_matrix(db, flow, matrix_retry)
+                details[MATRIX_OVERRIDES_KEY] = validated
+
+                reason = f"Retry of execution {source_execution.id}."
+                if note:
+                    reason += f" {note}"
+                labels = extract_trusted_labels(details)
+                details[ROUTING_RECORD_KEY] = _record(
+                    ai_model_id=validated.get("ai_model_id"),
+                    agent_type=validated.get("agent_type"),
+                    source="retry",
+                    reason=reason,
+                    label_snapshot=labels,
+                )
+            else:
+                # Acceptance criteria 1, 2, 6:
+                # Re-resolve model and harness from current flow and write fresh _model_routing
+                fresh_record = resolve_routing_record(db, flow, details)
+                prior_model_id = (persisted_record or {}).get("ai_model_id")
+                prior_note = None
+                if prior_model_id:
+                    try:
+                        prior_uuid = _model_uuid(prior_model_id)
+                        prior_model = crud_ai_model.get(db, id=prior_uuid)
+                        if not _account_can_use_model(
+                            prior_model, getattr(flow, "account_id", None)
+                        ):
+                            prior_note = f"Prior model {prior_model_id} is retired or unavailable."
+                    except Exception:
+                        prior_note = (
+                            f"Prior model {prior_model_id} is retired or unavailable."
+                        )
+
+                fresh_record["source"] = "retry"
+                reason = f"Retry of execution {source_execution.id}. Re-resolved model and harness from current flow."
+                if fresh_record.get("rule_id"):
+                    reason += f" Matched routing rule '{fresh_record['rule_id']}'."
+                if prior_note:
+                    reason += f" {prior_note}"
+                fresh_record["reason"] = reason
+                details[ROUTING_RECORD_KEY] = fresh_record
+
+            return details
+
+        # For continuation or other pin_kind
         if persisted_matrix is not None:
             require_persisted_identity(persisted_matrix)
             details[MATRIX_OVERRIDES_KEY] = validate_authorized_matrix(
                 db, flow, persisted_matrix
             )
-        persisted_record = _persisted_routing_record(source_execution)
         if persisted_record is not None:
             pinned = dict(persisted_record)
             pinned["source"] = "pinned"
             if pin_kind == "continuation":
                 pinned["handoff"] = "native_continue"
             details[ROUTING_RECORD_KEY] = revalidate_routing_record(db, flow, pinned)
-        if persisted_matrix is None and persisted_record is None:
-            raise ModelRoutingError(
-                "Prior execution model/harness identity is unavailable; start an explicit new execution."
-            )
         return details
 
     record = resolve_routing_record(db, flow, details)

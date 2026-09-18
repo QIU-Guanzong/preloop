@@ -27,7 +27,10 @@ import {
 } from '../../utils/date';
 import { RUNNING_STATUSES, executionDurationText } from '../../utils/execution';
 import { actionsFor } from '../../actions';
-import { canRetryExecution } from '../../actions/flow-execution-actions';
+import {
+  canRetryExecution,
+  confirmRetryExecution,
+} from '../../actions/flow-execution-actions';
 import '../../components/resource-actions.ts';
 import '../../components/operator-note-composer.ts';
 import {
@@ -131,6 +134,7 @@ interface Flow {
   agent_type: string;
   trigger_event_source: string;
   trigger_event_type: string;
+  ai_model_name?: string | null;
 }
 
 interface ToolActivityEntry {
@@ -3470,6 +3474,13 @@ ${log.payload.content}</pre>
 
   async retryExecution() {
     if (!this.executionId) return;
+
+    const confirmed = await confirmRetryExecution({
+      flow_name: this.flow?.name,
+      agent_type: this.flow?.agent_type,
+      model_name: this.flow?.ai_model_name,
+    });
+    if (!confirmed) return;
 
     try {
       this.isRetrying = true;

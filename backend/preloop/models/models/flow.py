@@ -1,3 +1,4 @@
+from typing import Optional
 from sqlalchemy import (  # Added JSON
     Boolean,
     Column,
@@ -172,6 +173,10 @@ class Flow(Base):
     executions = relationship(
         "FlowExecution", back_populates="flow", cascade="all, delete-orphan"
     )
+
+    @property
+    def ai_model_name(self) -> Optional[str]:
+        return self.ai_model.name if self.ai_model else None
 
     def __repr__(self) -> str:
         return f"<Flow(id={self.id}, name='{self.name}')>"

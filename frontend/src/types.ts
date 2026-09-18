@@ -107,6 +107,7 @@ export interface Flow {
   agent_type?: string;
   agent_config?: Record<string, unknown>;
   ai_model_id?: string;
+  ai_model_name?: string | null;
   trigger_event_source?: string;
   trigger_event_types?: string[];
   trigger_organization_id?: string;

@@ -1,8 +1,8 @@
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 from uuid import UUID
 
 from sqlalchemy import cast, String
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Query, Session, joinedload
 
 from .. import models, schemas
 from .base import CRUDBase
@@ -14,6 +14,10 @@ class CRUDFlow(CRUDBase[models.Flow]):
     def __init__(self):
         """Initialize with the Flow model."""
         super().__init__(model=models.Flow)
+
+    def _query_with_ai_model(self, db: Session) -> Query:
+        """List queries that serialize ``ai_model_name`` join the model."""
+        return db.query(self.model).options(joinedload(self.model.ai_model))
 
     def get(
         self,
@@ -49,6 +53,25 @@ class CRUDFlow(CRUDBase[models.Flow]):
 
         return query.first()
 
+    def get_multi(
+        self,
+        db: Session,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+        account_id: Optional[str] = None,
+        **filters: Any,
+    ) -> List[models.Flow]:
+        """List flows with ``ai_model`` joined so ``ai_model_name`` is not N+1."""
+        query = self._query_with_ai_model(db)
+        if account_id and hasattr(self.model, "account_id"):
+            query = query.filter(self.model.account_id == account_id)
+
+        for key, value in filters.items():
+            if hasattr(self.model, key):
+                query = query.filter(getattr(self.model, key) == value)
+        return query.offset(skip).limit(limit).all()
+
     def get_by_account(
         self,
         db: Session,
@@ -60,7 +83,7 @@ class CRUDFlow(CRUDBase[models.Flow]):
         Retrieve flows for a specific account with pagination.
         """
         account_id_str = str(account_id) if isinstance(account_id, UUID) else account_id
-        query = db.query(self.model).filter(
+        query = self._query_with_ai_model(db).filter(
             cast(self.model.account_id, String) == account_id_str
         )
         return query.offset(skip).limit(limit).all()

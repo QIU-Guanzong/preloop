@@ -1133,6 +1133,7 @@ class FlowResponse(FlowBase):
     execution_stats: Optional[Dict[str, Any]] = None
     # Computed schedule state for schedule-triggered flows (read-only)
     schedule_state: Optional[Dict[str, Any]] = None
+    ai_model_name: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
