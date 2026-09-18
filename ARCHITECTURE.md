@@ -214,7 +214,9 @@ The same ranked search is reachable as the built-in `search_sessions` tool
 the ordinary audit path, with the mode, the filters, the result count and a
 stable hash of the query; the query text itself is stored only when the account
 opts in.
-Operator knobs: [Session embedding](docs/operations/session-embedding.md).
+Operator knobs: [Session search](docs/operations/session-search.md) (coverage,
+the history backfill, who may search) and
+[Session embedding](docs/operations/session-embedding.md) (the vector worker).
 Saved searches: [Saved session searches](docs/guide/session-saved-searches.md).
 Search auditing: [Auditing session content search](docs/guide/session-search-audit.md).
 The agent-facing tool: [search_sessions](docs/guide/agent-session-search.md).

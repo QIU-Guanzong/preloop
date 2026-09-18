@@ -1511,6 +1511,59 @@ export class RuntimeSessionsView extends LitElement {
   }
 
   /**
+   * How far back the corpus reaches, when it stops inside the range searched.
+   *
+   * The companion to the marker above, and the one that matters on a
+   * deployment that has not run the backfill: indexing happens on write, so
+   * the corpus begins on the day search was deployed and every session older
+   * than that is absent rather than unmatched. A reader cannot tell those
+   * apart from a result count, and the difference is the whole question they
+   * are asking. Nothing is shown once the backfill reports it walked the
+   * retained history: at that point an empty answer really does mean nobody
+   * did that.
+   */
+  private coverageFloorFrom(): string | null {
+    const results = this.searchResults;
+    if (!results || results.backfill_complete) {
+      return null;
+    }
+    const marker = results.indexed_from ?? null;
+    if (!marker) {
+      return null;
+    }
+    const markerTime = new Date(marker).getTime();
+    if (Number.isNaN(markerTime)) {
+      return null;
+    }
+    const start = this.rangeStartIso();
+    // An unbounded range starts before any corpus, so any floor is inside it.
+    const startTime = start ? new Date(start).getTime() : null;
+    if (startTime !== null && markerTime <= startTime) {
+      return null;
+    }
+    // A floor past the end of the range is not suppressed: it means none of
+    // the range is indexed, which is the strongest version of this warning,
+    // not the absence of one. renderSearchNotices() says so in its own words.
+    return marker;
+  }
+
+  /**
+   * Whether the corpus starts after the end of the range being searched.
+   *
+   * Then nothing in the range is indexed at all, so an empty answer carries
+   * no information about what happened: it is a statement about the corpus.
+   */
+  private searchedRangeEndsBelowFloor(): boolean {
+    const marker = this.coverageFloorFrom();
+    if (!marker) {
+      return false;
+    }
+    const end = this.rangeEndIso();
+    const endTime = end ? new Date(end).getTime() : Date.now();
+    return new Date(marker).getTime() > endTime;
+  }
+
+  /**
    * What the search could not do, in the endpoint's own words.
    *
    * The response carries a degraded block; an answer that ranked on keywords
@@ -1529,12 +1582,40 @@ export class RuntimeSessionsView extends LitElement {
 
   private renderSearchNotices() {
     const coverage = this.partialCoverageThrough();
+    const floor = this.coverageFloorFrom();
+    const floorCoversNothing = this.searchedRangeEndsBelowFloor();
     const degraded = this.degradedNotice();
-    if (!coverage && !degraded) {
+    if (!coverage && !floor && !degraded) {
       return '';
     }
     return html`
       <div class="search-notices">
+        ${
+          floor
+            ? html`
+                <sl-alert
+                  variant=${floorCoversNothing ? 'warning' : 'neutral'}
+                  open
+                  data-testid="coverage-floor-notice"
+                >
+                  <sl-icon slot="icon" name="clock-history"></sl-icon>
+                  ${
+                    floorCoversNothing
+                      ? html`Nothing in this date range is indexed: search
+                        reaches back only to ${this.formatDateTime(floor)}. An
+                        empty answer here means not indexed, not that nothing
+                        happened. An operator switches on the history backfill
+                        to widen this.`
+                      : html`Search reaches back to
+                        ${this.formatDateTime(floor)}. Sessions older than that
+                        are not indexed yet, so they cannot match whatever they
+                        contain. An operator switches on the history backfill to
+                        widen this.`
+                  }
+                </sl-alert>
+              `
+            : ''
+        }
         ${
           coverage
             ? html`

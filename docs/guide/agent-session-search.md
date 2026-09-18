@@ -82,6 +82,8 @@ with keyword results and a degraded marker rather than an error.
     "detail": "Semantic ranking is not enabled on this deployment; these are keyword results ranked by relevance."
   },
   "indexed_through": "2026-09-16T07:41:12+00:00",
+  "indexed_from": "2026-09-11T00:02:39+00:00",
+  "backfill_complete": false,
   "total": 7,
   "returned": 3,
   "truncated": true,
@@ -114,6 +116,13 @@ Every part of that shape earns its place:
 - **`indexed_through`** is the newest content the corpus holds for the
   account. An empty answer newer than that marker means not indexed yet, not
   absent.
+- **`indexed_from` and `backfill_complete`** are the other end of the same
+  window. The corpus starts on the day search was switched on; older
+  sessions are only indexed once the operator's backfill has walked them.
+  Until `backfill_complete` is true, an empty answer about anything older
+  than `indexed_from` means not indexed, and the agent should say so rather
+  than assert that the work never happened. `indexed_from` is null while the
+  account has no chunks at all.
 - **No match is an empty `results` list**, not an error. "Nothing found" is
   the answer that lets the agent get on with the work.
 

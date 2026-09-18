@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from preloop.models.crud import (
     crud_account,
     crud_runtime_session,
+    crud_session_search_backfill_state,
     crud_session_search_document,
 )
 from preloop.models.crud.session_search_document import (
@@ -22,7 +23,11 @@ from preloop.models.models.session_search_document import (
     SOURCE_KIND_TOOL_CALL,
     SOURCE_KIND_TRANSCRIPT_MESSAGE,
 )
-from preloop.schemas.session_search import DEGRADED_SEMANTIC_NOT_ENABLED
+from preloop.schemas.session_search import (
+    BACKFILL_STATE_COMPLETE,
+    BACKFILL_STATE_NOT_STARTED,
+    DEGRADED_SEMANTIC_NOT_ENABLED,
+)
 
 SEARCH_URL = "/api/v1/runtime-sessions/search"
 BASE_AT = datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
@@ -434,7 +439,84 @@ def test_the_response_carries_the_contract_fields(client, db_session, test_user)
     assert payload["offset"] == 0
     assert payload["elapsed_ms"] >= 0
     assert payload["indexed_through"].startswith("2026-09-01T09:00")
+    assert payload["indexed_from"].startswith("2026-09-01T09:00")
+    assert payload["backfill_complete"] is False
+    assert payload["backfill_state"] == BACKFILL_STATE_NOT_STARTED
     assert set(payload["degraded"]) == {"keyword", "semantic", "reasons", "detail"}
+
+
+def test_the_answer_says_how_far_back_the_corpus_reaches(client, db_session, test_user):
+    """Both ends of the searched window are published, not just the head.
+
+    Indexing runs on write, so an account whose backfill has never run has a
+    corpus that starts at the deploy. Without the floor, a search that missed
+    everything older is indistinguishable from a search that found nothing,
+    which is the case a console cannot explain to whoever ran it.
+    """
+    session = _session(db_session, test_user.account_id, "window")
+    _write(
+        db_session,
+        test_user.account_id,
+        session,
+        "the ledger reconciled",
+        source_id="window-old",
+        occurred_at=BASE_AT,
+    )
+    _write(
+        db_session,
+        test_user.account_id,
+        session,
+        "the ledger reconciled again",
+        source_id="window-new",
+        occurred_at=BASE_AT + timedelta(days=5),
+    )
+
+    payload = client.post(SEARCH_URL, json={"query": "ledger"}).json()
+
+    assert payload["indexed_from"].startswith("2026-09-01T09:00")
+    assert payload["indexed_through"].startswith("2026-09-06T09:00")
+    assert payload["backfill_complete"] is False
+    assert payload["backfill_state"] == BACKFILL_STATE_NOT_STARTED
+
+
+def test_an_account_with_nothing_indexed_says_so_rather_than_naming_a_date(
+    client, db_session, test_user
+):
+    """An empty corpus has no window, and inventing one would be a lie."""
+    payload = client.post(SEARCH_URL, json={"query": "ledger"}).json()
+
+    assert payload["total"] == 0
+    assert payload["indexed_from"] is None
+    assert payload["indexed_through"] is None
+    assert payload["backfill_complete"] is False
+    assert payload["backfill_state"] == BACKFILL_STATE_NOT_STARTED
+
+
+def test_a_finished_backfill_reports_a_complete_window(client, db_session, test_user):
+    """Once the walk ends, an empty answer is an honest "nobody did that"."""
+    session = _session(db_session, test_user.account_id, "complete-window")
+    _write(
+        db_session,
+        test_user.account_id,
+        session,
+        "the ledger reconciled",
+        source_id="complete-message",
+        occurred_at=BASE_AT,
+    )
+    crud_session_search_backfill_state.record_pass(
+        db_session,
+        account_id=test_user.account_id,
+        cursor_started_at=BASE_AT,
+        sessions_scanned=1,
+        rows_written=1,
+        completed=True,
+    )
+
+    payload = client.post(SEARCH_URL, json={"query": "ledger"}).json()
+
+    assert payload["backfill_complete"] is True
+    assert payload["backfill_state"] == BACKFILL_STATE_COMPLETE
+    assert payload["indexed_from"].startswith("2026-09-01T09:00")
 
 
 def test_paging_walks_the_ranked_sessions(client, db_session, test_user):
