@@ -348,6 +348,60 @@ func TestSyncManagedGatewayAIModelCreateReusesFresherCodexSiblingSecret(t *testi
 	}
 }
 
+func TestSyncManagedGatewayAIModelDoesNotRepointLiveTargetOntoStaleSibling(t *testing.T) {
+	liveTarget := codexManagedOAuthSiblingForTest(
+		"target-codex-gpt4",
+		"gpt-4o",
+		"openai/gpt-4o",
+		"secret-live",
+	)
+	liveTarget.CredentialsLastVerifiedAt = apiTimePtr("2026-09-18T12:00:00Z")
+	liveTarget.UpdatedAt = apiTimePtr("2026-09-18T12:00:00Z")
+
+	staleSibling := codexManagedOAuthSiblingForTest(
+		"sibling-codex-o3",
+		"o3-mini",
+		"openai/o3-mini",
+		"secret-stale",
+	)
+	staleSibling.CredentialsLastVerifiedAt = apiTimePtr("2026-09-01T00:00:00Z")
+	staleSibling.UpdatedAt = apiTimePtr("2026-09-01T00:00:00Z")
+
+	writes := []recordedAIModelWrite{}
+	// Stale sibling first, so first-match without a target comparison
+	// would converge the live holder onto the consumed grant.
+	server := newCodexFamilyLineageServer(t, []aiModelResponse{staleSibling, liveTarget}, &writes)
+	defer server.Close()
+
+	freshExpiry := time.Now().UTC().Add(4 * time.Hour).UnixMilli()
+	upstream := codexUpstreamForTest("gpt-4o", "openai/gpt-4o", map[string]interface{}{
+		"access":  "sk-codex-oat-fresh",
+		"refresh": "sk-codex-ort-fresh",
+		"expires": freshExpiry,
+	})
+
+	if _, _, err := syncManagedGatewayAIModel(
+		api.NewClientWithToken(server.URL, "tok"),
+		&managedAgentSummary{ID: "agent-codex-1"},
+		AgentConfig{Name: "Codex CLI"},
+		upstream,
+		server.URL+"/openai/v1",
+	); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, write := range writes {
+		if write.Method != http.MethodPut || !strings.HasSuffix(write.Path, "/target-codex-gpt4") {
+			continue
+		}
+		if write.Body["credentials_secret_id"] == "secret-stale" {
+			t.Fatalf("live target must not be repointed onto a stale sibling: %#v", write)
+		}
+		if _, ok := write.Body["credential_payload"]; ok {
+			t.Fatalf("live target must not be re-seeded over its own secret: %#v", write)
+		}
+	}
+}
+
 func TestCodexServerHasReusableGatewayCredential(t *testing.T) {
 	sibling := codexManagedOAuthSiblingForTest(
 		"codex-o3-mini",

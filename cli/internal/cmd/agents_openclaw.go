@@ -6030,6 +6030,11 @@ func syncManagedGatewayAIModel(
 		// has a credential, so split family rows converge onto one secret.
 		// Sibling selection prefers last_verified / last_refresh /
 		// updated_at so a stale first-listed copy does not win.
+		//
+		// The target itself is excluded from the sibling pool, so compare
+		// liveness against it here: if this row already holds a newer
+		// secret than any sibling, keep it. Otherwise the first-synced
+		// live holder would be repointed onto a consumed copy.
 		sharedSibling := findManagedOAuthCredentialSibling(
 			existing,
 			managedAgent,
@@ -6037,12 +6042,20 @@ func syncManagedGatewayAIModel(
 			target.ID,
 		)
 		var sharedSecret string
+		targetHoldsLiveLineage := false
 		if sharedSibling != nil {
-			sharedSecret = applySharedClaudeCodeOAuthSecret(sharedSibling)
+			if oauthSiblingLiveness(target).After(oauthSiblingLiveness(sharedSibling)) {
+				targetHoldsLiveLineage = true
+			} else {
+				sharedSecret = applySharedClaudeCodeOAuthSecret(sharedSibling)
+			}
 		}
 		sameSecret := sharedSecret != "" &&
 			strings.TrimSpace(target.CredentialsSecretID) == sharedSecret
-		if sharedSecret != "" && !sameSecret {
+		if targetHoldsLiveLineage {
+			// Keep this row's own live secret. Do not attach a staler
+			// sibling and do not re-seed from a local bundle.
+		} else if sharedSecret != "" && !sameSecret {
 			update["credentials_secret_id"] = sharedSecret
 		} else if len(upstream.CredentialPayload) > 0 &&
 			(!target.HasAPIKey ||
