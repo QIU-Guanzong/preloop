@@ -386,6 +386,31 @@ def test_no_match_is_an_empty_result_set_not_an_error(db_session, test_user):
     assert answer["degraded"]["keyword"] is True
 
 
+def test_the_agent_is_told_how_far_back_the_corpus_reaches(db_session, test_user):
+    """An empty answer with a young corpus is not "this never happened".
+
+    The head marker alone cannot tell those apart, so the answer carries the
+    floor and the backfill state as well: an agent reading them can say the
+    history was never indexed instead of asserting the work was never done.
+    """
+    account_id = str(test_user.account_id)
+    session = _session(db_session, account_id, "mine", CALLER)
+    _write(
+        db_session,
+        account_id,
+        session,
+        "resized the ingest queue",
+        principal=CALLER,
+    )
+
+    answer = _search(db_session, account_id, "hovercraft")
+
+    assert answer["indexed_from"] is not None
+    assert answer["indexed_from"].startswith("2026-09-10T09:00")
+    assert answer["indexed_through"].startswith("2026-09-10T09:00")
+    assert answer["backfill_complete"] is False
+
+
 def test_the_time_range_narrows_the_search(db_session, test_user):
     """The agent asks about last week and does not get last quarter."""
     account_id = str(test_user.account_id)

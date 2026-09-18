@@ -20,6 +20,9 @@ describe('RuntimeSessionsView', () => {
       effective_mode: 'keyword',
       degraded: { keyword: true, semantic: false, reasons: [], detail: null },
       indexed_through: null,
+      indexed_from: null,
+      backfill_complete: false,
+      backfill_state: 'not_started',
       total: 1,
       limit: 25,
       offset: 0,
@@ -1298,6 +1301,90 @@ describe('RuntimeSessionsView', () => {
       const element = await renderedSearch();
       expect(
         element.shadowRoot!.querySelector('[data-testid="coverage-notice"]')
+      ).to.equal(null);
+    });
+
+    it('states how far back the corpus reaches when it stops inside the range', async () => {
+      // The shape of a deployment whose backfill has never run: the corpus
+      // starts a few days ago and everything older is absent, not unmatched.
+      const daysAgo = (days: number) =>
+        new Date(Date.now() - days * 24 * 3_600_000).toISOString();
+      fetchStub.withArgs(SEARCH_URL, sinon.match.any).callsFake(
+        async () =>
+          new Response(
+            JSON.stringify(
+              searchResponse({
+                indexed_from: daysAgo(2),
+                indexed_through: daysAgo(0),
+                backfill_complete: false,
+                backfill_state: 'not_started',
+              })
+            ),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+      );
+
+      const element = await renderedSearch();
+      const notice = element.shadowRoot!.querySelector(
+        '[data-testid="coverage-floor-notice"]'
+      );
+      expect(notice).to.not.equal(null);
+      expect(notice!.textContent).to.contain('reaches back to');
+    });
+
+    it('states nothing about the floor once the backfill walked the history', async () => {
+      // A complete backfill makes an empty answer honest on its own: there is
+      // no older history left to index, so a warning would be noise.
+      const daysAgo = (days: number) =>
+        new Date(Date.now() - days * 24 * 3_600_000).toISOString();
+      fetchStub.withArgs(SEARCH_URL, sinon.match.any).callsFake(
+        async () =>
+          new Response(
+            JSON.stringify(
+              searchResponse({
+                indexed_from: daysAgo(2),
+                indexed_through: daysAgo(0),
+                backfill_complete: true,
+                backfill_state: 'complete',
+              })
+            ),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+      );
+
+      const element = await renderedSearch();
+      expect(
+        element.shadowRoot!.querySelector(
+          '[data-testid="coverage-floor-notice"]'
+        )
+      ).to.equal(null);
+    });
+
+    it('states nothing about the floor when it predates the range searched', async () => {
+      // The default range is the last 30 days; a corpus reaching back a year
+      // covers all of it, so there is nothing to warn about.
+      const daysAgo = (days: number) =>
+        new Date(Date.now() - days * 24 * 3_600_000).toISOString();
+      fetchStub.withArgs(SEARCH_URL, sinon.match.any).callsFake(
+        async () =>
+          new Response(
+            JSON.stringify(
+              searchResponse({
+                indexed_from: daysAgo(365),
+                indexed_through: daysAgo(0),
+                backfill_complete: false,
+                backfill_state: 'in_progress',
+              })
+            ),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+      );
+
+      const element = await renderedSearch();
+      expect(
+        element.shadowRoot!.querySelector(
+          '[data-testid="coverage-floor-notice"]'
+        )
       ).to.equal(null);
     });
 

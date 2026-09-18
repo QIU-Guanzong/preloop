@@ -27033,6 +27033,32 @@ components:
           description: Newest content this account has in the corpus. The corpus fills
             forward, so an empty answer older than this marker means no match, and
             one newer means not indexed yet.
+        indexed_from:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Indexed From
+          description: 'Oldest point in time this account''s corpus covers without
+            gaps. Indexing on write only covers sessions written since search shipped,
+            so on a deployment whose backfill has not run this is the deploy date
+            and nothing before it is searchable. Read it with indexed_through: together
+            they are the window these results actually come from. Null when the account
+            has nothing indexed at all.'
+        backfill_complete:
+          type: boolean
+          title: Backfill Complete
+          description: Whether the backfill has walked this account's retained history
+            to the end. False means the window above is still growing backwards, or
+            that no backfill has been run.
+          default: false
+        backfill_state:
+          type: string
+          title: Backfill State
+          description: 'One of: not_started, in_progress, complete. ``not_started``
+            on a deployment where the operator has not switched the backfill on, which
+            is the shipped default.'
+          default: not_started
         embedded_through:
           anyOf:
           - type: string

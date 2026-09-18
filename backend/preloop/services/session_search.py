@@ -30,6 +30,15 @@ reason in the degraded block:
 * the corpus is only partly embedded: results are returned and the reason
   says the backfill has not got there yet.
 
+The same rule covers the keyword half, where the gap is not the vectors but
+the history. Indexing runs on write, so a deployment that has never run the
+backfill has a corpus that starts at the deploy and nothing behind it, and a
+search over that corpus answers "no results" to a question whose answer is in
+a transcript it simply never read. Every response therefore carries both ends
+of the window it actually searched: ``indexed_through`` at the head and
+``indexed_from`` at the tail, with the backfill state that says whether the
+tail is still moving.
+
 Everything account scoped happens in the CRUD query, not here.
 """
 
@@ -81,7 +90,7 @@ from preloop.schemas.session_search import (
     SessionSearchResult,
     SessionSearchSnippet,
 )
-from preloop.services import session_search_semantic
+from preloop.services import session_search_backfill, session_search_semantic
 from preloop.services.session_search_fusion import (
     FusedSession,
     fuse,
@@ -636,8 +645,9 @@ def search_sessions(
         now: Clock override for the daily cap window.
 
     Returns:
-        The ranked page, the count a caller can page through, the corpus
-        freshness markers and a degraded block describing what did not run.
+        The ranked page, the count a caller can page through, both ends of
+        the window the corpus actually covers, and a degraded block
+        describing what did not run.
     """
     started = time.perf_counter()
     plan = _plan_semantic(
@@ -656,6 +666,15 @@ def search_sessions(
             reasons.append(DEGRADED_FUSION_CANDIDATES_TRUNCATED)
 
     indexed_through = crud_session_search_document.indexed_through(
+        db, account_id=account_id
+    )
+    # Both ends of the covered window, not just the head. The head marker
+    # answers "is the newest turn in yet"; the floor answers "does this
+    # account have any history behind the deploy at all", which is the
+    # question an operator searching a corpus filled forward from a deploy is
+    # actually asking, and the one an answer of zero results is otherwise
+    # silent about.
+    corpus_coverage = session_search_backfill.corpus_coverage_for_account(
         db, account_id=account_id
     )
     elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -677,6 +696,9 @@ def search_sessions(
             effective_mode=effective_mode, plan=plan, reasons=reasons
         ),
         indexed_through=indexed_through,
+        indexed_from=corpus_coverage.indexed_from,
+        backfill_complete=corpus_coverage.complete,
+        backfill_state=corpus_coverage.state,
         embedded_through=plan.embedded_through,
         total=total,
         limit=request.limit,
