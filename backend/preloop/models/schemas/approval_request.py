@@ -345,6 +345,15 @@ class ApprovalRequestResponse(ApprovalRequestBase):
         return []
 
     @computed_field
+    def dropped_item_keys(self) -> list[str]:
+        """Extra keys dropped from question items during normalization."""
+        if isinstance(self.tool_args, dict):
+            keys = self.tool_args.get("dropped_item_keys")
+            if isinstance(keys, list):
+                return [str(k) for k in keys]
+        return []
+
+    @computed_field
     def question_schema(self) -> Optional[Dict[str, Any]]:
         """The answer form, in the subset documented in question_schema.py.
 

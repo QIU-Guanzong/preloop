@@ -512,17 +512,22 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
             QuestionSchemaError,
             normalize_input_schema,
             normalize_items,
+            validate_schema_items,
         )
 
+        dropped_item_keys: set[str] = set()
         try:
             normalized_schema = normalize_input_schema(input_schema)
-            normalized_items = normalize_items(items)
+            normalized_items = normalize_items(items, dropped_keys=dropped_item_keys)
+            validate_schema_items(normalized_schema, normalized_items)
         except QuestionSchemaError as schema_error:
             return f"Error: {schema_error}"
         if normalized_items:
             arguments["items"] = normalized_items
         if normalized_schema:
             arguments["input_schema"] = normalized_schema
+        if dropped_item_keys:
+            arguments["dropped_item_keys"] = sorted(dropped_item_keys)
 
         # Request approval using the standard approval helper
         approved, error = await require_approval(
@@ -659,11 +664,14 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
             QuestionSchemaError,
             normalize_input_schema,
             normalize_items,
+            validate_schema_items,
         )
 
+        dropped_item_keys: set[str] = set()
         try:
             normalized_schema = normalize_input_schema(input_schema)
-            normalized_items = normalize_items(items)
+            normalized_items = normalize_items(items, dropped_keys=dropped_item_keys)
+            validate_schema_items(normalized_schema, normalized_items)
         except QuestionSchemaError as schema_error:
             return f"Error: {schema_error}"
 
@@ -682,6 +690,8 @@ def initialize_mcp_with_tools() -> DynamicFastMCP:
             arguments["items"] = normalized_items
         if normalized_schema:
             arguments["input_schema"] = normalized_schema
+        if dropped_item_keys:
+            arguments["dropped_item_keys"] = sorted(dropped_item_keys)
 
         answered, answer = await require_approval(
             tool_name=ASK_USER_TOOL["name"],

@@ -19,6 +19,7 @@ from preloop.services.question_schema import (
     question_summary,
     summarize_answer,
     validate_answer,
+    validate_schema_items,
     MAX_ANSWER_BYTES,
 )
 
@@ -194,6 +195,96 @@ class TestNormalizeItems:
 
     def test_none_is_empty(self):
         assert normalize_items(None) == []
+
+    def test_extra_unsupported_keys_are_dropped(self):
+        items = normalize_items(
+            [{"id": "X", "rank": 1, "path": "/foo", "stacks": ["python"]}]
+        )
+        assert items[0] == {"id": "X", "title": "X"}
+
+    def test_extra_keys_recorded_when_dropped_keys_provided(self):
+        dropped = set()
+        items = normalize_items(
+            [{"id": "X", "rank": 1, "path": "/foo", "manifests": ["requirements.txt"]}],
+            dropped_keys=dropped,
+        )
+        assert dropped == {"rank", "path", "manifests"}
+        assert items[0] == {"id": "X", "title": "X"}
+
+    def test_severity_outside_vocabulary_rejected(self):
+        with pytest.raises(QuestionSchemaError) as excinfo:
+            normalize_items([{"id": "X", "severity": "catastrophic"}])
+        assert "items[0].severity 'catastrophic' is outside the vocabulary" in str(
+            excinfo.value
+        )
+
+    def test_severity_in_vocabulary_accepted_and_lowercased(self):
+        items = normalize_items([{"id": "X", "severity": "HIGH"}])
+        assert items[0]["severity"] == "high"
+
+
+class TestValidateSchemaItems:
+    def test_schema_enum_with_unknown_item_id_rejected(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "selected": {
+                    "type": "array",
+                    "items": {"enum": ["item-1", "item-2", "item-orphan"]},
+                }
+            },
+        }
+        items = [{"id": "item-1"}, {"id": "item-2"}]
+        with pytest.raises(QuestionSchemaError) as excinfo:
+            validate_schema_items(schema, items)
+        assert "names id 'item-orphan' with no matching item row" in str(excinfo.value)
+
+    def test_schema_row_object_enum_with_unknown_item_id_rejected(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "waived": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"enum": ["item-1", "ghost-item"]},
+                            "reason": {"type": "string"},
+                        },
+                    },
+                }
+            },
+        }
+        items = [{"id": "item-1"}]
+        with pytest.raises(QuestionSchemaError) as excinfo:
+            validate_schema_items(schema, items)
+        assert "names id 'ghost-item' with no matching item row" in str(excinfo.value)
+
+    def test_schema_enum_all_matching_items_accepted(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "selected": {
+                    "type": "array",
+                    "items": {"enum": ["item-1", "item-2"]},
+                }
+            },
+        }
+        items = [{"id": "item-1"}, {"id": "item-2"}]
+        validate_schema_items(schema, items)
+
+    def test_non_item_enum_unaffected(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "format": {
+                    "type": "string",
+                    "enum": ["json", "yaml"],
+                }
+            },
+        }
+        items = [{"id": "item-1"}, {"id": "item-2"}]
+        validate_schema_items(schema, items)
 
 
 class TestValidateAnswer:

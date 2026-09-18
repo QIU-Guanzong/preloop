@@ -108,6 +108,7 @@ _FIELD_KEYS = {
 }
 
 _ITEM_KEYS = {"id", "title", "description", "severity", "badges", "href"}
+ITEM_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info", "unknown"})
 
 
 class QuestionSchemaError(ValueError):
@@ -360,8 +361,103 @@ def normalize_input_schema(raw: Any) -> Optional[Dict[str, Any]]:
     )
 
 
-def normalize_items(raw: Any) -> List[Dict[str, Any]]:
-    """Validate the rows a question is about. Empty list when none given."""
+def validate_schema_items(
+    schema: Optional[Dict[str, Any]], items: List[Dict[str, Any]]
+) -> None:
+    """Ensure every item id referenced in answer schema enums names an actual item row."""
+    if not schema or not items:
+        return
+    item_ids = {
+        str(item["id"])
+        for item in items
+        if isinstance(item, dict) and "id" in item and item["id"]
+    }
+
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return
+
+    for name, spec in properties.items():
+        if not isinstance(spec, dict):
+            continue
+        spec_type = spec.get("type")
+        path = f"input_schema.properties.{name}"
+
+        # Multi-select or per-row array
+        if spec_type == "array":
+            items_spec = spec.get("items")
+            if isinstance(items_spec, dict):
+                # Checklist: array items with enum
+                if "enum" in items_spec and isinstance(items_spec["enum"], list):
+                    for val in items_spec["enum"]:
+                        val_str = str(val)
+                        if val_str not in item_ids:
+                            raise QuestionSchemaError(
+                                f"{path}.items.enum names id '{val_str}' with no matching item row"
+                            )
+                # Per-row table: array items of type object with an 'id' property enum
+                elif items_spec.get("type") == "object":
+                    row_props = items_spec.get("properties")
+                    if isinstance(row_props, dict):
+                        id_spec = row_props.get("id")
+                        if (
+                            isinstance(id_spec, dict)
+                            and "enum" in id_spec
+                            and isinstance(id_spec["enum"], list)
+                        ):
+                            for val in id_spec["enum"]:
+                                val_str = str(val)
+                                if val_str not in item_ids:
+                                    raise QuestionSchemaError(
+                                        f"{path}.items.properties.id.enum names id '{val_str}' with no matching item row"
+                                    )
+
+        # Nested object
+        elif spec_type == "object":
+            sub_props = spec.get("properties")
+            if isinstance(sub_props, dict):
+                for sub_name, sub_spec in sub_props.items():
+                    if (
+                        isinstance(sub_spec, dict)
+                        and "enum" in sub_spec
+                        and isinstance(sub_spec["enum"], list)
+                    ):
+                        enum_vals = [str(v) for v in sub_spec["enum"]]
+                        if any(v in item_ids for v in enum_vals):
+                            for val in enum_vals:
+                                if val not in item_ids:
+                                    raise QuestionSchemaError(
+                                        f"{path}.{sub_name}.enum names id '{val}' with no matching item row"
+                                    )
+
+        # Top-level scalar enum referencing items
+        elif "enum" in spec and isinstance(spec["enum"], list):
+            enum_vals = [str(v) for v in spec["enum"]]
+            if any(v in item_ids for v in enum_vals) or name in (
+                "id",
+                "item_id",
+                "item",
+                "finding",
+                "finding_id",
+            ):
+                for val in enum_vals:
+                    if val not in item_ids:
+                        raise QuestionSchemaError(
+                            f"{path}.enum names id '{val}' with no matching item row"
+                        )
+
+
+def normalize_items(
+    raw: Any,
+    *,
+    dropped_keys: Optional[Any] = None,
+    input_schema: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Validate the rows a question is about. Empty list when none given.
+
+    Extra unsupported keys on rows are dropped rather than refusing the call.
+    Dropped keys are appended to ``dropped_keys`` when a set or list is passed.
+    """
     if raw is None:
         return []
     if isinstance(raw, str):
@@ -383,11 +479,14 @@ def normalize_items(raw: Any) -> List[Dict[str, Any]]:
         if not isinstance(entry, dict):
             raise QuestionSchemaError(f"{path} must be an object")
         unknown = set(entry) - _ITEM_KEYS
-        if unknown:
-            raise QuestionSchemaError(
-                f"{path} carries unsupported keys: "
-                f"{', '.join(sorted(map(str, unknown)))}"
-            )
+        if unknown and dropped_keys is not None:
+            if isinstance(dropped_keys, set):
+                dropped_keys.update(unknown)
+            elif isinstance(dropped_keys, list):
+                for k in sorted(unknown):
+                    if k not in dropped_keys:
+                        dropped_keys.append(k)
+
         item_id = _clean_text(entry.get("id"), MAX_TITLE_LENGTH)
         if not item_id:
             raise QuestionSchemaError(f"{path}.id is required")
@@ -403,7 +502,13 @@ def normalize_items(raw: Any) -> List[Dict[str, Any]]:
             row["description"] = description
         severity = _clean_text(entry.get("severity"), 32)
         if severity:
-            row["severity"] = severity
+            norm_severity = severity.lower()
+            if norm_severity not in ITEM_SEVERITIES:
+                raise QuestionSchemaError(
+                    f"{path}.severity '{severity}' is outside the vocabulary: "
+                    f"{', '.join(sorted(ITEM_SEVERITIES))}"
+                )
+            row["severity"] = norm_severity
         badges = entry.get("badges")
         if badges is not None:
             if not isinstance(badges, list):
@@ -423,6 +528,10 @@ def normalize_items(raw: Any) -> List[Dict[str, Any]]:
                 raise QuestionSchemaError(f"{path}.href must be http(s)")
             row["href"] = href
         out.append(row)
+
+    if input_schema:
+        validate_schema_items(input_schema, out)
+
     return out
 
 
