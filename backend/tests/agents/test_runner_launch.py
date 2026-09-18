@@ -70,6 +70,39 @@ async def test_shared_launch_has_model_mcp_prompt_and_no_script_secrets(
 
 
 @pytest.mark.asyncio
+async def test_runner_launch_uses_the_public_url_not_the_cluster_gateway(monkeypatch):
+    """A runner is outside the cluster, so it gets the public gateway origin.
+
+    The resolved runtime carries the in-cluster gateway Service, which is
+    correct for agent Jobs and unreachable for a self-hosted runner. The
+    launch replaces it with the runner's own control-plane origin.
+    """
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    monkeypatch.setenv(
+        "PRELOOP_MODEL_GATEWAY_URL_K8S",
+        "http://release-preloop-gateway:80/openai/v1",
+    )
+    context = {
+        "agent_type": "codex",
+        "agent_config": {},
+        "model_identifier": "example-model",
+        "model_gateway_enabled": True,
+        "model_gateway_provider": "preloop",
+        "model_gateway_model_alias": "gateway-alias",
+        "model_gateway_url": "http://release-preloop-gateway:80/openai/v1",
+        "account_api_token": "mcp-secret",
+        "prompt": "Implement a focused fix",
+        "execution_id": str(uuid4()),
+        "flow_id": str(uuid4()),
+    }
+
+    launch = await build_runner_launch(context)
+
+    assert "${PRELOOP_URL}/openai/v1" in launch["script"]
+    assert "release-preloop-gateway" not in launch["script"]
+
+
+@pytest.mark.asyncio
 async def test_private_launch_delivers_evidence_capability_not_workspace():
     context = {
         "agent_type": "codex",

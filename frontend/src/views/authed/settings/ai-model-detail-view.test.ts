@@ -14,6 +14,7 @@ describe('AIModelDetailView', () => {
   let pricingQuote: any;
   let featureFlags: Record<string, boolean>;
   let overrideWrites: { url: string; method: string; body: any }[];
+  let modelWrites: { method: string; body: any }[];
   let repriceCalls: any[];
   let repriceResponse: any;
   let modelPayload: any;
@@ -41,6 +42,7 @@ describe('AIModelDetailView', () => {
     };
     featureFlags = {};
     overrideWrites = [];
+    modelWrites = [];
     repriceCalls = [];
     repriceResponse = {
       submitted_async: false,
@@ -146,6 +148,13 @@ describe('AIModelDetailView', () => {
           !url.includes('/runtime-sessions') &&
           !url.includes('/interactions')
         ) {
+          const method = (init?.method || 'GET').toUpperCase();
+          if (method !== 'GET') {
+            modelWrites.push({
+              method,
+              body: init?.body ? JSON.parse(String(init.body)) : null,
+            });
+          }
           return new Response(JSON.stringify(modelPayload), {
             status: 200,
             headers: { 'Content-Type': 'application/json' },
@@ -482,6 +491,60 @@ describe('AIModelDetailView', () => {
     expect(String(interactionsCall?.args[0])).to.contain('limit=10');
     expect(connectStub.callCount).to.be.at.least(1);
     expect(subscribeStub.callCount).to.be.at.least(4);
+  });
+
+  it('keeps the gateway URL when it enables gateway routing', async () => {
+    // A model onboarded by `preloop agents onboard` carries the gateway URL
+    // its runtime can actually reach. Re-enabling routing from the console
+    // used to rewrite the gateway block from scratch and drop that URL, after
+    // which the server fell back to a default host and every model call from
+    // that model 404'd.
+    modelPayload.meta_data.gateway = {
+      enabled: false,
+      url: 'https://gateway.example/openai/v1',
+      transport_mode: 'preloop_gateway',
+    };
+
+    const element = (await fixture(
+      html`<ai-model-detail-view .modelId=${'model-1'}></ai-model-detail-view>`
+    )) as AIModelDetailView;
+    await waitUntil(
+      () => !(element as any).loading,
+      'AI model detail view did not finish loading',
+      { timeout: 5000 }
+    );
+
+    await (element as any).enableGatewayRouting();
+
+    const write = modelWrites.find((entry) => entry.method === 'PUT');
+    expect(write).to.not.equal(undefined);
+    expect(write?.body.meta_data.gateway).to.deep.equal({
+      enabled: true,
+      url: 'https://gateway.example/openai/v1',
+      transport_mode: 'preloop_gateway',
+      provider_adapter: 'preloop',
+      model_alias: 'anthropic/claude-sonnet-4',
+    });
+  });
+
+  it('leaves the gateway URL absent when the model never had one', async () => {
+    // Nothing is invented for a model without a URL: the server picks the
+    // right in-cluster or public gateway for the deployment it runs in.
+    modelPayload.meta_data.gateway = { enabled: false };
+
+    const element = (await fixture(
+      html`<ai-model-detail-view .modelId=${'model-1'}></ai-model-detail-view>`
+    )) as AIModelDetailView;
+    await waitUntil(
+      () => !(element as any).loading,
+      'AI model detail view did not finish loading',
+      { timeout: 5000 }
+    );
+
+    await (element as any).enableGatewayRouting();
+
+    const write = modelWrites.find((entry) => entry.method === 'PUT');
+    expect(write?.body.meta_data.gateway).to.not.have.property('url');
   });
 
   it('sends a test request through the gateway', async () => {

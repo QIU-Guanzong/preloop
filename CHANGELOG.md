@@ -1245,6 +1245,20 @@ avatars.
 
 ### Fixed
 
+- Agents in a split Kubernetes deployment call the gateway Service instead
+  of the API Service. API pods run `PRELOOP_SERVICE_ROLE=api` and never
+  mount `/openai/v1`, so a model row without an explicit
+  `meta_data.gateway.url` sent every model call to a 404 and failed the
+  flow execution with no upstream request. The chart now renders
+  `PRELOOP_MODEL_GATEWAY_URL_K8S` (`gateway.inClusterUrl`, default
+  `http://<release>-gateway:80/openai/v1`) on the API and worker pods, and
+  the resolver falls back to the sibling `-gateway` Service. Runners keep
+  using the public `${PRELOOP_URL}/openai/v1`. See
+  `docs/operations/model-gateway-url.md`.
+- The console keeps a model's `meta_data.gateway.url`. Enabling gateway
+  routing from the model page, or saving any edit in the model modal,
+  rebuilt the gateway block from three fields and dropped the URL written
+  by `preloop agents onboard`.
 - Tree-stop and child-wait tests bind the session factory to an object
   that still looks like a Session. GitLab sets `INIT_TEST_DATA=true`,
   so `TestClient` lifespan seeds via `next(get_db_session()).query`,

@@ -131,6 +131,23 @@ the chart-managed credentials Secret. Never a literal in the pod spec.
 {{- end }}
 
 {{/*
+In-cluster model gateway URL.
+
+Agent Jobs, the API and the workers resolve model traffic to this URL when a
+model row carries no explicit meta_data.gateway.url. It must be the gateway
+Service: the API pods run PRELOOP_SERVICE_ROLE=api and never mount
+/openai/v1, so pointing it at the API Service answers 404 Not Found for every
+model call.
+*/}}
+{{- define "preloop.modelGatewayUrlK8s" -}}
+{{- if .Values.gateway.inClusterUrl -}}
+{{- .Values.gateway.inClusterUrl -}}
+{{- else -}}
+http://{{ include "preloop.fullname" . }}-gateway:80/openai/v1
+{{- end -}}
+{{- end }}
+
+{{/*
 SMTP_PASSWORD env entry, same rule as DATABASE_URL. Call with the root
 context ($) so it also works inside a range.
 */}}
