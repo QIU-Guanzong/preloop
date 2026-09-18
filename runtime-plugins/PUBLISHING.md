@@ -10,11 +10,11 @@ must work from the agent runtime alone.
 The enterprise repo pipeline (preloop-ee `.gitlab-ci.yml`) has manual publish
 jobs mirroring `publish:langchain-preloop`:
 
-- `publish:openclaw-plugin` — builds and publishes `@preloop-ai/openclaw-plugin`
+- `publish:openclaw-plugin` builds and publishes `@preloop-ai/openclaw-plugin`
   to **both npm and ClawHub** in a single job (requires the `OPENCLAW_NPM_TOKEN`
   and `CLAWHUB_TOKEN` CI variables). The job then verifies that npm's
   `dist.shasum` matches ClawHub's `npmShasum` and fails if they differ.
-- `publish:hermes-plugin` — builds and publishes `preloop-hermes-plugin` to
+- `publish:hermes-plugin` builds and publishes `preloop-hermes-plugin` to
   PyPI (requires the `HERMES_PYPI_TOKEN` CI variable).
 
 Both jobs fail fast if the package version and its plugin manifest version
@@ -23,7 +23,7 @@ disagree, or if the version is already on the registry. Release flow:
 1. Bump the versions (see Release Preconditions below) in the preloop repo.
 2. Land the preloop submodule bump on preloop-ee `main`.
 3. On that pipeline, trigger the manual publish job(s) from the `deploy` stage.
-   For OpenClaw this publishes npm **and** ClawHub — there is no follow-up step.
+   For OpenClaw this publishes npm **and** ClawHub, with no follow-up step.
 
 Plugin versions are decoupled from platform releases (a platform `0.11.x` tag
 does not publish plugins); trigger these jobs whenever plugin changes land.
@@ -73,7 +73,7 @@ Publish to npm:
 npm publish --access public
 ```
 
-**ClawHub publication is automated in CI** — in the preloop-ee GitLab job
+**ClawHub publication is automated in CI**, in the preloop-ee GitLab job
 `publish:openclaw-plugin` and in the GitHub Actions workflow
 `.github/workflows/publish-runtime-plugins.yml`. Both publish npm first, then
 ClawHub from the same build, then assert the two registries serve the same
@@ -89,7 +89,7 @@ already-fixed auth bypass. Any change here must preserve the digest guard.
 
 ### CI credentials
 
-`CLAWHUB_TOKEN` — a ClawHub API token with publish rights on the `preloop-ai`
+`CLAWHUB_TOKEN` is a ClawHub API token with publish rights on the `preloop-ai`
 publisher. Generate it once on your workstation:
 
 ```bash
@@ -116,14 +116,14 @@ Install the CLI if needed (`npm install -g clawhub`), then:
 # Provenance must point at the PUBLIC GitHub repo. `origin` is the internal
 # GitLab (gitlab.spacecode.ai); `github` is github.com/preloop/preloop. The
 # preloop repo is mirrored commit-for-commit, so the SHA is the same object on
-# both — but only commits actually pushed to `github` will resolve for ClawHub.
+# both, but only commits actually pushed to `github` will resolve for ClawHub.
 SOURCE_REPO=preloop/preloop
 SOURCE_COMMIT=$(git -C ../.. rev-parse HEAD)  # from openclaw-preloop/
 SOURCE_PATH=runtime-plugins/openclaw-preloop
 
 # Verify the commit is really on public GitHub before recording it:
 curl -sfo /dev/null "https://api.github.com/repos/preloop/preloop/commits/$SOURCE_COMMIT" \
-  || { echo "commit not on public GitHub — push the 'github' remote first"; exit 1; }
+  || { echo "commit not on public GitHub: push the 'github' remote first"; exit 1; }
 
 clawhub login --token "$CLAWHUB_TOKEN" --no-input
 # First-time only: scoped npm names require a matching ClawHub publisher
@@ -167,7 +167,7 @@ clawhub package delete @preloop-ai/openclaw-plugin --version <version>
 ```
 
 `--version` permanently deletes a single version. It **cannot be restored or
-republished** — the version string is burned. If the version being deleted is
+republished**: the version string is burned. If the version being deleted is
 the current `latest`, publish the replacement first. Without `--version` the
 command soft-deletes the whole package (reversible via
 `clawhub package undelete`), which is almost never what you want.
@@ -181,9 +181,9 @@ preloop-openclaw-plugin verify --config ~/.openclaw/openclaw.json
 Manual smoke test on a machine without the Preloop CLI:
 
 ```bash
+# The plugin is listed on ClawHub, so either spec installs it:
+openclaw plugins install clawhub:@preloop-ai/openclaw-plugin
 openclaw plugins install @preloop-ai/openclaw-plugin
-# or, once listed on ClawHub:
-# openclaw plugins install clawhub:@preloop-ai/openclaw-plugin
 preloop-openclaw-plugin verify --config ~/.openclaw/openclaw.json
 preloop-openclaw-plugin run --config ~/.openclaw/openclaw.json
 ```
@@ -208,7 +208,7 @@ Note: the OpenClaw plugin runtime id must be `preloop-plugin` (not
 
 OpenCode has no central plugin marketplace: discovery is npm plus the
 `plugin` array in `opencode.json`. There is no ClawHub step and no manifest
-file — the only release artifact is the npm package.
+file. The only release artifact is the npm package.
 
 Build and validate the npm package:
 

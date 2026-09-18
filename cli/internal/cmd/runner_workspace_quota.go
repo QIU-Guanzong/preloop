@@ -44,7 +44,7 @@ func enforceWorkspaceQuota(root string, limit int64, now time.Time, keep map[str
 			return err
 		}
 		row := retained{path: filepath.Join(root, entry.Name()), modified: info.ModTime(), active: keep[entry.Name()]}
-		if lease, err := os.Lstat(filepath.Join(row.path, ".preloop-runner-lease")); err == nil && lease.Mode().IsRegular() && now.Sub(lease.ModTime()) < 2*time.Minute {
+		if lease, err := os.Lstat(filepath.Join(row.path, runnerWorkspaceLeaseName)); err == nil && lease.Mode().IsRegular() && now.Sub(lease.ModTime()) < 2*time.Minute {
 			row.active = true
 		}
 		if err := filepath.Walk(row.path, func(_ string, info os.FileInfo, err error) error {

@@ -1,6 +1,6 @@
 # Preloop Architecture
 
-Preloop is an open-source, responsible AI automation platform. It can proxy tools from MCP servers, optionally adding a human approval layer with configurable policies. It provides event-driven agentic flows to intelligently automate common tasks using agent frameworks like Claude Code, Codex CLI, OpenCode, Gemini CLI, Aider or OpenHands. It integrates with issue & code tracking systems like Jira, GitHub, GitLab, both for listening to events and for ingesting issues, comments, documentation and code. By leveraging vector-based similarity search, Preloop detects duplicate and overlapping issues, detects unmapped dependencies, evaluates compliance metrics, and offers intelligent suggestions to streamline workflows. The architecture now also includes Preloop-owned model-gateway surfaces so managed runtimes can route model traffic through a central enforcement point for telemetry, budgets, session observability, and secret custody. The architecture emphasizes flexibility, performance, and ease of integration, providing access via a REST API, a web UI, and an MCP server for various clients.
+Preloop is an open-source, responsible AI automation platform. It can proxy tools from MCP servers, optionally adding a human approval layer with configurable policies. It provides event-driven agentic flows to intelligently automate common tasks using the agent harnesses registered in `preloop.agents.factory`: OpenHands, Aider, Codex CLI, Gemini CLI and OpenCode. It integrates with issue & code tracking systems like Jira, GitHub, GitLab, both for listening to events and for ingesting issues, comments, documentation and code. By leveraging vector-based similarity search, Preloop detects duplicate and overlapping issues, detects unmapped dependencies, evaluates compliance metrics, and offers intelligent suggestions to streamline workflows. The architecture now also includes Preloop-owned model-gateway surfaces so managed runtimes can route model traffic through a central enforcement point for telemetry, budgets, session observability, and secret custody. The architecture emphasizes flexibility, performance, and ease of integration, providing access via a REST API, a web UI, and an MCP server for various clients.
 
 ARCHITECTURE.md is the map. Read one chapter under `docs/architecture/` for the subsystem you are changing. Do not load every chapter for context.
 
@@ -50,7 +50,7 @@ graph LR
         subgraph "Main Repository"
             direction LR
             API["Preloop REST API"]
-            Gateway["OpenAI-Compatible Model Gateway"]
+            Gateway["Model Gateway (OpenAI / Anthropic / Gemini)"]
             subgraph "Sub projects"
                 direction LR
                 preloop.models["Preloop Models (Data Layer)"]
@@ -87,10 +87,10 @@ graph LR
 |---|---|
 | [Overview](docs/architecture/overview.md) | High-level layout, key components, and the REST search path. Start here for how the API, console, sync, and gateway fit together. |
 | [Frontend](docs/architecture/frontend.md) | Console structure (Lit, Vite, TypeScript, Shoelace). Tracker detail, tools page, and cost views. |
-| [Model gateway](docs/architecture/gateway.md) | OpenAI- and Anthropic-compatible ingress, accounting, budgets, and runtime session identity. |
+| [Model gateway](docs/architecture/gateway.md) | OpenAI-, Anthropic- and Gemini-compatible ingress (`/openai/v1`, `/anthropic/v1`, `/gemini/v1beta`), accounting, budgets, and runtime session identity. |
 | [Governance](docs/architecture/governance.md) | Subject-scoped allowed models, tool access rules, and tool output filters. |
 | [Approvals](docs/architecture/approvals.md) | Tool configuration, human-in-the-loop approval workflows, `ask_user`, and native-tool permission-check. |
-| [Agent Control](docs/architecture/agent-control.md) | Operator channel to managed agents, CLI/desktop enrollment, and mobile/watch voice contact. |
+| [Agent Control](docs/architecture/agent-control.md) | Operator channel to managed agents, operator notes delivered at the next turn boundary through the gateway or a permission hook, CLI/desktop enrollment, and mobile/watch voice contact. |
 | [Cost](docs/architecture/cost.md) | `ApiUsage` ledger, OSS spend and budget-health surfaces, and the Enterprise plugin boundary. |
 | [Sync](docs/architecture/sync.md) | Tracker polling, NATS scheduler/worker, issue tracker clients, and tracker scope rules. |
 | [Data model](docs/architecture/data-model.md) | `preloop.models`, PostgreSQL + PGVector, schema, and backend project layout. |
@@ -98,10 +98,37 @@ graph LR
 | [Realtime](docs/architecture/realtime.md) | Unified WebSocket, MessageRouter topics, and account-scoped pub/sub. |
 | [Security](docs/architecture/security.md) | Auth and tenancy, redaction, secret custody, audit hash chain, record signing, security-screen scoring, and `preloop.security`. |
 | [Decisions](docs/architecture/decisions.md) | Why FastAPI, Python, and PostgreSQL, and how the stack is deployed (Compose, Helm, service roles). |
-| [Flows](docs/architecture/flows.md) | Event-driven agentic flows, remote runners, matrix/batch fan-out, label-based model routing, eval artifacts, evidence packs, prompt `truncate(N)`, and the chunked agent launch-payload environment. |
+| [Flows](docs/architecture/flows.md) | Event-driven agentic flows, remote runners, matrix/batch fan-out, delegation and execution trees, label-based model routing, eval artifacts, evidence packs, prompt `truncate(N)`, and the chunked agent launch-payload environment. |
 
 Execution environment profiles and hosted checkpoint recovery are documented in
 [Environments and recovery](docs/guide/flows/environments-and-recovery.md).
+
+### Flow delegation and execution trees
+
+A flow execution can start another flow of the same account as a child of
+itself through the default-off `run_flow` tool, gated by both the flow's
+`allowed_mcp_tools` and its `callable_flows` allowlist. `FlowExecution` carries
+`parent_execution_id`, `root_execution_id` and `delegation_depth`, so a subtree
+is one query and rows that predate the columns read back as roots.
+`GET /api/v1/flows/executions/{id}/tree` returns an execution, its descendants
+and a rollup in the same shape the batch listing uses. `run_flow(wait=true)`
+waits in process briefly and then parks the parent on `WAITING_FOR_CHILDREN`,
+releasing the container, the runner and the runtime token exactly as a park on
+a human decision does; the parent resumes as a new execution that natively
+continues the same agent session. Depth, fan-out and subtree cost are bounded
+by `FLOW_DELEGATION_MAX_DEPTH`, `FLOW_DELEGATION_MAX_CHILDREN` and
+`FLOW_DELEGATION_MAX_TREE_USD`. See
+[Flow delegation](docs/guide/flows/flow-delegation.md).
+
+### Telemetry export
+
+Optional OpenTelemetry export (`preloop.services.otel_export`, disabled by
+default) emits GenAI spans for governed model calls and MCP tool calls to any
+OTLP endpoint, carrying `gen_ai.conversation.id` when a runtime session id is
+present. Token and cost attributes match the `ApiUsage` row for that request;
+prompts, completions and tool arguments are not attached. Exporter errors are
+logged and never fail the user-facing call. It supplements the `ApiUsage`
+ledger rather than replacing it. See [OTLP export](docs/guide/observability-otlp.md).
 
 ### Agent launch payload (custom images and runners)
 
@@ -181,5 +208,15 @@ A question worth repeating can be saved under a name in `session_saved_search`
 and re-run from `/runtime-sessions/search/saved`; a saved search stores the
 question and never the answer, is private until its author shares it with the
 account, and a run says which of its filters no longer resolve.
-Operator knobs: [Session embedding](docs/operations/session-embedding.md).
+The same ranked search is reachable as the built-in `search_sessions` tool
+(default off, own-sessions scope unless an operator grants `account`) and from
+`preloop sessions search`. Every content search writes one audit row through
+the ordinary audit path, with the mode, the filters, the result count and a
+stable hash of the query; the query text itself is stored only when the account
+opts in.
+Operator knobs: [Session search](docs/operations/session-search.md) (coverage,
+the history backfill, who may search) and
+[Session embedding](docs/operations/session-embedding.md) (the vector worker).
 Saved searches: [Saved session searches](docs/guide/session-saved-searches.md).
+Search auditing: [Auditing session content search](docs/guide/session-search-audit.md).
+The agent-facing tool: [search_sessions](docs/guide/agent-session-search.md).

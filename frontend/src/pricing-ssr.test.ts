@@ -93,8 +93,8 @@ const CONFIG = {
               {
                 label: 'BYOK analysis quota / month',
                 values: {
-                  free: '100M tokens',
-                  pro: '1B tokens',
+                  free: '20M tokens',
+                  pro: '200M tokens',
                   team: '5B tokens',
                   business: '20B tokens',
                 },
@@ -265,8 +265,8 @@ describe('Server-rendered pricing (light DOM)', () => {
     expect(agents).to.contain('100');
     expect(agents).to.contain('Unlimited');
     const quota = rowText('BYOK analysis quota / month');
-    expect(quota).to.contain('100M');
-    expect(quota).to.contain('1B');
+    expect(quota).to.contain('20M');
+    expect(quota).to.contain('200M');
     expect(quota).to.contain('5B');
     expect(quota).to.contain('20B');
   });

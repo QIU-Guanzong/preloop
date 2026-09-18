@@ -142,6 +142,23 @@ database:
 builds `DATABASE_URL` from `externalDatabase.*`. For development, keep
 `database.external: false` to deploy in-cluster CloudNativePG.
 
+### Credentials in pod specs
+
+The chart does not render `DATABASE_URL` or `SMTP_PASSWORD` as literal
+environment values. Both are read with a `secretKeyRef`, either from an
+operator Secret (`database.urlFromSecret`, `config.smtp.passwordSecret`) or
+from the Secret the chart builds from values (`<release>-credentials`).
+Deployments carry a `checksum/credentials` annotation, so a credential
+change made through chart values still rolls the pods. The annotation
+hashes only the chart-managed Secret. Operator-managed Secrets
+(`database.urlFromSecret`, `config.smtp.passwordSecret`) are not hashed:
+after rotating one of those, restart the deployments yourself
+(`kubectl rollout restart deployment -l app.kubernetes.io/instance=<release>`).
+
+Rotating an already-exposed credential, moving the application off the
+Postgres superuser, and turning `database.cnpg.enableSuperuserAccess` off
+are covered in `docs/operations/database-credentials.md`.
+
 ### Application secrets
 
 ```bash
@@ -334,6 +351,7 @@ helm uninstall preloop
 | `database.externalDatabase.sslMode`  | Optional libpq sslmode on a chart-built URL        | `""`        |
 | `database.urlFromSecret.name`        | Secret containing DATABASE_URL                     | `""`        |
 | `database.urlFromSecret.key`         | Key inside that Secret                             | `database-url` |
+| `database.cnpg.enableSuperuserAccess` | Keep the postgres superuser password enabled     | `true`      |
 | `database.postgresql.auth.username` | PostgreSQL username                                 | `postgres`  |
 | `database.postgresql.auth.password` | PostgreSQL password                                 | `postgres`  |
 | `database.postgresql.auth.database` | PostgreSQL database                                 | `preloop` |
@@ -349,6 +367,19 @@ helm uninstall preloop
 | `database.cnpg.logging.log_min_duration_statement` | Log queries slower than this (ms) | `1000`      |
 | `database.cnpg.queryAnalysis.enabled`    | Enable pg_stat_statements and auto_explain     | `false`     |
 | `database.cnpg.queryAnalysis.autoExplainMinDuration` | Log EXPLAIN for queries slower than (ms) | `1000` |
+
+### Schema migration parameters
+
+The `pre-upgrade` hook runs against the pods that are still serving. See
+[Schema migrations run against live pods](#schema-migrations-run-against-live-pods).
+
+| Name                               | Description                                           | Value       |
+|------------------------------------|-------------------------------------------------------|-------------|
+| `migrationJob.lockTimeout`         | Per-session lock_timeout for the migration connection | `5s`        |
+| `migrationJob.maxAttempts`         | Attempts at `upgrade head` before the Job fails       | `20`        |
+| `migrationJob.retryMinSeconds`     | Lower bound of the jittered backoff between attempts  | `3`         |
+| `migrationJob.retryMaxSeconds`     | Upper bound of the jittered backoff between attempts  | `15`        |
+| `migrationJob.backoffLimit`        | Pod-level Job retries (for a crashed container)       | `2`         |
 
 ### Environment parameters
 
@@ -436,6 +467,72 @@ helm install preloop ./helm/preloop \
 | `autoscaling.minReplicas`      | Minimum number of replicas                            | `1`         |
 | `autoscaling.maxReplicas`      | Maximum number of replicas                            | `5`         |
 | `autoscaling.targetCPUUtilizationPercentage` | Target CPU utilization percentage      | `80`        |
+
+### Agent isolation parameters
+
+| Name                                                        | Description                                                       | Value           |
+|-------------------------------------------------------------|-------------------------------------------------------------------|-----------------|
+| `agentExecution.networkPolicy.enabled`                        | Isolate pods labelled `app=agent-execution`                       | `true`          |
+| `agentExecution.networkPolicy.dns.namespaceSelectorLabels`    | Namespace holding the DNS pods                                    | `{kubernetes.io/metadata.name: kube-system}` |
+| `agentExecution.networkPolicy.dns.podSelectorLabels`          | DNS pods; `{}` allows the whole namespace                         | `{k8s-app: kube-dns}` |
+| `agentExecution.networkPolicy.dns.ports`                      | DNS ports (UDP and TCP)                                           | `[53]`          |
+| `agentExecution.networkPolicy.allowPreloopAPI`                | Allow egress to the API and gateway (MCP, model calls)            | `true`          |
+| `agentExecution.networkPolicy.allowExternalLLMAPIs`           | Allow egress to the internet outside the cluster CIDRs            | `true`          |
+| `agentExecution.networkPolicy.clusterCidrs`                   | Pod and service CIDRs carved out of the internet rule. Empty falls back to `excludeCIDRs`, then to RFC1918 plus `169.254.169.254/32` | `[]` |
+| `agentExecution.networkPolicy.controlPlanePorts`              | Ports an agent may open towards API and gateway pods              | `[80, 8000]`    |
+| `agentExecution.networkPolicy.internetPorts`                  | Restrict internet egress to these ports (empty means all)         | `[]`            |
+| `agentExecution.networkPolicy.extraEgress`                    | Extra egress rules, appended verbatim                             | `[]`            |
+| `agentExecution.networkPolicy.nodeCidrs`                      | Node CIDRs re-admitted on ingress for kubelet probes; empty denies all ingress | `[]` |
+| `agentExecution.networkPolicy.cilium.enabled`                 | Render a CiliumNetworkPolicy instead of the plain NetworkPolicy   | `false`         |
+| `agentExecution.networkPolicy.cilium.internetEntities`        | Cilium entities the internet rule allows                          | `[world, host]` |
+| `agentExecution.networkPolicy.cilium.allowHostIngress`        | Admit the host entity (kubelet probes) on ingress                 | `true`          |
+| `agentExecution.networkPolicy.cilium.egressDenyCidrs`         | Addresses denied on egress although Cilium classes them as world  | `[169.254.169.254/32]` |
+| `agentExecution.networkPolicy.cilium.extraEgress`             | Extra CiliumNetworkPolicy egress rules, appended verbatim         | `[]`            |
+| `agentExecution.networkPolicy.controlPlaneIngress.enabled`    | Also restrict agent ingress on the API and gateway pods           | `false`         |
+| `agentExecution.networkPolicy.controlPlaneIngress.podCidrs`   | Cluster pod CIDRs, required when the policy above is enabled      | `[]`            |
+
+`excludeCIDRs` and `additionalEgressRules` are the previous names of
+`clusterCidrs` and `extraEgress`. They are read whenever the new keys are
+empty, and the new keys ship empty, so a release that customised
+`excludeCIDRs` keeps that list across the upgrade unchanged. `helm install`
+and `helm upgrade` print a notice while the deprecated key is the one in
+use. Both keys will be removed in a future version.
+
+#### Cilium
+
+Cilium does not match a plain NetworkPolicy `ipBlock` against node
+addresses ("By default, ipBlock rules in NetworkPolicy do not match
+intra-cluster IPs (such as Pod or Node IPs)", Cilium docs, Kubernetes
+NetworkPolicy compatibility). A public address that resolves back into
+the cluster, which is what an ingress in front of this chart looks like
+from inside it, lands on a node and is dropped by the internet rule. On a
+default install that means agent pods cannot reach the deployment's own
+public URL. Set:
+
+```yaml
+agentExecution:
+  networkPolicy:
+    cilium:
+      enabled: true
+```
+
+and the chart renders a `CiliumNetworkPolicy` with the same allow list:
+DNS, the API and gateway pods, and `toEntities: [world, host]` in place of
+the CIDR carve-out. `world` is everything outside the cluster, so the
+database, NATS and other pods are never part of it; the cloud metadata
+address, which is `world` to Cilium, is denied by name. Add `remote-node`
+to `cilium.internetEntities` when the public address can land on a node
+other than the one the pod runs on. `cilium.extraEgress` takes
+CiliumNetworkPolicy egress rules; the plain `extraEgress` list is not
+translated. Label keys inside `toEndpoints` should carry the `k8s:` source
+prefix, as the chart's own selectors do; Cilium reads a bare key there as
+`any:`.
+
+Leave `controlPlaneIngress` off on Cilium: it relies on the same `ipBlock`
+to re-admit node-sourced traffic to the API and gateway.
+
+See `docs/security/agent-isolation.md` for what an agent pod can reach with
+and without these policies.
 
 ### Observability
 
@@ -787,6 +884,34 @@ point in time), they do not restore in place:
 5. Decommission the old cluster only after the new one is verified.
 
 ## Upgrading the Chart
+
+### Schema migrations run against live pods
+
+`helm upgrade` runs `preloop-migration-job` as a `pre-upgrade` hook, before the
+new pods roll out and while the previous API pods, sync workers and connected
+private runners keep serving. The migration competes for locks with live
+traffic, so the Job runs `python -m preloop.models.migrate` rather than bare
+`alembic upgrade head`:
+
+- every revision commits on its own, releasing its locks before the next
+  revision starts (a retry resumes from the last revision that committed);
+- the migration session uses a short `lock_timeout`
+  (`migrationJob.lockTimeout`, default `5s`). This is per-session and does not
+  change `database.cnpg.resilience.lock_timeout`. Short on purpose: a pending
+  ACCESS EXCLUSIVE request blocks every query queued behind it, so a long wait
+  stalls reads of that table for just as long;
+- lock contention (deadlock, lock timeout, serialization failure) is retried up
+  to `migrationJob.maxAttempts` times with `migrationJob.retryMinSeconds` to
+  `migrationJob.retryMaxSeconds` of jittered backoff. Any other error fails on
+  the first attempt.
+
+Drain the API first when a revision rewrites a large table, when the release
+notes say so, or when a run has exhausted its retry budget. Scale the serving
+deployments to zero, upgrade, then scale back: runners reconnect on their own.
+Raising `lockTimeout` instead makes the stall longer, not shorter.
+
+Full operator guide, including the queries for finding a session that is idle
+in a transaction: [docs/operations/schema-migrations.md](../../docs/operations/schema-migrations.md).
 
 ### To 1.0.0
 

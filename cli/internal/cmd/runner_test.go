@@ -1103,9 +1103,12 @@ func TestPreparePersistWorkspaceReusesResumeFrom(t *testing.T) {
 	if err := os.WriteFile(marker, []byte("kept"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	dest, err := preparePersistWorkspace(current, prior)
+	dest, recovered, err := preparePersistWorkspace(current, prior)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !recovered {
+		t.Fatal("moved resume state must report as recovered")
 	}
 	if _, err := os.Stat(src); !os.IsNotExist(err) {
 		t.Fatalf("resume_from dir should be moved, stat err = %v", err)

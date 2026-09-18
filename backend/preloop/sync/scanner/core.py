@@ -21,6 +21,7 @@ from preloop.models.crud import (
     crud_comment,
     crud_tracker,
 )
+from preloop.models.db.session import release_transaction
 from preloop.models.models import (
     Issue,
     Organization,
@@ -136,6 +137,10 @@ class TrackerClient:
 
     async def scan_organizations(self, db: Session) -> List[Organization]:
         """Scan and update organizations for this tracker."""
+        # A tracker API call takes as long as the tracker takes. Anything this
+        # session already read would otherwise stay locked for that whole time
+        # (see release_transaction).
+        release_transaction(db)
         org_data_list = await self.client.get_organizations()
         logger.info(
             f"Found {len(org_data_list)} organizations in tracker {self.tracker.id}"
@@ -183,8 +188,12 @@ class TrackerClient:
         logger.info(
             f"Scanning projects for organization {organization.id} ({organization.name})"
         )
+        organization_identifier = organization.identifier
+        # Read the identifier first: after the release the instance is expired,
+        # and re-reading it would open the transaction we just ended.
+        release_transaction(db)
         try:
-            proj_data_list = await self.client.get_projects(organization.identifier)
+            proj_data_list = await self.client.get_projects(organization_identifier)
         except Exception as e:
             logger.error(
                 f"Failed to get projects from tracker for org {organization.name}: {e}"
@@ -306,9 +315,15 @@ class TrackerClient:
         logger.info(
             f"Scanning issues for project {project.id} ({project.name}) since {since}"
         )
+        organization_identifier = organization.identifier
+        project_identifier = project.identifier
+        # The log line above is the SELECT that used to leave this worker idle
+        # in transaction for minutes while the tracker answered. Read what the
+        # call needs, then let go of the locks before making it.
+        release_transaction(db)
         issue_data_list = await self.client.get_issues(
-            organization_id=organization.identifier,
-            project_id=project.identifier,
+            organization_id=organization_identifier,
+            project_id=project_identifier,
             since=since,
         )
 

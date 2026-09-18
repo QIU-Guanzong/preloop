@@ -39,6 +39,23 @@ describe('history-cutoff-row', () => {
     expect(el.shadowRoot!.querySelector('button')).to.equal(null);
   });
 
+  it('states the window of a plan the public ladder does not carry', async () => {
+    // A legacy per-seat plan with a year of history. The number is the
+    // server's 365, never the 90 days of the plan this account is not on.
+    const el = await fixture<HistoryCutoffRow>(
+      html`<history-cutoff-row
+        .days=${365}
+        .unlocksAtPlan=${'team'}
+      ></history-cutoff-row>`
+    );
+    expect(el.shadowRoot!.textContent).to.contain('Data older than 365 days');
+    expect(el.shadowRoot!.textContent).to.not.contain('90');
+    // The server named a plan to move to, so the offer stands even though it
+    // sent no display name for it: the row simply does not name it.
+    expect(el.shadowRoot!.querySelector('button')).to.not.equal(null);
+    expect(el.shadowRoot!.textContent).to.contain('See plans');
+  });
+
   it('opens the upgrade modal only when the link is pressed', async () => {
     const seen: CustomEvent[] = [];
     const handler = (event: Event) => seen.push(event as CustomEvent);

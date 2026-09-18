@@ -554,7 +554,20 @@ export interface SessionSearchResponse {
   mode: SessionSearchMode;
   effective_mode: SessionSearchMode;
   degraded: SessionSearchDegraded;
+  /** Newest content in the corpus: the head of the window searched. */
   indexed_through: string | null;
+  /**
+   * Oldest content in the corpus: the tail of the window searched.
+   *
+   * Indexing runs on write, so an account whose backfill has never run has a
+   * corpus that starts on the day search was deployed. Everything older is
+   * absent rather than unmatched, and the two look identical in a result
+   * count of zero unless the interface says which it was.
+   */
+  indexed_from: string | null;
+  /** Whether the backfill has walked this account's retained history. */
+  backfill_complete: boolean;
+  backfill_state: 'not_started' | 'in_progress' | 'complete';
   total: number;
   limit: number;
   offset: number;

@@ -100,8 +100,8 @@ const LADDER_CONTENT = {
             {
               label: 'BYOK analysis quota / month',
               values: {
-                free: '100M tokens',
-                pro: '1B tokens',
+                free: '20M tokens',
+                pro: '200M tokens',
                 team: '5B tokens',
                 business: '20B tokens',
               },
@@ -1250,5 +1250,45 @@ describe('PublicPricingView', () => {
     await el.updateComplete;
     expect((el as any)._plans.length).to.equal(0);
     expect(el.shadowRoot?.querySelector('pricing-card')).to.not.exist;
+  });
+
+  it('sends a visitor choosing Free to signup with the plan on the link', async () => {
+    fetchStub = stubLadderFetch();
+    localStorage.removeItem('accessToken');
+    const el = (await fixture(
+      html`<public-pricing-view></public-pricing-view>`
+    )) as PublicPricingView;
+    await tick();
+    await el.updateComplete;
+    const navStub = sinon.stub(el as any, '_navigate');
+    await (el as any)._handleSignUp('free');
+    // Free has nothing to charge for, so there is no Stripe step. The plan
+    // rides on the link so the new account is stamped as having chosen, and
+    // the first-login plan choice never appears for this person.
+    expect(checkoutCalls(fetchStub).length).to.equal(0);
+    expect(navStub.calledOnceWith('/register?plan=free')).to.be.true;
+  });
+
+  it('never routes a paid plan through signup, so no plan choice follows', async () => {
+    fetchStub = stubLadderFetch();
+    localStorage.removeItem('accessToken');
+    const el = (await fixture(
+      html`<public-pricing-view></public-pricing-view>`
+    )) as PublicPricingView;
+    await tick();
+    await el.updateComplete;
+    const navStub = sinon.stub(el as any, '_navigate');
+    const originalHash = window.location.hash;
+    try {
+      await (el as any)._handleSignUp('pro');
+      // Stripe first: the account is created from the completed session, and
+      // paying is itself the answer to the plan question.
+      expect(checkoutCalls(fetchStub).length).to.equal(1);
+      expect(navStub.called, 'no signup detour for a paid plan').to.equal(
+        false
+      );
+    } finally {
+      window.location.hash = originalHash;
+    }
   });
 });

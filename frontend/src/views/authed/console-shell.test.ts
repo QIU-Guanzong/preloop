@@ -736,6 +736,108 @@ describe('ConsoleShell', () => {
       .exist;
   });
 
+  it('puts Plan directly under Account and above Users', async () => {
+    // What the account pays for belongs with the account, not below the list
+    // of people in it, where it read as a per-person setting.
+    invalidateApiCaches();
+    fetchStub.callsFake(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.endsWith('/api/v1/features')) {
+        return new Response(
+          JSON.stringify({
+            plugins: ['billing'],
+            features: { billing: true, user_management: true },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.endsWith('/api/v1/auth/users/me')) {
+        return new Response(
+          JSON.stringify({
+            username: 'test',
+            email: 'test@example.com',
+            email_verified: true,
+            permissions: null,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const el = (await fixture(
+      html`<console-shell></console-shell>`
+    )) as ConsoleShell;
+    await waitUntil(
+      () =>
+        el.shadowRoot?.querySelector('a[href="/console/settings/plan"]') !==
+        null,
+      'Plan link did not render'
+    );
+
+    const settingsPaths = Array.from(
+      el.shadowRoot?.querySelectorAll<HTMLAnchorElement>(
+        'a[href^="/console/settings/"]'
+      ) ?? []
+    ).map((link) => link.getAttribute('href'));
+    const order = ['account', 'plan', 'users'].map((page) =>
+      settingsPaths.indexOf(`/console/settings/${page}`)
+    );
+    expect(order[0]).to.be.greaterThan(-1);
+    expect(order[1]).to.equal(order[0] + 1);
+    expect(order[2]).to.equal(order[1] + 1);
+  });
+
+  it('still offers the plan page where there is no user management', async () => {
+    // The two conditions are separate: a deployment that sells plans but does
+    // not manage users keeps its way in.
+    invalidateApiCaches();
+    fetchStub.callsFake(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.endsWith('/api/v1/features')) {
+        return new Response(
+          JSON.stringify({
+            plugins: ['billing'],
+            features: { billing: true, user_management: false },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.endsWith('/api/v1/auth/users/me')) {
+        return new Response(
+          JSON.stringify({
+            username: 'test',
+            email: 'test@example.com',
+            email_verified: true,
+            permissions: null,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const el = (await fixture(
+      html`<console-shell></console-shell>`
+    )) as ConsoleShell;
+    await waitUntil(
+      () =>
+        el.shadowRoot?.querySelector('a[href="/console/settings/plan"]') !==
+        null,
+      'Plan link did not render'
+    );
+    expect(el.shadowRoot?.querySelector('a[href="/console/settings/account"]'))
+      .to.not.exist;
+    expect(el.shadowRoot?.querySelector('a[href="/console/settings/users"]')).to
+      .not.exist;
+  });
+
   it('shows All events under Audit when audit_logs is enabled', async () => {
     invalidateApiCaches();
     fetchStub.callsFake(async (input: RequestInfo | URL) => {
@@ -1065,6 +1167,194 @@ describe('ConsoleShell', () => {
       expect(assign).to.have.been.calledWith(
         '/console/settings/plan?feature=price_overrides'
       );
+    });
+  });
+
+  /**
+   * The first-login plan choice.
+   *
+   * The shell's whole job here is the decision: who gets asked, who is never
+   * asked, and who is never even a request to the server about it. The
+   * screen's own behaviour lives in plan-choice-screen.test.ts.
+   */
+  describe('first-login plan choice', () => {
+    /**
+     * Drive the shell with a chosen billing feature state and profile, and
+     * record every URL it asks for so "no extra request" can be asserted
+     * rather than assumed.
+     */
+    function drive(options: {
+      billing: boolean;
+      planChoiceMade?: boolean;
+      show?: boolean;
+    }): string[] {
+      const seen: string[] = [];
+      fetchStub.callsFake(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        seen.push(url);
+        if (url.endsWith('/api/v1/features')) {
+          return new Response(
+            JSON.stringify({
+              plugins: [],
+              features: { billing: options.billing },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        if (url.endsWith('/api/v1/auth/users/me')) {
+          return new Response(
+            JSON.stringify({
+              username: 'test',
+              email: 'test@example.com',
+              email_verified: true,
+              permissions: null,
+              ...(options.planChoiceMade === undefined
+                ? {}
+                : { plan_choice_made: options.planChoiceMade }),
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        if (url.includes('/api/v1/billing/plan-choice')) {
+          return new Response(
+            JSON.stringify({
+              show: options.show === true,
+              reason: options.show === true ? 'eligible' : 'answered',
+              trial_days: 14,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        if (url.includes('/landing-content.json')) {
+          return new Response(JSON.stringify({ pricing: { plans: [] } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      return seen;
+    }
+
+    async function mount(): Promise<ConsoleShell> {
+      const el = (await fixture(
+        html`<console-shell></console-shell>`
+      )) as ConsoleShell;
+      await el.updateComplete;
+      return el;
+    }
+
+    it('replaces the whole console for somebody who has not chosen', async () => {
+      drive({ billing: true, planChoiceMade: false, show: true });
+      const el = await mount();
+      await waitUntil(
+        () => el.shadowRoot?.querySelector('plan-choice-screen') !== null,
+        'The plan choice never appeared'
+      );
+
+      // Full screen means full screen: no sidebar, no header, no banners and
+      // no routed view underneath. A step you can walk around is not a step.
+      expect(el.shadowRoot!.querySelector('.console-container')).to.not.exist;
+      expect(el.shadowRoot!.querySelector('.sidebar-wrapper')).to.not.exist;
+      expect(el.shadowRoot!.querySelector('console-header')).to.not.exist;
+      expect(el.shadowRoot!.querySelector('slot')).to.not.exist;
+      // And nothing to dismiss it with.
+      expect(el.shadowRoot!.querySelector('sl-dialog#upgrade-modal')).to.not
+        .exist;
+    });
+
+    it('hands the configured trial length to the screen', async () => {
+      drive({ billing: true, planChoiceMade: false, show: true });
+      const el = await mount();
+      await waitUntil(
+        () => el.shadowRoot?.querySelector('plan-choice-screen') !== null,
+        'The plan choice never appeared'
+      );
+      const screen = el.shadowRoot!.querySelector('plan-choice-screen') as any;
+      expect(screen.trialDays).to.equal(14);
+    });
+
+    it('shows the console again once the choice is made, on the same route', async () => {
+      drive({ billing: true, planChoiceMade: false, show: true });
+      const el = await mount();
+      await waitUntil(
+        () => el.shadowRoot?.querySelector('plan-choice-screen') !== null,
+        'The plan choice never appeared'
+      );
+
+      el.shadowRoot!.querySelector('plan-choice-screen')!.dispatchEvent(
+        new CustomEvent('plan-choice-made', { bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('plan-choice-screen')).to.not.exist;
+      expect(el.shadowRoot!.querySelector('.console-container')).to.exist;
+    });
+
+    it('never asks again once the profile says the choice was made', async () => {
+      // The second login. The answer is on the user, so it holds on another
+      // device and in another browser, and it costs no request at all.
+      const seen = drive({ billing: true, planChoiceMade: true });
+      const el = await mount();
+      await waitUntil(
+        () => el.shadowRoot?.querySelector('.console-container') !== null,
+        'The console never rendered'
+      );
+      expect(el.shadowRoot!.querySelector('plan-choice-screen')).to.not.exist;
+      expect(
+        seen.filter((u) => u.includes('billing/plan-choice'))
+      ).to.have.length(0);
+    });
+
+    it('never asks an older server that does not send the field', async () => {
+      const seen = drive({ billing: true });
+      const el = await mount();
+      await waitUntil(
+        () => el.shadowRoot?.querySelector('.console-container') !== null,
+        'The console never rendered'
+      );
+      expect(el.shadowRoot!.querySelector('plan-choice-screen')).to.not.exist;
+      expect(
+        seen.filter((u) => u.includes('billing/plan-choice'))
+      ).to.have.length(0);
+    });
+
+    it('takes the plugin word for it when the plugin says no', async () => {
+      // An invited colleague: the profile has no stamp, but the plugin can
+      // see that this member cannot buy for the account.
+      drive({ billing: true, planChoiceMade: false, show: false });
+      const el = await mount();
+      await waitUntil(
+        () => el.shadowRoot?.querySelector('.console-container') !== null,
+        'The console never rendered'
+      );
+      expect(el.shadowRoot!.querySelector('plan-choice-screen')).to.not.exist;
+    });
+
+    it('does not exist without the billing plugin (OSS default)', async () => {
+      // The OSS contract: no screen, and NO REQUEST. Even a profile that
+      // says the choice is open changes nothing, because a deployment that
+      // sells nothing has no plan to choose.
+      const seen = drive({ billing: false, planChoiceMade: false, show: true });
+      const el = await mount();
+      await waitUntil(
+        () => el.shadowRoot?.querySelector('.console-container') !== null,
+        'The console never rendered'
+      );
+      expect(el.shadowRoot!.querySelector('plan-choice-screen')).to.not.exist;
+      // Scoped to this feature's own route on purpose: other components in
+      // the shell have their own OSS behaviour and their own tests, and a
+      // blanket "no /billing/ request" here would fail for their reasons
+      // rather than this one's.
+      expect(
+        seen.filter((u) => u.includes('billing/plan-choice'))
+      ).to.have.length(0);
+      expect(
+        seen.filter((u) => u.includes('/landing-content.json'))
+      ).to.have.length(0);
     });
   });
 });

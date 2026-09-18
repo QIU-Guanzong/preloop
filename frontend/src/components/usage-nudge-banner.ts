@@ -10,9 +10,9 @@ import {
   nudgeLink,
   nudgeMessage,
   visibleNudges,
-  NUDGE_BANDS,
-  NUDGE_THRESHOLD,
+  FALLBACK_LADDER,
   type NudgeDismissals,
+  type NudgeLadder,
 } from '../utils/usage-nudges';
 
 /**
@@ -38,16 +38,19 @@ import {
  */
 @customElement('usage-nudge-banner')
 export class UsageNudgeBanner extends LitElement {
+  /**
+   * The server's list, as it arrived.
+   *
+   * Never enriched, never filled in from a plan table, never defaulted to
+   * Free for a plan id this build does not recognise: an account on a legacy
+   * plan is entitled to hear its own numbers or nothing at all.
+   */
   @state()
   private nudges: UsageNudge[] = [];
 
   /** The ladder the server nudges on, or this build's until it answers. */
   @state()
-  private bands: readonly number[] = NUDGE_BANDS;
-
-  /** Where nudging starts, for a dismissal recorded below the first band. */
-  @state()
-  private threshold = NUDGE_THRESHOLD;
+  private ladder: NudgeLadder = FALLBACK_LADDER;
 
   @state()
   private dismissals: NudgeDismissals = {};
@@ -158,21 +161,20 @@ export class UsageNudgeBanner extends LitElement {
     ]);
     this.userId = profile?.id ?? '';
     this.dismissals = this.userId ? loadNudgeDismissals(this.userId) : {};
-    const ladder = nudgeLadder(payload);
-    this.threshold = ladder.threshold;
-    this.bands = ladder.bands;
+    this.ladder = nudgeLadder(payload);
     this.nudges = payload.nudges;
   }
 
   private handleDismiss(nudge: UsageNudge) {
     // Store the band it stood at, not "hidden": the same limit at 80 percent
     // is news again, the same limit at 51 is not.
-    const band = bandFor(nudge.ratio, this.bands) ?? this.threshold;
+    const band =
+      bandFor(nudge.ratio, this.ladder.bands) ?? this.ladder.threshold;
     this.dismissals = dismissNudge(this.userId, nudge.key, band);
   }
 
   render() {
-    const visible = visibleNudges(this.nudges, this.dismissals, this.bands);
+    const visible = visibleNudges(this.nudges, this.dismissals, this.ladder);
     if (visible.length === 0) return nothing;
 
     return html`

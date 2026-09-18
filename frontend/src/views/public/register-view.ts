@@ -5,6 +5,8 @@ import { post, getFeatures } from '../../api';
 import { formStyles } from '../../styles/form-styles';
 import { getBrandConfig } from '../../brand-config';
 import { trackGoal } from '../../services/web-analytics';
+import { cloudPlans, loadPricingContent } from '../../utils/pricing-content';
+import type { PricingPlan } from '../../components/pricing-plans';
 
 import '@shoelace-style/shoelace/dist/components/input/input.js';
 import '@shoelace-style/shoelace/dist/components/button/button.js';
@@ -46,6 +48,45 @@ export function parseBootstrapFragment(hash: string): string {
   return match ? decodeURIComponent(match[1]) : '';
 }
 
+/**
+ * The plan this visitor already picked, from `?plan=` on the pricing page.
+ *
+ * Kept to a plan id shape, and silently dropped otherwise, because the value
+ * comes from a link somebody may have mangled and a broken query string must
+ * never be able to stop a signup. The server applies the same rule again; it
+ * is repeated here so the request does not carry rubbish in the first place.
+ *
+ * This is a shape check only. Whether the id names a plan a signup can
+ * actually land on is {@link isFreePlanId}'s question.
+ */
+export function parsePlanChoice(search: string): string {
+  const raw = new URLSearchParams(search || '').get('plan') || '';
+  const candidate = raw.trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(candidate) ? candidate : '';
+}
+
+/**
+ * Does this id name a plan somebody can finish signing up on?
+ *
+ * Only a free plan arrives on this form. Every paid plan on the pricing page
+ * goes to Stripe first and comes back as an account that already exists, so a
+ * paid id here did not come from our own link: it was edited, forwarded or
+ * guessed. Recording it as "chose a plan" would leave that account on no plan
+ * at all with the first-login choice suppressed for good, which is exactly
+ * the state this whole change removes. Such an id is dropped instead, and the
+ * console asks on first login.
+ *
+ * A plan with no price on either interval is quoted, not free, and cannot be
+ * self-served either. Shape, not plan id, for the same reason the pricing
+ * page uses shape: a brand may name these tiers anything.
+ */
+export function isFreePlanId(plans: PricingPlan[], planId: string): boolean {
+  const plan = plans.find((p) => p.id === planId);
+  if (!plan) return false;
+  if (plan.price_monthly === null && plan.price_annually === null) return false;
+  return (plan.price_monthly ?? 0) <= 0 && (plan.price_annually ?? 0) <= 0;
+}
+
 @customElement('register-view')
 export class RegisterView extends LitElement {
   @state()
@@ -75,6 +116,17 @@ export class RegisterView extends LitElement {
   // Token from the setup link fragment (#bootstrap=<token>). Held in memory
   // only; the fragment is stripped from the URL immediately on load.
   private bootstrapToken = '';
+
+  // The plan chosen on the pricing page, if this visitor came from there.
+  // Empty for anyone who opened the signup page directly, which is exactly
+  // the group the console asks to choose a plan on first login.
+  private planChoice = '';
+
+  // The check that the plan on the link is one a signup can land on. Held so
+  // that submitting before it lands waits for it rather than racing it: a
+  // form filled in faster than a static file loads is unlikely, and "the
+  // stamp depends on typing speed" is not a rule anybody could debug.
+  private planChoiceChecked: Promise<void> | null = null;
 
   static styles = [
     formStyles,
@@ -162,6 +214,10 @@ export class RegisterView extends LitElement {
     // Setup link: read the bootstrap token out of the fragment, keep it in
     // memory only, and strip it from the URL immediately (history, referrer
     // and share safety).
+    this.planChoice = parsePlanChoice(window.location.search);
+    if (this.planChoice) {
+      this.planChoiceChecked = this._confirmPlanChoiceIsFree();
+    }
     this.bootstrapToken = parseBootstrapFragment(window.location.hash);
     if (this.bootstrapToken) {
       history.replaceState(
@@ -171,6 +227,30 @@ export class RegisterView extends LitElement {
       );
     }
     this._checkFeatures();
+  }
+
+  /**
+   * Check the `?plan=` id against the published price list, and drop it
+   * unless it names a free plan.
+   *
+   * Only runs when a plan arrived on the link, so a plain signup makes no
+   * extra request. The list is the same public, cacheable file the pricing
+   * page already reads.
+   *
+   * A file that will not load drops the plan too. The cost of dropping is
+   * one extra screen on first login; the cost of keeping is an account
+   * recorded as having chosen a plan nobody can name. The safe direction is
+   * to ask.
+   */
+  private async _confirmPlanChoiceIsFree(): Promise<void> {
+    try {
+      const plans = cloudPlans(await loadPricingContent());
+      if (!isFreePlanId(plans, this.planChoice)) {
+        this.planChoice = '';
+      }
+    } catch {
+      this.planChoice = '';
+    }
   }
 
   private async _checkFeatures() {
@@ -200,9 +280,17 @@ export class RegisterView extends LitElement {
     const password = formData.get('password') as string;
 
     try {
+      await this.planChoiceChecked;
       const payload: Record<string, unknown> = { username, email, password };
       if (this.bootstrapToken) {
         payload.bootstrap_token = this.bootstrapToken;
+      }
+      if (this.planChoice) {
+        // Somebody who arrived from the pricing page already answered the
+        // plan question. Sending it here records the answer on the new user,
+        // which is what keeps the first-login plan choice off their screen
+        // even after they follow a verification link in another browser.
+        payload.plan_choice = this.planChoice;
       }
       const registerResult = await post('/api/v1/auth/register', payload);
 
@@ -214,8 +302,9 @@ export class RegisterView extends LitElement {
       // Completed registration is the primary conversion goal.
       trackGoal('Signup');
 
-      // Signup is card-free (T2 paywall move): no Stripe checkout here.
-      // Premium features request the card in-product via the upgrade modal.
+      // No Stripe checkout here. A paid plan chosen on the pricing page goes
+      // to Stripe first and never reaches this form; a signup that arrives
+      // with no plan is asked to choose one on its first console visit.
 
       // Try to auto-log-in the user using the credentials they just submitted
       // and continue any pending flow (eg. CLI OAuth consent at

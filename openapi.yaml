@@ -15558,6 +15558,17 @@ components:
           title: Bootstrap Token
           description: First-user setup token from the install (required while the
             instance has zero users and PRELOOP_BOOTSTRAP_TOKEN is set).
+        plan_choice:
+          anyOf:
+          - type: string
+            maxLength: 64
+          - type: 'null'
+          title: Plan Choice
+          description: 'The plan this person already picked on the pricing page before
+            they got here. Its presence, not its value, is what matters: it records
+            that the choice has been made, so the console never asks again. Paid plans
+            do not arrive this way (they go through checkout first), so in practice
+            this is the free plan''s id.'
       type: object
       required:
       - username
@@ -15615,6 +15626,16 @@ components:
           - type: string
           - type: 'null'
           title: Avatar Source
+        plan_choice_made:
+          type: boolean
+          title: Plan Choice Made
+          description: Whether this person has already chosen a plan. False is the
+            console's cue to ask the billing plugin whether to show the first-login
+            plan choice; true means it never asks. It defaults to true so a client
+            talking to an older server, or any caller reading a profile built without
+            a user row, is never dragged into an onboarding step it cannot reason
+            about.
+          default: true
         team_ids:
           items:
             type: string
@@ -24437,6 +24458,11 @@ components:
           - type: string
           - type: 'null'
           title: Issue Id
+        issue_key:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Issue Key
         project_id:
           anyOf:
           - type: string
@@ -24467,6 +24493,10 @@ components:
           - type: string
           - type: 'null'
           title: Error
+        coalesced:
+          type: boolean
+          title: Coalesced
+          default: false
       type: object
       title: RunPresetItemResult
       description: Target outcome for a preset run, including dispatch failure receipts.
@@ -27003,6 +27033,36 @@ components:
           description: Newest content this account has in the corpus. The corpus fills
             forward, so an empty answer older than this marker means no match, and
             one newer means not indexed yet.
+        indexed_from:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Indexed From
+          description: 'Oldest point in time this account''s corpus covers without
+            gaps. Indexing on write only covers sessions written since search shipped,
+            so on a deployment whose backfill has not run this is the deploy date
+            and nothing before it is searchable. Read it with indexed_through: together
+            they are the window these results actually come from. Null when the account
+            has nothing indexed at all.'
+        backfill_complete:
+          type: boolean
+          title: Backfill Complete
+          description: Whether the backfill has walked this account's retained history
+            to the end. False means the window above is still growing backwards, or
+            that no backfill has been run.
+          default: false
+        backfill_state:
+          type: string
+          enum:
+          - not_started
+          - in_progress
+          - complete
+          title: Backfill State
+          description: 'One of: not_started, in_progress, complete. ``not_started``
+            on a deployment where the operator has not switched the backfill on, which
+            is the shipped default.'
+          default: not_started
         embedded_through:
           anyOf:
           - type: string

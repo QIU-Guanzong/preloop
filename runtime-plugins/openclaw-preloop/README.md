@@ -1,55 +1,82 @@
-# Govern your OpenClaw agent — approvals on your phone, spend you can see
+# Govern your OpenClaw agent: approvals on your phone, spend you can see
 
 Your agent decides to run `kubectl delete deployment api`. You are not at the
 keyboard. Right now it just runs.
 
 `@preloop-ai/openclaw-plugin` connects OpenClaw to
 [Preloop](https://github.com/preloop/preloop), the open-source AI agent control
-plane. With it, that command pauses, the request lands on your phone, watch,
-Slack, Mattermost, email, or the web console, and you tap **Approve** or
-**Deny**. The agent continues or gets blocked with your reason. Everything it
-did is recorded.
+plane. With the plugin installed, that command pauses, the request lands on your
+phone, watch, Slack, Mattermost, email, or the web console, and you tap
+**Approve** or **Deny**. The agent continues or gets blocked with your reason.
+Everything it did is recorded.
 
-**Two things to be clear about, because they install differently:**
+## What you get
 
-- **The plugin** gates OpenClaw's native tool calls — shell commands, file
-  writes, everything the model can reach without asking — and holds open a
-  durable control channel, so you can message or interrupt an already-running
-  session from anywhere, typed or dictated.
+- **Dangerous commands wait for you instead of just running.** Every native tool
+  call is checked before it runs: your local OpenClaw policy first, then your
+  central Preloop policy. Allow, deny, or hold for a human, per tool and per
+  argument.
+- **Approve from wherever you actually are.** Push to phone or watch, Slack,
+  Mattermost, email, an outbound webhook, or the Preloop console. The tool call
+  stays blocked while you decide, for up to 24 hours by default, so "I will look
+  at it after lunch" is a valid answer.
+- **Nothing runs ungoverned when Preloop is down.** The gate fails closed by
+  default. An unreachable control plane, a 5xx, a bad token, or a malformed
+  reply all block the call rather than waving it through.
+- **Talk to an agent that is already running.** A durable control channel stays
+  open, so you can send a message, dictate one, or interrupt the current turn
+  from the console or the mobile apps, long after you walked away from the
+  terminal.
+- **A record of what the agent did, and who let it.** Every governed call is
+  logged with the matched rule, the approver, the arguments, and the outcome.
+- **One screen for every agent you run, with its bill.** Per-agent spend, budget
+  ceilings that stop the spend, and a session timeline. This part needs the
+  agent onboarded to Preloop as well as the plugin installed. See
+  [What onboarding unlocks](#what-onboarding-unlocks).
+
+![The Preloop console overview: pending approvals waiting for a decision, budget health against soft and hard ceilings, and the list of active agents with per-agent spend and a Talk button on each](https://raw.githubusercontent.com/preloop/preloop/main/frontend/public/assets/screenshots/quickstart/dark/dashboard.png)
+
+**Two pieces, because they install differently:**
+
+- **The plugin** (this package) gates OpenClaw's native tool calls, the shell
+  commands and file writes the model can reach without asking, and holds open
+  the control channel for messages and interrupts.
 - **Onboarding OpenClaw to Preloop** (one extra CLI command, below) routes its
   MCP and model traffic through Preloop, which is what produces per-agent cost
   attribution, budgets, allowed-model lists, and session cost optimization. The
   plugin does not do this on its own.
 
 Install the plugin and you get governance. Onboard the agent and you also get
-the bill, itemized — across every agent you run, not just OpenClaw.
-
-![The Preloop console showing live agents — OpenClaw, Hermes, Claude Code and Codex CLI — connected through the Preloop gateway, each with its own request count, spend, and Talk button](https://raw.githubusercontent.com/preloop/preloop/main/frontend/public/assets/screenshots/quickstart/dark/agent_bubble.png)
+the bill, itemized, across every agent you run rather than just OpenClaw.
 
 It is Apache-2.0, and it works against either the open-source
 [Preloop](https://github.com/preloop/preloop) control plane you host yourself,
 or the hosted [Preloop Cloud](https://preloop.ai).
 
-**Watch it work** — onboarding, tool governance, approvals, and cutting session
+**Watch it work.** Onboarding, tool governance, approvals, and cutting session
 cost, recorded end to end against a real stack:
 
-[![Preloop video series — see your agents, govern them, cut their cost](https://img.youtube.com/vi/Y_geb2Or8zM/maxresdefault.jpg)](https://www.youtube.com/watch?v=Y_geb2Or8zM&list=PLr2Jp0c-Qn2hoYL3aRZGUtBjTCVygWIXt)
+[![Preloop video series: see your agents, govern them, cut their cost](https://img.youtube.com/vi/Y_geb2Or8zM/maxresdefault.jpg)](https://www.youtube.com/watch?v=Y_geb2Or8zM&list=PLr2Jp0c-Qn2hoYL3aRZGUtBjTCVygWIXt)
 
-## Install
+## 60 seconds to install
 
-Node **>= 20** is required — OpenClaw runs the plugin installer inside its own
-Node runtime.
+Node **>= 20** is required, because OpenClaw runs the plugin installer inside
+its own Node runtime.
+
+```bash
+openclaw plugins install clawhub:@preloop-ai/openclaw-plugin
+```
+
+That is the ClawHub listing. The plain npm package works too:
 
 ```bash
 openclaw plugins install @preloop-ai/openclaw-plugin
-# or from ClawHub:
-# openclaw plugins install clawhub:@preloop-ai/openclaw-plugin
 ```
 
 Restart OpenClaw afterwards. If OpenClaw reports `requires Node` or
 `Unsupported engine`, upgrade the Node executable `openclaw` uses and reinstall.
 
-You also need a Preloop control plane to approve against — either
+You also need a Preloop control plane to approve against, either
 [Preloop Cloud](https://preloop.ai) (nothing to run) or the open-source stack on
 your own machine:
 
@@ -72,33 +99,52 @@ preloop agents validate openclaw
 ```
 
 This is the path that also routes OpenClaw's MCP tool calls through the Preloop
-MCP firewall and its model traffic through the Preloop gateway — the budgets and
-per-agent cost attribution described above. The plugin alone covers native tool
-approvals and the control channel.
+MCP firewall and its model traffic through the Preloop gateway, which is where
+the budgets and per-agent cost attribution come from. The plugin alone covers
+native tool approvals and the control channel.
 
 Undo anything with `preloop agents restore openclaw` or
 `preloop agents offboard openclaw`.
 
-## What you get, and from which piece
+Do not hand-author the runtime bearer token. Let the CLI or the marketplace
+installer mint it.
 
-| | Without Preloop | Plugin installed | Agent also onboarded |
-|---|---|---|---|
-| Risky native tool calls | `rm -rf`, `terraform apply`, `git push --force` run the moment the model decides to | Your rules decide: run, block, or hold for a human | same |
-| Approving | Means sitting in front of the terminal | Phone, watch, Slack, Mattermost, email, or console | same |
-| Reaching a running agent | Unreachable once it starts | Message or interrupt it from console or mobile | same |
-| Record of what happened | Terminal scrollback | Every governed call logged with matched rule, approver, outcome | plus model calls and MCP calls |
-| MCP tool calls | Ungoverned | Ungoverned — the plugin does not see them | Governed by the MCP firewall |
-| Model spend | Invisible | Still invisible | Attributed per agent, session, and model; budgets enforced |
-| Wasted tokens | Unmeasured | Unmeasured | Evidence-grounded waste findings per session |
+## What happens on the first dangerous tool call
 
-Concretely, for the approval path: the `before_tool_call` hook intercepts the
-call and asks Preloop for a decision. Preloop matches your policy, sees this
-needs a human, and pushes a notification with the full command to your phone.
-The tool call waits for the selected approval workflow while you decide. You deny it;
-OpenClaw gets the block plus your reason, and the agent carries on with
-something else.
+The model picks a tool. Before OpenClaw runs it, the plugin's
+`before_tool_call` hook stops it and works through four steps.
 
-## Configuration
+1. **Your local OpenClaw policy runs first.** The plugin reads
+   `~/.openclaw/exec-approvals.json`. If your own policy denies the command, it
+   is denied outright and never leaves the machine. A local allow is still sent
+   to Preloop so central rules can narrow it, and an allowlist miss is escalated
+   rather than resolved locally, because the plugin does not reimplement
+   OpenClaw's command analyzer.
+2. **Preloop evaluates your central policy.** Rules match on the tool name and
+   its arguments, written either as simple conditions or as CEL expressions,
+   and the whole policy can be exported and imported as YAML. A rule can allow
+   the call, deny it, or require a human. Most calls resolve here without
+   bothering anyone. If no rule matches, a local allow stands.
+3. **If a human is required, the request goes out and the tool waits.** A
+   notification with the full command lands on your phone, watch, Slack,
+   Mattermost, email, an outbound webhook, or the console. The tool call is
+   still blocked while you think. The default wait budget is 24 hours.
+4. **The answer comes back and is recorded.** Approve and the tool runs. Deny
+   and OpenClaw receives a block plus the reason you gave, which the agent sees
+   as the tool result and usually works around. Either way the decision is
+   written to the audit trail, tagged with tool source `agent`, next to your
+   MCP tool calls.
+
+**When things go wrong, the call blocks.** Only a valid `allow` lets a tool run.
+A returned `deny`, including an approval that expired (`timed_out: true`),
+blocks even if you turned fail-open on. Transport errors, timeouts and HTTP 5xx
+block by default and are the only failures that `tool_approval_fail_open: true`
+can waive. HTTP 4xx (including 401 and 403), malformed replies and invalid
+configuration always block, fail-open or not.
+
+![The Preloop tools page with rules on an MCP tool: deny above one threshold, require approval in the middle band, allow below it, each rule written as a CEL expression over the tool arguments](https://raw.githubusercontent.com/preloop/preloop/main/frontend/public/assets/screenshots/quickstart/dark/rules_configured.png)
+
+## Configuration reference
 
 The plugin reads its own OpenClaw plugin entry, at
 `plugins.entries.preloop-plugin.config` in `~/.openclaw/openclaw.json`:
@@ -123,9 +169,8 @@ The plugin reads its own OpenClaw plugin entry, at
 }
 ```
 
-Do not hand-author `bearer_token` — let the CLI or the marketplace installer
-mint it. Do not write Agent Control metadata as a top-level `preloop` object
-either; OpenClaw builds that validate config schemas reject unknown root keys.
+Do not write Agent Control metadata as a top-level `preloop` object. OpenClaw
+builds that validate config schemas reject unknown root keys.
 
 | Key | Default | What it does |
 |---|---|---|
@@ -133,6 +178,24 @@ either; OpenClaw builds that validate config schemas reject unknown root keys.
 | `tool_approval_fail_open` | `false` | Fail-closed by default: if Preloop is unreachable, the tool call is **blocked**. Set `true` only if you accept ungoverned execution during an outage |
 | `tool_approval_timeout_seconds` | `86400` | Workflow wait budget, an integer from 30 to 86400 seconds; HTTP adds 15 seconds of headroom |
 | `permission_check_url` | derived from `control_ws_url` | Override the approval endpoint |
+
+### Wait budgets
+
+The default budget covers approval workflows up to 24 hours, including a
+workflow selected by a central rule. It is a maximum wait, not a new workflow
+timeout: a five-minute workflow still expires after five minutes. Set
+`tool_approval_timeout_seconds` lower only if it covers every workflow this
+agent can select, because a shorter transport deadline can interrupt a pending
+approval and then follows the failure behaviour above. Missing config uses the
+default; invalid values block and are rejected by `verify` and by the manifest.
+
+Bundled standalone and Helm nginx configurations allow 86460 seconds only on
+`/api/v1/agents/permission-check`. Other ingress, load-balancer and OpenClaw
+host limits must also permit the chosen wait.
+
+Turning the plugin gate off skips central enforcement entirely. Preloop's
+server-side approvals-off setting only disables human escalation and does not
+override an explicit central require-approval rule.
 
 ### Where the plugin metadata lives
 
@@ -145,47 +208,6 @@ top-level key. Packaging and runtime metadata (the `before_tool_call` hook, the
 `package.json` instead. Nothing about plugin behaviour changed: the plugin
 reads its config through the OpenClaw plugin entry and registers its hook in
 code, not from manifest declarations.
-
-### How a decision is made
-
-1. **OpenClaw's own policy runs first.** The plugin reads
-   `~/.openclaw/exec-approvals.json`. Commands your local policy denies are
-   denied outright. Locally allowed calls also reach Preloop so central rules
-   can deny them or require approval. Without a matching central rule, a local
-   allow returns immediately without creating a human approval.
-   Allowlist-miss cases are escalated rather than resolved locally — the plugin
-   does not reimplement OpenClaw's command analyzer.
-2. **Preloop evaluates your policy.** Allow, deny, require approval, or require
-   a written justification, expressed as YAML + CEL.
-3. **A human decides, if the policy says so.** Notification to mobile, watch,
-   Slack, Mattermost, email, or webhook; the tool waits for the selected workflow.
-4. **The result is recorded** in the same audit trail as MCP tool calls, tagged
-   with tool source `agent`.
-
-### Waits and unavailable approvals
-
-Only a valid `allow` response permits execution. A returned `deny`, including
-an expired approval (`timed_out: true`), blocks even when fail-open is enabled.
-Transport errors/timeouts and HTTP 5xx block by default;
-`tool_approval_fail_open: true` explicitly permits execution for those availability
-failures only. HTTP 4xx (including 401/403), malformed replies and invalid
-configuration always block, even with fail-open enabled.
-
-The default wait budget covers approval workflows up to 24 hours, including a
-workflow selected by a central rule. This is a maximum wait, not a new workflow
-timeout: a five-minute workflow still expires after five minutes. Set
-`tool_approval_timeout_seconds` lower only if it covers all workflows this agent
-can select; a shorter transport deadline can interrupt a pending approval and
-follows the configured failure behavior. Missing config uses the new default;
-invalid values block by default and are rejected by `verify` and the manifest.
-
-Bundled standalone and Helm nginx configurations allow 86460 seconds only on
-`/api/v1/agents/permission-check`. Other ingress/load-balancer and OpenClaw host
-limits must also permit the chosen wait. The plugin only governs calls delivered
-to its `before_tool_call` hook; it cannot promise coverage for tools that bypass
-that host hook. Turning the plugin gate off skips central enforcement entirely;
-Preloop's server-side approvals-off setting only disables human escalation and
-does not override an explicit central require-approval rule.
 
 ## Manual Test Without Preloop CLI
 
@@ -211,8 +233,10 @@ message.
 Scoped honestly, so you know what you are installing:
 
 - Maintains a WebSocket to Preloop's Agent Control endpoint, with exponential
-  reconnect backoff (2s → 30s) and a 30s heartbeat, so the channel survives
-  laptop sleep and network changes.
+  reconnect backoff (2s to 30s) and a 30s heartbeat, so the channel survives
+  laptop sleep and network changes. A server eviction (close code 4000, meaning
+  a newer connection superseded this one) stops the retry loop instead of
+  fighting it.
 - Advertises capabilities: new and existing sessions, text, voice transcripts,
   interrupt, tool approval.
 - Delivers operator messages and voice transcripts into the running OpenClaw
@@ -220,12 +244,14 @@ Scoped honestly, so you know what you are installing:
 - Gates every native tool call through `before_tool_call`, fail-closed.
 
 What it does **not** do: it is not a content filter or a prompt-injection
-defense. Preloop's protection against prompt injection is partial — policy and
+defense. Preloop's protection against prompt injection is partial. Policy and
 approvals mean an injected instruction still has to get past your rules and, for
-anything risky, past you. That is a meaningful barrier, not a guarantee. It also
-does not itself route MCP or model traffic, and so it does not by itself produce
-cost attribution, budgets, or optimization findings; those come from Preloop
-onboarding.
+anything risky, past you. That is a meaningful barrier, not a guarantee. The
+plugin only governs calls delivered to its `before_tool_call` hook, so it cannot
+promise coverage for tools that bypass that host hook, and it does not see
+OpenClaw's MCP tool calls at all: those are governed by the MCP firewall, which
+requires onboarding. It also does not itself route model traffic, and so it does
+not by itself produce cost attribution, budgets, or optimization findings.
 
 ## What onboarding unlocks
 
@@ -234,19 +260,19 @@ control plane (Apache-2.0, self-hostable, with
 [Preloop Cloud](https://preloop.ai) as a hosted option). Once an agent's traffic
 runs through it, alongside approvals you get:
 
-- **MCP firewall** — allow / deny / require-approval / require-justification on
-  every MCP tool call, as YAML + CEL policy.
-- **AI model gateway** — OpenAI- and Anthropic-compatible, with per-agent
+- **MCP firewall.** Allow, deny, require approval, or require a justification on
+  every MCP tool call, as YAML plus CEL policy.
+- **AI model gateway.** OpenAI- and Anthropic-compatible, with per-agent
   budgets, allowed-model lists, and cost attribution. Provider keys stay with
   Preloop instead of inside agent containers.
-- **Cost analytics and budgets** — spend explained by model, agent, session, API
+- **Cost analytics and budgets.** Spend explained by model, agent, session, API
   key, and user, with soft and hard budget ceilings and budget-health alerts.
-- **Session cost optimization** — evidence-grounded waste findings per session,
+- **Session cost optimization.** Evidence-grounded waste findings per session,
   one-click apply, and consent-gated replay verification of the savings. This
   ships in the open-source core, using your own model keys.
-- **Runtime session observability** — one timeline per session covering tool
+- **Runtime session observability.** One timeline per session covering tool
   calls, model calls, policy decisions, approvals, and spend.
-- **Audit trails** — durable records with the matched policy, approver, inputs,
+- **Audit trails.** Durable records with the matched policy, approver, inputs,
   timestamps, and outcome.
 
 ![The Preloop cost view: estimated spend and token totals for the period, per-agent cost breakdown, and budget health against soft and hard ceilings](https://raw.githubusercontent.com/preloop/preloop/main/frontend/public/assets/screenshots/quickstart/dark/cost_page.png)
@@ -254,9 +280,9 @@ runs through it, alongside approvals you get:
 ![The Preloop audit timeline: a live, filterable stream of model requests, runtime sessions, token counts, cost per call, and outcomes](https://raw.githubusercontent.com/preloop/preloop/main/frontend/public/assets/screenshots/quickstart/dark/audit_page.png)
 
 The point of the combination: one control plane over every agent you run, not a
-separate dashboard per runtime. Preloop works with any MCP-compatible agent —
-OpenClaw, Claude Code, Codex CLI, Cursor, Gemini CLI, Hermes, OpenCode, and
-others. The same OpenClaw, still running at full speed, but now something you
+separate dashboard per runtime. Preloop works with any MCP-compatible agent,
+including OpenClaw, Claude Code, Codex CLI, Cursor, Gemini CLI, Hermes and
+OpenCode. The same OpenClaw, still running at full speed, but now something you
 can see while it works, stop before it does damage, talk to from anywhere, and
 account for afterwards.
 
@@ -265,10 +291,10 @@ hosted service. *Preloop Enterprise* is the commercial self-hosted edition.
 
 ## Learn more
 
-- Docs: [docs.preloop.ai](https://docs.preloop.ai) —
+- Docs: [docs.preloop.ai](https://docs.preloop.ai), and the
   [OpenClaw integration guide](https://docs.preloop.ai/guide/integrations/openclaw/)
-- Source: [github.com/preloop/preloop](https://github.com/preloop/preloop) —
-  this plugin lives in
+- Source: [github.com/preloop/preloop](https://github.com/preloop/preloop). This
+  plugin lives in
   [`runtime-plugins/openclaw-preloop`](https://github.com/preloop/preloop/tree/main/runtime-plugins/openclaw-preloop)
 - Video series:
   [Preloop on YouTube](https://www.youtube.com/watch?v=Y_geb2Or8zM&list=PLr2Jp0c-Qn2hoYL3aRZGUtBjTCVygWIXt)

@@ -1,7 +1,7 @@
 {
   "name": "@preloop-ai/claude-plugin",
-  "version": "0.1.0",
-  "description": "Preloop Agent Control sidecar for Claude Code",
+  "version": "0.1.1",
+  "description": "See your live Claude Code sessions from the Preloop console or your phone, send them a turn, and interrupt them from anywhere. Prototype.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
@@ -20,8 +20,15 @@
   "keywords": [
     "preloop",
     "claude-code",
-    "agent-control",
+    "approvals",
     "tool-approval",
+    "human-in-the-loop",
+    "governance",
+    "audit",
+    "control-plane",
+    "remote-control",
+    "agent-control",
+    "observability",
     "autonomous-agents"
   ],
   "bin": {

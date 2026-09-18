@@ -54,8 +54,9 @@ class User(Base):
         oauth_id: OAuth provider's user ID.
         external_id: External system's user ID (for LDAP/AD/SAML).
         last_login: When the user last logged in.
-        trial_prompt_dismissed_at: When the user answered the post-signup
-            trial offer (null while it has never been shown or answered).
+        plan_choice_made_at: When this user chose a plan (on the pricing
+            page before signing up, on the first-login plan choice, or by
+            completing a checkout). Null means the choice is still open.
         onboarding_claim_hash: SHA-256 of the outstanding single-use token
             that claims a checkout-created account (null when none is
             outstanding).
@@ -138,14 +139,18 @@ class User(Base):
         DateTime(timezone=True), nullable=True, comment="When the user last logged in"
     )
 
-    # Onboarding state. The post-signup trial offer is shown once per person,
-    # so its dismissal has to survive a new browser and a cleared cache: it
-    # belongs to the user, not to localStorage. Null means "not answered yet";
-    # the timestamp records when they chose (either Free or a checkout).
-    trial_prompt_dismissed_at: Mapped[Optional[datetime]] = mapped_column(
+    # Onboarding state. The plan choice is made once per person, so it has to
+    # survive a new browser and a cleared cache: it belongs to the user, not
+    # to localStorage. Null means the question is still open, which is the
+    # only state in which the first-login plan choice is shown. It is stamped
+    # by whichever door the person came through: the pricing page (carried
+    # into registration), a completed checkout, or the choice screen itself.
+    # The timestamp is the whole record: which plan they picked is already
+    # written down as a subscription, or as its absence.
+    plan_choice_made_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
-        comment="When the user answered the post-signup trial offer",
+        comment="When this user chose a plan (null while the choice is open)",
     )
 
     # SHA-256 of the single-use claim token minted when a completed checkout

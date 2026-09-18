@@ -7,56 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- CI prefers a matching system Python (through a venv) and only then
-  falls back to `actions/setup-python`. The action has no Debian 12
-  builds, so a self-hosted bookworm runner with `python3.11` already
-  installed used to fail before any test ran. Distro Python is PEP 668
-  managed; the venv is what makes `pip install` legal. Needs
-  `python3.11-venv` on Debian. Public `ubuntu-latest` jobs are
-  unchanged: they have no system 3.11, so they still use setup-python.
-- Self-hosted backend shards run in a `python:<version>-bookworm` job
-  container and reach Postgres by service hostname, so they do not bind
-  host 5432. Two runner processes on one VM can run shards together.
-  Public `ubuntu-latest` backend jobs stay on the VM with
-  `localhost:5432`.
-- Self-hosted GitHub runners are extra CI capacity, not a replacement
-  pool. Frontend, plugins, and coverage stay on `ubuntu-latest`. Backend
-  keeps its eight hosted shards by default; idle self-hosted Linux/X64
-  runners take only overflow shards (the tail of the matrix, in a
-  `python:<version>-bookworm` job container so they do not bind host
-  5432). Sending every test job to three VMs serialized the suite and
-  was slower than public runners.
-- The setup-ci-python composite invokes its helper via
-  `GITHUB_WORKSPACE`, not `github.action_path`. The latter is a host
-  path and does not exist inside the self-hosted job container.
-
-### Fixed
-
-- Tree-stop and child-wait tests bind the session factory to an object
-  that still looks like a Session. GitLab sets `INIT_TEST_DATA=true`,
-  so `TestClient` lifespan seeds via `next(get_db_session()).query`,
-  and a contextmanager-only stub made those client tests ERROR at
-  setup with `Database setup failed`.
-- The log-persistence backpressure test waits long enough for a
-  saturated sqlite pool inside a self-hosted job container. Overflow
-  shards run there; a 5s/10s budget passed on `ubuntu-latest` and
-  timed out on the VMs.
-- GitHub CI overflow-plan tests compute `backend_plan` in Python, so
-  GitLab's unit image (no `jq`) can still pin hosted-first routing.
-- Backend shard routing indexes `backend_plan` with `matrix.group`.
-  GitHub expressions reject minus, so `matrix.group - 1` made the
-  workflow file invalid and no GitHub CI job could start. The plan
-  array is 1-based (dummy `null` at index 0).
-- Issues similar-duplicates tests drop coalesced GETs between cases,
-  so a later spec cannot join an earlier in-flight `/issue-duplicates`
-  response and render zero rows.
-- The upgrade e2e checks out the 2026 `pro` plan, not the withdrawn
-  `teams` id. Free accounts see the AI-titles upsell hint on the
-  sessions list again. Custom-agent e2e opens the wizard from
-  "Onboard existing agent". Overview e2e treats an empty gateway card
-  as first-usable.
+Highlights: **Alibaba Cloud Model Studio (Qwen)** and **AWS Bedrock** join the
+model providers with live discovery and honest cost estimates, **operator
+notes** steer a running agent at its next turn boundary from the console, the
+CLI or another agent, **session search** makes transcripts findable by keyword
+or embedding with saved searches and an index that retention and legal holds
+cover, **flow composition** lets one execution start another through
+`run_flow` with an execution tree, a cost rollup and a parent that parks on
+`WAITING_FOR_CHILDREN`, **runners** hold several executions each and gain a
+one-shot ephemeral mode behind a `run-flow` GitHub Action, **OTLP export**
+ships gateway and MCP telemetry to any collector, a **repo review preset
+family** adds architecture, code health, standards, docs currency and
+portfolio lenses with one-page verdict covers, and the **console** gains an
+Activity feed, an Inventory box, model prices you can read and set, and user
+avatars.
 
 ### Added
 
@@ -110,9 +74,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   callable list is refused rather than skipped. The selection form also
   asks how deep to read and for how much: `max_cost_usd` is a ceiling
   the human sets, never a forecast, and fan out stops when measured
-  spend crosses it. The follow-up form's README pull-request toggle is
-  off unless a human turns it on, and this preset still opens nothing.
-  Read-only: it files nothing and opens nothing.
+  spend crosses it. The agent itself holds no write tool, so it files
+  nothing and opens nothing. Two platform steps run after it exits, each
+  off unless the flow configures it. `report_publication` commits the
+  generated report as one file on a stable `preloop/report/<slug>` branch
+  built in a throwaway worktree and opens or updates one pull request
+  against it; a byte-identical document commits nothing and records
+  `identical_document`, and every failure degrades into
+  `result.report_publication` from a closed vocabulary.
+  `follow_up_filing` turns the rows a human approved at the gate into one
+  tracker issue each, keyed on a stable follow-up id so a re-run files
+  nothing twice, and writes the issue identifiers back into the stored
+  result. Both keys are reserved to the control plane, so an agent cannot
+  author a receipt for work it has no tool to do. Guide at
+  `docs/guide/flows/portfolio-review.md`.
 - `models.crud.billing_preflight` reports the entitled half of the fleet:
   entitled accounts per plan, how many of them sit at or over a given seat
   or agent ceiling (seats counted as active users plus live invitations, the
@@ -397,195 +372,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   4096 UTF-8 bytes) so a weekly subscription can name the baseline without
   a caller on the tick. Guide at `docs/guide/flows/repo-review-presets.md`.
 
-### Removed
-
-- Flow failure comments. `notifications.on_failure.comment_on_trigger_issue`
-  is still accepted by `POST/PATCH /api/v1/flows` (no 422 for stored flows or
-  older clients) but is parsed and ignored: a failed or timed out execution no
-  longer posts a comment with the redacted log tail on the triggering issue.
-  A failed execution is an attention item on Overview instead. `notifications`
-  is a JSONB column, so there is no migration; the ignored block is dropped
-  the next time the flow is saved from the console. This matches the existing
-  treatment of `notifications.on_failure.attention_item`.
-
-### Fixed
-
-- A plan withdrawn from sale (`plan.is_active = False`) is grandfathered
-  only for a subscription somebody is paying for, or for a trial of it that
-  is still running. An ended or cancelled trial, a cancelled subscription,
-  and an `active` row with no provider subscription id behind it all resolve
-  to the default plan instead of keeping the withdrawn plan's terms and
-  name. The rule lives once, in `preloop.models.crud.entitlement`, and is
-  applied by `entitled_subscription`, `get_active_for_account` and the
-  billing preflight aggregates, so console, checkout and operator counts
-  agree. Operator note: a grant hand-provisioned on a withdrawn plan without
-  a provider subscription id stops resolving when this ships. Count those
-  rows before deploying (newest subscription per account, status `active` or
-  `past_due`, plan row with `is_active = False`, provider id null or blank);
-  re-establish any that are real by reconciling them against the provider,
-  or by moving the account onto a custom plan row, which is on sale by
-  construction and never subject to this rule.
-- Code scanning and Code Quality findings on main: report-publication
-  logs only closed-vocabulary outcomes, session-search credential
-  redaction uses length-bounded patterns that still consume a labelled
-  value past 4096 characters so it cannot leave a plaintext tail, the
-  in-repo flow-trigger workflow checks out the default branch and
-  installs a checksum-verified CLI from that tree's `scripts/install-cli.sh`
-  instead of piping curl to sh, and the remaining CodeQL quality notes
-  (unclosed publication fds, lock-file Close, unused locals/imports,
-  mixed returns, test lambdas) are cleared.
-
-- The console upgrade modal repeats what the server said instead of
-  "Unexpected checkout response". `startCheckout` resolves a `refresh`
-  answer (asking the billing views to re-read the subscription summary and
-  returning the reason), surfaces the server's sentence for any other
-  action, and keeps the redirect path. A deployment refusal such as
-  `catalog_not_synced` now reaches the dialog word for word.
-
-- The stale-claim reaper no longer re-publishes every unclaimed execution
-  from every worker on every pass. One replica runs the pass per interval
-  (a database lease), an execution nobody claims is re-dispatched on a
-  doubling delay recorded on the row (30s, 60s, 2m, ... up to
-  `FLOW_EXECUTION_REDISPATCH_BACKOFF_MAX_SECONDS`, default 900), and a pass
-  that finds flow tasks already queued undelivered publishes nothing.
-  Recovery of an execution whose owner died is unchanged: a claim clears
-  the backoff, so it is adopted inside one stale window. Each pass logs one
-  summary line with its counts instead of a line per candidate.
-- Agent launch no longer fails with `exec /bin/bash: argument list too
-  long` when a rendered prompt or Kubernetes inner script exceeds
-  Linux `MAX_ARG_STRLEN` (131072 bytes). The prompt and script travel
-  as base64 chunks. A pre-launch guard refuses a payload that reaches
-  or exceeds the per-string or total budget, with a named
-  `runner_error`. OpenHands (the default `agent_type`) uses the same
-  transport. Refs #609.
-- A labeled trigger matches the label the event carries, not the issue's
-  whole label list. A flow already active on that issue or pull request
-  coalesces further triggers instead of starting another run.
-
-- GitHub App trackers keep their installation binding when edited. The
-  edit modal used to run the API-token path: `POST
-  /api/v1/trackers/test-and-list-orgs` built a token client for a tracker
-  whose `auth_type` is `github_app`, offered the `personal` login instead of
-  the installation's numeric owner ids, and saving replaced the scope rules
-  with ones that matched no project. Both `test-and-list-orgs` and
-  `list-projects-for-org` now build the client from the tracker's
-  installation (same as the scanner) when `tracker_id` refers to an App
-  tracker. `TrackerResponse` gains `auth_type`, `oauth_installation_id` and
-  `github_installation_target_login` so the console can tell App trackers
-  from token trackers; the edit form no longer asks for a token. A new
-  App tracker is scoped to the installation being bound only, not to every
-  installation on the account. When the App is already installed on the
-  target account (GitHub shows its Configure page and never calls the setup
-  callback), the add form offers a "Use an existing installation" picker
-  next to "Connect with GitHub".
-
-### Changed
-
-- Session embedding that was already opted in now embeds only a session's
-  title and summary (`summaries_only`) after this upgrade. There is no
-  flag that keeps the previous "every chunk" behaviour. An account that
-  wants the old behaviour sends `PUT
-  /api/v1/runtime-sessions/settings/embedding` with `{"scope": "full"}`.
-  Narrowing deletes no existing vector; widening hands the untouched
-  backlog back to the worker.
-- Brand pricing config: `landing.pricing.deployment_options` is no longer
-  read. The Dedicated tab is `landing.pricing.dedicated` (same card-plus-table
-  shape as Cloud) with optional `cloud_label`. A leftover
-  `deployment_options` key is ignored and will not render. EE brands.yaml
-  already ships the replacement block.
-
-- Helm gateway Deployments set `PRELOOP_SERVICE_ROLE=gateway` (API pods
-  set `api`). `create_app` lazy-imports control-plane routers so a gateway
-  process does not load flow orchestration or MCP HTTP. LiteLLM defaults to
-  its bundled price map (`LITELLM_LOCAL_MODEL_COST_MAP=true`) unless the
-  operator already chose otherwise. Account-governance, live-price
-  negative, and Responses-capability caches cap at 4096 entries, and
-  LiteLLM's retained stream-chunk list is dropped after cost copy.
-- Gateway memory request is 768Mi (limit 2Gi). HPA minReplicas 2 / max 5
-  with a 90% memory target. Hosted idle RSS is ~650Mi; a 256Mi request
-  made HPA report ~250% and pin at maxReplicas while CPU was idle. More
-  replicas copy that idle RSS. Use maxReplicas for real CPU/traffic, not to
-  paper over an undersized request. Search-corpus indexing is queued off
-  the response path, bounded by `GATEWAY_USAGE_INDEX_QUEUE_MAX_PENDING`
-  (default 256) and `GATEWAY_USAGE_INDEX_QUEUE_ENABLED`. Dedicated gateway
-  pods still run no audit-seal, retention, or optimization passes, so at
-  least one `api` or `all` process must remain.
-- CodeQL advanced setup uploads SARIF so Scorecard SAST sees every push and
-  pull request. Disable GitHub default CodeQL setup or the upload is
-  rejected.
-- `execute_flow` / `resume_flow_execution` NATS publishes set `Nats-Msg-Id`
-  `{task}:{execution_id}` so the 2m duplicate window collapses reaper
-  republishes of the same unclaimed execution.
-- Preset 001 (Issue Triage Assistant) writes remaining scope, acceptance
-  and readiness onto the issue body and applies a complexity label.
-  Operators who sync this preset to linked flows move from a
-  proposals-only assessor to an issue writer.
-- Failed implementation publication keeps the configured PR/MR when
-  commits were already pushed. A failed `result.json` no longer refuses
-  publication: the publisher opens a disclosed, non-closing PR/MR with
-  `Refs` and the execution link. Configured verification still gates new
-  pushes.
-- **CRA VEX suppressions are applied before the severity gate, not after it**:
-  preset 006 asked for VEX and the gate in one breath, so a run could escalate
-  a finding to a human and then annotate it as `not_affected`, which made
-  authoring VEX cost an approval interrupt instead of saving one. Order is now
-  stated and deterministic, and `gate.vex_suppressed` must equal the set the
-  body implies, field for field. A status only suppresses with a non-empty
-  justification beside it: a bare `not_affected` stays in the gate, where
-  before it was dropped from the gate silently. `affected` and
-  `under_investigation` never suppress.
-- bcrypt 5.0.0 raises on secrets longer than 72 bytes instead of truncating.
-  New passwords stay capped at 72 characters. Login and `current_password`
-  do not: hashing and verify use bcrypt's 72-byte prefix so existing longer
-  passwords still authenticate (the same truncation passlib used to apply).
-  Forgot-password remains available to set a new password under the cap.
-- CRA `dossier_manifest.evidence` no longer reports a run's evidence pack as
-  `missing` while `evidence-status` reports it `available`. The dossier is
-  built before finalize persists the captured pack, so `load_evidence` sees a
-  stale row; the orchestrator's in-memory captured receipt (the same receipt
-  finalize stores) now fills that window, and a genuinely failed or expired
-  DB receipt stays authoritative.
-- The flow form only offers PR-dependent options where they apply. PR review
-  and CI follow-up render when "Create a pull request on commit" is checked,
-  and the success comment on the triggering issue also requires a tracker
-  trigger with at least one issue or comment event. Hidden sections are
-  preserved byte for byte in the submitted payload, since a flow can also open
-  its pull request through the MCP `create_pull_request` tool.
-- Security-maintenance repair: rebuilt SBOM ingest after approval, controller
-  checkout from frozen publication records (not agent-writable `HEAD.txt`),
-  per-component screening, background reconcile without
-  GET, per-request approval policy, and managed-credential denial on console
-  approval routes. Recheck removal is derived from the submitted SBOM bytes
-  (advertised CycloneDX/SPDX JSON), not from model inventory omission.
-  Baseline acceptance requires exact `release_id` and the digest of the
-  supplied SBOM bytes on the controller envelope. The initial-baseline audit
-  is scheduled through
-  `POST /api/v1/security-maintenance/releases/{release_id}/baseline/audit`,
-  which commits the execution then dispatches it through the existing flow
-  trigger path.
-  Omitted or null SBOM component lists, unsupported format versions, and
-  malformed nesting cannot prove component removal.
-- Abandoned security-maintenance dispatch claims expire after the same
-  interval as flow-execution recovery (default 120 seconds). Sweep and the
-  initial-baseline retry route redeliver a still-`PENDING` execution id;
-  a live claim is not duplicated, and a started or finished execution is
-  not restarted. Legacy `dispatching` records without a timestamp are
-  treated as expired. Claim helpers flush and re-read the locked row and
-  bound execution with `populate_existing` so a second session cannot
-  finish or redeliver from a stale identity-map copy.
-- Security-maintenance audit and recheck completion observes frozen Git
-  bundles even when isolated publication is off. A hex40 pin plus
-  `git_clone_config.repositories[].repository_url` produces a controller
-  `product_provenance` mapping; agent `HEAD.txt` and forged
-  `sha_status=verified` rows cannot establish checkout. Hosted and
-  private post-exec export `evidence/branch.bundle` for those opted-in
-  audits even with no code changes, no target branch, and publication
-  off. The export does not commit, push, open a pull request, or mint
-  writer credentials. Isolated publication is unchanged. The mapping is
-  checkout observation, not signed build attestation.
-
-### Added
-
 - **CRA Article 14 reporting: the judgement and the clock**: presets 005 and
   006 now emit a `reporting` block instead of a bare `art14_candidates` list of
   KEV CVE ids. KEV membership says a vulnerability is exploited somewhere, not
@@ -599,8 +385,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed or the scan did not complete, so silence is not read as safety. The
   audit report cover prints an ARTICLE 14 REPORTING BOX and the new
   `cra.reportable_vulnerability` webhook event fires once per candidate,
-  idempotent on (execution, cve). The obligation applies from 11 September
-  2026. Preloop computes the judgement and the clock and does not file: there
+  idempotent on (execution, cve). The obligation applies from
+  11 September 2026. Preloop computes the judgement and the clock and does
+  not file: there
   is no ENISA submission client, the payload carries
   `not_a_legal_determination` and `filing_is_manufacturer_responsibility`, and
   the filing decision stays with the manufacturer.
@@ -852,16 +639,488 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/guide/usage-hooks.md` (old `cursor-usage-hooks.md` path kept as
   a stub).
 
+- **`resolve_sbom_upstreams` builtin (default-disabled)**: maps vendored
+  Arduino/PlatformIO SBOM components (name + version) to an upstream
+  repository URL and version-shaped tag candidates via the public library
+  registries. A resolution requires a registry-confirmed name AND version
+  match with a usable repository URL; everything else is unresolved with a
+  reason. Default-off so regular sessions do not pay the tools/list context
+  tax; security-audit presets 005 (SBOM Exploit Check) and 006 (Release
+  Security Audit) allow-list it.
+- **CRA result.json contract**: the four security-audit presets pin
+  `/workspace/result.json` as a versioned contract (`preloop.cra.sbomaudit/v1`,
+  `vulnscan/v1`, `releaseaudit/v1`, `duediligence/v1`). Tests parse each YAML
+  Required shape, require the honesty line, validate example artifacts against
+  those keys, and reject banned claims (`compliant: true`, `ce_mark: true`,
+  "Article 14 filed").
+- **CRA / AI Act evidence runbook**: rewrite of
+  `docs/guide/flows/security-audit-presets.md` as a manufacturer-facing
+  runbook for the shipped Apache presets (SBOM Verify, SBOM Exploit
+  Check, Release Security Audit, Component Due Diligence). Opens with
+  what the pack is not (Regulation (EU) 2024/2847; Art. 14 reporting
+  from 11 Sep 2026; full CRA 11 Dec 2027; Preloop does not file Article
+  14 reports), then the `result.json` contract aligned to the YAML
+  prompts, a copy-paste CI hook (`workspace_files` plus poll `/result`
+  and retain `/evidence`), and honest limits. Not a conformity
+  assessment, CE marking, or certification.
+- **Model I/O content policies**: instance policies can `allow`, `deny`,
+  or `require_approval` on `model.request` and `model.response` using
+  the existing policy engine. Built-in detectors cover PII, prompt
+  injection heuristics, and a local moderation ruleset. The console
+  restores `/console/policies` (sidebar next to Tools;
+  `/console/governance` redirects there) as a rule-centric page. Describe
+  a change edits the current policy with the account default model and
+  shows a unified YAML diff that must be Saved. YAML import/export
+  round-trips the new targets. Streaming buffers until the assembled
+  response can be evaluated (deny cannot retract tokens already sent).
+  See `docs/guide/model-content-policies.md`.
+- **Private-cluster Helm install**: `helm/preloop/README.md` documents a
+  ClusterIP + ingress install with private registry pull secrets, existing
+  Postgres, Kubernetes Secrets (not values committed to git), and mounting a
+  private CA via `extraVolumes` / `extraEnv` (`SSL_CERT_FILE`). Example
+  overlay: `helm/preloop/values-private-cluster.yaml`. Compose and Helm are
+  the supported install surfaces; this repo does not ship Terraform.
+- **OpenAI-compatible upstream TLS**: LiteLLM completions and model
+  discovery honor `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE`
+  (and `PRELOOP_SSL_VERIFY=false` as a last resort) so a private
+  OpenAI-compatible base URL such as `https://gateway.internal/v1` works
+  with operator PKI. Public OpenAI, Anthropic, and OpenRouter keep the
+  default trust store (including an `openai-compatible` model whose
+  endpoint is `https://openrouter.ai/api/v1`).
+- **OTLP export for gateway and MCP telemetry**: optional OpenTelemetry
+  export (disabled by default) emits GenAI spans for governed model
+  calls and MCP tool calls, including `gen_ai.conversation.id` when a
+  runtime session id is present. Token and cost attributes match the
+  `ApiUsage` row for that request. Exporter errors are logged and never
+  fail the user-facing call. Helm `otlp.*` values and
+  `docs/guide/observability-otlp.md` cover a generic collector, Langfuse
+  OTLP ingest, and Datadog OTLP ingest.
+- **GitLab `issue_labeled`**: an Issue Hook whose `changes.labels` adds
+  a label now normalizes to `issue_labeled` (remove-only is
+  `issue_unlabeled`). Filter field `added_labels` is set on GitHub and
+  GitLab.
+- **Alibaba Cloud Model Studio (Qwen)** as a model provider: the add-model
+  dialog names it, existing rows keep the provider id `qwen`, and Fetch
+  Models lists the live catalog for the region the API URL names (Beijing,
+  Singapore International, a Singapore workspace host, US), with the key
+  link following that hostname to the right regional console. The chat
+  adapter covers streaming, tool calls, provider usage, thinking controls
+  and ephemeral cache markers; omni, speech-to-speech and translate SKUs
+  are matched by family token and hidden from the chat picker. Costs are
+  estimates: Singapore International USD list tariffs seed the map, live
+  native `GET /api/v1/models` prices overlay it per host and region, and
+  CNY sites, time-banded SKUs and non-token units stay unpriced rather
+  than guessed. AI approval policies honour the configured region.
+  Docs: `docs/guide/alibaba-model-studio.md`.
+- **AWS Bedrock** as a model provider. The add-model dialog asks for an
+  access key, a secret key, an optional session token and a region in place
+  of the API URL and key pair, and discovery lists foundation models live
+  from the Bedrock control plane (`list_foundation_models`), filtered to
+  ACTIVE text-output chat models; embedding, image and video ids are
+  dropped. Rejected credentials answer 401, and a small bundled catalog is
+  the fallback only when boto3 is missing or the control plane is
+  unreachable. Secret material is masked in serialized copies the way
+  `api_key` already is; submit stores the credential blob the existing
+  Bedrock completion path parses plus `meta_data.provider_runtime.region`.
+  `preloop agents onboard` for Claude Code warns when a truthy
+  `CLAUDE_CODE_USE_BEDROCK` survives in the launching shell, naming the AWS
+  variables exported beside it, because that routes traffic past the
+  gateway's budgets, policies and accounting.
+- **Operator notes**: a short instruction from an identified human to a
+  running agent, delivered at its next turn boundary. `POST` and `GET
+  /api/v1/operator-notes` send and list one against an agent, a runtime
+  session or an execution, and `POST
+  /api/v1/operator-notes/{note_id}/cancel` withdraws an undelivered one.
+  Sending takes `control_managed_agent` and is audited before the API
+  answers the author. The gateway appends a claimed note
+  to the outbound body as a trailing user message in the protocol's own
+  shape, after policy enforcement and before anything reaches upstream, so
+  no harness polls and a turn with no note costs nothing. Notes live on the
+  agent-control table behind a `kind` discriminator and `claim_note` is an
+  exactly-once UPDATE, so a retry cannot deliver the same note twice. The
+  console carries an Operator notes composer on the agent page and on a
+  live execution, showing each note's state (pending, delivered with
+  channel and turn, acknowledged, cancelled, expired) and letting an
+  undelivered one be withdrawn. Docs at `docs/guide/operator-notes.md`.
+- **`send_note` builtin tool**: an agent can note another agent, session or
+  execution, default off, through the same store, envelope and delivery
+  rail a human note uses; the only new fact is the author, which the server
+  stamps and the sender cannot choose. The default scope is descent: a run
+  may note the runs it started, at any depth, and nothing else, keyed on
+  lineage the platform wrote rather than an argument the caller passed. A
+  sibling, the run that started it, and a caller with no lineage are
+  refused before target resolution completes. Wider than descent is a
+  grant, not a setting: the refusal falls through to a rule evaluation on
+  `send_note` and only an explicit allow widens it, so deny,
+  approval-required and evaluation failure all fail closed. Every refusal
+  writes one `agent.note_scope_denied` audit row. Every console surface
+  that renders a note names the author and the credential kind, and the
+  sessions list reports per row how many notes a session received and who
+  wrote the most recent one.
+- **A subagent session records its parent**: runtime sessions carry a
+  nullable, indexed `parent_session_id`, derived only where a harness says
+  so on the wire (OpenCode's `X-Parent-Session-Id`, and a Claude Code
+  subagent turn that still sends the parent's session id alongside
+  `X-Claude-Code-Agent-Id`), and the usage-hook ingest path carries the
+  `parent_conversation_id` it already reports onto the row the same way.
+  Null means lineage unknown, not an error: an incapable harness, a hostile
+  or oversized value, and a session that names itself all leave a null
+  parent with the session still created. The parent is stored as a real
+  session row id, looked up or created so a subagent that reaches the
+  gateway first cannot race its parent into a second row, and is
+  write-once. Per-harness findings in
+  `docs/guide/subagent-session-identity.md`.
+- **Every approval is attributed to its agent, key, session and run**:
+  `approval_request` gains `api_key_id` (nullable FK, `ON DELETE SET NULL`,
+  so revoking a key does not erase the history it produced), and the MCP
+  creation paths (the builtin and proxied tool gate, the approval wrapper,
+  the dynamic MCP server) record who was asking instead of nothing. The
+  console renders one attribution line on every approval surface ("Agent x,
+  Key y, Session z, Flow run w"), each part linked and each part omitted
+  when nothing names it, with an id shortened to eight characters rather
+  than falling back to a label nobody can click. Approval email and push
+  name the agent when the request carries one, and keep the previous
+  subject, lead line and subtitle verbatim when it does not.
+- **`POST /openai/v1/embeddings`** on the gateway, beside chat completions
+  and responses, with the same authentication, account-scoped model
+  resolution, kill switch, budget preflight, retry ownership and usage
+  accounting: one call lands one `ApiUsage` row with its account, key,
+  model, prompt tokens and catalogue-priced cost. The ledger and the event
+  copy of the response keep the model, the usage and the count and width of
+  the returned vectors, not the float arrays; the caller still gets the
+  vectors. Embedding models are now kept when the vendored price catalogue
+  is refreshed (46 rows added), so the recorded cost comes from the
+  catalogue.
+- **Full-repo review preset family**: three read-only whole-repo presets
+  sharing one skeleton, `008-architecture-strategy-review` (declared intent
+  versus observed structure), `009-repo-code-health-review` (five health
+  lenses over a sampled pass) and `010-standards-compliance-walk`
+  (payload-named standards to a requirement register, refusing to run
+  without a named standard), plus `016-docs-currency-review` as a fourth
+  lens: it extracts five checkable claim types from a project's
+  documentation (entry points, services, dependencies, environment
+  variables, build or run commands), verifies each against the code with a
+  recorded search, and emits a drift list of claim, document pointer and
+  what the code shows under `preloop.review.docscurrency/v1`. Prose
+  quality, tone and completeness are never reported and no documentation is
+  ever written. Shared guarantees: command-only inventory, deterministic
+  sampling with declared coverage, depth and budget knobs, empty MCP
+  allowlists, a 006-style evidence pack, freeze-floor drift, evidence
+  pointers on every claim, and a register that can never upgrade a verdict.
+  Security lenses stay with the 004 to 006 audit family, referred to and
+  never duplicated. Every report in the family now opens with the same
+  one-page three-box verdict cover 006 mandates, adapted per lens and with
+  the verdict sentence first; `result.json` is unchanged. Guide at
+  `docs/guide/flows/repo-review-presets.md`.
+- **The release security audit can be scoped to one project**: payload
+  `project_path` makes one project inside a larger repository the unit of
+  audit, the way the code health review already takes a path selector. SBOM
+  lookup, the gap register file walk and every evidence pointer stay inside
+  that path, and the result envelope records what was audited in an
+  additive nullable scope block; no path means the whole repository and
+  unchanged behaviour. A project with no SBOM of its own is reported
+  `not_checkable` with its reason. This family verifies SBOMs and never
+  generates them, so there is no fallback to manifests and never a
+  neighbour's SBOM.
+- **Per-source screening matrix and governed waiver inputs** for presets
+  005 and 006: `db_resolvable` becomes a component-by-source coverage
+  matrix, with `osv_purl` and `osv_git` (OSV git-range and commit queries
+  through the `vcs_url` qualifier) as database sources and `nvd_cpe` and
+  `osv_distro` labelled as heuristics, one negative control per source, the
+  full matrix in `evidence/source-matrix.json`, and cover-page coverage
+  lines derived from it. Heuristic hits never enter the severity gate.
+  Preset 006 accepts an optional human-authored waiver file (id, reason,
+  author, date) factored into the gate deterministically: an unwaived fail
+  stays fail, every entry is echoed verbatim in `evidence/waivers.json` and
+  listed on the cover page, and a model can never author a waiver.
+- **Opt-in repo-audit MCP**: tools that emit classifiable SHA-plus-path
+  rows, never values, so the release security audit can freeze a gap
+  register instead of rediscovering the same findings on every run.
+- **Generic Automated Issue Implementation preset**: the OSS implementation
+  flow has one job, to read the issue, implement it, test, lint, commit to
+  the checkout and report in `result.json`. Pushing and opening the pull
+  request stay with the flow (`git_clone_config.create_pull_request`), so
+  the agent carries no tool that can publish anything, and eligibility is
+  decided by `trigger_config`, which already filters labels, instead of a
+  prompt guard. Guide at
+  `docs/guide/flows/automated-issue-implementation.md`.
+- **PR feedback continuation is configurable from the console**: a flow
+  form can turn on continue-implementation-after-PR-review and edit its
+  controls, and a successful execution that published a pull request offers
+  a preview of the follow-up on the execution detail page before it is
+  adopted. Turning the option on does not merge a pull request. Guide at
+  `docs/guide/flows/durable-implementation-feedback.md`.
+- **Weekly model price review preset and a reviewed price feed**: preset
+  `015-weekly-model-price-review` (disabled by default, cron Monday 06:00
+  UTC) compares supported provider prices with the catalog, records
+  first-party evidence, and prepares a pull request carrying the price
+  fixes and a reviewed runtime feed. It publishes that pull request and
+  never merges it or activates a price on an account. The optional
+  reviewed-feed service runs in each API, dedicated gateway and worker
+  process and fetches an operator-controlled HTTPS JSON artifact every six
+  hours (`MODEL_PRICE_REFRESH_URL`, `MODEL_PRICE_REFRESH_ALLOWED_MODELS`,
+  `MODEL_PRICE_REFRESH_INTERVAL_SECONDS`; an empty URL, the default,
+  disables polling), so publishing a new artifact updates current estimates
+  without restarting them. Docs at `docs/guide/model-price-refresh.md`.
+- **A model's price is visible and settable on its page**: a Pricing card
+  reports input, output, cached-input and per-request price in USD per
+  million tokens plus which source produced them (an account override, the
+  model's own configuration, the provider catalog, or nothing at all, which
+  is why some requests land unpriced). `GET
+  /api/v1/ai-models/{model_id}/pricing` resolves in the gateway's own
+  order, so the card cannot claim a price the
+  cost estimator would not use. Editing writes an account price override in
+  force from a date the operator picks; an empty field stays empty instead
+  of becoming $0, because "we do not know" and "free" price differently,
+  and a saved price then offers "Apply to past usage since <date>", which
+  reprices every gateway row in that window and reports how many changed.
+  `POST /api/v1/ai-models/{model_id}/pricing/fetch` reads the prices
+  OpenRouter publishes and fills the form without saving, because a price
+  rewrites
+  what past requests cost; a provider that publishes nothing says so on the
+  button instead of failing when pressed.
+- **Unpriced and zero-priced requests are counted apart**:
+  `get_gateway_usage_by_model` now returns `unpriced_request_count`,
+  `zero_priced_request_count`, `failed_request_count` and `last_request_at`
+  on the same unpriced condition the account-level summary uses, so the
+  Attention list can tell a hole in the price list from a free tier.
+  Unpriced stays a warning; zero-priced becomes a low-tone item with one
+  Expected action. An account override in force counts as a price,
+  including $0, while an override that is off, not started or ended prices
+  nothing. A server that sends neither count falls back to the old test on
+  estimated cost, so nothing disappears.
+- **Each budget period carries a forecast**: a global budget row shows a
+  straight-line projection under the spend ("On track for $120.00 by Sep
+  30"), amber once the forecast passes the soft limit and red once it
+  passes the hard one. The projection is linear and says so in its tooltip.
+  Nothing is shown before a tenth of the period has elapsed, where one
+  expensive minute after midnight would forecast a five-figure day, nor for
+  all-time budgets, which have no end to aim at. Period bounds come from
+  the server when it sends them; otherwise the console mirrors the server's
+  alignment, weeks from Monday included.
+- **Activity feed, Inventory box and Users tab on the console Overview**:
+  the feed is one time-ordered column (a tone dot, one line, the time, and
+  a link to the most specific page that can act on it), filled from the
+  last 24 hours of the audit timeline and kept up over the topics the page
+  already subscribes to, capped at 30 rows and deduped by event id, with
+  successful gateway calls and session heartbeats dropped. A row expands in
+  place onto the fields that matter for its kind, a tool line leads with
+  the caller, and a run of identical tool lines folds into one row with a
+  count. From 1200px the feed is a sticky rail bounded to the viewport with
+  its own scroll. The Inventory box puts four counts in tab labels over one
+  table (agents, flows, models, tools), reuses the Usage card's range
+  rather than offering a second one, and remembers the tab in
+  localStorage. On Cloud and Enterprise a fifth Users tab lists who is on
+  the account, their role, when they last logged in, how many agents they
+  own and what those agents spent in the range; OSS is one operator per
+  account, so the tab is absent rather than there and empty.
+- **An agent's available models are editable in the console**: the Models
+  and Spend tab gains an allow toggle per configured AI model plus a manual
+  override for aliases that are not configured yet, persisted through the
+  existing governance PUT. Budget edits no longer derive `allowed_models`
+  from the budget keys, so a model can be granted or revoked without also
+  being given a budget. Generated agent configs now list every authorized
+  gateway model at session start instead of only the primary one (the
+  primary stays the default), so the harness model picker shows what the
+  console granted.
+- **User profile avatars**: `avatar_url` and `avatar_source` on the user
+  row, filled from the SSO provider's picture (Google, GitHub, GitLab) or
+  by upload through `PUT /api/v1/users/me/avatar` and removed with the
+  matching `DELETE`. An upload is validated, EXIF-stripped, cropped to a
+  centre square, resized to 256x256 and stored as a base64 data URI.
+  Precedence is manual upload, then the SSO image, then the initials
+  placeholder, so an SSO refresh never overwrites a picture somebody chose.
+- **`GET /api/v1/auth/users/me` returns `id`, `account_id` and `team_ids`**
+  (teams inside the caller's own account, ordered by team name), purely
+  additive on the wire. A client can now answer "is this pending approval
+  waiting for me?" against a workflow's `approver_user_ids` and
+  `approver_team_ids` instead of reading an `id` that was never there.
+- **`@preloop-ai/opencode-plugin`**: an in-process OpenCode plugin that
+  routes tool-permission approvals through Preloop Agent Control, mirroring
+  the openclaw and Claude Code integrations, and forwards operator turns
+  and stop commands from Agent Control into the local OpenCode session with
+  delivered, acked and result status events and message-id dedupe. The
+  opencode, openclaw and hermes plugins also refresh the gateway model list
+  on WebSocket open and at session start, deriving the `GET /models` URL
+  from the Agent Control WebSocket URL and reusing its bearer token, so a
+  model granted in the console reaches the local picker without restarting
+  the agent.
+- **`preloop cursor`**: interactive `preloop cursor` is a TTY passthrough,
+  because cursor-agent only emits structured events in `--print` mode.
+  `preloop cursor run` injects stream-json, ships the usage it can measure
+  as estimated, and never fabricates token counts. Docs in
+  `docs/guide/cursor-cli.md`.
+- **Per-conversation rollup for imported usage**:
+  `imported_usage.usage_by_conversation` on `GET /api/v1/cost/summary`
+  extends the existing imported-usage block rather than adding an endpoint,
+  and the console cost summary renders it. Estimated and reconciled costs
+  are separate fields per conversation and are never combined, a sum with
+  no contributing rows stays null rather than 0, rows with no conversation
+  id (CSV and JSON batch imports) are excluded, and
+  `parent_conversation_id` is surfaced so a subagent conversation can nest
+  under its parent thread.
+- **Cloud billing surfaces (billing plugin only)**:
+  `/console/settings/plan` renders the public pricing cards and comparison
+  table from one shared component, with the account's own plan marked, an
+  annual default, and a per-card action: an upgrade applies immediately and
+  quotes the prorated amount, a downgrade or a move to Free takes effect at
+  period end and never refunds, and an account with no subscription goes
+  straight to checkout. An anonymous click on a cloud plan opens Stripe
+  checkout for that plan and interval; the completed session creates the
+  account and the welcome page collects the name and password, with the
+  address marked verified because checkout supplied it, and a cancel at
+  Stripe returns to the pricing page saying nothing was charged and no
+  account was created. Someone who registers without a plan sees a one-time
+  trial step on their first console visit, with the answer recorded before
+  Stripe opens, so declining, cancelling, or a trial that ends without a
+  card all land on Free and the step does not come back. A usage nudge
+  banner replaces the upgrade prompt that used to open on first load: one
+  line per limit at or past half of a plan ceiling, with the number in it,
+  dismissable per limit and repeated at the next band (50, 80, 100
+  percent), from `GET /api/v1/billing/nudges`. A 404 from that route means
+  no nudges, so an OSS console renders no banner, no history cutoff row and
+  no modal. The emergency (kill switch) controls move to
+  `/console/settings/emergency`, off the billing surface.
+
 ### Changed
+
+- CI prefers a matching system Python (through a venv) and only then
+  falls back to `actions/setup-python`. The action has no Debian 12
+  builds, so a self-hosted bookworm runner with `python3.11` already
+  installed used to fail before any test ran. Distro Python is PEP 668
+  managed; the venv is what makes `pip install` legal. Needs
+  `python3.11-venv` on Debian. Public `ubuntu-latest` jobs are
+  unchanged: they have no system 3.11, so they still use setup-python.
+- Self-hosted backend shards run in a `python:<version>-bookworm` job
+  container and reach Postgres by service hostname, so they do not bind
+  host 5432. Two runner processes on one VM can run shards together.
+  Public `ubuntu-latest` backend jobs stay on the VM with
+  `localhost:5432`.
+- Self-hosted GitHub runners are extra CI capacity, not a replacement
+  pool. Frontend, plugins, and coverage stay on `ubuntu-latest`. Backend
+  keeps its eight hosted shards by default; idle self-hosted Linux/X64
+  runners take only overflow shards (the tail of the matrix, in a
+  `python:<version>-bookworm` job container so they do not bind host
+  5432). Sending every test job to three VMs serialized the suite and
+  was slower than public runners.
+- The setup-ci-python composite invokes its helper via
+  `GITHUB_WORKSPACE`, not `github.action_path`. The latter is a host
+  path and does not exist inside the self-hosted job container.
+
+- Session embedding that was already opted in now embeds only a session's
+  title and summary (`summaries_only`) after this upgrade. There is no
+  flag that keeps the previous "every chunk" behaviour. An account that
+  wants the old behaviour sends `PUT
+  /api/v1/runtime-sessions/settings/embedding` with `{"scope": "full"}`.
+  Narrowing deletes no existing vector; widening hands the untouched
+  backlog back to the worker.
+- Brand pricing config: `landing.pricing.deployment_options` is no longer
+  read. The Dedicated tab is `landing.pricing.dedicated` (same card-plus-table
+  shape as Cloud) with optional `cloud_label`. A leftover
+  `deployment_options` key is ignored and will not render. EE brands.yaml
+  already ships the replacement block.
+
+- Helm gateway Deployments set `PRELOOP_SERVICE_ROLE=gateway` (API pods
+  set `api`). `create_app` lazy-imports control-plane routers so a gateway
+  process does not load flow orchestration or MCP HTTP. LiteLLM defaults to
+  its bundled price map (`LITELLM_LOCAL_MODEL_COST_MAP=true`) unless the
+  operator already chose otherwise. Account-governance, live-price
+  negative, and Responses-capability caches cap at 4096 entries, and
+  LiteLLM's retained stream-chunk list is dropped after cost copy.
+- Gateway memory request is 768Mi (limit 2Gi). HPA minReplicas 2 / max 5
+  with a 90% memory target. Hosted idle RSS is ~650Mi; a 256Mi request
+  made HPA report ~250% and pin at maxReplicas while CPU was idle. More
+  replicas copy that idle RSS. Use maxReplicas for real CPU/traffic, not to
+  paper over an undersized request. Search-corpus indexing is queued off
+  the response path, bounded by `GATEWAY_USAGE_INDEX_QUEUE_MAX_PENDING`
+  (default 256) and `GATEWAY_USAGE_INDEX_QUEUE_ENABLED`. Dedicated gateway
+  pods still run no audit-seal, retention, or optimization passes, so at
+  least one `api` or `all` process must remain.
+- CodeQL advanced setup uploads SARIF so Scorecard SAST sees every push and
+  pull request. Disable GitHub default CodeQL setup or the upload is
+  rejected.
+- `execute_flow` / `resume_flow_execution` NATS publishes set `Nats-Msg-Id`
+  `{task}:{execution_id}` so the 2m duplicate window collapses reaper
+  republishes of the same unclaimed execution.
+- Preset 001 (Issue Triage Assistant) writes remaining scope, acceptance
+  and readiness onto the issue body and applies a complexity label.
+  Operators who sync this preset to linked flows move from a
+  proposals-only assessor to an issue writer.
+- Failed implementation publication keeps the configured PR/MR when
+  commits were already pushed. A failed `result.json` no longer refuses
+  publication: the publisher opens a disclosed, non-closing PR/MR with
+  `Refs` and the execution link. Configured verification still gates new
+  pushes.
+- **CRA VEX suppressions are applied before the severity gate, not after it**:
+  preset 006 asked for VEX and the gate in one breath, so a run could escalate
+  a finding to a human and then annotate it as `not_affected`, which made
+  authoring VEX cost an approval interrupt instead of saving one. Order is now
+  stated and deterministic, and `gate.vex_suppressed` must equal the set the
+  body implies, field for field. A status only suppresses with a non-empty
+  justification beside it: a bare `not_affected` stays in the gate, where
+  before it was dropped from the gate silently. `affected` and
+  `under_investigation` never suppress.
+- bcrypt 5.0.0 raises on secrets longer than 72 bytes instead of truncating.
+  New passwords stay capped at 72 characters. Login and `current_password`
+  do not: hashing and verify use bcrypt's 72-byte prefix so existing longer
+  passwords still authenticate (the same truncation passlib used to apply).
+  Forgot-password remains available to set a new password under the cap.
+- CRA `dossier_manifest.evidence` no longer reports a run's evidence pack as
+  `missing` while `evidence-status` reports it `available`. The dossier is
+  built before finalize persists the captured pack, so `load_evidence` sees a
+  stale row; the orchestrator's in-memory captured receipt (the same receipt
+  finalize stores) now fills that window, and a genuinely failed or expired
+  DB receipt stays authoritative.
+- The flow form only offers PR-dependent options where they apply. PR review
+  and CI follow-up render when "Create a pull request on commit" is checked,
+  and the success comment on the triggering issue also requires a tracker
+  trigger with at least one issue or comment event. Hidden sections are
+  preserved byte for byte in the submitted payload, since a flow can also open
+  its pull request through the MCP `create_pull_request` tool.
+- Security-maintenance repair: rebuilt SBOM ingest after approval, controller
+  checkout from frozen publication records (not agent-writable `HEAD.txt`),
+  per-component screening, background reconcile without
+  GET, per-request approval policy, and managed-credential denial on console
+  approval routes. Recheck removal is derived from the submitted SBOM bytes
+  (advertised CycloneDX/SPDX JSON), not from model inventory omission.
+  Baseline acceptance requires exact `release_id` and the digest of the
+  supplied SBOM bytes on the controller envelope. The initial-baseline audit
+  is scheduled through
+  `POST /api/v1/security-maintenance/releases/{release_id}/baseline/audit`,
+  which commits the execution then dispatches it through the existing flow
+  trigger path.
+  Omitted or null SBOM component lists, unsupported format versions, and
+  malformed nesting cannot prove component removal.
+- Abandoned security-maintenance dispatch claims expire after the same
+  interval as flow-execution recovery (default 120 seconds). Sweep and the
+  initial-baseline retry route redeliver a still-`PENDING` execution id;
+  a live claim is not duplicated, and a started or finished execution is
+  not restarted. Legacy `dispatching` records without a timestamp are
+  treated as expired. Claim helpers flush and re-read the locked row and
+  bound execution with `populate_existing` so a second session cannot
+  finish or redeliver from a stale identity-map copy.
+- Security-maintenance audit and recheck completion observes frozen Git
+  bundles even when isolated publication is off. A hex40 pin plus
+  `git_clone_config.repositories[].repository_url` produces a controller
+  `product_provenance` mapping; agent `HEAD.txt` and forged
+  `sha_status=verified` rows cannot establish checkout. Hosted and
+  private post-exec export `evidence/branch.bundle` for those opted-in
+  audits even with no code changes, no target branch, and publication
+  off. The export does not commit, push, open a pull request, or mint
+  writer credentials. Isolated publication is unchanged. The mapping is
+  checkout observation, not signed build attestation.
 
 - **Issue-duplicates AI errors use `{code, message}`**: `GET /issue-duplicates/check` and `POST /ai-suggestion` return `detail` as `{code, message}` instead of a string. `no_default_ai_model` is HTTP 422; `ai_model_error` (model-call failure) is still HTTP 500. Clients that parsed `detail` as a string need to read `detail.message`.
 
 - **GitHub merged PRs emit `pull_request_merged`**: a closed-and-merged pull request is no longer normalized as `pull_request_closed`. GitLab Job Hooks expose `build_name` / `build_status`, and GitHub issue close exposes `state_reason`, so flows can filter `deploy:staging` success and merge-completed closes. The event pickers list Job Event and Deployment.
 
-- **GitHub backend CI uses 8 pytest-split shards**: group 1 of 4 was the
-  wall-clock pole (~7-9m vs ~3-4.5m). Eight `duration_based_chunks` slices
-  split that first quarter in half. Coverage still combines before the 60%
-  floor.
+- **GitHub CI backend tests run in parallel, across 8 pytest-split shards**:
+  the backend unit suite is sharded across GitHub Actions jobs with
+  pytest-split, each with its own Postgres, so PRs are no longer gated on a
+  single ~12-minute pytest process. Four shards left group 1 as the
+  wall-clock pole (~7-9m vs ~3-4.5m), so eight `duration_based_chunks`
+  slices split that first quarter in half. Coverage from the shards is
+  combined before the 60% floor is applied.
 
 - **Blog posts can show a hero image**: `og_image` in frontmatter is
   rendered as a figure under the tags on the post, as a linked thumbnail
@@ -895,7 +1154,189 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of an allowlist. OSS does not hardcode EU instrument paths; EE
   adds a page by dropping a markdown file.
 
+- **Provider model pickers are live-only**: bundled fallback catalogs
+  are gone. A failed or keyless listing returns an empty picker with a
+  safe `source`/`error` reason (timeout, network, empty_response,
+  missing_endpoint, sdk_missing, missing_key, auth) instead of a stale
+  guess. OpenAI STT/TTS ids are filtered from the same live
+  `GET /v1/models` list. The pricing table is unchanged.
+- **README is the product intro, not the operator manual**: ~390 lines
+  down to ~200. Locked category line and lead, install + evidence first,
+  ops (TLS, SMTP, Agent Control internals, QM proxy, smoke tests) moved
+  to docs.preloop.ai and in-repo docs. Agents get a repo map
+  (ARCHITECTURE.md by section, AGENTS.md, CONTRIBUTING.md). Capability
+  pass after inventory: Flows and Talk named; Audit/AI Act pack is
+  Cloud/Enterprise (`audit_logs`); `preloop policy apply` next to the
+  YAML sample; trackers as flow triggers; imported usage in Cost.
+- **ARCHITECTURE.md is an index of per-subsystem chapters**: subsystem
+  docs moved to `docs/architecture/*.md`. The index is the map; read
+  the chapter for the subsystem you are changing. Flows architecture
+  lives at `docs/architecture/flows.md`. Empty leftover headers in
+  `docs/architecture/overview.md` were removed. Redaction comments
+  in `approval_service` point at `docs/architecture/security.md`.
+  Frontend test/auth conventions that were only in
+  `frontend/CLAUDE.md` now live in `frontend/README.md`; the stale
+  file is not restored.
+- **Named-instrument EU pages**: SaaS landing can ship `/cra-readiness`,
+  `/dora`, and `/nis2` next to `/ai-act-readiness` when those markdown
+  files exist. Each page names the regulation and article or date.
+  Homepage FAQ can repeat the not-a-law-firm disclaimer. Evidence packs
+  stay Apache presets, not an edition gate. Page titles and descriptions
+  are brand-parameterized, and the footer links only the regulation pages
+  a build actually pre-rendered.
+- **Editions table lists differences only**: OSS is one operator per
+  account. Users, teams, and RBAC are Cloud / Enterprise. Cloud is
+  managed hosting; Cloud and Enterprise include support plans. Dropped
+  Yes/Yes capability-tour rows and overclaims (CEL, AI-driven/quorum
+  evaluation, AI Act pack, chargeback/forecasting as edition gates).
+  CEL, AI-driven approvals, and quorum evaluation are OSS. Chargeback
+  and forecasting stay Cloud / Enterprise cost features; they were
+  dropped from the table because they are not users/teams/RBAC
+  edition gates, not because they went away.
+- **CRA / AI Act evidence named as an OSS use case**: README intro and
+  What-you-get name the security-audit presets (`result.json`) as machine
+  evidence, not a conformity assessment. Editions table still lists only
+  users, teams, and RBAC.
+- **Overview Top Models shows a preview per model**: each model lists its
+  top four agents/flows/sessions by spend or usage, with a See N more
+  control when there are more. Expanded groups cap nested sessions the
+  same way so a busy model cannot dominate the card.
+- **Codex onboarding is config-only**: `preloop agents onboard` no longer
+  installs a `~/.local/bin/codex` PATH wrapper. Codex only requires a
+  process environment variable when `env_key` or `bearer_token_env_var` is
+  set; if `env_key` is set and the var is missing, Codex errors and never
+  falls back to an inline token. Desktop onboarding writes
+  `experimental_bearer_token` and inlined MCP `http_headers` instead, so
+  Homebrew's `codex` can run without a wrapper. The flow runner still uses
+  `env_key` because it launches Codex as a subprocess. Re-onboarding
+  removes leftover Preloop wrappers. Gemini CLI still uses a wrapper
+  because it reads gateway credentials from the environment.
+- **Cloud and Self-hosted are the top-level axis of `/pricing`**: both tabs
+  render through the same card row and comparison table, so they cannot
+  drift into different layouts, and the tab bar is full width under the H1
+  with `role=tablist` and its own one-line lead per tab. Monthly versus
+  Yearly is a compact pill above the card row, shown on Cloud only, and it
+  rewrites the price lines without changing the set of plans or table rows;
+  Self-hosted editions are quoted, not bought. Price formatting moved into
+  one module shared by the hydrated card and the server-rendered markup, so
+  a crawler and a browser read the same sentence from the same numbers, and
+  every plan follows one rule instead of the Business card carrying a
+  special case. The default Self-hosted tab label is "Self-hosted"; the
+  `dedicated` config key and the plan ids are unchanged.
+- **Console visual refresh**: card, alert and empty-state styling is
+  unified on the proposed dark glowing treatment, header action buttons are
+  de-duplicated instead of appearing once in the view header and again in
+  the list, empty states across trackers, flows, agents and governance
+  share one pattern with the action that fills them, flow executions gain
+  filters and copy actions, an audit event can be linked to and copied, the
+  Overview gives model names room and ages its "Updated ... ago" line, and
+  a custom agent's owner is told what that agent can actually do. Talk is
+  also in the agents list kebab, disabled with the rest of the menu when
+  Agent Control is not connected; cards and canvas nodes keep their own
+  button rather than gaining a duplicate.
+- **The Usage card keeps its numbers up while a new range loads**: the last
+  range stays on screen at 60% opacity with a spinner in the header instead
+  of dropping back to skeletons, the card says "from rollup" when the
+  server reports the totals came out of a pre-aggregated rollup, and it
+  adds "Long ranges take longer" under a year that has been loading for
+  more than two seconds. A server that does not roll up sends neither
+  provenance field, and the card then claims nothing about where the number
+  came from.
+
 ### Fixed
+
+- Tree-stop and child-wait tests bind the session factory to an object
+  that still looks like a Session. GitLab sets `INIT_TEST_DATA=true`,
+  so `TestClient` lifespan seeds via `next(get_db_session()).query`,
+  and a contextmanager-only stub made those client tests ERROR at
+  setup with `Database setup failed`.
+- The log-persistence backpressure test waits long enough for a
+  saturated sqlite pool inside a self-hosted job container. Overflow
+  shards run there; a 5s/10s budget passed on `ubuntu-latest` and
+  timed out on the VMs.
+- GitHub CI overflow-plan tests compute `backend_plan` in Python, so
+  GitLab's unit image (no `jq`) can still pin hosted-first routing.
+- Backend shard routing indexes `backend_plan` with `matrix.group`.
+  GitHub expressions reject minus, so `matrix.group - 1` made the
+  workflow file invalid and no GitHub CI job could start. The plan
+  array is 1-based (dummy `null` at index 0).
+- Issues similar-duplicates tests drop coalesced GETs between cases,
+  so a later spec cannot join an earlier in-flight `/issue-duplicates`
+  response and render zero rows.
+- The upgrade e2e checks out the 2026 `pro` plan, not the withdrawn
+  `teams` id. Free accounts see the AI-titles upsell hint on the
+  sessions list again. Custom-agent e2e opens the wizard from
+  "Onboard existing agent". Overview e2e treats an empty gateway card
+  as first-usable.
+
+- A plan withdrawn from sale (`plan.is_active = False`) is grandfathered
+  only for a subscription somebody is paying for, or for a trial of it that
+  is still running. An ended or cancelled trial, a cancelled subscription,
+  and an `active` row with no provider subscription id behind it all resolve
+  to the default plan instead of keeping the withdrawn plan's terms and
+  name. The rule lives once, in `preloop.models.crud.entitlement`, and is
+  applied by `entitled_subscription`, `get_active_for_account` and the
+  billing preflight aggregates, so console, checkout and operator counts
+  agree. Operator note: a grant hand-provisioned on a withdrawn plan without
+  a provider subscription id stops resolving when this ships. Count those
+  rows before deploying (newest subscription per account, status `active` or
+  `past_due`, plan row with `is_active = False`, provider id null or blank);
+  re-establish any that are real by reconciling them against the provider,
+  or by moving the account onto a custom plan row, which is on sale by
+  construction and never subject to this rule.
+- Code scanning and Code Quality findings on main: report-publication
+  logs only closed-vocabulary outcomes, session-search credential
+  redaction uses length-bounded patterns that still consume a labelled
+  value past 4096 characters so it cannot leave a plaintext tail, the
+  in-repo flow-trigger workflow checks out the default branch and
+  installs a checksum-verified CLI from that tree's `scripts/install-cli.sh`
+  instead of piping curl to sh, and the remaining CodeQL quality notes
+  (unclosed publication fds, lock-file Close, unused locals/imports,
+  mixed returns, test lambdas) are cleared.
+
+- The console upgrade modal repeats what the server said instead of
+  "Unexpected checkout response". `startCheckout` resolves a `refresh`
+  answer (asking the billing views to re-read the subscription summary and
+  returning the reason), surfaces the server's sentence for any other
+  action, and keeps the redirect path. A deployment refusal such as
+  `catalog_not_synced` now reaches the dialog word for word.
+
+- The stale-claim reaper no longer re-publishes every unclaimed execution
+  from every worker on every pass. One replica runs the pass per interval
+  (a database lease), an execution nobody claims is re-dispatched on a
+  doubling delay recorded on the row (30s, 60s, 2m, ... up to
+  `FLOW_EXECUTION_REDISPATCH_BACKOFF_MAX_SECONDS`, default 900), and a pass
+  that finds flow tasks already queued undelivered publishes nothing.
+  Recovery of an execution whose owner died is unchanged: a claim clears
+  the backoff, so it is adopted inside one stale window. Each pass logs one
+  summary line with its counts instead of a line per candidate.
+- Agent launch no longer fails with `exec /bin/bash: argument list too
+  long` when a rendered prompt or Kubernetes inner script exceeds
+  Linux `MAX_ARG_STRLEN` (131072 bytes). The prompt and script travel
+  as base64 chunks. A pre-launch guard refuses a payload that reaches
+  or exceeds the per-string or total budget, with a named
+  `runner_error`. OpenHands (the default `agent_type`) uses the same
+  transport. Refs #609.
+- A labeled trigger matches the label the event carries, not the issue's
+  whole label list. A flow already active on that issue or pull request
+  coalesces further triggers instead of starting another run.
+
+- GitHub App trackers keep their installation binding when edited. The
+  edit modal used to run the API-token path: `POST
+  /api/v1/trackers/test-and-list-orgs` built a token client for a tracker
+  whose `auth_type` is `github_app`, offered the `personal` login instead of
+  the installation's numeric owner ids, and saving replaced the scope rules
+  with ones that matched no project. Both `test-and-list-orgs` and
+  `list-projects-for-org` now build the client from the tracker's
+  installation (same as the scanner) when `tracker_id` refers to an App
+  tracker. `TrackerResponse` gains `auth_type`, `oauth_installation_id` and
+  `github_installation_target_login` so the console can tell App trackers
+  from token trackers; the edit form no longer asks for a token. A new
+  App tracker is scoped to the installation being bound only, not to every
+  installation on the account. When the App is already installed on the
+  target account (GitHub shows its Configure page and never calls the setup
+  callback), the add form offers a "Use an existing installation" picker
+  next to "Connect with GitHub".
 
 - Optional gateway session-summary failures no longer page as primary gateway
   outages or retry generation after every request. Failed primary requests skip
@@ -1334,6 +1775,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not loop vectors) and matches bot identities by exact name instead of
   prefix, preventing false positives on usernames like "preloop-fan".
 
+- **Agent Control eviction now sends close code 4000**: when a second
+  WebSocket connects for the same managed agent, the server closes the
+  previous connection with close code 4000 and a reason string instead
+  of silently orphaning it. All runtime plugin clients (Python shared
+  library, Hermes, OpenClaw, OpenCode, Claude Code sidecar) treat
+  close code 4000 as a non-retryable eviction and stop reconnecting to
+  avoid an eviction ping-pong loop. A warning-level log on the server
+  names both connection identities.
+- **Empty upstream streams no longer complete "successfully"**: an
+  OpenAI-Responses stream whose upstream produced zero output items
+  (or reported an in-band `error` chunk) used to be folded into a
+  successful empty `response.completed`. Codex treats that as a
+  completed no-op turn and exits 0 without printing anything, which a
+  flow then fails as a missing success confirmation (staging
+  executions 1ded95c8 / ffb122bd: 18,268 prompt / 0 completion
+  tokens, agent silent). Such streams now emit an SSE `error` event
+  and are recorded as a 502 upstream failure, so Codex retries the
+  turn (verified against codex-cli 0.149.0: 5 retries, then a loud
+  stream error) instead of dying silently.
+- **z.ai GLM-5.3 was unpriced**: first-party list prices from docs.z.ai
+  are now in the vendored catalog ($1.4 input, $0.26 cached input, $4.4
+  output per 1M). z.ai has no price API, so
+  `scripts/update_model_prices.py` refreshes those rows from the public
+  pricing page alongside the litellm map.
+- **Preloop-bot label events were dropped**: `_is_preloop_triggered_event`
+  no longer skips `issue_labeled` / `issue_unlabeled`, so
+  `update_issue` adding `agent-ready` can start an implementation flow.
+
+### Removed
+
+- Flow failure comments. `notifications.on_failure.comment_on_trigger_issue`
+  is still accepted by `POST/PATCH /api/v1/flows` (no 422 for stored flows or
+  older clients) but is parsed and ignored: a failed or timed out execution no
+  longer posts a comment with the redacted log tail on the triggering issue.
+  A failed execution is an attention item on Overview instead. `notifications`
+  is a JSONB column, so there is no migration; the ignored block is dropped
+  the next time the flow is saved from the console. This matches the existing
+  treatment of `notifications.on_failure.attention_item`.
+
 ### Security
 
 - **Frontend `fflate` 0.7.5**: override the `deck.gl` transitive so ZIP64
@@ -1362,164 +1842,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `python-ecdsa` (CVE-2024-23342, no patch). Auth is HS256; APNs ES256
   already uses `cryptography` when present. PyJWT was already in the
   tree via firebase-admin / MCP.
-
-### Added
-
-- **`resolve_sbom_upstreams` builtin (default-disabled)**: maps vendored
-  Arduino/PlatformIO SBOM components (name + version) to an upstream
-  repository URL and version-shaped tag candidates via the public library
-  registries. A resolution requires a registry-confirmed name AND version
-  match with a usable repository URL; everything else is unresolved with a
-  reason. Default-off so regular sessions do not pay the tools/list context
-  tax; security-audit presets 005 (SBOM Exploit Check) and 006 (Release
-  Security Audit) allow-list it.
-- **CRA result.json contract**: the four security-audit presets pin
-  `/workspace/result.json` as a versioned contract (`preloop.cra.sbomaudit/v1`,
-  `vulnscan/v1`, `releaseaudit/v1`, `duediligence/v1`). Tests parse each YAML
-  Required shape, require the honesty line, validate example artifacts against
-  those keys, and reject banned claims (`compliant: true`, `ce_mark: true`,
-  "Article 14 filed").
-- **CRA / AI Act evidence runbook**: rewrite of
-  `docs/guide/flows/security-audit-presets.md` as a manufacturer-facing
-  runbook for the shipped Apache presets (SBOM Verify, SBOM Exploit
-  Check, Release Security Audit, Component Due Diligence). Opens with
-  what the pack is not (Regulation (EU) 2024/2847; Art. 14 reporting
-  from 11 Sep 2026; full CRA 11 Dec 2027; Preloop does not file Article
-  14 reports), then the `result.json` contract aligned to the YAML
-  prompts, a copy-paste CI hook (`workspace_files` plus poll `/result`
-  and retain `/evidence`), and honest limits. Not a conformity
-  assessment, CE marking, or certification.
-- **Model I/O content policies**: instance policies can `allow`, `deny`,
-  or `require_approval` on `model.request` and `model.response` using
-  the existing policy engine. Built-in detectors cover PII, prompt
-  injection heuristics, and a local moderation ruleset. The console
-  restores `/console/policies` (sidebar next to Tools;
-  `/console/governance` redirects there) as a rule-centric page. Describe
-  a change edits the current policy with the account default model and
-  shows a unified YAML diff that must be Saved. YAML import/export
-  round-trips the new targets. Streaming buffers until the assembled
-  response can be evaluated (deny cannot retract tokens already sent).
-  See `docs/guide/model-content-policies.md`.
-- **Private-cluster Helm install**: `helm/preloop/README.md` documents a
-  ClusterIP + ingress install with private registry pull secrets, existing
-  Postgres, Kubernetes Secrets (not values committed to git), and mounting a
-  private CA via `extraVolumes` / `extraEnv` (`SSL_CERT_FILE`). Example
-  overlay: `helm/preloop/values-private-cluster.yaml`. Compose and Helm are
-  the supported install surfaces; this repo does not ship Terraform.
-- **OpenAI-compatible upstream TLS**: LiteLLM completions and model
-  discovery honor `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE`
-  (and `PRELOOP_SSL_VERIFY=false` as a last resort) so a private
-  OpenAI-compatible base URL such as `https://gateway.internal/v1` works
-  with operator PKI. Public OpenAI, Anthropic, and OpenRouter keep the
-  default trust store (including an `openai-compatible` model whose
-  endpoint is `https://openrouter.ai/api/v1`).
-- **OTLP export for gateway and MCP telemetry**: optional OpenTelemetry
-  export (disabled by default) emits GenAI spans for governed model
-  calls and MCP tool calls, including `gen_ai.conversation.id` when a
-  runtime session id is present. Token and cost attributes match the
-  `ApiUsage` row for that request. Exporter errors are logged and never
-  fail the user-facing call. Helm `otlp.*` values and
-  `docs/guide/observability-otlp.md` cover a generic collector, Langfuse
-  OTLP ingest, and Datadog OTLP ingest.
-- **GitLab `issue_labeled`**: an Issue Hook whose `changes.labels` adds
-  a label now normalizes to `issue_labeled` (remove-only is
-  `issue_unlabeled`). Filter field `added_labels` is set on GitHub and
-  GitLab.
-
-### Changed
-
-- **Provider model pickers are live-only**: bundled fallback catalogs
-  are gone. A failed or keyless listing returns an empty picker with a
-  safe `source`/`error` reason (timeout, network, empty_response,
-  missing_endpoint, sdk_missing, missing_key, auth) instead of a stale
-  guess. OpenAI STT/TTS ids are filtered from the same live
-  `GET /v1/models` list. The pricing table is unchanged.
-- **README is the product intro, not the operator manual**: ~390 lines
-  down to ~200. Locked category line and lead, install + evidence first,
-  ops (TLS, SMTP, Agent Control internals, QM proxy, smoke tests) moved
-  to docs.preloop.ai and in-repo docs. Agents get a repo map
-  (ARCHITECTURE.md by section, AGENTS.md, CONTRIBUTING.md). Capability
-  pass after inventory: Flows and Talk named; Audit/AI Act pack is
-  Cloud/Enterprise (`audit_logs`); `preloop policy apply` next to the
-  YAML sample; trackers as flow triggers; imported usage in Cost.
-- **ARCHITECTURE.md is an index of per-subsystem chapters**: subsystem
-  docs moved to `docs/architecture/*.md`. The index is the map; read
-  the chapter for the subsystem you are changing. Flows architecture
-  lives at `docs/architecture/flows.md`. Empty leftover headers in
-  `docs/architecture/overview.md` were removed. Redaction comments
-  in `approval_service` point at `docs/architecture/security.md`.
-  Frontend test/auth conventions that were only in
-  `frontend/CLAUDE.md` now live in `frontend/README.md`; the stale
-  file is not restored.
-- **Named-instrument EU pages**: SaaS landing can ship `/cra-readiness`,
-  `/dora`, and `/nis2` next to `/ai-act-readiness` when those markdown
-  files exist. Each page names the regulation and article or date.
-  Homepage FAQ can repeat the not-a-law-firm disclaimer. Evidence packs
-  stay Apache presets, not an edition gate. Page titles and descriptions
-  are brand-parameterized, and the footer links only the regulation pages
-  a build actually pre-rendered.
-- **Editions table lists differences only**: OSS is one operator per
-  account. Users, teams, and RBAC are Cloud / Enterprise. Cloud is
-  managed hosting; Cloud and Enterprise include support plans. Dropped
-  Yes/Yes capability-tour rows and overclaims (CEL, AI-driven/quorum
-  evaluation, AI Act pack, chargeback/forecasting as edition gates).
-  CEL, AI-driven approvals, and quorum evaluation are OSS. Chargeback
-  and forecasting stay Cloud / Enterprise cost features; they were
-  dropped from the table because they are not users/teams/RBAC
-  edition gates, not because they went away.
-- **CRA / AI Act evidence named as an OSS use case**: README intro and
-  What-you-get name the security-audit presets (`result.json`) as machine
-  evidence, not a conformity assessment. Editions table still lists only
-  users, teams, and RBAC.
-- **Overview Top Models shows a preview per model**: each model lists its
-  top four agents/flows/sessions by spend or usage, with a See N more
-  control when there are more. Expanded groups cap nested sessions the
-  same way so a busy model cannot dominate the card.
-- **GitHub CI backend tests run in parallel**: the backend unit suite is
-  sharded across four GitHub Actions jobs with pytest-split, each with
-  its own Postgres, so PRs are no longer gated on a single ~12-minute
-  pytest process. Coverage from the shards is combined before the 60%
-  floor is applied.
-- **Codex onboarding is config-only**: `preloop agents onboard` no longer
-  installs a `~/.local/bin/codex` PATH wrapper. Codex only requires a
-  process environment variable when `env_key` or `bearer_token_env_var` is
-  set; if `env_key` is set and the var is missing, Codex errors and never
-  falls back to an inline token. Desktop onboarding writes
-  `experimental_bearer_token` and inlined MCP `http_headers` instead, so
-  Homebrew's `codex` can run without a wrapper. The flow runner still uses
-  `env_key` because it launches Codex as a subprocess. Re-onboarding
-  removes leftover Preloop wrappers. Gemini CLI still uses a wrapper
-  because it reads gateway credentials from the environment.
-
-### Fixed
-
-- **Agent Control eviction now sends close code 4000**: when a second
-  WebSocket connects for the same managed agent, the server closes the
-  previous connection with close code 4000 and a reason string instead
-  of silently orphaning it. All runtime plugin clients (Python shared
-  library, Hermes, OpenClaw, OpenCode, Claude Code sidecar) treat
-  close code 4000 as a non-retryable eviction and stop reconnecting to
-  avoid an eviction ping-pong loop. A warning-level log on the server
-  names both connection identities.
-- **Empty upstream streams no longer complete "successfully"**: an
-  OpenAI-Responses stream whose upstream produced zero output items
-  (or reported an in-band `error` chunk) used to be folded into a
-  successful empty `response.completed`. Codex treats that as a
-  completed no-op turn and exits 0 without printing anything, which a
-  flow then fails as a missing success confirmation (staging
-  executions 1ded95c8 / ffb122bd: 18,268 prompt / 0 completion
-  tokens, agent silent). Such streams now emit an SSE `error` event
-  and are recorded as a 502 upstream failure, so Codex retries the
-  turn (verified against codex-cli 0.149.0: 5 retries, then a loud
-  stream error) instead of dying silently.
-- **z.ai GLM-5.3 was unpriced**: first-party list prices from docs.z.ai
-  are now in the vendored catalog ($1.4 input, $0.26 cached input, $4.4
-  output per 1M). z.ai has no price API, so
-  `scripts/update_model_prices.py` refreshes those rows from the public
-  pricing page alongside the litellm map.
-- **Preloop-bot label events were dropped**: `_is_preloop_triggered_event`
-  no longer skips `issue_labeled` / `issue_unlabeled`, so
-  `update_issue` adding `agent-ready` can start an implementation flow.
 
 ## [0.15.0] - 2026-08-20
 

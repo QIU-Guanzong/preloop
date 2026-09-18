@@ -31,6 +31,7 @@ from preloop.models.crud import (
 )
 from preloop.models.crud.flow_runner import crud_flow_runner
 from preloop.models.db.session import get_db_session as get_db
+from preloop.models.db.session import release_transaction
 
 from preloop.services.flow_pr_binding import record_runner_handoff_markers
 from preloop.services.runner_service import (
@@ -515,10 +516,21 @@ async def runner_ws(
         hello["halt"] = True
         hello["halt_execution_id"] = halts[0]
         hello["halt_execution_ids"] = halts
+    # Sending is a network wait too. A runner that is connected but not reading
+    # (a closed laptop) applies backpressure here, so the reads that built this
+    # payload must not still be holding their locks while we block on the peer.
+    release_transaction(db)
     await websocket.send_json(hello)
 
     try:
         while True:
+            # A heartbeat arrives every few seconds; between two of them this
+            # handler must not be "idle in transaction". The reads that build
+            # the previous reply (runner, assignments, executions) would
+            # otherwise keep AccessShareLock on those tables for the whole
+            # quiet gap, which is long enough to block an `ALTER TABLE` during
+            # a rolling upgrade and, through it, every query behind it.
+            release_transaction(db)
             raw = await websocket.receive_json()
             msg_type = str(raw.get("type") or "")
             runner = crud_flow_runner.get(db, id=runner_id)
@@ -625,6 +637,10 @@ async def runner_ws(
                     reply["halt"] = True
                     reply["halt_execution_id"] = halts[0]
                     reply["halt_execution_ids"] = halts
+                # The reply is fully built, and a stalled peer can park this
+                # send for as long as the keepalive allows. Same reason as the
+                # release before `receive_json`.
+                release_transaction(db)
                 await websocket.send_json(reply)
                 continue
 

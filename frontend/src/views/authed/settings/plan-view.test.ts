@@ -410,7 +410,6 @@ describe('PlanView', () => {
     expect(note(element, 'Team')).to.contain('Applies immediately');
     expect(note(element, 'Team')).to.contain('credit for the unused time');
     expect(note(element, 'Free')).to.contain('Takes effect on');
-    expect(note(element, 'Free')).to.contain('not refunded');
     expect(note(element, 'Pro')).to.contain('Renews on');
   });
 

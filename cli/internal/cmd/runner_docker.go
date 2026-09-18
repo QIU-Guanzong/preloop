@@ -22,6 +22,9 @@ const (
 	workspaceTTLHoursEnv     = "PRELOOP_RUNNER_WORKSPACE_TTL_HOURS"
 	composeProjectPrefix     = "preloop-"
 	dockerSocketMount        = dockerSocketPath + ":" + dockerSocketPath
+	// Bookkeeping file inside a persisted workspace. Shared by the lease
+	// writer, the retention sweep and the "is there anything here?" check.
+	runnerWorkspaceLeaseName = ".preloop-runner-lease"
 )
 
 // Canonical UUID form. Workspace dirs and resume_from join this into a host
@@ -275,33 +278,77 @@ func runnerWorkspaceDir(executionID string) (string, error) {
 	return filepath.Join(root, id), nil
 }
 
-func preparePersistWorkspace(executionID, resumeFrom string) (string, error) {
+// preparePersistWorkspace returns the host workspace directory for this
+// execution and whether the requested resume state was actually found here.
+//
+// A private workspace never leaves its host, so "recovered" is not a detail:
+// a continuation that lands on a runner without the directory would start
+// from a cold clone and quietly drop the unpushed commits it was asked to
+// continue. The caller turns a false into an explicit job failure instead.
+func preparePersistWorkspace(executionID, resumeFrom string) (string, bool, error) {
 	dest, err := runnerWorkspaceDir(executionID)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if resumeFrom != "" && resumeFrom != executionID {
 		src, err := runnerWorkspaceDir(resumeFrom)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		if info, err := os.Stat(src); err == nil && info.IsDir() {
 			if _, err := os.Stat(dest); os.IsNotExist(err) {
 				if err := os.Rename(src, dest); err != nil {
 					if copyErr := copyDir(src, dest); copyErr != nil {
-						return "", copyErr
+						return "", false, copyErr
 					}
 				}
 			}
 		}
 	}
 	if err := os.MkdirAll(dest, 0o700); err != nil {
-		return "", err
+		return "", false, err
 	}
-	return dest, nil
+	return dest, resumeFrom == "" || workspaceHasRecoverableState(dest), nil
+}
+
+// workspaceHasRecoverableState reports whether a persisted workspace holds
+// anything but runner bookkeeping. An empty directory is the shape a quota
+// sweep, a retention expiry or a different owning host all leave behind.
+func workspaceHasRecoverableState(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == runnerWorkspaceLeaseName || strings.HasPrefix(name, ".lease-") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// workspaceRecoveryUnavailable explains a resume this host cannot serve.
+// The tombstone written by retention/quota cleanup is read back so expiry
+// reads differently from "this was never the owning runner".
+func workspaceRecoveryUnavailable(resumeFrom, dest string) error {
+	cause := "no local workspace for that execution on this runner"
+	if prior, err := runnerWorkspaceDir(resumeFrom); err == nil {
+		if body, err := os.ReadFile(prior + ".expired"); err == nil {
+			cause = "local workspace removed: " + strings.TrimSpace(string(body))
+		}
+	}
+	return fmt.Errorf(
+		"workspace_recovery_unavailable: %s (resume_from %s, expected %s). "+
+			"Private workspaces are never uploaded, so this continuation cannot "+
+			"be recovered on another host. Resume on the owning runner, or start "+
+			"a fresh conversation from the published branch",
+		cause, resumeFrom, dest,
+	)
 }
 
 func copyDir(src, dst string) error {
@@ -377,7 +424,7 @@ func touchWorkspaceLease(executionID string) error {
 	if _, err := os.Stat(dir); err != nil {
 		return err
 	}
-	path := filepath.Join(dir, ".preloop-runner-lease")
+	path := filepath.Join(dir, runnerWorkspaceLeaseName)
 	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("invalid workspace lease")
 	}
@@ -398,7 +445,7 @@ func touchWorkspaceLease(executionID string) error {
 
 func releaseWorkspaceLease(executionID string) {
 	if dir, err := runnerWorkspaceDir(executionID); err == nil {
-		_ = os.Remove(filepath.Join(dir, ".preloop-runner-lease"))
+		_ = os.Remove(filepath.Join(dir, runnerWorkspaceLeaseName))
 	}
 }
 
@@ -417,7 +464,7 @@ func cleanupStaleWorkspacesAt(root string, ttl time.Duration, now time.Time, kee
 		if keep != nil && keep[entry.Name()] {
 			continue
 		}
-		if lease, err := os.Lstat(filepath.Join(root, entry.Name(), ".preloop-runner-lease")); err == nil && lease.Mode().IsRegular() && now.Sub(lease.ModTime()) < 2*time.Minute {
+		if lease, err := os.Lstat(filepath.Join(root, entry.Name(), runnerWorkspaceLeaseName)); err == nil && lease.Mode().IsRegular() && now.Sub(lease.ModTime()) < 2*time.Minute {
 			continue
 		}
 		info, err := entry.Info()

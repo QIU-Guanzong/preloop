@@ -15,7 +15,7 @@ they asked for, and they have no way to tell.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, get_args
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -82,6 +82,30 @@ DEGRADED_REASONS = (
     DEGRADED_SEMANTIC_BACKFILL_INCOMPLETE,
     DEGRADED_FUSION_CANDIDATES_TRUNCATED,
 )
+
+# How far back this account's corpus reaches, as a state a caller can read
+# without knowing the sweeper exists. These live here rather than in the
+# sweeper because they are part of the response contract; the sweeper imports
+# them back.
+
+#: No backfill has walked this account. On the shipped defaults the sweeper is
+#: off, so this is what every account reports and it means the corpus starts
+#: at the deploy that switched indexing on.
+BACKFILL_STATE_NOT_STARTED = "not_started"
+#: The walk is under way and the covered window is still growing backwards.
+BACKFILL_STATE_IN_PROGRESS = "in_progress"
+#: The walk reached the end of the retained history: nothing older exists to
+#: index, so an empty answer is an honest "no session did that".
+BACKFILL_STATE_COMPLETE = "complete"
+
+#: The closed set as a type, so the generated schema publishes the three
+#: values the way it publishes the search modes, and a client can exhaust it.
+#: A constant above that drifts from one of these fails validation the first
+#: time a response carries it, which is why the tuple is derived rather than
+#: written out a second time.
+SessionSearchBackfillState = Literal["not_started", "in_progress", "complete"]
+
+BACKFILL_STATES: tuple[str, ...] = get_args(SessionSearchBackfillState)
 
 #: Longest query accepted. Past this a caller is pasting a document, not
 #: searching for one.
@@ -388,6 +412,34 @@ class SessionSearchResponse(BaseModel):
             "Newest content this account has in the corpus. The corpus fills "
             "forward, so an empty answer older than this marker means no "
             "match, and one newer means not indexed yet."
+        ),
+    )
+    indexed_from: Optional[datetime] = Field(
+        None,
+        description=(
+            "Oldest point in time this account's corpus covers without gaps. "
+            "Indexing on write only covers sessions written since search "
+            "shipped, so on a deployment whose backfill has not run this is "
+            "the deploy date and nothing before it is searchable. Read it "
+            "with indexed_through: together they are the window these "
+            "results actually come from. Null when the account has nothing "
+            "indexed at all."
+        ),
+    )
+    backfill_complete: bool = Field(
+        False,
+        description=(
+            "Whether the backfill has walked this account's retained history "
+            "to the end. False means the window above is still growing "
+            "backwards, or that no backfill has been run."
+        ),
+    )
+    backfill_state: SessionSearchBackfillState = Field(
+        BACKFILL_STATE_NOT_STARTED,
+        description=(
+            "One of: " + ", ".join(BACKFILL_STATES) + ". ``not_started`` on a "
+            "deployment where the operator has not switched the backfill on, "
+            "which is the shipped default."
         ),
     )
     embedded_through: Optional[datetime] = Field(

@@ -1,7 +1,7 @@
 {
   "name": "@preloop-ai/opencode-plugin",
   "version": "0.2.0",
-  "description": "Preloop Agent Control plugin for OpenCode",
+  "description": "Approve or deny your OpenCode agent's tool calls from your phone, watch, Slack or the web, and steer a running session from anywhere.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
@@ -18,8 +18,17 @@
   "keywords": [
     "preloop",
     "opencode",
-    "agent-control",
+    "approvals",
     "tool-approval",
+    "human-in-the-loop",
+    "governance",
+    "policy",
+    "audit",
+    "budget",
+    "cost-control",
+    "control-plane",
+    "remote-control",
+    "agent-control",
     "autonomous-agents"
   ],
   "bin": {

@@ -1,5 +1,6 @@
 """Authentication schemas for request and response validation."""
 
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
@@ -60,6 +61,17 @@ class AuthUserCreate(BaseModel):
             "instance has zero users and PRELOOP_BOOTSTRAP_TOKEN is set)."
         ),
     )
+    plan_choice: Optional[str] = Field(
+        None,
+        max_length=64,
+        description=(
+            "The plan this person already picked on the pricing page before "
+            "they got here. Its presence, not its value, is what matters: it "
+            "records that the choice has been made, so the console never "
+            "asks again. Paid plans do not arrive this way (they go through "
+            "checkout first), so in practice this is the free plan's id."
+        ),
+    )
 
     @field_validator("username")
     @classmethod
@@ -67,6 +79,25 @@ class AuthUserCreate(BaseModel):
         if not v.isalnum():
             raise ValueError("Username must be alphanumeric")
         return v
+
+    @field_validator("plan_choice")
+    @classmethod
+    def plan_choice_is_a_slug(cls, v: Optional[str]) -> Optional[str]:
+        """Keep plan ids, drop anything else, never refuse the signup.
+
+        This value arrives from a marketing link, so a mangled or hostile one
+        has to cost the visitor nothing: a truncated query string must not be
+        able to stop somebody creating an account. Anything that is not a
+        plan id shape is therefore ignored rather than rejected, and ignoring
+        it only means the person is asked to choose a plan once, in the
+        console, which is the default behaviour anyway.
+        """
+        if v is None:
+            return None
+        candidate = v.strip().lower()
+        if not candidate or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", candidate):
+            return None
+        return candidate
 
 
 class AuthUserUpdate(BaseModel):
@@ -99,6 +130,17 @@ class AuthUserResponse(BaseModel):
     permissions: Optional[List[str]] = None
     avatar_url: Optional[str] = None
     avatar_source: Optional[str] = None
+    plan_choice_made: bool = Field(
+        True,
+        description=(
+            "Whether this person has already chosen a plan. False is the "
+            "console's cue to ask the billing plugin whether to show the "
+            "first-login plan choice; true means it never asks. It defaults "
+            "to true so a client talking to an older server, or any caller "
+            "reading a profile built without a user row, is never dragged "
+            "into an onboarding step it cannot reason about."
+        ),
+    )
     team_ids: List[UUID] = Field(
         ...,
         description=(

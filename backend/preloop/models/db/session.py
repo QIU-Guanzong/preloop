@@ -71,6 +71,40 @@ def _database_pool_kwargs() -> dict:
     }
 
 
+def release_transaction(db: Session) -> None:
+    """End the session's transaction before a long wait, keeping its work.
+
+    A session that is "idle in transaction" still holds an AccessShareLock on
+    every table it read. That is what turns a routine `ALTER TABLE` into a
+    stalled deployment: the migration queues for ACCESS EXCLUSIVE behind a
+    socket handler that will not touch the database again until its peer sends
+    the next heartbeat, and every query arriving after the migration queues
+    behind it in turn.
+
+    Call this immediately before any wait that is not bounded by the database:
+    reading from a websocket, or calling a third-party API. Pending changes are
+    committed (the caller has already decided they are good, or it would not be
+    idling); a session that cannot commit is rolled back so the connection is
+    returned in a usable state rather than left holding locks.
+    """
+    try:
+        if db.in_transaction():
+            db.commit()
+    except SQLAlchemyError as exc:
+        logger.warning(f"Releasing database transaction failed, rolling back: {exc}")
+        try:
+            db.rollback()
+        except SQLAlchemyError as rollback_exc:
+            logger.warning(f"Rollback after failed release failed: {rollback_exc}")
+            # Last resort, and it must stay quiet: the caller is about to wait
+            # on a socket, and raising from the cleanup path would take down
+            # the handler this function exists to protect.
+            try:
+                db.invalidate()
+            except SQLAlchemyError as invalidate_exc:
+                logger.warning(f"Invalidating the session failed: {invalidate_exc}")
+
+
 def _safe_close_db_session(db: Session) -> None:
     """Rollback and close a sync session, invalidating dead connections quietly."""
     try:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -15,6 +15,10 @@ from preloop.services.runner_service import (
     DEFAULT_QUEUE_TIMEOUT,
     lease_job,
     mark_queued_or_fail,
+    runner_blocked_notice,
+    runner_wait_notice,
+    unwrap_agent_config,
+    workspace_owner_runner_id,
 )
 
 from preloop.services.host_exec import (
@@ -66,12 +70,14 @@ class RemoteRunnerExecutor(AgentExecutor):
             prompt=execution_context.get("prompt"),
             execution_context=execution_context,
         )
+        owner_id = workspace_owner_runner_id(self.db, payload=payload)
         runner = lease_job(
             self.db,
             account_id=self.account_id,
             pool=self.pool,
             execution_id=execution_id,
             payload=payload,
+            required_runner_id=owner_id,
         )
         execution = crud_flow_execution.get(self.db, id=execution_id)
         if runner:
@@ -99,14 +105,28 @@ class RemoteRunnerExecutor(AgentExecutor):
             return f"runner:{runner.id}:{execution_id}"
 
         if execution:
-            if payload.get("_publication"):
-                from preloop.models.schemas.flow_execution import FlowExecutionUpdate
+            from preloop.models.schemas.flow_execution import FlowExecutionUpdate
 
+            if payload.get("_publication"):
                 crud_flow_execution.update(
                     self.db,
                     db_obj=execution,
                     obj_in=FlowExecutionUpdate(
                         error_message="Waiting for a private Docker runner with publication protocol v1 and a configured ready helper image"
+                    ),
+                )
+            elif owner_id is not None:
+                # The wait has a named cause. Without it the console shows a
+                # generic queue while the one machine that can finish this
+                # work is offline.
+                crud_flow_execution.update(
+                    self.db,
+                    db_obj=execution,
+                    obj_in=FlowExecutionUpdate(
+                        error_message=runner_wait_notice(
+                            crud_flow_runner.get_fresh(self.db, runner_id=owner_id),
+                            payload.get("resume_from") or execution_id,
+                        )
                     ),
                 )
             execution.agent_session_reference = (
@@ -115,8 +135,9 @@ class RemoteRunnerExecutor(AgentExecutor):
             self.db.add(execution)
             self.db.commit()
         logger.info(
-            "No online runner for pool %s; queued execution %s",
+            "No online runner for pool %s (owner=%s); queued execution %s",
             self.pool,
+            owner_id,
             execution_id,
         )
         return f"runner:queued:{self.pool}:{execution_id}"
@@ -159,24 +180,37 @@ class RemoteRunnerExecutor(AgentExecutor):
             queued = mark_queued_or_fail(
                 queued_since=started, timeout=DEFAULT_QUEUE_TIMEOUT
             )
+            owner_id, owner_resolved = (
+                self._owner_runner_id(execution) if execution else (None, True)
+            )
             if queued == "FAILED":
                 if execution:
                     execution.status = "FAILED"
-                    execution.error_message = (
-                        f"No matching self-hosted runner for pool "
-                        f"{self.pool} within {DEFAULT_QUEUE_TIMEOUT}"
-                        + (
-                            "; isolated publication requires protocol v1 and a configured ready helper image"
-                            if (execution.result or {}).get("_private_publication")
-                            else ""
+                    if owner_id is not None:
+                        # A host-bound continuation has exactly one machine
+                        # that can finish it. Say so, name the surviving local
+                        # state, and stop: moving the run to another host
+                        # would silently restart from a cold clone.
+                        execution.error_message = runner_blocked_notice(
+                            crud_flow_runner.get_fresh(self.db, runner_id=owner_id),
+                            _resume_from_execution_id({}, execution) or execution.id,
                         )
-                    )
+                    else:
+                        execution.error_message = (
+                            f"No matching self-hosted runner for pool "
+                            f"{self.pool} within {DEFAULT_QUEUE_TIMEOUT}"
+                            + (
+                                "; isolated publication requires protocol v1 and a configured ready helper image"
+                                if (execution.result or {}).get("_private_publication")
+                                else ""
+                            )
+                        )
                     execution.end_time = datetime.now(timezone.utc)
                     self.db.add(execution)
                     self.db.commit()
                 return AgentStatus.FAILED
             # A runner may have come online; try to lease now.
-            if execution:
+            if execution and owner_resolved:
                 flow = self._flow_for_execution(execution)
                 payload = self._lease_payload(
                     execution_id=execution.id,
@@ -184,12 +218,19 @@ class RemoteRunnerExecutor(AgentExecutor):
                     prompt=execution.resolved_input_prompt,
                     flow=flow,
                 )
+                if owner_id is None:
+                    # The payload is the shape the runner actually receives,
+                    # so it is the authority on whether this job is host
+                    # bound. Resolving from the row alone can miss a config
+                    # the payload builder normalizes.
+                    owner_id = workspace_owner_runner_id(self.db, payload=payload)
                 runner = lease_job(
                     self.db,
                     account_id=self.account_id,
                     pool=self.pool,
                     execution_id=execution.id,
                     payload=payload,
+                    required_runner_id=owner_id,
                 )
                 if runner:
                     payload = await prepare_runner_delivery(self.db, payload)
@@ -275,12 +316,7 @@ class RemoteRunnerExecutor(AgentExecutor):
             agent_config = getattr(flow, "agent_config", None)
         if agent_config is None:
             agent_config = self.config
-        if (
-            isinstance(agent_config, dict)
-            and set(agent_config) == {"agent_config"}
-            and isinstance(agent_config["agent_config"], dict)
-        ):
-            agent_config = agent_config["agent_config"]
+        agent_config = unwrap_agent_config(agent_config)
         if isinstance(agent_config, dict):
             agent_config = dict(agent_config)
         else:
@@ -394,6 +430,43 @@ class RemoteRunnerExecutor(AgentExecutor):
             if resume_from:
                 payload["resume_from"] = resume_from
         return payload
+
+    def _owner_runner_id(self, execution: Any) -> Tuple[Optional[UUID], bool]:
+        """Runner pinned by a persisted-workspace continuation, if any.
+
+        Resolved from the row rather than the lease payload so a queued job
+        can name its owner before the payload (which may refuse to build) is
+        needed.
+
+        Args:
+            execution: The queued flow execution.
+
+        Returns:
+            ``(owner_id, resolved)``. ``owner_id`` is None when the job may
+            run anywhere. ``resolved`` is False when the lookup itself failed,
+            which is not the same answer: leasing such a job unpinned would
+            hand a host-bound continuation to a peer that cannot serve it.
+        """
+        resume_from = _resume_from_execution_id({}, execution)
+        if not resume_from:
+            return None, True
+        flow = self._flow_for_execution(execution)
+        agent_config = (
+            getattr(flow, "agent_config", None) if flow is not None else None
+        ) or self.config
+        try:
+            owner = workspace_owner_runner_id(
+                self.db,
+                payload={"resume_from": resume_from, "agent_config": agent_config},
+            )
+        except Exception:  # pragma: no cover - a lookup must not fail a poll
+            logger.warning(
+                "Could not resolve the owning runner for execution %s",
+                getattr(execution, "id", None),
+                exc_info=True,
+            )
+            return None, False
+        return owner, True
 
     def _flow_for_execution(self, execution: Any) -> Any:
         """Resolve the flow without depending on a loaded ORM relationship."""

@@ -1127,3 +1127,375 @@ async def test_pull_request_dispatch_failure_returns_typed_warning_receipt() -> 
     assert item["execution_url"] == result["execution_url"]
     assert "before retrying" in item["error"]
     assert "private transport detail" not in item["error"]
+
+
+def _triage_issue() -> MagicMock:
+    issue = MagicMock()
+    issue.external_id = "2451234567"
+    issue.key = "example/repo#42"
+    issue.title = "Broken search"
+    issue.description = "Search returns 500"
+    issue.status = "open"
+    issue.updated_at = None
+    issue.meta_data = {"url": "https://github.com/example/repo/issues/42", "labels": []}
+    issue.external_url = None
+    return issue
+
+
+def _active_execution(payload: dict, *, status: str = "RUNNING") -> MagicMock:
+    """A run already holding the tracker object in ``payload``."""
+    execution = MagicMock()
+    execution.id = uuid.uuid4()
+    execution.status = status
+    execution.trigger_event_details = {"source": "github", "payload": payload}
+    return execution
+
+
+@pytest.mark.asyncio
+async def test_single_run_coalesces_onto_an_active_run_for_the_same_issue() -> None:
+    """A second click must not start a second agent on one issue."""
+    from preloop.models.schemas.flow import RunPresetResponse
+
+    issue_id = uuid.uuid4()
+    issue = _triage_issue()
+    project, tracker = _github_project_tracker()
+    payload = build_issue_trigger_payload(issue, project, tracker, git_only=False)
+    active = _active_execution(payload["payload"])
+    flow = _account_flow(name="Issue Triage Assistant")
+    trigger = AsyncMock()
+
+    with (
+        patch(
+            "preloop.services.preset_runner._load_visible_issue",
+            return_value=(issue, project, tracker),
+        ),
+        patch(
+            "preloop.services.preset_runner.resolve_or_create_flow",
+            return_value=(flow, False),
+        ),
+        patch(
+            "preloop.services.flow_trigger_service.crud_flow_execution"
+        ) as crud_execution,
+        patch(
+            "preloop.services.flow_trigger_service.FlowTriggerService.trigger_flow",
+            trigger,
+        ),
+    ):
+        crud_execution.get_running_by_flow.return_value = [active]
+        response = await run_preset_on_target(
+            MagicMock(),
+            current_user=_user(uuid.uuid4()),
+            preset_slug=TRIAGE_SLUG,
+            target=_Simple(kind="issue", issue_id=issue_id),
+            confirm_create=True,
+            triggered_by="Jane Doe",
+        )
+
+    trigger.assert_not_awaited()
+    result = RunPresetResponse.model_validate(response).model_dump()
+    item = result["results"][0]
+    assert item["coalesced"] is True
+    assert item["issue_id"] == str(issue_id)
+    assert item["issue_key"] == "example/repo#42"
+    assert item["execution_id"] == str(active.id) == result["execution_id"]
+    assert item["execution_status"] == "RUNNING"
+    assert item["execution_url"] == f"/console/flows/executions/{active.id}"
+    assert item["error"] is None
+    lookup = crud_execution.get_running_by_flow.call_args.kwargs
+    assert lookup["tracker_object_key"] == "github:example/repo:issue:42"
+
+
+@pytest.mark.asyncio
+async def test_batch_coalesces_only_the_issue_that_is_already_running() -> None:
+    """Every other selected issue still gets its own run."""
+    from preloop.models.schemas.flow import RunPresetResponse
+
+    running_id, free_id = uuid.uuid4(), uuid.uuid4()
+    running_issue = _triage_issue()
+    free_issue = _triage_issue()
+    free_issue.key = "example/repo#43"
+    free_issue.external_id = "43"
+    free_issue.meta_data = {
+        "url": "https://github.com/example/repo/issues/43",
+        "labels": [],
+    }
+    project, tracker = _github_project_tracker()
+    running_payload = build_issue_trigger_payload(
+        running_issue, project, tracker, git_only=False
+    )
+    active = _active_execution(running_payload["payload"], status="WAITING_FOR_HUMAN")
+    new_execution_id = str(uuid.uuid4())
+    trigger = AsyncMock(return_value={"id": new_execution_id, "status": "PENDING"})
+
+    def _load(_db, *, issue_id, account_id):  # noqa: ARG001
+        if issue_id == running_id:
+            return running_issue, project, tracker
+        return free_issue, project, tracker
+
+    with (
+        patch("preloop.services.preset_runner._load_visible_issue", side_effect=_load),
+        patch(
+            "preloop.services.preset_runner.resolve_or_create_flow",
+            return_value=(_account_flow(name="Issue Triage Assistant"), False),
+        ),
+        patch(
+            "preloop.services.flow_trigger_service.crud_flow_execution"
+        ) as crud_execution,
+        patch(
+            "preloop.services.flow_trigger_service.FlowTriggerService.trigger_flow",
+            trigger,
+        ),
+    ):
+        crud_execution.get_running_by_flow.side_effect = (
+            lambda *args, **kwargs: [active]
+            if kwargs.get("tracker_object_key") == "github:example/repo:issue:42"
+            else []
+        )
+        response = await run_preset_on_target(
+            MagicMock(),
+            current_user=_user(uuid.uuid4()),
+            preset_slug=TRIAGE_SLUG,
+            targets=[
+                _Simple(kind="issue", issue_id=running_id),
+                _Simple(kind="issue", issue_id=free_id),
+            ],
+            confirm_create=True,
+            triggered_by="Jane Doe",
+        )
+
+    trigger.assert_awaited_once()
+    result = RunPresetResponse.model_validate(response).model_dump()
+    coalesced, started = result["results"]
+    assert coalesced["coalesced"] is True
+    assert coalesced["issue_key"] == "example/repo#42"
+    assert coalesced["execution_id"] == str(active.id)
+    assert started["coalesced"] is False
+    assert started["issue_key"] == "example/repo#43"
+    assert started["execution_id"] == new_execution_id
+    # A reused run never becomes the batch's own execution identity.
+    assert result["execution_id"] == new_execution_id
+
+
+@pytest.mark.asyncio
+async def test_a_failed_active_run_lookup_still_starts_the_requested_run() -> None:
+    """Duplicate detection is best effort; it never refuses the run."""
+    from sqlalchemy.exc import SQLAlchemyError
+
+    issue = _triage_issue()
+    project, tracker = _github_project_tracker()
+    execution_id = str(uuid.uuid4())
+    trigger = AsyncMock(return_value={"id": execution_id, "status": "PENDING"})
+
+    with (
+        patch(
+            "preloop.services.preset_runner._load_visible_issue",
+            return_value=(issue, project, tracker),
+        ),
+        patch(
+            "preloop.services.preset_runner.resolve_or_create_flow",
+            return_value=(_account_flow(name="Issue Triage Assistant"), False),
+        ),
+        patch(
+            "preloop.services.flow_trigger_service.crud_flow_execution"
+        ) as crud_execution,
+        patch(
+            "preloop.services.flow_trigger_service.FlowTriggerService.trigger_flow",
+            trigger,
+        ),
+    ):
+        crud_execution.get_running_by_flow.side_effect = SQLAlchemyError("no session")
+        response = await run_preset_on_target(
+            MagicMock(),
+            current_user=_user(uuid.uuid4()),
+            preset_slug=TRIAGE_SLUG,
+            target=_Simple(kind="issue", issue_id=uuid.uuid4()),
+            confirm_create=True,
+            triggered_by="Jane Doe",
+        )
+
+    trigger.assert_awaited_once()
+    assert response["execution_id"] == execution_id
+    assert response.get("results") is None
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_run_on_the_same_issue_does_not_coalesce() -> None:
+    """``get_running_by_flow`` filters on status, so the object is free."""
+    issue = _triage_issue()
+    project, tracker = _github_project_tracker()
+    execution_id = str(uuid.uuid4())
+    trigger = AsyncMock(return_value={"id": execution_id, "status": "PENDING"})
+
+    with (
+        patch(
+            "preloop.services.preset_runner._load_visible_issue",
+            return_value=(issue, project, tracker),
+        ),
+        patch(
+            "preloop.services.preset_runner.resolve_or_create_flow",
+            return_value=(_account_flow(name="Issue Triage Assistant"), False),
+        ),
+        patch(
+            "preloop.services.flow_trigger_service.crud_flow_execution"
+        ) as crud_execution,
+        patch(
+            "preloop.services.flow_trigger_service.FlowTriggerService.trigger_flow",
+            trigger,
+        ),
+    ):
+        crud_execution.get_running_by_flow.return_value = []
+        response = await run_preset_on_target(
+            MagicMock(),
+            current_user=_user(uuid.uuid4()),
+            preset_slug=TRIAGE_SLUG,
+            target=_Simple(kind="issue", issue_id=uuid.uuid4()),
+            confirm_create=True,
+            triggered_by="Jane Doe",
+        )
+
+    trigger.assert_awaited_once()
+    assert response["execution_id"] == execution_id
+
+
+@pytest.mark.asyncio
+async def test_a_different_issue_in_the_same_project_is_not_coalesced() -> None:
+    """The guard keys on the tracker object, not on the repository."""
+    issue = _triage_issue()
+    other = _triage_issue()
+    other.key = "example/repo#7"
+    other.external_id = "7"
+    other.meta_data = {
+        "url": "https://github.com/example/repo/issues/7",
+        "labels": [],
+    }
+    project, tracker = _github_project_tracker()
+    active = _active_execution(
+        build_issue_trigger_payload(other, project, tracker, git_only=False)["payload"]
+    )
+    execution_id = str(uuid.uuid4())
+    trigger = AsyncMock(return_value={"id": execution_id, "status": "PENDING"})
+
+    with (
+        patch(
+            "preloop.services.preset_runner._load_visible_issue",
+            return_value=(issue, project, tracker),
+        ),
+        patch(
+            "preloop.services.preset_runner.resolve_or_create_flow",
+            return_value=(_account_flow(name="Issue Triage Assistant"), False),
+        ),
+        patch(
+            "preloop.services.flow_trigger_service.crud_flow_execution"
+        ) as crud_execution,
+        patch(
+            "preloop.services.flow_trigger_service.FlowTriggerService.trigger_flow",
+            trigger,
+        ),
+    ):
+        # The JSONB prefilter is over-inclusive by design; the Python
+        # extractor decides, and it must reject issue 7 for issue 42.
+        crud_execution.get_running_by_flow.return_value = [active]
+        response = await run_preset_on_target(
+            MagicMock(),
+            current_user=_user(uuid.uuid4()),
+            preset_slug=TRIAGE_SLUG,
+            target=_Simple(kind="issue", issue_id=uuid.uuid4()),
+            confirm_create=True,
+            triggered_by="Jane Doe",
+        )
+
+    trigger.assert_awaited_once()
+    assert response["execution_id"] == execution_id
+
+
+@pytest.mark.asyncio
+async def test_pull_request_run_coalesces_onto_an_active_review() -> None:
+    """One active reviewer run per pull request, however it was started."""
+    from preloop.models.schemas.flow import RunPresetResponse
+
+    project_id = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    payload = _github_pr_payload()
+    active = _active_execution(payload["payload"])
+    trigger = AsyncMock()
+
+    with (
+        patch(
+            "preloop.services.preset_runner._load_visible_project",
+            return_value=(MagicMock(), MagicMock(), MagicMock()),
+        ),
+        patch(
+            "preloop.services.preset_runner.resolve_or_create_flow",
+            return_value=(_account_flow(name="Pull Request Reviewer"), False),
+        ),
+        patch(
+            "preloop.services.preset_runner._fetch_pull_request_detail",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "preloop.services.preset_runner.build_pull_request_trigger_payload",
+            return_value=payload,
+        ),
+        patch(
+            "preloop.services.flow_trigger_service.crud_flow_execution"
+        ) as crud_execution,
+        patch(
+            "preloop.services.flow_trigger_service.FlowTriggerService.trigger_flow",
+            trigger,
+        ),
+    ):
+        crud_execution.get_running_by_flow.return_value = [active]
+        response = await run_preset_on_target(
+            MagicMock(),
+            current_user=_user(uuid.uuid4()),
+            preset_slug=REVIEWER_SLUG,
+            target=_Simple(kind="pull_request", project_id=project_id, number=12),
+            confirm_create=True,
+            triggered_by="Jane Doe",
+        )
+
+    trigger.assert_not_awaited()
+    result = RunPresetResponse.model_validate(response).model_dump()
+    item = result["results"][0]
+    assert item["coalesced"] is True
+    assert item["project_id"] == str(project_id)
+    assert item["number"] == 12
+    assert item["execution_id"] == str(active.id)
+
+
+@pytest.mark.asyncio
+async def test_batch_item_errors_carry_the_issue_key_when_it_is_known() -> None:
+    """A 25-row selection needs to say which issue failed."""
+    issue = _triage_issue()
+    project, tracker = _github_project_tracker()
+    trigger = AsyncMock(side_effect=ValueError("Flow is unavailable"))
+
+    with (
+        patch(
+            "preloop.services.preset_runner._load_visible_issue",
+            return_value=(issue, project, tracker),
+        ),
+        patch(
+            "preloop.services.preset_runner.resolve_or_create_flow",
+            return_value=(_account_flow(name="Issue Triage Assistant"), False),
+        ),
+        patch(
+            "preloop.services.flow_trigger_service.crud_flow_execution"
+        ) as crud_execution,
+        patch(
+            "preloop.services.flow_trigger_service.FlowTriggerService.trigger_flow",
+            trigger,
+        ),
+    ):
+        crud_execution.get_running_by_flow.return_value = []
+        response = await run_preset_on_target(
+            MagicMock(),
+            current_user=_user(uuid.uuid4()),
+            preset_slug=TRIAGE_SLUG,
+            targets=[_Simple(kind="issue", issue_id=uuid.uuid4())],
+            confirm_create=True,
+            triggered_by="Jane Doe",
+        )
+
+    item = response["results"][0]
+    assert item["issue_key"] == "example/repo#42"
+    assert item["error"] == "Flow is unavailable"

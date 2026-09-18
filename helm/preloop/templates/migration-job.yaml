@@ -9,6 +9,9 @@ metadata:
     "helm.sh/hook-weight": "0"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
+  # The container retries lock contention itself; this only covers a pod that
+  # dies outright.
+  backoffLimit: {{ .Values.migrationJob.backoffLimit | default 2 }}
   template:
     metadata:
       labels:
@@ -24,8 +27,19 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy | default "Always" }}
           command: ["/bin/sh", "-c"]
-          args: ["cd /app/backend/preloop/models && alembic upgrade head"]
+          # Not bare `alembic upgrade head`: this wrapper commits one
+          # transaction per revision, holds a short lock_timeout, and retries
+          # a revision that lost a lock race against the pods still serving.
+          args: ["cd /app/backend/preloop/models && python -m preloop.models.migrate"]
           env:
+            - name: PRELOOP_MIGRATION_LOCK_TIMEOUT
+              value: {{ .Values.migrationJob.lockTimeout | quote }}
+            - name: PRELOOP_MIGRATION_MAX_ATTEMPTS
+              value: {{ .Values.migrationJob.maxAttempts | quote }}
+            - name: PRELOOP_MIGRATION_RETRY_MIN_SECONDS
+              value: {{ .Values.migrationJob.retryMinSeconds | quote }}
+            - name: PRELOOP_MIGRATION_RETRY_MAX_SECONDS
+              value: {{ .Values.migrationJob.retryMaxSeconds | quote }}
             {{- include "preloop.databaseUrlEnv" . | nindent 12 }}
             {{- include "preloop.extraEnv" . | nindent 12 }}
           {{- with .Values.extraEnvFrom }}

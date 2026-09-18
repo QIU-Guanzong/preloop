@@ -7,6 +7,7 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 
 # Import Base from your models
+from preloop.models.migration_runtime import configure_online_context, connect_args
 from preloop.models.models.base import Base
 
 # Import model modules so their tables register with Base.metadata for
@@ -109,15 +110,21 @@ def run_migrations_online() -> None:
     In this scenario we need to create an Engine
     and associate a connection with the context.
 
+    The hook that runs this in production runs it against a live deployment,
+    so the connection carries a short ``lock_timeout`` and every revision gets
+    its own transaction. See ``preloop.models.migration_runtime``.
     """
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=connect_args(database_url),
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        configure_online_context(
+            context, connection=connection, target_metadata=target_metadata
+        )
 
         with context.begin_transaction():
             context.run_migrations()

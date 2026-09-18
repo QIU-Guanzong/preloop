@@ -26,7 +26,7 @@ const plan = (id: string, extra = {}) => ({
   features: {
     max_users: 1,
     max_agents: -1,
-    byok_ingest_tokens_monthly: 100000000,
+    byok_ingest_tokens_monthly: 200000000,
     hosted_models_monthly_limit_usd: 2,
     retention_days: 365,
   },
@@ -572,7 +572,7 @@ describe('Billing plan comparison', () => {
   });
   it('shows observed overage even when the full month is incomplete', async () => {
     data.monthly_usage[0].coverage = 'unknown';
-    data.monthly_usage[0].observed_byok_tokens = 101000000;
+    data.monthly_usage[0].observed_byok_tokens = 201000000;
     data.monthly_usage[0].observed_hosted_cost_usd = 4;
     data.assessments[0].fit = 'exceeds';
     const el = await mount();
