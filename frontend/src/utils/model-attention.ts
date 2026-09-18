@@ -4,7 +4,7 @@ import {
   modelAttentionFingerprint,
   modelAttentionItemId,
 } from './attention';
-import { parseUTCDate } from './date';
+import { formatRelativeTime, parseUTCDate } from './date';
 
 /**
  * The Models page and the model detail page say "needs attention" from a
@@ -42,11 +42,19 @@ export interface ModelAliasFailure {
 /** What a Models row or a detail page knows about one model's failures. */
 export interface ModelFailureSummary extends ModelAliasFailure {
   providerName?: string | null;
+  modelAlias?: string | null;
   /**
    * Per-alias groups, matching the inbox. When present and non-empty, the
    * row takes the worst of these instead of keying only the newest alias.
    */
   aliasFailures?: ModelAliasFailure[];
+  modelId?: string | null;
+  credentialsStatus?: string | null;
+  credentialsLastError?: string | null;
+  credentialsLastErrorCode?: string | null;
+  credentialsLastFailedAt?: string | null;
+  credentialsLastVerifiedAt?: string | null;
+  credentialType?: string | null;
 }
 
 export type ModelAttentionStatus = 'quiet' | 'marked' | 'failing';
@@ -77,6 +85,27 @@ export interface ModelAttentionState {
   markerLabel: string | null;
   /** Is there an unacknowledged failure here to offer a Dismiss control for? */
   dismissable: boolean;
+  /** Description of the failure, e.g. credential refresh error and failed-at time. */
+  reasonText?: string | null;
+  /** Remediation instructions tailored to the credential type. */
+  remediationText?: string | null;
+  credentialsStatus?: string | null;
+  credentialsLastError?: string | null;
+  credentialsLastFailedAt?: string | null;
+  credentialType?: string | null;
+}
+
+export function modelCredentialRemediation(
+  credentialType: string | null | undefined
+): string {
+  switch (credentialType) {
+    case 'oauth_openai_codex':
+      return 'Re-sync from your local Codex login by re-onboarding Codex CLI (`preloop agents onboard "Codex CLI"`).';
+    case 'oauth_anthropic_claude_code':
+      return 'Re-onboard Claude Code (`preloop agents onboard "Claude Code"`) to refresh credentials.';
+    default:
+      return 'Rotate the API key for this model.';
+  }
 }
 
 /** The three reasons the console offers, in one place. */
@@ -130,7 +159,27 @@ function newestAliasState(
   left: ModelAttentionState,
   right: ModelAttentionState
 ): ModelAttentionState {
-  return fingerprintTime(right) > fingerprintTime(left) ? right : left;
+  const chosen = fingerprintTime(right) > fingerprintTime(left) ? right : left;
+  return {
+    ...chosen,
+    reasonText: chosen.reasonText || left.reasonText || right.reasonText,
+    remediationText:
+      chosen.remediationText || left.remediationText || right.remediationText,
+    credentialsStatus:
+      chosen.credentialsStatus ||
+      left.credentialsStatus ||
+      right.credentialsStatus,
+    credentialsLastError:
+      chosen.credentialsLastError ||
+      left.credentialsLastError ||
+      right.credentialsLastError,
+    credentialsLastFailedAt:
+      chosen.credentialsLastFailedAt ||
+      left.credentialsLastFailedAt ||
+      right.credentialsLastFailedAt,
+    credentialType:
+      chosen.credentialType || left.credentialType || right.credentialType,
+  };
 }
 
 /**
@@ -141,18 +190,46 @@ function modelAttentionStateForAlias(
   dismissals: AttentionDismissal[],
   now: Date
 ): ModelAttentionState {
-  const itemId = modelAttentionItemId(
-    summary.failureAlias,
-    summary.providerName
-  );
-  const fingerprint = modelAttentionFingerprint(summary.lastFailureAt);
+  const isCredentialFailure = summary.credentialsStatus === 'error';
+  const alias = summary.failureAlias || summary.modelAlias;
+  const itemId = modelAttentionItemId(alias, summary.providerName);
+
+  let effectiveFailureAt = summary.lastFailureAt;
+  if (isCredentialFailure && summary.credentialsLastFailedAt) {
+    if (
+      !effectiveFailureAt ||
+      Date.parse(summary.credentialsLastFailedAt) >
+        Date.parse(effectiveFailureAt)
+    ) {
+      effectiveFailureAt = summary.credentialsLastFailedAt;
+    }
+  }
+
+  const fingerprint = modelAttentionFingerprint(effectiveFailureAt);
   const dismissal =
     dismissals.find((candidate) => candidate.item_id === itemId) || null;
-  const failing = (summary.failedRequests || 0) > 0;
+  const failing = (summary.failedRequests || 0) > 0 || isCredentialFailure;
   const marked = Boolean(
     dismissal && dismissalHidesFingerprint(dismissal, fingerprint, now)
   );
   const markerFailureAt = marked ? null : markerFailureTimestamp(dismissal);
+
+  let reasonText: string | null = null;
+  let remediationText: string | null = null;
+  if (isCredentialFailure) {
+    const parts: string[] = [];
+    if (summary.credentialsLastError) {
+      parts.push(summary.credentialsLastError);
+    }
+    if (summary.credentialsLastFailedAt) {
+      parts.push(
+        `(last ${formatRelativeTime(summary.credentialsLastFailedAt, now)})`
+      );
+    }
+    reasonText = parts.join(' ') || 'Credential refresh failed';
+    remediationText = modelCredentialRemediation(summary.credentialType);
+  }
+
   return {
     itemId,
     fingerprint,
@@ -175,7 +252,13 @@ function modelAttentionStateForAlias(
     // failure to point at that is not already acknowledged. A server too old
     // to report one gets no controls rather than a dismissal the other pages
     // would never match.
-    dismissable: failing && !marked && Boolean(summary.lastFailureAt),
+    dismissable: failing && !marked && Boolean(effectiveFailureAt),
+    reasonText,
+    remediationText,
+    credentialsStatus: summary.credentialsStatus,
+    credentialsLastError: summary.credentialsLastError,
+    credentialsLastFailedAt: summary.credentialsLastFailedAt,
+    credentialType: summary.credentialType,
   };
 }
 
@@ -201,11 +284,18 @@ export function modelAttentionState(
     summary.aliasFailures && summary.aliasFailures.length > 0
       ? summary.aliasFailures.map((group) => ({
           failureAlias: group.failureAlias,
+          modelAlias: summary.modelAlias,
           providerName: summary.providerName,
           failedRequests: group.failedRequests,
           lastFailureAt: group.lastFailureAt,
           failedRequestsSince:
             group.failedRequestsSince ?? summary.failedRequestsSince,
+          credentialsStatus: summary.credentialsStatus,
+          credentialsLastError: summary.credentialsLastError,
+          credentialsLastErrorCode: summary.credentialsLastErrorCode,
+          credentialsLastFailedAt: summary.credentialsLastFailedAt,
+          credentialsLastVerifiedAt: summary.credentialsLastVerifiedAt,
+          credentialType: summary.credentialType,
         }))
       : [summary];
   const states = groups.map((group) =>

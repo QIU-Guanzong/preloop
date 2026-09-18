@@ -576,15 +576,27 @@ export class AIModelsView extends LitElement {
 
   /** Where one model stands, by the rule the Overview and the inbox use. */
   private attentionStateFor(
-    item: AIModelOverviewItem | undefined
+    item: AIModelOverviewItem | undefined,
+    model?: AIModel | undefined
   ): ModelAttentionState {
+    const resolvedModel =
+      model ||
+      (item ? this.models.find((m) => m.id === item.ai_model_id) : undefined);
     return modelAttentionState(
       {
+        modelId: resolvedModel?.id || item?.ai_model_id,
+        modelAlias: resolvedModel?.alias || item?.model_alias,
         failureAlias: item?.last_failure_alias,
-        providerName: item?.provider_name,
+        providerName: resolvedModel?.provider_name || item?.provider_name,
         failedRequests: item?.failed_requests || 0,
         lastFailureAt: item?.last_failure_at,
         failedRequestsSince: item?.failed_requests_since,
+        credentialsStatus: resolvedModel?.credentials_status,
+        credentialsLastError: resolvedModel?.credentials_last_error,
+        credentialsLastErrorCode: resolvedModel?.credentials_last_error_code,
+        credentialsLastFailedAt: resolvedModel?.credentials_last_failed_at,
+        credentialsLastVerifiedAt: resolvedModel?.credentials_last_verified_at,
+        credentialType: resolvedModel?.credential_type,
         aliasFailures: (item?.alias_failures || []).map((group) => ({
           failureAlias: group.alias,
           lastFailureAt: group.last_failure_at,
@@ -597,7 +609,8 @@ export class AIModelsView extends LitElement {
   }
 
   private attentionStateForModel(modelId: string): ModelAttentionState {
-    return this.attentionStateFor(this.getModelOverview(modelId));
+    const model = this.models.find((m) => m.id === modelId);
+    return this.attentionStateFor(this.getModelOverview(modelId), model);
   }
 
   private async loadPriorFleetSpend(): Promise<void> {
@@ -664,6 +677,15 @@ export class AIModelsView extends LitElement {
    * Unpriced requests are not dismissable and are counted as before.
    */
   private get modelsNeedingAttentionCount(): number {
+    if (this.models.length > 0) {
+      return this.models.filter((model) => {
+        const overview = this.getModelOverview(model.id);
+        return (
+          this.attentionStateFor(overview, model).status === 'failing' ||
+          (overview && overview.unpriced_request_count > 0)
+        );
+      }).length;
+    }
     return [...this.modelOverview.values()].filter(
       (item) =>
         this.attentionStateFor(item).status === 'failing' ||
@@ -728,12 +750,13 @@ export class AIModelsView extends LitElement {
   }
 
   private getHealthVariant(modelId: string): 'success' | 'warning' | 'neutral' {
+    const state = this.attentionStateForModel(modelId);
+    if (state.status === 'failing') {
+      return 'warning';
+    }
     const overview = this.getModelOverview(modelId);
     if (!overview || overview.total_requests === 0) {
       return 'neutral';
-    }
-    if (this.attentionStateFor(overview).status === 'failing') {
-      return 'warning';
     }
     return 'success';
   }
@@ -744,12 +767,13 @@ export class AIModelsView extends LitElement {
    * stays checkable.
    */
   private getHealthLabel(modelId: string): string {
+    const state = this.attentionStateForModel(modelId);
+    if (state.status === 'failing') {
+      return 'Attention';
+    }
     const overview = this.getModelOverview(modelId);
     if (!overview || overview.total_requests === 0) {
       return 'Idle';
-    }
-    if (this.attentionStateFor(overview).status === 'failing') {
-      return 'Attention';
     }
     return 'Healthy';
   }
@@ -757,6 +781,9 @@ export class AIModelsView extends LitElement {
   /** The tooltip that says why a model with failures reads as healthy. */
   private getHealthTitle(modelId: string): string {
     const state = this.attentionStateForModel(modelId);
+    if (state.status === 'failing' && state.reasonText) {
+      return state.reasonText;
+    }
     return state.status === 'marked' && state.markerLabel
       ? state.markerLabel
       : '';
@@ -1300,7 +1327,7 @@ export class AIModelsView extends LitElement {
 
   private renderHealthCell(model: AIModel) {
     const overview = this.getModelOverview(model.id);
-    const state = this.attentionStateFor(overview);
+    const state = this.attentionStateFor(overview, model);
     return html`
       <div class="cell-stack">
         <div class="badge-row">

@@ -1607,11 +1607,18 @@ func runAgentsStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	var agentModels []aiModelResponse
+	if client.IsAuthenticated() {
+		doc, _ := loadAgentConfigDocument(agent)
+		agentModels = resolveAgentModelRows(client, agent, detail, doc)
+	}
+
 	if asJSON {
 		payload := map[string]interface{}{
 			"agent":        agent,
 			"local_state":  localState,
 			"remote_state": detail,
+			"models":       agentModels,
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -1647,6 +1654,22 @@ func runAgentsStatus(cmd *cobra.Command, args []string) error {
 		if latest.TargetConfigPath != "" {
 			fmt.Printf("Target config: %s\n", latest.TargetConfigPath)
 		}
+	}
+	for _, m := range agentModels {
+		mStatus := m.CredentialsStatus
+		if mStatus == "" {
+			mStatus = "active"
+		}
+		summary := m.CredentialsLastError
+		if summary == "" {
+			summary = m.Name
+			if summary == "" {
+				summary = m.ModelIdentifier
+			}
+		}
+		fmt.Printf("Model: %s\n", m.Name)
+		fmt.Printf("Model status: %s\n", mStatus)
+		fmt.Printf("Model summary: %s\n", summary)
 	}
 	return nil
 }
@@ -1792,7 +1815,9 @@ func runAgentsValidate(cmd *cobra.Command, args []string) error {
 		if state, err := loadLocalEnrollmentState(agent); err == nil {
 			enrollmentID = state.EnrollmentID
 		}
+		var agentDetail *managedAgentDetailResponse
 		if detail, err := getManagedAgentDetailForDiscovered(client, agent); err == nil {
+			agentDetail = detail
 			for _, enrollment := range detail.Enrollments {
 				if enrollment.EnrollmentType == "cli_managed_config" {
 					if enrollmentID == "" {
@@ -1803,6 +1828,36 @@ func runAgentsValidate(cmd *cobra.Command, args []string) error {
 				}
 			}
 		}
+
+		agentModels, matchKind := resolveAgentModelMatch(client, agent, agentDetail, document)
+		if matchKind == agentModelMatchFallback {
+			// Default-model / all-models fallbacks are not models this agent
+			// uses. Surface them as unknown rather than failing validate on
+			// an unrelated credential error.
+			result["model_status"] = "unknown"
+			result["model_summary"] = "no configured model match"
+		} else {
+			for _, m := range agentModels {
+				mStatus := m.CredentialsStatus
+				if mStatus == "" {
+					mStatus = "active"
+				}
+				summary := m.CredentialsLastError
+				if summary == "" {
+					summary = "healthy"
+				}
+				result["model_status"] = mStatus
+				result["model_summary"] = summary
+				if strings.EqualFold(mStatus, "error") {
+					status = "validation_failed"
+					if result["error"] == nil {
+						result["error"] = fmt.Sprintf("model %s credential error: %s", m.Name, summary)
+					}
+					break
+				}
+			}
+		}
+
 		if runLiveValidation && status == "validated" {
 			liveResult, liveErr := runManagedAgentLiveValidation(client, agent, existingValidation)
 			if liveResult != nil {
@@ -1840,6 +1895,8 @@ func runAgentsValidate(cmd *cobra.Command, args []string) error {
 		"gateway_base_url_ok",
 		"gateway_token_ok",
 		"model_provider_rewritten",
+		"model_status",
+		"model_summary",
 		"live_validation_status",
 		"live_validation_passed",
 		"live_validation_skip_reason",
@@ -1852,6 +1909,12 @@ func runAgentsValidate(cmd *cobra.Command, args []string) error {
 		if value, ok := result[key]; ok {
 			fmt.Printf("  %s: %s\n", key, formatManagedValidationValue(key, value))
 		}
+	}
+	if ms, ok := result["model_status"].(string); ok && ms != "" {
+		fmt.Printf("Model status: %s\n", ms)
+	}
+	if sum, ok := result["model_summary"].(string); ok && sum != "" {
+		fmt.Printf("Model summary: %s\n", sum)
 	}
 	fmt.Printf("  onboarding_mode: %s\n", onboardingStateLabel(onboardingStateFromValidation(result)))
 	fmt.Printf("  routing: %s\n", onboardingStateNote(onboardingStateFromValidation(result)))
@@ -6453,7 +6516,8 @@ func publicPlanNote(note string) string {
 
 func formatManagedValidationValue(key string, value interface{}) string {
 	switch key {
-	case "config_path", "live_validation_status", "live_validation_skip_reason":
+	case "config_path", "live_validation_status", "live_validation_skip_reason",
+		"model_status", "model_summary":
 		if s, ok := value.(string); ok {
 			return s
 		}
@@ -6651,4 +6715,164 @@ func parseServerMapFromTOML(data []byte) (map[string]MCPDef, error) {
 		return nil, err
 	}
 	return parseServerMapFromDocument(doc), nil
+}
+
+// agentModelMatchKind says how resolveAgentModelMatch picked the rows.
+// Validate may fail on exact and provider matches, but not on fallbacks
+// (account default or every model), which are not models the agent uses.
+type agentModelMatchKind int
+
+const (
+	agentModelMatchNone agentModelMatchKind = iota
+	agentModelMatchExact
+	agentModelMatchProvider
+	agentModelMatchFallback
+)
+
+func resolveAgentModelRows(
+	client *api.Client,
+	agent AgentConfig,
+	detail *managedAgentDetailResponse,
+	document map[string]interface{},
+) []aiModelResponse {
+	rows, _ := resolveAgentModelMatch(client, agent, detail, document)
+	return rows
+}
+
+func resolveAgentModelMatch(
+	client *api.Client,
+	agent AgentConfig,
+	detail *managedAgentDetailResponse,
+	document map[string]interface{},
+) ([]aiModelResponse, agentModelMatchKind) {
+	if client == nil || !client.IsAuthenticated() {
+		return nil, agentModelMatchNone
+	}
+	var allModels []aiModelResponse
+	if err := client.Get("/api/v1/ai-models", &allModels); err != nil || len(allModels) == 0 {
+		return nil, agentModelMatchNone
+	}
+
+	// 1. If detail has ConfiguredModels, match by AIModelID
+	if detail != nil && len(detail.Agent.ConfiguredModels) > 0 {
+		var matched []aiModelResponse
+		seen := make(map[string]bool)
+		for _, binding := range detail.Agent.ConfiguredModels {
+			id := strings.TrimSpace(binding.AIModelID)
+			if id == "" || seen[id] {
+				continue
+			}
+			for _, m := range allModels {
+				if strings.TrimSpace(m.ID) == id {
+					matched = append(matched, m)
+					seen[id] = true
+					break
+				}
+			}
+		}
+		if len(matched) > 0 {
+			return matched, agentModelMatchExact
+		}
+	}
+
+	// 2. If detail has LatestModelAlias, match by alias / identifier / name
+	if detail != nil && strings.TrimSpace(detail.Agent.LatestModelAlias) != "" {
+		alias := strings.TrimSpace(detail.Agent.LatestModelAlias)
+		var matched []aiModelResponse
+		for _, m := range allModels {
+			if strings.EqualFold(strings.TrimSpace(m.ModelIdentifier), alias) ||
+				strings.EqualFold(strings.TrimSpace(m.Name), alias) ||
+				strings.EqualFold(strings.TrimSpace(gatewayAliasForAIModel(m)), alias) ||
+				strings.EqualFold(strings.TrimPrefix(alias, "preloop/"), strings.TrimSpace(m.ModelIdentifier)) {
+				matched = append(matched, m)
+			}
+		}
+		if len(matched) > 0 {
+			return matched, agentModelMatchExact
+		}
+	}
+
+	// 3. From document, if available
+	if document == nil {
+		document, _ = loadAgentConfigDocument(agent)
+	}
+	if document != nil {
+		var docAliases []string
+		if isClaudeCodeAgent(agent) {
+			if m := lookupString(document, "model"); m != "" {
+				docAliases = append(docAliases, m)
+			}
+		} else if isCodexCLIAgent(agent) {
+			if m := lookupString(document, "model"); m != "" {
+				docAliases = append(docAliases, m)
+			}
+		} else if isOpenClawAgent(agent) {
+			if m := extractOpenClawPrimaryModel(document); m != "" {
+				docAliases = append(docAliases, m)
+			}
+		} else if isHermesAgent(agent) {
+			if modelObj, ok := asObjectMap(document["model"]); ok {
+				if m := lookupString(modelObj, "default"); m != "" {
+					docAliases = append(docAliases, m)
+				} else if m := lookupString(modelObj, "model"); m != "" {
+					docAliases = append(docAliases, m)
+				}
+			}
+		} else if isGeminiCLIAgent(agent) {
+			if modelObj, ok := asObjectMap(document["model"]); ok {
+				if m := lookupString(modelObj, "name"); m != "" {
+					docAliases = append(docAliases, m)
+				}
+			}
+			if m := lookupString(document, "model"); m != "" {
+				docAliases = append(docAliases, m)
+			}
+		} else {
+			if m := lookupString(document, "model"); m != "" {
+				docAliases = append(docAliases, m)
+			}
+		}
+		for _, alias := range docAliases {
+			alias = strings.TrimSpace(alias)
+			for _, m := range allModels {
+				if strings.EqualFold(strings.TrimSpace(m.ModelIdentifier), alias) ||
+					strings.EqualFold(strings.TrimSpace(m.Name), alias) ||
+					strings.EqualFold(strings.TrimSpace(gatewayAliasForAIModel(m)), alias) ||
+					strings.EqualFold(strings.TrimPrefix(alias, "preloop/"), strings.TrimSpace(m.ModelIdentifier)) {
+					return []aiModelResponse{m}, agentModelMatchExact
+				}
+			}
+		}
+	}
+
+	// 4. By agent credential type or provider fallback
+	var typeMatched []aiModelResponse
+	for _, m := range allModels {
+		if isCodexCLIAgent(agent) {
+			if m.CredentialType == openaiCodexOAuthCredentialType || strings.EqualFold(m.ProviderName, "openai") {
+				typeMatched = append(typeMatched, m)
+			}
+		} else if isClaudeCodeAgent(agent) {
+			if m.CredentialType == anthropicClaudeCodeOAuthCredentialType || strings.EqualFold(m.ProviderName, "anthropic") {
+				typeMatched = append(typeMatched, m)
+			}
+		} else if isGeminiCLIAgent(agent) {
+			if strings.EqualFold(m.ProviderName, "google") {
+				typeMatched = append(typeMatched, m)
+			}
+		}
+	}
+	if len(typeMatched) > 0 {
+		return typeMatched, agentModelMatchProvider
+	}
+
+	// 5-6. Account default, then every model. These are not models the
+	// agent uses; validate reports unknown and does not fail on them.
+	for _, m := range allModels {
+		if m.IsDefault {
+			return []aiModelResponse{m}, agentModelMatchFallback
+		}
+	}
+
+	return allModels, agentModelMatchFallback
 }
