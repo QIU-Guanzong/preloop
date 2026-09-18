@@ -40,6 +40,11 @@ from preloop.models.models.session_search_document import (
     SOURCE_KIND_GATEWAY_INTERACTION,
     SOURCE_KIND_TOOL_CALL,
 )
+from preloop.schemas.session_search import (
+    BACKFILL_STATE_COMPLETE,
+    BACKFILL_STATE_IN_PROGRESS,
+    BACKFILL_STATE_NOT_STARTED,
+)
 from preloop.services.service_roles import (
     background_passes_allowed,
     current_service_role,
@@ -58,10 +63,9 @@ SESSION_PAGE_SIZE = 50
 #: Source rows read per query inside one session.
 SOURCE_PAGE_SIZE = 100
 
-#: Backfill state values reported with the indexed through value.
-BACKFILL_STATE_NOT_STARTED = "not_started"
-BACKFILL_STATE_IN_PROGRESS = "in_progress"
-BACKFILL_STATE_COMPLETE = "complete"
+# The backfill state values are imported above rather than defined here: they
+# are part of what a search answer publishes, so the response schema owns
+# them, and the sweeper reads the same three strings it reports.
 
 
 def _now() -> datetime:
@@ -83,28 +87,23 @@ def backfill_enabled() -> bool:
 
 
 @dataclass
-class IndexedThrough:
+class CorpusCoverage:
     """How far back session search currently reaches for one account.
 
-    ``indexed_through`` is the oldest point in time the corpus covers without
+    ``indexed_from`` is the oldest point in time the corpus covers without
     gaps: the backfill watermark while the walk is in progress, and the oldest
     chunk the account holds once it finished. ``None`` means the account has
     no indexed content at all.
+
+    It was called ``indexed_through`` and sat one letter away from the CRUD
+    marker of the same name, which means the newest chunk rather than the
+    oldest. The two are opposite ends of the same window and the collision is
+    why nothing consumed this one; the name says which end it is now.
     """
 
-    indexed_through: Optional[datetime] = None
+    indexed_from: Optional[datetime] = None
     complete: bool = False
     state: str = BACKFILL_STATE_NOT_STARTED
-
-    def as_dict(self) -> Dict[str, Any]:
-        """Return the value in the shape a search response carries."""
-        return {
-            "indexed_through": (
-                self.indexed_through.isoformat() if self.indexed_through else None
-            ),
-            "backfill_complete": self.complete,
-            "backfill_state": self.state,
-        }
 
 
 @dataclass
@@ -160,11 +159,14 @@ class BackfillPassResult:
         }
 
 
-def indexed_through_for_account(db: Session, *, account_id: Any) -> IndexedThrough:
+def corpus_coverage_for_account(db: Session, *, account_id: Any) -> CorpusCoverage:
     """Return how far back search reaches for one account.
 
     Consumed by the search endpoint so the interface can say what the result
-    set covers instead of implying it covers everything.
+    set covers instead of implying it covers everything. One indexed read of
+    the backfill state row plus one ``MIN(occurred_at)`` over the same
+    ``(account_id, occurred_at)`` index the head marker already scans, so the
+    honest answer costs a search the same order as the marker it completes.
     """
     state = crud_session_search_backfill_state.get_for_account(
         db, account_id=account_id
@@ -173,8 +175,8 @@ def indexed_through_for_account(db: Session, *, account_id: Any) -> IndexedThrou
         crud_session_search_document.earliest_occurred_at(db, account_id=account_id)
     )
     if state is None:
-        return IndexedThrough(
-            indexed_through=earliest,
+        return CorpusCoverage(
+            indexed_from=earliest,
             complete=False,
             state=BACKFILL_STATE_NOT_STARTED,
         )
@@ -182,14 +184,14 @@ def indexed_through_for_account(db: Session, *, account_id: Any) -> IndexedThrou
     if state.completed_at is not None:
         # The walk reached the end of the retained history, so the oldest
         # chunk on disk is the honest answer: there is nothing older to find.
-        return IndexedThrough(
-            indexed_through=earliest or watermark,
+        return CorpusCoverage(
+            indexed_from=earliest or watermark,
             complete=True,
             state=BACKFILL_STATE_COMPLETE,
         )
     candidates = [value for value in (watermark, earliest) if value is not None]
-    return IndexedThrough(
-        indexed_through=min(candidates) if candidates else None,
+    return CorpusCoverage(
+        indexed_from=min(candidates) if candidates else None,
         complete=False,
         state=(
             BACKFILL_STATE_IN_PROGRESS

@@ -38,6 +38,50 @@
 {{- else }}
    - Using custom database configuration
 {{- end }}
+{{- if and .Values.database.enabled (not .Values.database.external) (not (and .Values.database.urlFromSecret .Values.database.urlFromSecret.name)) }}
+{{- if eq (.Values.database.cnpg.auth.password | default "") "postgres" }}
+
+   WARNING: database.cnpg.auth.password is still the placeholder value.
+   Anything that can reach port 5432 in this cluster can log in as the
+   superuser. Set a real password, or move the URL into a Secret with
+   database.urlFromSecret. See docs/operations/database-credentials.md.
+{{- end }}
+{{- end }}
+
+4. Agent isolation:
+{{- if .Values.agentExecution.networkPolicy.enabled }}
+{{- $np := .Values.agentExecution.networkPolicy }}
+{{- $cilium := $np.cilium | default dict }}
+{{- if $cilium.enabled }}
+   - A CiliumNetworkPolicy restricts agent pods (app=agent-execution) to DNS,
+     the Preloop API and gateway, and the entities in
+     agentExecution.networkPolicy.cilium.internetEntities
+     ({{ join ", " ($cilium.internetEntities | default (list "world" "host")) }}).
+{{- if $np.controlPlaneIngress.enabled }}
+   - WARNING: controlPlaneIngress is enabled together with the Cilium policy.
+     Its ipBlock rule does not match node addresses on Cilium, so node-sourced
+     traffic to the API and gateway (load balancer health checks) is dropped
+     unless Cilium runs with policyCIDRMatchMode including nodes.
+{{- end }}
+{{- else }}
+{{- $clusterCidrs := $np.clusterCidrs | default $np.excludeCIDRs | default (list "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "169.254.169.254/32") }}
+   - A NetworkPolicy restricts agent pods (app=agent-execution) to DNS, the
+     Preloop API and gateway, and the internet outside
+     {{ join ", " $clusterCidrs }}.
+     Confirm those CIDRs cover this cluster's pod and service ranges, and
+     that your CNI enforces NetworkPolicy.
+{{- if and (not $np.clusterCidrs) $np.excludeCIDRs }}
+   - agentExecution.networkPolicy.excludeCIDRs is deprecated and is the list
+     in use above. Rename it to agentExecution.networkPolicy.clusterCidrs.
+{{- end }}
+   - On Cilium set agentExecution.networkPolicy.cilium.enabled=true: a plain
+     ipBlock rule does not match node addresses there, so a public address
+     that resolves back into the cluster is unreachable from agent pods.
+{{- end }}
+{{- else }}
+   - WARNING: agent pods are unrestricted. They can reach the database,
+     NATS, and every other pod in the cluster. See docs/security/agent-isolation.md.
+{{- end }}
 
 See helm/preloop/README.md (Private cluster) for ingress, private registry, extra CA, and OpenAI-compatible upstream setup.
 
