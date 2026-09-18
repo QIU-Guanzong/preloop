@@ -123,6 +123,41 @@ class TestAskUserForm:
         assert [row["id"] for row in arguments["items"]] == ["CVE-1", "CVE-2"]
         assert arguments["input_schema"]["properties"]["waived"]["type"] == "array"
 
+    async def test_dropped_item_keys_ride_in_tool_args(self):
+        fn = await _tool_fn("ask_user")
+        captured = {}
+
+        async def _require(**kwargs):
+            captured.update(kwargs)
+            return True, "ok"
+
+        p1, p2, p3 = _workflow_patches()
+        with (
+            p1,
+            p2,
+            p3,
+            patch(
+                "preloop.services.initialize_mcp.require_approval",
+                new=AsyncMock(side_effect=_require),
+            ),
+        ):
+            _set_meta(answer=None)
+            await fn(
+                question="Which files did this change?",
+                items=[
+                    {
+                        "id": "F-1",
+                        "rank": 1,
+                        "path": "/foo",
+                        "stacks": ["python"],
+                    }
+                ],
+            )
+
+        arguments = captured["arguments"]
+        assert arguments["dropped_item_keys"] == ["path", "rank", "stacks"]
+        assert arguments["items"] == [{"id": "F-1", "title": "F-1"}]
+
     async def test_answer_round_trips_as_json(self):
         answer = {
             "waived": [{"id": "CVE-1", "reason": "no fix released yet"}],
@@ -289,6 +324,36 @@ class TestRequestApprovalForm:
         assert payload["status"] == "approved"
         assert payload["answer"] == answer
         assert payload["answered_by"] == "dimo@example.com"
+
+    async def test_dropped_item_keys_ride_in_tool_args(self):
+        fn = await _tool_fn("request_approval")
+        captured = {}
+
+        async def _require(**kwargs):
+            captured.update(kwargs)
+            return True, None
+
+        p1, p2, p3 = _workflow_patches()
+        with (
+            p1,
+            p2,
+            p3,
+            patch(
+                "preloop.services.initialize_mcp.require_approval",
+                new=AsyncMock(side_effect=_require),
+            ),
+        ):
+            _set_meta()
+            await fn(
+                operation="waive findings",
+                context="release audit",
+                reasoning="gate failed",
+                items=[{"id": "CVE-1", "rank": 9, "manifests": ["requirements.txt"]}],
+            )
+
+        arguments = captured["arguments"]
+        assert arguments["dropped_item_keys"] == ["manifests", "rank"]
+        assert arguments["items"] == [{"id": "CVE-1", "title": "CVE-1"}]
 
     async def test_plain_approval_return_is_unchanged(self):
         fn = await _tool_fn("request_approval")

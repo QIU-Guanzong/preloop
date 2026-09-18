@@ -19,7 +19,9 @@ from preloop.services.question_schema import (
     question_summary,
     summarize_answer,
     validate_answer,
+    validate_schema_items,
     MAX_ANSWER_BYTES,
+    MAX_ITEM_ID_LENGTH,
 )
 
 
@@ -194,6 +196,158 @@ class TestNormalizeItems:
 
     def test_none_is_empty(self):
         assert normalize_items(None) == []
+
+    def test_extra_unsupported_keys_are_dropped(self):
+        items = normalize_items(
+            [{"id": "X", "rank": 1, "path": "/foo", "stacks": ["python"]}]
+        )
+        assert items[0] == {"id": "X", "title": "X"}
+
+    def test_extra_keys_recorded_when_dropped_keys_provided(self):
+        dropped = set()
+        items = normalize_items(
+            [{"id": "X", "rank": 1, "path": "/foo", "manifests": ["requirements.txt"]}],
+            dropped_keys=dropped,
+        )
+        assert dropped == {"rank", "path", "manifests"}
+        assert items[0] == {"id": "X", "title": "X"}
+
+    def test_severity_outside_vocabulary_does_not_refuse(self):
+        items = normalize_items([{"id": "X", "severity": "catastrophic"}])
+        assert items[0]["severity"] == "catastrophic"
+
+    def test_severity_near_miss_values_pass_through(self):
+        warning = normalize_items([{"id": "W", "severity": "warning"}])
+        moderate = normalize_items([{"id": "M", "severity": "Moderate"}])
+        assert warning[0]["severity"] == "warning"
+        assert moderate[0]["severity"] == "Moderate"
+
+    def test_severity_in_vocabulary_accepted_and_lowercased(self):
+        items = normalize_items([{"id": "X", "severity": "HIGH"}])
+        assert items[0]["severity"] == "high"
+
+    def test_item_id_longer_than_ceiling_is_refused(self):
+        with pytest.raises(QuestionSchemaError) as excinfo:
+            normalize_items([{"id": "x" * (MAX_ITEM_ID_LENGTH + 1)}])
+        assert f"items[0].id is longer than {MAX_ITEM_ID_LENGTH} characters" in str(
+            excinfo.value
+        )
+
+    def test_item_id_at_ceiling_matches_enum(self):
+        item_id = "p" * MAX_ITEM_ID_LENGTH
+        items = normalize_items([{"id": item_id}])
+        schema = normalize_input_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "selected": {"type": "array", "items": {"enum": [item_id]}}
+                },
+            }
+        )
+        validate_schema_items(schema, items)
+        assert items[0]["id"] == item_id
+
+
+class TestValidateSchemaItems:
+    def test_schema_enum_with_unknown_item_id_rejected(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "selected": {
+                    "type": "array",
+                    "items": {"enum": ["item-1", "item-2", "item-orphan"]},
+                }
+            },
+        }
+        items = [{"id": "item-1"}, {"id": "item-2"}]
+        with pytest.raises(QuestionSchemaError) as excinfo:
+            validate_schema_items(schema, items)
+        assert "names id 'item-orphan' with no matching item row" in str(excinfo.value)
+
+    def test_schema_row_object_enum_with_unknown_item_id_rejected(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "waived": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"enum": ["item-1", "ghost-item"]},
+                            "reason": {"type": "string"},
+                        },
+                    },
+                }
+            },
+        }
+        items = [{"id": "item-1"}]
+        with pytest.raises(QuestionSchemaError) as excinfo:
+            validate_schema_items(schema, items)
+        assert "names id 'ghost-item' with no matching item row" in str(excinfo.value)
+
+    def test_schema_enum_all_matching_items_accepted(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "selected": {
+                    "type": "array",
+                    "items": {"enum": ["item-1", "item-2"]},
+                }
+            },
+        }
+        items = [{"id": "item-1"}, {"id": "item-2"}]
+        validate_schema_items(schema, items)
+
+    def test_non_item_enum_unaffected(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "format": {
+                    "type": "string",
+                    "enum": ["json", "yaml"],
+                }
+            },
+        }
+        items = [{"id": "item-1"}, {"id": "item-2"}]
+        validate_schema_items(schema, items)
+
+    def test_plain_multi_select_enum_unaffected_when_items_present(self):
+        schema = normalize_input_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "tags": {"type": "array", "items": {"enum": ["infra", "docs"]}}
+                },
+            }
+        )
+        items = normalize_items([{"id": "F-1"}])
+        validate_schema_items(schema, items)
+
+    def test_overlapping_multi_select_enum_requires_item_rows(self):
+        schema = normalize_input_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "picked": {
+                        "type": "array",
+                        "items": {"enum": ["F-1", "ghost"]},
+                    }
+                },
+            }
+        )
+        items = normalize_items([{"id": "F-1"}])
+        with pytest.raises(QuestionSchemaError) as excinfo:
+            validate_schema_items(schema, items)
+        assert "names id 'ghost' with no matching item row" in str(excinfo.value)
+
+    def test_top_level_id_enum_without_overlap_is_accepted(self):
+        schema = normalize_input_schema(
+            {
+                "type": "object",
+                "properties": {"id": {"type": "string", "enum": ["A", "B"]}},
+            }
+        )
+        validate_schema_items(schema, normalize_items([{"id": "F-1"}]))
 
 
 class TestValidateAnswer:
