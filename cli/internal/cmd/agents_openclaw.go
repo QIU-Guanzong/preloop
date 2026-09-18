@@ -2492,7 +2492,7 @@ func upstreamEligibleForServerCredentialReuse(
 	if upstream.AllowServerCredentialReuse {
 		return true
 	}
-	return isClaudeCodeAgent(agent)
+	return isClaudeCodeAgent(agent) || isCodexCLIAgent(agent)
 }
 
 // serverHasReusableGatewayCredential checks (best-effort, read-only) whether
@@ -5648,6 +5648,28 @@ func syncSingleOpenClawAIModel(
 		if parsed.ProviderAPIKey != "" && (!target.HasAPIKey || aiModelUsesAmbientProviderCredentials(target)) {
 			update["api_key"] = parsed.ProviderAPIKey
 		}
+		credType := ""
+		if isCodexCLIAgent(agent) {
+			credType = "oauth_openai_codex"
+		} else if isOAuthCredentialType(parsed.ProviderName) {
+			credType = parsed.ProviderName
+		}
+		if credType != "" {
+			if sharedSibling := findManagedClaudeCodeOAuthSibling(
+				existing,
+				agent,
+				managedAgent,
+				credType,
+				target.ID,
+			); sharedSibling != nil {
+				sharedSecret := applySharedClaudeCodeOAuthSecret(sharedSibling)
+				sameSecret := sharedSecret != "" &&
+					strings.TrimSpace(target.CredentialsSecretID) == sharedSecret
+				if sharedSecret != "" && !sameSecret {
+					update["credentials_secret_id"] = sharedSecret
+				}
+			}
+		}
 		if len(update) > 0 {
 			var updated aiModelResponse
 			if err := client.Put("/api/v1/ai-models/"+target.ID, update, &updated); err != nil {
@@ -5689,6 +5711,29 @@ func syncSingleOpenClawAIModel(
 		APIEndpoint:     normalizeAIModelEndpoint(parsed.ProviderBaseURL),
 		APIKey:          parsed.ProviderAPIKey,
 		MetaData:        metaData,
+	}
+	credType := ""
+	if isCodexCLIAgent(agent) {
+		credType = "oauth_openai_codex"
+	} else if isOAuthCredentialType(parsed.ProviderName) {
+		credType = parsed.ProviderName
+	}
+	if credType != "" {
+		if sharedSibling := findManagedClaudeCodeOAuthSibling(
+			existing,
+			agent,
+			managedAgent,
+			credType,
+			"",
+		); sharedSibling != nil {
+			sharedSecret := applySharedClaudeCodeOAuthSecret(sharedSibling)
+			if sharedSecret != "" {
+				create.CredentialsSecretID = sharedSecret
+				create.APIKey = ""
+				create.CredentialType = ""
+				create.CredentialsJSON = nil
+			}
+		}
 	}
 
 	var created aiModelResponse
@@ -5797,7 +5842,7 @@ func findManagedClaudeCodeOAuthSibling(
 	credentialType string,
 	excludeID string,
 ) *aiModelResponse {
-	if !isClaudeCodeAgent(agent) || !isOAuthCredentialType(credentialType) {
+	if !isOAuthCredentialType(credentialType) {
 		return nil
 	}
 	wantType := strings.TrimSpace(credentialType)
@@ -5948,11 +5993,16 @@ func syncManagedGatewayAIModel(
 			upstream.CredentialType,
 			target.ID,
 		)
-		if !target.HasAPIKey && sharedSibling != nil {
-			sharedSecret := applySharedClaudeCodeOAuthSecret(sharedSibling)
-			if sharedSecret != "" {
-				update["credentials_secret_id"] = sharedSecret
-			}
+		var sharedSecret string
+		if sharedSibling != nil {
+			sharedSecret = applySharedClaudeCodeOAuthSecret(sharedSibling)
+		}
+		sameSecret := sharedSecret != "" &&
+			strings.TrimSpace(target.CredentialsSecretID) == sharedSecret
+		if sharedSecret != "" && !sameSecret {
+			update["credentials_secret_id"] = sharedSecret
+		} else if !target.HasAPIKey && sharedSecret != "" {
+			update["credentials_secret_id"] = sharedSecret
 		} else if len(upstream.CredentialPayload) > 0 &&
 			(!target.HasAPIKey ||
 				strings.TrimSpace(target.CredentialType) != strings.TrimSpace(upstream.CredentialType) ||
