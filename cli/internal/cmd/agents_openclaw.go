@@ -347,16 +347,18 @@ type gatewayUsageSearchItem struct {
 }
 
 type aiModelResponse struct {
-	ID                  string                 `json:"id"`
-	Name                string                 `json:"name"`
-	ProviderName        string                 `json:"provider_name"`
-	ModelIdentifier     string                 `json:"model_identifier"`
-	APIEndpoint         string                 `json:"api_endpoint"`
-	MetaData            map[string]interface{} `json:"meta_data"`
-	CredentialType      string                 `json:"credential_type"`
-	CredentialsSecretID string                 `json:"credentials_secret_id"`
-	HasAPIKey           bool                   `json:"has_api_key"`
-	IsDefault           bool                   `json:"is_default"`
+	ID                        string                 `json:"id"`
+	Name                      string                 `json:"name"`
+	ProviderName              string                 `json:"provider_name"`
+	ModelIdentifier           string                 `json:"model_identifier"`
+	APIEndpoint               string                 `json:"api_endpoint"`
+	MetaData                  map[string]interface{} `json:"meta_data"`
+	CredentialType            string                 `json:"credential_type"`
+	CredentialsSecretID       string                 `json:"credentials_secret_id"`
+	CredentialsLastVerifiedAt string                 `json:"credentials_last_verified_at"`
+	UpdatedAt                 string                 `json:"updated_at"`
+	HasAPIKey                 bool                   `json:"has_api_key"`
+	IsDefault                 bool                   `json:"is_default"`
 }
 
 type aiModelCreateRequest struct {
@@ -5648,28 +5650,6 @@ func syncSingleOpenClawAIModel(
 		if parsed.ProviderAPIKey != "" && (!target.HasAPIKey || aiModelUsesAmbientProviderCredentials(target)) {
 			update["api_key"] = parsed.ProviderAPIKey
 		}
-		credType := ""
-		if isCodexCLIAgent(agent) {
-			credType = "oauth_openai_codex"
-		} else if isOAuthCredentialType(parsed.ProviderName) {
-			credType = parsed.ProviderName
-		}
-		if credType != "" {
-			if sharedSibling := findManagedClaudeCodeOAuthSibling(
-				existing,
-				agent,
-				managedAgent,
-				credType,
-				target.ID,
-			); sharedSibling != nil {
-				sharedSecret := applySharedClaudeCodeOAuthSecret(sharedSibling)
-				sameSecret := sharedSecret != "" &&
-					strings.TrimSpace(target.CredentialsSecretID) == sharedSecret
-				if sharedSecret != "" && !sameSecret {
-					update["credentials_secret_id"] = sharedSecret
-				}
-			}
-		}
 		if len(update) > 0 {
 			var updated aiModelResponse
 			if err := client.Put("/api/v1/ai-models/"+target.ID, update, &updated); err != nil {
@@ -5711,29 +5691,6 @@ func syncSingleOpenClawAIModel(
 		APIEndpoint:     normalizeAIModelEndpoint(parsed.ProviderBaseURL),
 		APIKey:          parsed.ProviderAPIKey,
 		MetaData:        metaData,
-	}
-	credType := ""
-	if isCodexCLIAgent(agent) {
-		credType = "oauth_openai_codex"
-	} else if isOAuthCredentialType(parsed.ProviderName) {
-		credType = parsed.ProviderName
-	}
-	if credType != "" {
-		if sharedSibling := findManagedClaudeCodeOAuthSibling(
-			existing,
-			agent,
-			managedAgent,
-			credType,
-			"",
-		); sharedSibling != nil {
-			sharedSecret := applySharedClaudeCodeOAuthSecret(sharedSibling)
-			if sharedSecret != "" {
-				create.CredentialsSecretID = sharedSecret
-				create.APIKey = ""
-				create.CredentialType = ""
-				create.CredentialsJSON = nil
-			}
-		}
 	}
 
 	var created aiModelResponse
@@ -5831,13 +5788,17 @@ func syncOpenClawAIModels(
 	return bindings, notes, nil
 }
 
-// findManagedClaudeCodeOAuthSibling returns an existing managed Claude Code
-// AI model that already holds a live same-type OAuth SecretReference. Used
-// so a newly pinned family (e.g. a first-seen fable row) attaches that
+// findManagedOAuthCredentialSibling returns an existing managed AI model that
+// already holds a live same-type OAuth SecretReference. Used so a newly
+// pinned family (e.g. a first-seen Codex or Claude family row) attaches that
 // secret instead of minting a second single-use refresh-token lineage.
-func findManagedClaudeCodeOAuthSibling(
+//
+// Same-machine rows (matching managed_agent_id) always beat untagged
+// fallbacks. Within a bucket, prefer the row with the newest liveness
+// signal (secret last_verified, then last_refresh, then updated_at) so a
+// stale first-listed copy of a rotated grant does not win.
+func findManagedOAuthCredentialSibling(
 	existing []aiModelResponse,
-	agent AgentConfig,
 	managedAgent *managedAgentSummary,
 	credentialType string,
 	excludeID string,
@@ -5853,7 +5814,8 @@ func findManagedClaudeCodeOAuthSibling(
 	if managedAgent != nil {
 		agentID = strings.TrimSpace(managedAgent.ID)
 	}
-	var fallback *aiModelResponse
+	var sameAgent []*aiModelResponse
+	var untagged []*aiModelResponse
 	for i := range existing {
 		model := &existing[i]
 		if excludeID != "" && strings.TrimSpace(model.ID) == strings.TrimSpace(excludeID) {
@@ -5871,7 +5833,8 @@ func findManagedClaudeCodeOAuthSibling(
 			modelAgentID = strings.TrimSpace(modelAgentID)
 		}
 		if agentID != "" && modelAgentID == agentID {
-			return model
+			sameAgent = append(sameAgent, model)
+			continue
 		}
 		// A row tagged with a different managed agent belongs to another
 		// machine's login; never attach to (or overwrite) that lineage.
@@ -5880,11 +5843,78 @@ func findManagedClaudeCodeOAuthSibling(
 		if modelAgentID != "" {
 			continue
 		}
-		if fallback == nil {
-			fallback = model
+		untagged = append(untagged, model)
+	}
+	if picked := pickLiveOAuthSibling(sameAgent); picked != nil {
+		return picked
+	}
+	return pickLiveOAuthSibling(untagged)
+}
+
+func pickLiveOAuthSibling(candidates []*aiModelResponse) *aiModelResponse {
+	var best *aiModelResponse
+	var bestTime time.Time
+	for _, model := range candidates {
+		if model == nil {
+			continue
+		}
+		liveAt := oauthSiblingLiveness(model)
+		if best == nil || liveAt.After(bestTime) {
+			best = model
+			bestTime = liveAt
 		}
 	}
-	return fallback
+	return best
+}
+
+func oauthSiblingLiveness(model *aiModelResponse) time.Time {
+	if model == nil {
+		return time.Time{}
+	}
+	if liveAt := parseOAuthSiblingTime(model.CredentialsLastVerifiedAt); !liveAt.IsZero() {
+		return liveAt
+	}
+	if model.MetaData != nil {
+		for _, key := range []string{"last_verified_at", "last_verified", "last_refresh"} {
+			if liveAt := parseOAuthSiblingTime(model.MetaData[key]); !liveAt.IsZero() {
+				return liveAt
+			}
+		}
+	}
+	return parseOAuthSiblingTime(model.UpdatedAt)
+}
+
+func parseOAuthSiblingTime(value interface{}) time.Time {
+	switch typed := value.(type) {
+	case time.Time:
+		return typed.UTC()
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return time.Time{}
+		}
+		layouts := []string{
+			time.RFC3339Nano,
+			time.RFC3339,
+			"2006-01-02T15:04:05.999999",
+			"2006-01-02T15:04:05",
+			"2006-01-02 15:04:05.999999",
+			"2006-01-02 15:04:05",
+		}
+		for _, layout := range layouts {
+			if parsed, err := time.Parse(layout, trimmed); err == nil {
+				return parsed.UTC()
+			}
+		}
+	case float64:
+		if typed > 1e12 {
+			return time.UnixMilli(int64(typed)).UTC()
+		}
+		if typed > 0 {
+			return time.Unix(int64(typed), 0).UTC()
+		}
+	}
+	return time.Time{}
 }
 
 func applySharedClaudeCodeOAuthSecret(sibling *aiModelResponse) string {
@@ -5983,12 +6013,14 @@ func syncManagedGatewayAIModel(
 		// bundle is expired and the account already holds a same-type OAuth
 		// credential, keep the account copy — the gateway can refresh it.
 		//
-		// A second exception: when this target has no credential yet but a
-		// sibling Claude Code row already holds the same-type OAuth secret,
-		// attach that secret instead of minting a second lineage.
-		sharedSibling := findManagedClaudeCodeOAuthSibling(
+		// A second exception: when a sibling already holds a same-type
+		// OAuth secret, attach that live lineage instead of minting a
+		// second one. This wins over re-seed even when the target already
+		// has a credential, so split family rows converge onto one secret.
+		// Sibling selection prefers last_verified / last_refresh /
+		// updated_at so a stale first-listed copy does not win.
+		sharedSibling := findManagedOAuthCredentialSibling(
 			existing,
-			agent,
 			managedAgent,
 			upstream.CredentialType,
 			target.ID,
@@ -6000,8 +6032,6 @@ func syncManagedGatewayAIModel(
 		sameSecret := sharedSecret != "" &&
 			strings.TrimSpace(target.CredentialsSecretID) == sharedSecret
 		if sharedSecret != "" && !sameSecret {
-			update["credentials_secret_id"] = sharedSecret
-		} else if !target.HasAPIKey && sharedSecret != "" {
 			update["credentials_secret_id"] = sharedSecret
 		} else if len(upstream.CredentialPayload) > 0 &&
 			(!target.HasAPIKey ||
@@ -6075,9 +6105,8 @@ func syncManagedGatewayAIModel(
 		CredentialsJSON: upstream.CredentialPayload,
 		MetaData:        metaData,
 	}
-	if sharedSibling := findManagedClaudeCodeOAuthSibling(
+	if sharedSibling := findManagedOAuthCredentialSibling(
 		existing,
-		agent,
 		managedAgent,
 		upstream.CredentialType,
 		"",

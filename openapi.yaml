@@ -12984,6 +12984,22 @@ components:
           - type: 'null'
           title: Credential Type
           description: Logical credential type stored for the model
+        updated_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Updated At
+          description: When this AI model row was last updated
+        credentials_last_verified_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Credentials Last Verified At
+          description: When the attached credential secret last verified successfully.
+            For rotating OAuth grants this is the live-lineage signal; it moves on
+            gateway refresh even when the AI model row does not.
         has_api_key:
           type: boolean
           title: Has Api Key

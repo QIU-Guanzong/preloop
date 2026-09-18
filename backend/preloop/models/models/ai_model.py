@@ -1,6 +1,7 @@
 """AIModel model for storing model configurations."""
 
 import uuid
+from datetime import datetime
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from sqlalchemy import Boolean, ForeignKey, String, Text
@@ -155,6 +156,18 @@ class AIModel(Base):
         if self.credentials_secret:
             return self.credentials_secret.external_ref
         return None
+
+    @property
+    def credentials_last_verified_at(self) -> Optional[datetime]:
+        """Return when the attached credential secret last verified successfully.
+
+        Gateway OAuth refresh writes SecretReference.last_verified_at; the AI
+        model row itself is not updated on refresh, so sibling lineage
+        selection must read this instead of ai_model.updated_at.
+        """
+        if self.credentials_secret is None:
+            return None
+        return self.credentials_secret.last_verified_at
 
     def __repr__(self):
         return f"<AIModel(id={self.id}, name='{self.name}')>"

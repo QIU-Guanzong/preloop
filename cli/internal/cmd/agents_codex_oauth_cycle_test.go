@@ -252,6 +252,93 @@ func TestSyncManagedGatewayAIModelDifferentManagedAgentDoesNotAttachCodex(t *tes
 	}
 }
 
+func TestFindManagedOAuthCredentialSiblingPrefersFresherOverFirstMatch(t *testing.T) {
+	staleFirst := codexManagedOAuthSiblingForTest(
+		"codex-stale-first",
+		"o3-mini",
+		"openai/o3-mini",
+		"secret-stale",
+	)
+	staleFirst.UpdatedAt = "2026-09-01T00:00:00Z"
+	staleFirst.CredentialsLastVerifiedAt = "2026-09-01T00:00:00Z"
+
+	freshLater := codexManagedOAuthSiblingForTest(
+		"codex-fresh-later",
+		"gpt-4o",
+		"openai/gpt-4o",
+		"secret-live",
+	)
+	freshLater.UpdatedAt = "2026-09-18T00:00:00Z"
+	freshLater.CredentialsLastVerifiedAt = "2026-09-18T12:00:00Z"
+
+	got := findManagedOAuthCredentialSibling(
+		[]aiModelResponse{staleFirst, freshLater},
+		&managedAgentSummary{ID: "agent-codex-1"},
+		"oauth_openai_codex",
+		"",
+	)
+	if got == nil || got.ID != "codex-fresh-later" {
+		t.Fatalf("stale first-listed sibling must lose to the fresher copy, got %#v", got)
+	}
+	if got.CredentialsSecretID != "secret-live" {
+		t.Fatalf("expected live secret, got %#v", got)
+	}
+}
+
+func TestSyncManagedGatewayAIModelCreateReusesFresherCodexSiblingSecret(t *testing.T) {
+	staleFirst := codexManagedOAuthSiblingForTest(
+		"codex-stale-first",
+		"o3-mini",
+		"openai/o3-mini",
+		"secret-stale",
+	)
+	staleFirst.CredentialsLastVerifiedAt = "2026-09-01T00:00:00Z"
+	staleFirst.UpdatedAt = "2026-09-01T00:00:00Z"
+
+	freshLater := codexManagedOAuthSiblingForTest(
+		"codex-fresh-later",
+		"gpt-5",
+		"openai/gpt-5",
+		"secret-live",
+	)
+	freshLater.CredentialsLastVerifiedAt = "2026-09-18T12:00:00Z"
+	freshLater.UpdatedAt = "2026-09-18T12:00:00Z"
+
+	writes := []recordedAIModelWrite{}
+	server := newCodexFamilyLineageServer(t, []aiModelResponse{staleFirst, freshLater}, &writes)
+	defer server.Close()
+
+	freshExpiry := time.Now().UTC().Add(4 * time.Hour).UnixMilli()
+	upstream := codexUpstreamForTest("gpt-4o", "openai/gpt-4o", map[string]interface{}{
+		"access":  "sk-codex-oat-fresh",
+		"refresh": "sk-codex-ort-fresh",
+		"expires": freshExpiry,
+	})
+
+	_, _, err := syncManagedGatewayAIModel(
+		api.NewClientWithToken(server.URL, "tok"),
+		&managedAgentSummary{ID: "agent-codex-1"},
+		AgentConfig{Name: "Codex CLI"},
+		upstream,
+		server.URL+"/openai/v1",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var createBody map[string]interface{}
+	for _, write := range writes {
+		if write.Method == http.MethodPost {
+			createBody = write.Body
+		}
+	}
+	if createBody == nil {
+		t.Fatalf("expected a create for the new codex row; writes: %#v", writes)
+	}
+	if createBody["credentials_secret_id"] != "secret-live" {
+		t.Fatalf("create must reuse the fresher sibling secret, got %#v", createBody)
+	}
+}
+
 func TestCodexServerHasReusableGatewayCredential(t *testing.T) {
 	sibling := codexManagedOAuthSiblingForTest(
 		"codex-o3-mini",

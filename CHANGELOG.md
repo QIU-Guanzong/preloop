@@ -1245,6 +1245,12 @@ avatars.
 
 ### Fixed
 
+- Codex CLI enrollments share one OAuth SecretReference per managed agent
+  instead of minting a second single-use lineage per model family. A
+  re-onboard of a split pre-fix enrollment repoints family rows onto the
+  live sibling secret (newest `last_verified` / `updated_at`), rather
+  than rotating another grant and tripping provider reuse detection.
+
 - Tree-stop and child-wait tests bind the session factory to an object
   that still looks like a Session. GitLab sets `INIT_TEST_DATA=true`,
   so `TestClient` lifespan seeds via `next(get_db_session()).query`,
