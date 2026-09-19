@@ -1,4 +1,32 @@
-import { BrandConfig } from './brand-config';
+import type { BrandConfig } from './brand-config';
+
+const screenshotDirectory = '/assets/screenshots/quickstart/dark/';
+const responsiveScreenshots = new Set(
+  [
+    'agent_bubble',
+    'audit_page',
+    'cost_page',
+    'dashboard',
+    'rules_configured',
+  ].map((name) => `${screenshotDirectory}${name}.png`)
+);
+
+/** Display derivatives for bundled stills; custom branding and animation pass through. */
+export function landingImageSources(original: string): {
+  src: string;
+  srcset?: string;
+  width?: number;
+  height?: number;
+} {
+  if (!responsiveScreenshots.has(original)) return { src: original };
+  const stem = original.slice(0, -4);
+  return {
+    src: `${stem}-800.webp`,
+    srcset: `${stem}-800.webp 800w, ${stem}-1600.webp 1600w, ${original} 3200w`,
+    width: 3200,
+    height: 1900,
+  };
+}
 
 function isRootRelativeAssetPath(assetPath: string): boolean {
   return (
@@ -25,5 +53,10 @@ export function collectLandingPublicAssetPaths(brand: BrandConfig): string[] {
       paths.push(feature.placeholderImg);
     }
   }
-  return [...new Set(paths)].filter(isRootRelativeAssetPath);
+  const displayPaths = paths.flatMap((original) => {
+    if (!responsiveScreenshots.has(original)) return [original];
+    const stem = original.slice(0, -4);
+    return [original, `${stem}-800.webp`, `${stem}-1600.webp`];
+  });
+  return [...new Set(displayPaths)].filter(isRootRelativeAssetPath);
 }

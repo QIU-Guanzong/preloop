@@ -111,12 +111,12 @@ tools:
 Ship it with `preloop policy apply <file>` (`validate` / `diff` / `export` also exist).
 
 <p align="center">
-  <img alt="Preloop dashboard with live agent and gateway usage" src="frontend/public/assets/screenshots/quickstart/dark/dashboard.png" style="width: 100%; max-width: 1135px; border-radius: 12px;" />
+  <a href="frontend/public/assets/screenshots/quickstart/dark/dashboard.png"><img alt="Preloop dashboard with live agent and gateway usage" src="frontend/public/assets/screenshots/quickstart/dark/dashboard-1600.webp" style="width: 100%; max-width: 1135px; border-radius: 12px;" /></a>
 </p>
 
 <div align="center">
-  <img alt="Preloop MCP tool policy rules configured for an example pay tool" src="frontend/public/assets/screenshots/quickstart/dark/rules_configured.png" style="width: 49%; min-width: 320px; border-radius: 12px; margin-right: 1%;" />
-  <img alt="Governed agent activity in the Preloop console" src="frontend/public/assets/screenshots/quickstart/dark/audit_page.png" style="width: 49%; min-width: 320px; border-radius: 12px; margin-left: 1%;" />
+  <a href="frontend/public/assets/screenshots/quickstart/dark/rules_configured.png"><img alt="Preloop MCP tool policy rules configured for an example pay tool" src="frontend/public/assets/screenshots/quickstart/dark/rules_configured-800.webp" style="width: 49%; min-width: 320px; border-radius: 12px; margin-right: 1%;" /></a>
+  <a href="frontend/public/assets/screenshots/quickstart/dark/audit_page.png"><img alt="Governed agent activity in the Preloop console" src="frontend/public/assets/screenshots/quickstart/dark/audit_page-800.webp" style="width: 49%; min-width: 320px; border-radius: 12px; margin-left: 1%;" /></a>
 </div>
 
 Talk details for OpenClaw, Hermes, and Claude Code: [OpenClaw](https://docs.preloop.ai/integrations/openclaw/), [runtime adapters](https://docs.preloop.ai/integrations/agent-control-runtime-adapters/).

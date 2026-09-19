@@ -1,6 +1,9 @@
 import { expect } from '@open-wc/testing';
 import { BrandConfig } from './brand-config';
-import { collectLandingPublicAssetPaths } from './brand-landing-assets';
+import {
+  collectLandingPublicAssetPaths,
+  landingImageSources,
+} from './brand-landing-assets';
 
 function brandWithImages(partial: {
   heroImage?: string;
@@ -55,5 +58,42 @@ describe('collectLandingPublicAssetPaths', () => {
     );
 
     expect(paths).to.deep.equal(['/assets/ok.png']);
+  });
+});
+
+describe('landingImageSources', () => {
+  it('offers smaller stock screenshots while retaining the full-size candidate', () => {
+    const original = '/assets/screenshots/quickstart/dark/dashboard.png';
+    expect(landingImageSources(original)).to.deep.equal({
+      src: '/assets/screenshots/quickstart/dark/dashboard-800.webp',
+      srcset:
+        '/assets/screenshots/quickstart/dark/dashboard-800.webp 800w, /assets/screenshots/quickstart/dark/dashboard-1600.webp 1600w, /assets/screenshots/quickstart/dark/dashboard.png 3200w',
+      width: 3200,
+      height: 1900,
+    });
+  });
+
+  it('leaves animations and custom brand images alone', () => {
+    for (const src of [
+      '/assets/screenshots/quickstart/dark/agents-onboarding.webp',
+      '/assets/custom.png',
+      'https://cdn.example.com/assets/screenshots/quickstart/dark/dashboard.png',
+    ]) {
+      expect(landingImageSources(src)).to.deep.equal({ src });
+    }
+  });
+
+  it('validates responsive files as well as the original at build time', () => {
+    expect(
+      collectLandingPublicAssetPaths(
+        brandWithImages({
+          heroImage: '/assets/screenshots/quickstart/dark/agent_bubble.png',
+        })
+      )
+    ).to.have.members([
+      '/assets/screenshots/quickstart/dark/agent_bubble.png',
+      '/assets/screenshots/quickstart/dark/agent_bubble-800.webp',
+      '/assets/screenshots/quickstart/dark/agent_bubble-1600.webp',
+    ]);
   });
 });
