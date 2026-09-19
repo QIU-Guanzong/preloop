@@ -1249,6 +1249,9 @@ avatars.
   runner setup failures from code failures. Startup failures and explicit
   pipeline infrastructure reasons use bounded escalation rather than code repair.
 
+- Private-runner launch and server logs report the configured container image,
+  including the legacy `docker_image` alias, instead of the harness default.
+
 - Agents in a split Kubernetes deployment call the gateway Service instead
   of the API Service. API pods run `PRELOOP_SERVICE_ROLE=api` and never
   mount `/openai/v1`, so a model row without an explicit

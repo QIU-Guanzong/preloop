@@ -35,6 +35,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { dismissPlanChoiceIfShown } from './login';
 
 const IS_STAGING = process.env.PRELOOP_E2E_TARGET === 'staging';
 const RUNS = Number(process.env.PRELOOP_PERF_RUNS || 3);
@@ -95,6 +96,7 @@ async function login(page: Page, creds: Creds): Promise<void> {
       }
     )
     .not.toBeNull();
+  await dismissPlanChoiceIfShown(page);
 }
 
 interface ApiCall {

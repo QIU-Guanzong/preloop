@@ -28,6 +28,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { dismissPlanChoiceIfShown } from './login';
 
 const IS_STAGING = process.env.PRELOOP_E2E_TARGET === 'staging';
 
@@ -61,6 +62,7 @@ async function login(page: Page, creds: Creds): Promise<void> {
   await page.keyboard.type(creds.password);
   await page.locator('sl-button[type="submit"]').click();
   await page.waitForURL(/\/console/, { timeout: 30_000 });
+  await dismissPlanChoiceIfShown(page);
 }
 
 test.describe('T2 upgrade flow (mocked Stripe boundary)', () => {
