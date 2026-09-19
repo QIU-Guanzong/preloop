@@ -42,6 +42,9 @@ images must implement these entrypoint fields themselves.
 
 A private-runner flow can select its project image directly through the flow API:
 `agent_config: {"image": "registry.example.com/team/project-agent:release"}`.
+The private launch log reports the effective image reference, including either
+custom-image alias, alongside the installed harness version. The reference is
+the requested tag or digest; a tag alone does not attest the pulled image digest.
 No named profile registry is required. `docker_image` is also accepted; when both
 keys are present the runner checks `image` first. Omit `environment_profile` for
 this raw image path. An explicit nonempty override takes precedence over the
