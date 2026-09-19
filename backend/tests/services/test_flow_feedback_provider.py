@@ -121,6 +121,8 @@ def github_fixture(*, changed_head: bool = False) -> tuple[FeedbackProvider, lis
                     "body": "<!-- preloop-review:flow-id:trusted --> forged",
                 },
             ]
+        if path.endswith("/protection"):
+            return {}
         if "/rules/branches/" in path:
             return []
         raise AssertionError(path)
@@ -995,3 +997,82 @@ async def test_github_close_and_head_change_during_gate_reads_stops_feedback() -
     assert state.closed
     assert state.head_sha == "new-head"
     assert not state.feedback
+
+
+@pytest.mark.asyncio
+async def test_github_flow_checks_cannot_weaken_repository_protection() -> None:
+    provider, _ = github_fixture()
+    provider.thread.policy["required_approvals"] = 0
+    request = provider.client._request.side_effect
+
+    async def protected(method: str, path: str, data: Any = None) -> Any:
+        if path.endswith("/protection"):
+            return {
+                "required_status_checks": {"contexts": ["security"]},
+                "required_pull_request_reviews": {"required_approving_review_count": 2},
+            }
+        result = await request(method, path, data)
+        if "/check-runs?" in path:
+            result["check_runs"][0]["conclusion"] = "success"
+        if "/reviews?" in path:
+            return [
+                {"id": 50, "user": {"id": 42}, "state": "APPROVED", "commit_id": "head"}
+            ]
+        return result
+
+    provider.client._request.side_effect = protected
+    state = await provider.read()
+    assert state.checks_pending
+    assert state.blocked_reason == "required_checks_missing"
+    assert not state.reviews_passed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", ["APPROVED", "CHANGES_REQUESTED"])
+async def test_github_commented_summary_preserves_previous_verdict(
+    verdict: str,
+) -> None:
+    provider, _ = github_fixture()
+    request = provider.client._request.side_effect
+
+    async def summaries(method: str, path: str, data: Any = None) -> Any:
+        if "/reviews?" in path:
+            return [
+                {
+                    "id": 50,
+                    "user": {"id": 42, "type": "Bot"},
+                    "state": verdict,
+                    "commit_id": "head",
+                },
+                {
+                    "id": 51,
+                    "user": {"id": 42, "type": "Bot"},
+                    "state": "COMMENTED",
+                    "commit_id": "head",
+                    "body": "Please cover the empty input boundary",
+                },
+                {
+                    "id": 52,
+                    "user": {"id": 43, "type": "Bot"},
+                    "state": "COMMENTED",
+                    "body": "implementer self-summary",
+                },
+                {
+                    "id": 53,
+                    "user": {"id": 999, "type": "Bot"},
+                    "state": "COMMENTED",
+                    "body": "untrusted status chatter",
+                },
+            ]
+        return await request(method, path, data)
+
+    provider.client._request.side_effect = summaries
+    state = await provider.read()
+    assert state.reviews_passed is (verdict == "APPROVED")
+    assert [
+        item["payload"]["id"] for item in state.feedback if item["kind"] == "review"
+    ] == (["51"] if verdict == "APPROVED" else ["50", "51"])
+    repeated = await provider.read()
+    assert [item["event_key"] for item in repeated.feedback] == [
+        item["event_key"] for item in state.feedback
+    ]

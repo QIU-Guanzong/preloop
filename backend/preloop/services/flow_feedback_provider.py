@@ -609,23 +609,26 @@ class FeedbackProvider:
         # Repository policy is authoritative; absent explicit config is not proof
         # that required checks are empty. Branch protection errors fail closed.
         requirements_unknown = False
-        if "required_checks" not in self.thread.policy:
-            try:
-                protection = await request(
-                    "GET",
-                    f"{repo}/branches/{quote(pr['base']['ref'], safe='')}/protection",
-                )
-            except TrackerPermissionError:
-                protection = {}
-                requirements_unknown = True
-            required = (protection.get("required_status_checks") or {}).get(
-                "contexts", []
+        try:
+            protection = await request(
+                "GET",
+                f"{repo}/branches/{quote(pr['base']['ref'], safe='')}/protection",
             )
-            count = int(
+        except TrackerPermissionError:
+            protection = {}
+            requirements_unknown = True
+        required = sorted(
+            set(required)
+            | set((protection.get("required_status_checks") or {}).get("contexts", []))
+        )
+        count = max(
+            count,
+            int(
                 (protection.get("required_pull_request_reviews") or {}).get(
-                    "required_approving_review_count", count
+                    "required_approving_review_count", 0
                 )
-            )
+            ),
+        )
         try:
             rules = await request(
                 "GET", f"{repo}/rules/branches/{quote(pr['base']['ref'], safe='')}"
@@ -684,7 +687,12 @@ class FeedbackProvider:
             comments, "inline_comment", sha
         ) + self._comments(discussion, "comment", sha)
         state.feedback += self._comments(
-            [r for r in latest.values() if r.get("state") == "CHANGES_REQUESTED"],
+            [r for r in latest.values() if r.get("state") == "CHANGES_REQUESTED"]
+            + [
+                r
+                for r in reviews
+                if r.get("state") == "COMMENTED" and (r.get("body") or "").strip()
+            ],
             "review",
             sha,
         )

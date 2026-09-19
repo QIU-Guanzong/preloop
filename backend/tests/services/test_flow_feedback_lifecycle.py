@@ -135,6 +135,8 @@ class ProviderLifecycle:
                 if self.approved
                 else []
             )
+        if path.endswith("/protection"):
+            return {}
         if "/issues/" in path or "/rules/branches/" in path:
             return []
         raise AssertionError((method, path))

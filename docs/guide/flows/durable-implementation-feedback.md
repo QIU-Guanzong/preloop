@@ -122,8 +122,11 @@ between turns; CI waiting and stuck-job deadlines belong to the scheduler.
 
 GitHub reconciliation reads the current PR head, checks, legacy commit statuses,
 submitted reviews, unresolved inline review threads and conversation comments.
-It incorporates configured required checks, branch protection and effective
-ruleset check/review requirements. A failing check run contributes its own
+It combines configured required checks with branch protection and effective
+ruleset check/review requirements; flow configuration cannot lower repository
+requirements. Nonempty submitted review summaries in the COMMENTED state enter
+feedback without replacing the reviewer's previous approval or changes-requested
+verdict. A failing check run contributes its own
 bounded, redacted `output` title/summary/text as diagnostic evidence. For failing
 GitHub Actions checks, reconciliation reads at most two job-detail records on
 the bound repository. The job must match the current head and check-run ID.
