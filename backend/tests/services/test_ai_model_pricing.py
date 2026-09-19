@@ -342,7 +342,7 @@ def test_alibaba_fetch_distinguishes_catalog_refresh_failures(monkeypatch):
     cases = (
         (CatalogRefreshStatus.no_credentials, "credentials"),
         (CatalogRefreshStatus.unreachable, "could not be reached"),
-        (CatalogRefreshStatus.empty, "no token tariffs"),
+        (CatalogRefreshStatus.empty, "no list tariffs"),
         (CatalogRefreshStatus.host_mismatch, "different"),
     )
     for status, needle in cases:

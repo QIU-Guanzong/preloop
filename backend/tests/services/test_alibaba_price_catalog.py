@@ -1,4 +1,4 @@
-"""Native Model Studio catalog parsing is token-only and skips time bands."""
+"""Native Model Studio catalog parsing keeps token pairs, unit rates, and both time bands."""
 
 from typing import Any, Callable
 from datetime import datetime, timedelta, timezone
@@ -231,24 +231,7 @@ def test_parse_skips_nan_token_prices() -> None:
     assert nan_price is None
 
 
-def test_parse_skips_image_and_time_banded_rows() -> None:
-    image = parse_native_model(
-        {
-            "model": "qwen-image-max",
-            "prices": [
-                {
-                    "range_name": "Default",
-                    "prices": [
-                        {
-                            "type": "image_number",
-                            "price": "0.075",
-                            "price_unit": "per image",
-                        }
-                    ],
-                }
-            ],
-        }
-    )
+def test_parse_skips_busy_only_time_banded_rows() -> None:
     banded = parse_native_model(
         {
             "model": "busy-model",
@@ -273,8 +256,172 @@ def test_parse_skips_image_and_time_banded_rows() -> None:
             ],
         }
     )
-    assert image is None
     assert banded is None
+
+
+def test_parse_keeps_single_image_list_price() -> None:
+    image = parse_native_model(
+        {
+            "model": "qwen-image-max",
+            "prices": [
+                {
+                    "range_name": "Default",
+                    "prices": [
+                        {
+                            "type": "image_number",
+                            "price": "0.075",
+                            "price_unit": "per image",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    assert image is not None
+    assert image.per_image == 0.075
+    assert image.has_token_rates() is False
+
+
+def test_parse_thinking_embedding_and_omni_chat_defaults() -> None:
+    thinking = parse_native_model(
+        {
+            "model": "qwen3-next-80b-a3b-thinking",
+            "prices": [
+                {
+                    "range_name": "Default",
+                    "prices": [
+                        {
+                            "type": "thinking_input_token",
+                            "price": "0.15",
+                            "price_unit": "Per 1M tokens",
+                            "time_band": "standard",
+                        },
+                        {
+                            "type": "thinking_output_token",
+                            "price": "1.2",
+                            "price_unit": "Per 1M tokens",
+                            "time_band": "standard",
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    assert thinking is not None
+    assert thinking.input == 0.15
+    assert thinking.output == 1.2
+    embedding = parse_native_model(
+        {
+            "model": "text-embedding-v4",
+            "prices": [
+                {
+                    "range_name": "Default",
+                    "prices": [
+                        {
+                            "type": "embedding_token",
+                            "price": "0.07",
+                            "price_unit": "Per 1M tokens",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    assert embedding is not None
+    assert embedding.input == 0.07
+    assert embedding.output == 0.0
+    omni = parse_native_model(
+        {
+            "model": "qwen3.5-omni-plus",
+            "prices": [
+                {
+                    "range_name": "Default",
+                    "prices": [
+                        {
+                            "type": "omni_audio_input_token",
+                            "price": "11",
+                            "price_unit": "Per 1M tokens",
+                        },
+                        {
+                            "type": "omni_audio_output_token",
+                            "price": "44",
+                            "price_unit": "Per 1M tokens",
+                        },
+                        {
+                            "type": "omni_no_audio_input_token",
+                            "price": "1.4",
+                            "price_unit": "Per 1M tokens",
+                        },
+                        {
+                            "type": "omni_no_audio_output_token",
+                            "price": "8.3",
+                            "price_unit": "Per 1M tokens",
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    assert omni is not None
+    assert omni.input == 1.4
+    assert omni.output == 8.3
+    assert ("omni_audio_input_token", "Per 1M tokens", 11.0) in omni.extra_rates
+
+
+def test_parse_keeps_idle_and_busy_token_bands() -> None:
+    tariff = parse_native_model(
+        {
+            "model": "deepseek-v4.1-flash",
+            "prices": [
+                {
+                    "range_name": "Default",
+                    "prices": [
+                        {
+                            "type": "input_token",
+                            "price": "0.3",
+                            "price_unit": "Per 1M tokens",
+                            "time_band": "busy",
+                        },
+                        {
+                            "type": "output_token",
+                            "price": "1.2",
+                            "price_unit": "Per 1M tokens",
+                            "time_band": "busy",
+                        },
+                        {
+                            "type": "input_token_cache_implicit",
+                            "price": "0.03",
+                            "price_unit": "Per 1M tokens",
+                            "time_band": "busy",
+                        },
+                        {
+                            "type": "input_token",
+                            "price": "0.15",
+                            "price_unit": "Per 1M tokens",
+                            "time_band": "idle",
+                        },
+                        {
+                            "type": "output_token",
+                            "price": "0.6",
+                            "price_unit": "Per 1M tokens",
+                            "time_band": "idle",
+                        },
+                        {
+                            "type": "input_token_cache_implicit",
+                            "price": "0.015",
+                            "price_unit": "Per 1M tokens",
+                            "time_band": "idle",
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    assert tariff is not None
+    assert tariff.time_bands is not None
+    assert tariff.time_bands.busy.input == 0.3
+    assert tariff.time_bands.idle.input == 0.15
+    assert tariff.time_bands.idle.implicit_read == 0.015
 
 
 def test_parse_keeps_unbanded_token_tariff_and_tiers() -> None:
@@ -391,9 +538,11 @@ def test_incomplete_download_does_not_drop_existing_skus(
 
 def test_download_catalog_single_page(monkeypatch: pytest.MonkeyPatch) -> None:
     pages: list[int] = []
+    captured: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         pages.append(int(request.url.params["page_no"]))
+        captured.append(request)
         return httpx.Response(
             200,
             json={
@@ -411,6 +560,8 @@ def test_download_catalog_single_page(monkeypatch: pytest.MonkeyPatch) -> None:
     assert pages == [1]
     assert complete is True
     assert [row["model"] for row in entries] == ["qwen3.8-flash"]
+    assert "capabilities" not in captured[0].url.params
+    assert captured[0].url.params["service_site"] == "international"
 
 
 def test_download_catalog_stops_on_repeated_page(

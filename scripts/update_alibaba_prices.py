@@ -86,6 +86,66 @@ def _models_from_payload(payload: Any) -> tuple[list[dict[str, Any]], dict[str, 
     return rows, meta
 
 
+def _tier_payload(tier: Any) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in {
+            "max_input": tier.max_input,
+            "input": tier.input,
+            "output": tier.output,
+            "implicit_read": tier.implicit_read,
+            "explicit_read": tier.explicit_read,
+            "creation": tier.creation,
+        }.items()
+        if value is not None
+    }
+
+
+def _band_payload(tariff: Any) -> dict[str, Any]:
+    tiers = list(tariff.tiers) if tariff.tiers else [tariff]
+    return {"tiers": [_tier_payload(tier) for tier in tiers]}
+
+
+def _unit_payload(tariff: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key in (
+        "per_image",
+        "per_image_input",
+        "per_image_output",
+        "per_second",
+        "per_10k_characters",
+        "per_voice",
+    ):
+        value = getattr(tariff, key, None)
+        if value is not None:
+            payload[key] = value
+    extra = getattr(tariff, "extra_rates", ()) or ()
+    if extra:
+        payload["extra_rates"] = [
+            {"type": kind, "unit": unit, "amount": amount}
+            for kind, unit, amount in extra
+        ]
+    return payload
+
+
+def _seed_model_entry(tariff: Any) -> dict[str, Any]:
+    bands = tariff.time_bands
+    units = _unit_payload(tariff)
+    if bands is not None:
+        return {
+            "time_bands": {
+                "idle": _band_payload(bands.idle),
+                "busy": _band_payload(bands.busy),
+            },
+            **units,
+        }
+    if tariff.has_token_rates():
+        return {**_band_payload(tariff), **units}
+    if units:
+        return units
+    return _band_payload(tariff)
+
+
 def build_seed(payload: Any) -> dict[str, Any]:
     """Convert a verified complete dump without changing its retrieval date."""
     rows, meta = _models_from_payload(payload)
@@ -95,26 +155,9 @@ def build_seed(payload: Any) -> dict[str, Any]:
         tariff = parse_native_model(entry)
         if tariff is None:
             continue
-        tiers = list(tariff.tiers) if tariff.tiers else [tariff]
-        models[ident] = {
-            "tiers": [
-                {
-                    key: value
-                    for key, value in {
-                        "max_input": tier.max_input,
-                        "input": tier.input,
-                        "output": tier.output,
-                        "implicit_read": tier.implicit_read,
-                        "explicit_read": tier.explicit_read,
-                        "creation": tier.creation,
-                    }.items()
-                    if value is not None
-                }
-                for tier in tiers
-            ]
-        }
+        models[ident] = _seed_model_entry(tariff)
     if not models:
-        raise ValueError("Native dump contains no supported USD token tariffs")
+        raise ValueError("Native dump contains no supported USD list tariffs")
     return {
         "_meta": {
             **meta,
@@ -124,7 +167,10 @@ def build_seed(payload: Any) -> dict[str, Any]:
                 for row in rows
                 if row["model"].strip() not in models
             ),
-            "note": "Verified Singapore International token tariffs. Estimates, not invoices.",
+            "note": (
+                "Verified Singapore International list tariffs from native "
+                "GET /api/v1/models. Estimates, not invoices."
+            ),
         },
         "models": {key: models[key] for key in sorted(models)},
     }

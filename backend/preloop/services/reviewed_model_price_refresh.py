@@ -3,7 +3,8 @@
 This service never discovers providers, changes account overrides, or writes usage
 rows. Every serving process polls independently; one dictionary replacement makes
 the validated price set visible together. Published pages are evidence, not an
-executable scraping policy. Only flat token rates and the known native DeepSeek UTC-band policy are
+executable scraping policy. Flat token rates, Alibaba regional token tiers
+including idle/busy time bands, and the known native DeepSeek UTC-band policy are
 supported; new policy structures need estimator support before publication.
 """
 
@@ -19,7 +20,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 MAX_FEED_BYTES = 2_000_000
@@ -144,6 +145,35 @@ class AlibabaTier(BaseModel):
     max_input: int | None = Field(default=None, gt=0)
 
 
+def _ordered_alibaba_tiers(value: list[AlibabaTier]) -> list[AlibabaTier]:
+    """Reject ambiguous, duplicate, or unsorted context ranges."""
+    bounds = [tier.max_input for tier in value]
+    finite = [bound for bound in bounds if bound is not None]
+    if finite != sorted(set(finite)) or None in bounds[:-1]:
+        raise ValueError("Alibaba tiers must have increasing upper bounds")
+    return value
+
+
+class AlibabaBand(BaseModel):
+    """One idle or busy token tariff made of whole-request tiers."""
+
+    model_config = ConfigDict(extra="forbid")
+    tiers: list[AlibabaTier] = Field(min_length=1, max_length=100)
+
+    @field_validator("tiers")
+    @classmethod
+    def ordered_tiers(cls, value: list[AlibabaTier]) -> list[AlibabaTier]:
+        return _ordered_alibaba_tiers(value)
+
+
+class AlibabaTimeBands(BaseModel):
+    """Model Studio night/daytime token tariffs for one reviewed SKU."""
+
+    model_config = ConfigDict(extra="forbid")
+    idle: AlibabaBand
+    busy: AlibabaBand
+
+
 class AlibabaPolicy(BaseModel):
     """Only supported USD regions and whole-request token-length tiers."""
 
@@ -153,17 +183,25 @@ class AlibabaPolicy(BaseModel):
     model_identifier: str = Field(
         min_length=1, max_length=256, pattern=r"^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$"
     )
-    tiers: list[AlibabaTier] = Field(min_length=1, max_length=100)
+    tiers: list[AlibabaTier] | None = Field(default=None, max_length=100)
+    time_bands: AlibabaTimeBands | None = None
 
     @field_validator("tiers")
     @classmethod
-    def ordered_tiers(cls, value: list[AlibabaTier]) -> list[AlibabaTier]:
+    def ordered_tiers(cls, value: list[AlibabaTier] | None) -> list[AlibabaTier] | None:
         """Reject ambiguous, duplicate, or unsorted context ranges."""
-        bounds = [tier.max_input for tier in value]
-        finite = [bound for bound in bounds if bound is not None]
-        if finite != sorted(set(finite)) or None in bounds[:-1]:
-            raise ValueError("Alibaba tiers must have increasing upper bounds")
-        return value
+        if value is None:
+            return value
+        return _ordered_alibaba_tiers(value)
+
+    @model_validator(mode="after")
+    def token_shape(self) -> AlibabaPolicy:
+        """Require exactly one of flat tiers or idle/busy time bands."""
+        if self.time_bands is not None and self.tiers:
+            raise ValueError("banded Alibaba policy cannot also carry flat tiers")
+        if self.time_bands is None and not self.tiers:
+            raise ValueError("Alibaba policy needs tiers or time_bands")
+        return self
 
 
 class ReviewedPrice(BaseModel):
@@ -383,7 +421,20 @@ class ReviewedPriceRefresher:
             install_reviewed_catalogs,
             validate_reviewed_catalogs,
         )
-        from preloop.services.alibaba_pricing import Tariff
+        from preloop.services.alibaba_pricing import Tariff, TimeBands, _SEED
+
+        def _tariff_from_alibaba_tiers(tiers: list[AlibabaTier]) -> Tariff:
+            parsed = tuple(Tariff(**tier.model_dump()) for tier in tiers)
+            first = parsed[0]
+            return Tariff(
+                input=first.input,
+                output=first.output,
+                implicit_read=first.implicit_read,
+                explicit_read=first.explicit_read,
+                creation=first.creation,
+                max_input=first.max_input,
+                tiers=parsed if len(parsed) > 1 else (),
+            )
 
         alibaba_catalogs: dict[str, dict[str, Tariff]] = {}
         alibaba_verified = []
@@ -392,17 +443,29 @@ class ReviewedPriceRefresher:
             policy = entry.alibaba_policy
             if policy is None:
                 continue
-            tiers = tuple(Tariff(**tier.model_dump()) for tier in policy.tiers)
-            first = tiers[0]
-            tariff = Tariff(
-                input=first.input,
-                output=first.output,
-                implicit_read=first.implicit_read,
-                explicit_read=first.explicit_read,
-                creation=first.creation,
-                max_input=first.max_input,
-                tiers=tiers if len(tiers) > 1 else (),
-            )
+            seed = _SEED.get(policy.model_identifier)
+            if (
+                seed is not None
+                and seed.time_bands is not None
+                and policy.time_bands is None
+            ):
+                raise ValueError("Reviewed Alibaba tariff cannot flatten time_bands")
+            if policy.time_bands is not None:
+                idle = _tariff_from_alibaba_tiers(policy.time_bands.idle.tiers)
+                busy = _tariff_from_alibaba_tiers(policy.time_bands.busy.tiers)
+                tariff = Tariff(
+                    input=busy.input,
+                    output=busy.output,
+                    implicit_read=busy.implicit_read,
+                    explicit_read=busy.explicit_read,
+                    creation=busy.creation,
+                    max_input=busy.max_input,
+                    tiers=busy.tiers,
+                    time_bands=TimeBands(idle=idle, busy=busy),
+                )
+            else:
+                assert policy.tiers is not None
+                tariff = _tariff_from_alibaba_tiers(policy.tiers)
             alibaba_catalogs.setdefault(policy.region, {})[policy.model_identifier] = (
                 tariff
             )

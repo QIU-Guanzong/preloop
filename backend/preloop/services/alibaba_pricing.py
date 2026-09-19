@@ -1,13 +1,15 @@
 """Region-scoped Alibaba Model Studio list-price estimates, never invoice cost.
 
 Singapore International USD seed: ``data/alibaba_international_prices.json``,
-from the public pricing page. The native ``GET /api/v1/models`` overlay
+from the native ``GET /api/v1/models`` catalog. The live overlay
 (see ``alibaba_price_catalog``) keeps that map current, including cache rows
-from the same USD site response. Chat completions still report tokens only.
+from the same USD site response. Chat completions still report tokens only;
+image, TTS, and other unit rates use matching usage fields.
 
 Beijing and other CNY sites stay unpriced in USD accounting. Time-banded
-SKUs stay unpriced until a dedicated adapter exists. Do not substitute a
-native DeepSeek/Z.ai/Moonshot price for an Alibaba-hosted model.
+Singapore International SKUs use Model Studio night hours (22:00-08:00
+UTC+8, idle) versus daytime (busy). Do not substitute a native
+DeepSeek/Z.ai/Moonshot price for an Alibaba-hosted model.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -28,17 +30,65 @@ SEED_PATH = (
 )
 
 
+UTC8 = timezone(timedelta(hours=8))
+
+
 @dataclass(frozen=True)
 class Tariff:
-    """USD amounts per million tokens for one serving tariff or tier."""
+    """USD list prices for one serving tariff, tier, or non-token unit."""
 
-    input: float
-    output: float
+    input: float | None = None
+    output: float | None = None
     implicit_read: float | None = None
     explicit_read: float | None = None
     creation: float | None = None
     max_input: int | None = None
     tiers: tuple["Tariff", ...] = ()
+    time_bands: TimeBands | None = None
+    per_image: float | None = None
+    per_image_input: float | None = None
+    per_image_output: float | None = None
+    per_second: float | None = None
+    per_10k_characters: float | None = None
+    per_voice: float | None = None
+    extra_rates: tuple[tuple[str, str, float], ...] = ()
+
+    def has_token_rates(self) -> bool:
+        """True when this tariff can estimate prompt and completion tokens."""
+        return self.input is not None and self.output is not None
+
+
+@dataclass(frozen=True)
+class TimeBands:
+    """Model Studio night/daytime token tariffs for one SKU."""
+
+    idle: Tariff
+    busy: Tariff
+
+
+def is_alibaba_idle_hour(when: datetime) -> bool:
+    """True during Model Studio night hours, 22:00-08:00 UTC+8."""
+    aware = when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+    hour = aware.astimezone(UTC8).hour
+    return hour >= 22 or hour < 8
+
+
+def select_time_band(tariff: Tariff, observed_at: datetime | None) -> Tariff:
+    """Pick the idle or busy tariff for the request time, or the flat tariff."""
+    bands = tariff.time_bands
+    if bands is None:
+        return tariff
+    when = observed_at or datetime.now(timezone.utc)
+    chosen = bands.idle if is_alibaba_idle_hour(when) else bands.busy
+    return chosen
+
+
+def applied_time_band(tariff: Tariff, observed_at: datetime | None) -> str | None:
+    """Return ``idle`` or ``busy`` when this tariff is time-banded."""
+    if tariff.time_bands is None:
+        return None
+    when = observed_at or datetime.now(timezone.utc)
+    return "idle" if is_alibaba_idle_hour(when) else "busy"
 
 
 def _host(ai_model: models.AIModel) -> str:
@@ -80,7 +130,77 @@ def usd_region(ai_model: models.AIModel) -> str | None:
     return None
 
 
+def _unit_fields_from_seed(entry: dict[str, Any]) -> dict[str, Any]:
+    """Copy non-token list prices from a seed object."""
+    payload: dict[str, Any] = {}
+    for key in (
+        "per_image",
+        "per_image_input",
+        "per_image_output",
+        "per_second",
+        "per_10k_characters",
+        "per_voice",
+    ):
+        rate = _optional_rate(entry.get(key))
+        if rate is not None:
+            payload[key] = rate
+    extra = entry.get("extra_rates")
+    if isinstance(extra, list):
+        parsed: list[tuple[str, str, float]] = []
+        for row in extra:
+            if not isinstance(row, dict):
+                continue
+            kind = str(row.get("type") or "").strip()
+            unit = str(row.get("unit") or "").strip()
+            amount = _optional_rate(row.get("amount"))
+            if kind and unit and amount is not None:
+                parsed.append((kind, unit, amount))
+        if parsed:
+            payload["extra_rates"] = tuple(parsed)
+    return payload
+
+
 def _tariff_from_seed_entry(entry: dict[str, Any]) -> Tariff | None:
+    units = _unit_fields_from_seed(entry)
+    bands = entry.get("time_bands")
+    if isinstance(bands, dict):
+        idle = _tariff_from_seed_tiers(bands.get("idle"))
+        busy = _tariff_from_seed_tiers(bands.get("busy"))
+        if idle is None or busy is None:
+            return None
+        return Tariff(
+            input=busy.input,
+            output=busy.output,
+            implicit_read=busy.implicit_read,
+            explicit_read=busy.explicit_read,
+            creation=busy.creation,
+            max_input=busy.max_input,
+            tiers=busy.tiers,
+            time_bands=TimeBands(idle=idle, busy=busy),
+            **units,
+        )
+    token = _tariff_from_seed_tiers(entry)
+    if token is not None:
+        if not units:
+            return token
+        return Tariff(
+            input=token.input,
+            output=token.output,
+            implicit_read=token.implicit_read,
+            explicit_read=token.explicit_read,
+            creation=token.creation,
+            max_input=token.max_input,
+            tiers=token.tiers,
+            **units,
+        )
+    if units:
+        return Tariff(**units)
+    return None
+
+
+def _tariff_from_seed_tiers(entry: Any) -> Tariff | None:
+    if not isinstance(entry, dict):
+        return None
     raw_tiers = entry.get("tiers")
     if not isinstance(raw_tiers, list) or not raw_tiers:
         return None
@@ -234,14 +354,16 @@ def tariff_for(
 
 def catalog_entry(ai_model: models.AIModel) -> tuple[str, dict[str, Any]] | None:
     """Expose the same scoped list tariff in the model pricing view."""
-    tariff = tariff_for(ai_model)
-    if tariff is None:
+    parent = tariff_for(ai_model)
+    if parent is None:
         return None
+    tariff = select_time_band(parent, None)
     region = usd_region(ai_model) or "singapore-international"
-    entry: dict[str, Any] = {
-        "input_cost_per_token": tariff.input / 1_000_000,
-        "output_cost_per_token": tariff.output / 1_000_000,
-    }
+    entry: dict[str, Any] = {}
+    if tariff.input is not None:
+        entry["input_cost_per_token"] = tariff.input / 1_000_000
+    if tariff.output is not None:
+        entry["output_cost_per_token"] = tariff.output / 1_000_000
     # The UI has one cached-input column. Do not collapse explicit and implicit
     # prices into one misleading number when they differ.
     if tariff.implicit_read is not None and tariff.explicit_read in (
@@ -249,6 +371,28 @@ def catalog_entry(ai_model: models.AIModel) -> tuple[str, dict[str, Any]] | None
         tariff.implicit_read,
     ):
         entry["cache_read_input_token_cost"] = tariff.implicit_read / 1_000_000
+    if tariff.per_image is not None:
+        entry["input_cost_per_image"] = tariff.per_image
+    if tariff.per_image_input is not None:
+        entry["input_cost_per_image"] = tariff.per_image_input
+    if tariff.per_image_output is not None:
+        entry["output_cost_per_image"] = tariff.per_image_output
+    if tariff.per_second is not None:
+        entry["output_cost_per_second"] = tariff.per_second
+    if tariff.per_10k_characters is not None:
+        entry["output_cost_per_10k_characters"] = tariff.per_10k_characters
+    if tariff.per_voice is not None:
+        entry["output_cost_per_voice"] = tariff.per_voice
+    if tariff.extra_rates:
+        entry["alibaba_extra_rates"] = [
+            {"type": kind, "unit": unit, "amount": amount}
+            for kind, unit, amount in tariff.extra_rates
+        ]
+    band = applied_time_band(parent, None)
+    if band is not None:
+        entry["time_band"] = band
+    if not entry:
+        return None
     from preloop.services.alibaba_price_catalog import tariff_source
 
     prefix = f"alibaba/{tariff_source(ai_model) or region}"
@@ -366,16 +510,21 @@ def estimate(
     already include reasoning tokens, which must never be added a second time.
     The internal cache-mode tag comes from the forwarded request, not the model.
     """
-    resolved = tariff_for_usage(
+    parent = tariff_for_usage(
         ai_model,
         prompt_tokens=prompt_tokens,
         usage_details=usage_details,
         observed_at=observed_at,
     )
-    if resolved is None:
+    if parent is None:
         return None
+    resolved = select_time_band(parent, observed_at)
     tariff = select_tier(resolved, prompt_tokens)
     if tariff is None:
+        return None
+    if not tariff.has_token_rates():
+        return _estimate_non_token(tariff, usage_details)
+    if _mixed_modality_usage(tariff, usage_details):
         return None
     usage = usage_details or {}
     details = usage.get("prompt_tokens_details") or {}
@@ -400,7 +549,7 @@ def estimate(
     if cached + created > prompt_tokens:
         return None
     if (cached or created) and _seed_cache_predates_evidence(
-        ai_model, resolved, observed_at
+        ai_model, parent, observed_at
     ):
         return None
     mode = usage.get("_preloop_cache_mode")
@@ -421,6 +570,100 @@ def estimate(
     )
 
 
+def _mixed_modality_usage(tariff: Tariff, usage_details: dict[str, Any] | None) -> bool:
+    """True when leftover audio/vision rates cannot be applied to known tokens."""
+    extra = {kind.lower() for kind, _, _ in tariff.extra_rates}
+    if not extra:
+        return False
+    usage = usage_details or {}
+    blobs: list[dict[str, Any]] = []
+    for key in ("prompt_tokens_details", "completion_tokens_details"):
+        details = usage.get(key) or {}
+        if isinstance(details, dict):
+            blobs.append(details)
+    if not blobs:
+        return False
+
+    def _positive(*keys: str) -> bool:
+        for details in blobs:
+            for key in keys:
+                raw = details.get(key)
+                if raw is None:
+                    continue
+                try:
+                    value = int(raw)
+                except (TypeError, ValueError, OverflowError):
+                    return True
+                if value == 0:
+                    continue
+                return True
+        return False
+
+    leftover_audio = any("audio" in kind or "multi_output" in kind for kind in extra)
+    leftover_vision = any(
+        token in kind for kind in extra for token in ("image", "vision")
+    )
+    if leftover_audio and _positive("audio_tokens"):
+        return True
+    if leftover_vision and _positive("image_tokens", "vision_tokens"):
+        return True
+    return False
+
+
+def _usage_int(usage: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        if key not in usage:
+            continue
+        try:
+            value = int(usage[key])
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if value < 0:
+            return None
+        return value
+    return None
+
+
+def _estimate_non_token(
+    tariff: Tariff, usage_details: dict[str, Any] | None
+) -> float | None:
+    """Estimate image, audio duration, TTS, or voice units from usage details."""
+    usage = usage_details or {}
+    if tariff.per_image is not None:
+        count = _usage_int(
+            usage, "image_count", "n_images", "output_images", "num_images"
+        )
+        if count is None:
+            return None
+        return round(count * tariff.per_image, 6)
+    if tariff.per_image_input is not None or tariff.per_image_output is not None:
+        inputs = _usage_int(usage, "input_images", "image_count")
+        outputs = _usage_int(usage, "output_images", "n_images")
+        if inputs is None and outputs is None:
+            return None
+        return round(
+            (inputs or 0) * (tariff.per_image_input or 0)
+            + (outputs or 0) * (tariff.per_image_output or 0),
+            6,
+        )
+    if tariff.per_second is not None:
+        seconds = _usage_int(usage, "duration_seconds", "audio_seconds", "seconds")
+        if seconds is None:
+            return None
+        return round(seconds * tariff.per_second, 6)
+    if tariff.per_10k_characters is not None:
+        chars = _usage_int(usage, "character_count", "characters", "tts_characters")
+        if chars is None:
+            return None
+        return round(chars * tariff.per_10k_characters / 10_000, 6)
+    if tariff.per_voice is not None:
+        voices = _usage_int(usage, "voice_count", "voices")
+        if voices is None:
+            return None
+        return round(voices * tariff.per_voice, 6)
+    return None
+
+
 def pricing_failure_reason(
     ai_model: models.AIModel,
     *,
@@ -435,17 +678,24 @@ def pricing_failure_reason(
         return "unsupported_region"
     if reviewed_before_effective(ai_model, observed_at=observed_at):
         return "tariff_not_effective"
-    resolved = tariff_for_usage(
+    parent = tariff_for_usage(
         ai_model,
         prompt_tokens=prompt_tokens,
         usage_details=usage_details,
         observed_at=observed_at,
     )
-    if resolved is None:
+    if parent is None:
         return "missing_model_tariff"
+    resolved = select_time_band(parent, observed_at)
     tariff = select_tier(resolved, prompt_tokens)
     if tariff is None:
         return "context_out_of_range"
+    if not tariff.has_token_rates():
+        if _estimate_non_token(tariff, usage_details) is None:
+            return "non_token_usage_required"
+        return None
+    if _mixed_modality_usage(tariff, usage_details):
+        return "mixed_modality_usage"
     usage = usage_details or {}
     details = usage.get("prompt_tokens_details") or {}
     if not isinstance(details, dict):
@@ -467,7 +717,7 @@ def pricing_failure_reason(
     if min(prompt_tokens, cached, created) < 0 or cached + created > prompt_tokens:
         return "invalid_usage"
     if (cached or created) and _seed_cache_predates_evidence(
-        ai_model, resolved, observed_at
+        ai_model, parent, observed_at
     ):
         return "cache_tariff_not_effective"
     mode = usage.get("_preloop_cache_mode")

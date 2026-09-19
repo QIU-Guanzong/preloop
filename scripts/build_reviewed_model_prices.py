@@ -18,6 +18,23 @@ from typing import Any
 from preloop.services.reviewed_model_price_refresh import PRICE_FIELDS, validate_feed
 
 
+def _alibaba_tiers(node: Any, identifier: str) -> list[dict[str, Any]]:
+    """Copy shared cache fields into each token tier without inventing rates."""
+    if not isinstance(node, dict) or not isinstance(node.get("tiers"), list):
+        raise ValueError(f"Alibaba seed {identifier} is missing token tiers")
+    return [
+        {
+            **{
+                key: node[key]
+                for key in ("implicit_read", "explicit_read", "creation")
+                if key in node
+            },
+            **tier,
+        }
+        for tier in node["tiers"]
+    ]
+
+
 def build_feed(
     catalog: dict[str, Any],
     manifest: dict[str, Any],
@@ -54,18 +71,43 @@ def build_feed(
             if meta.get("currency") != "USD" or meta.get("region") != expected_region:
                 raise ValueError("Alibaba seed currency or region mismatch")
             entry = seed["models"][identifier]
-            # Copy shared cache fields into each tier without inventing absent rates.
-            tiers = [
-                {
-                    **{
-                        key: entry[key]
-                        for key in ("implicit_read", "explicit_read", "creation")
-                        if key in entry
+            if "time_bands" in entry and "tiers" in entry:
+                raise ValueError(
+                    f"Alibaba seed {identifier} cannot carry both time_bands and tiers"
+                )
+
+            if "time_bands" in entry:
+                bands = entry["time_bands"]
+                if (
+                    not isinstance(bands, dict)
+                    or "idle" not in bands
+                    or "busy" not in bands
+                ):
+                    raise ValueError(
+                        f"Alibaba seed {identifier} time_bands need idle and busy"
+                    )
+                payload["models"][model] = {
+                    **evidence,
+                    "alibaba_policy": {
+                        "region": region,
+                        "currency": "USD",
+                        "model_identifier": identifier,
+                        "time_bands": {
+                            "idle": {
+                                "tiers": _alibaba_tiers(bands["idle"], identifier)
+                            },
+                            "busy": {
+                                "tiers": _alibaba_tiers(bands["busy"], identifier)
+                            },
+                        },
                     },
-                    **tier,
                 }
-                for tier in entry["tiers"]
-            ]
+                continue
+            if "tiers" not in entry:
+                raise ValueError(
+                    f"Alibaba seed {identifier} needs token tiers or time_bands"
+                )
+            tiers = _alibaba_tiers(entry, identifier)
             payload["models"][model] = {
                 **evidence,
                 "alibaba_policy": {
