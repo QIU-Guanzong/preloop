@@ -254,3 +254,157 @@ async def test_native_tool_cancellation_during_auth_releases_connection(
     cancelled = await asyncio.gather(task, return_exceptions=True)
     assert isinstance(cancelled[0], asyncio.CancelledError)
     assert tool_pool.checkedout() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["add_comment", "get_pull_request"])
+async def test_failed_tool_call_rolls_back_session_and_recovers_next_call(
+    tool_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An induced DB error in one tool call rolls back and leaves the session usable."""
+    from sqlalchemy.exc import OperationalError
+
+    engine = create_engine("sqlite://")
+
+    class AbortableSession(Session):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.aborted = False
+            self.rollbacks = 0
+            self.commits = 0
+
+        def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+            if self.aborted:
+                raise OperationalError(
+                    "(psycopg2.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block",
+                    {"param": "secret_param"},
+                    Exception("aborted"),
+                )
+            return super().execute(statement, *args, **kwargs)
+
+        def rollback(self) -> None:
+            self.aborted = False
+            self.rollbacks += 1
+            super().rollback()
+
+        def commit(self) -> None:
+            self.commits += 1
+            super().commit()
+
+    shared_session = AbortableSession(bind=engine)
+
+    def get_db() -> Generator[Session, None, None]:
+        yield shared_session
+
+    monkeypatch.setattr(mcp, "get_db", get_db)
+    monkeypatch.setattr(
+        mcp,
+        "get_http_request",
+        lambda: SimpleNamespace(headers={"authorization": "Bearer test"}),
+    )
+
+    async def valid_token(token: str, db: Session) -> Any:
+        db.execute(text("SELECT 1"))
+        return SimpleNamespace(account_id="account")
+
+    monkeypatch.setattr(mcp, "get_user_from_token_if_valid", valid_token)
+
+    # Induce a database error matching the exact issue #805 incident on tool call 1
+    leaked_sql = "SELECT issue.title FROM issue JOIN tracker WHERE issue.external_url = %(external_url_1)s"
+    leaked_params = {"external_url_1": "https://secret-internal.preloop.ai/issues/123"}
+
+    def failing_project_or_issue(*args: Any, **kwargs: Any) -> Any:
+        shared_session.aborted = True
+        raise OperationalError(
+            leaked_sql, leaked_params, Exception("connection terminated")
+        )
+
+    monkeypatch.setattr(mcp, "_find_pr_project", failing_project_or_issue)
+    monkeypatch.setattr(mcp, "_find_issue_by_identifier", failing_project_or_issue)
+
+    # 1. First tool call fails with induced database error
+    with pytest.raises(HTTPException) as exc_info:
+        if tool_name == "add_comment":
+            await mcp.add_comment(
+                target="https://github.com/example/repo/issues/1",
+                comment="Test comment",
+            )
+        else:
+            await mcp.get_pull_request("https://github.com/example/repo/pull/1")
+
+    # Assert error response to agent is clean, recoverable, and contains no leaked SQL/params
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "database error, transaction rolled back, retry"
+    assert "SELECT" not in exc_info.value.detail
+    assert "tracker" not in exc_info.value.detail
+    assert "secret-internal" not in exc_info.value.detail
+    assert "external_url" not in exc_info.value.detail
+    assert "psycopg2" not in exc_info.value.detail
+    assert "InFailedSqlTransaction" not in exc_info.value.detail
+
+    # Assert that session.rollback() was called, clearing the aborted state
+    assert shared_session.rollbacks >= 1
+    assert shared_session.aborted is False
+
+    # 2. The following tool call on the SAME session succeeds normally
+    monkeypatch.setattr(
+        mcp,
+        "_find_pr_project",
+        lambda *args, **kwargs: SimpleNamespace(
+            id="project", organization_id="organization"
+        ),
+    )
+    monkeypatch.setattr(
+        mcp,
+        "get_tracker_client",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                tracker_type="github",
+                get_pull_request=AsyncMock(
+                    return_value={
+                        "id": "1",
+                        "number": 1,
+                        "title": "Clean PR",
+                        "state": "open",
+                        "url": "https://github.com/example/repo/pull/1",
+                    }
+                ),
+            )
+        ),
+    )
+
+    result = await mcp.get_pull_request("https://github.com/example/repo/pull/1")
+    assert result.id == "1"
+    assert result.title == "Clean PR"
+    assert shared_session.aborted is False
+
+
+@pytest.mark.asyncio
+async def test_tool_call_commits_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful tool invocation commits its unit of work on the session."""
+    engine = create_engine("sqlite://")
+    commit_called = False
+
+    class CommitTrackingSession(Session):
+        def commit(self) -> None:
+            nonlocal commit_called
+            commit_called = True
+            super().commit()
+
+    test_session = CommitTrackingSession(bind=engine)
+
+    def get_db() -> Generator[Session, None, None]:
+        yield test_session
+
+    monkeypatch.setattr(mcp, "get_db", get_db)
+
+    @mcp._with_tool_db
+    async def sample_tool() -> str:
+        db = mcp._get_tool_db()
+        db.execute(text("SELECT 1"))
+        assert db.in_transaction() is True
+        return "done"
+
+    result = await sample_tool()
+    assert result == "done"
+    assert commit_called is True

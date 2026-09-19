@@ -98,6 +98,63 @@ _tool_db: ContextVar[_ToolDatabase | None] = ContextVar(
 )
 
 
+_DATABASE_ERRORS: list[type[BaseException]] = [SQLAlchemyError]
+try:
+    import psycopg2
+
+    _DATABASE_ERRORS.append(psycopg2.Error)
+except ImportError:
+    pass
+try:
+    import psycopg
+
+    _DATABASE_ERRORS.append(psycopg.Error)
+except ImportError:
+    pass
+_DATABASE_ERROR_TYPES = tuple(_DATABASE_ERRORS)
+
+DATABASE_ERROR_DETAIL = "database error, transaction rolled back, retry"
+
+_DB_ERROR_PATTERNS = (
+    "psycopg2",
+    "psycopg",
+    "infailedsqltransaction",
+    "[sql:",
+    "operationalerror",
+    "programmingerror",
+    "integrityerror",
+    "internalerror",
+    "databaseerror",
+    "dataerror",
+    "sqlalchemy",
+)
+
+
+def _contains_database_error(detail: Any) -> bool:
+    """Return True if the error string contains leaked SQL or database driver text."""
+    if not isinstance(detail, str):
+        return False
+    detail_lower = detail.lower()
+    return any(pattern in detail_lower for pattern in _DB_ERROR_PATTERNS)
+
+
+def _is_database_error(exc: BaseException) -> bool:
+    """Check if an exception is or wraps a database error."""
+    if isinstance(exc, _DATABASE_ERROR_TYPES):
+        return True
+    cause = getattr(exc, "__cause__", None)
+    if cause is not None and isinstance(cause, _DATABASE_ERROR_TYPES):
+        return True
+    context = getattr(exc, "__context__", None)
+    if context is not None and isinstance(context, _DATABASE_ERROR_TYPES):
+        return True
+    if isinstance(exc, HTTPException) and _contains_database_error(str(exc.detail)):
+        return True
+    if _contains_database_error(str(exc)):
+        return True
+    return False
+
+
 def _with_tool_db(
     tool: Callable[_ToolParams, Awaitable[_ToolResult]],
 ) -> Callable[_ToolParams, Awaitable[_ToolResult]]:
@@ -107,6 +164,11 @@ def _with_tool_db(
     A bare ``next(get_db())`` does not keep the dependency generator alive;
     queries reopen the session after its finalizer and leak the new checkout.
     Scope ownership here guarantees cleanup on errors and cancellation too.
+
+    Each invocation runs as a unit of work: commits on success, rolls back
+    the session on any error so a failed statement cannot leave the session
+    in an aborted transaction block, and sanitizes database errors to prevent
+    information leaks to agents.
     """
 
     @wraps(tool)
@@ -114,9 +176,52 @@ def _with_tool_db(
         *args: _ToolParams.args, **kwargs: _ToolParams.kwargs
     ) -> _ToolResult:
         stack = ExitStack()
-        token = _tool_db.set(_ToolDatabase(stack))
+        scope = _ToolDatabase(stack)
+        token = _tool_db.set(scope)
         try:
-            return await tool(*args, **kwargs)
+            result = await tool(*args, **kwargs)
+            if scope.session is not None:
+                try:
+                    if scope.session.is_active and scope.session.in_transaction():
+                        scope.session.commit()
+                except Exception as commit_exc:
+                    logger.error(
+                        f"Database commit failed after tool {tool.__name__}: {commit_exc}",
+                        exc_info=True,
+                    )
+                    try:
+                        scope.session.rollback()
+                    except Exception:
+                        pass
+                    raise HTTPException(
+                        status_code=500,
+                        detail=DATABASE_ERROR_DETAIL,
+                    ) from None
+            return result
+        except BaseException as exc:
+            if scope.session is not None:
+                try:
+                    scope.session.rollback()
+                except Exception as rollback_exc:
+                    logger.warning(
+                        f"Database session rollback failed after tool error: {rollback_exc}"
+                    )
+                    try:
+                        scope.session.invalidate()
+                    except Exception:
+                        pass
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            if _is_database_error(exc):
+                logger.error(
+                    f"Database error executing tool {tool.__name__}: {exc}",
+                    exc_info=True,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=DATABASE_ERROR_DETAIL,
+                ) from None
+            raise
         finally:
             _tool_db.reset(token)
             stack.close()
