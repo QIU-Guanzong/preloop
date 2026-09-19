@@ -432,11 +432,15 @@ export class TalkComposer extends LitElement {
     return getAgentControlSessionMode(this.agent);
   }
 
+  private get startsNewSession(): boolean {
+    return !this.sessionId && this.agent?.supports_new_session !== false;
+  }
+
   private async takeOverSession(): Promise<void> {
     if (!this.agent) return;
     await sendAgentControlTakeover(this.agent.id, {
       target_session_id: this.sessionId,
-      start_new_session: !this.sessionId,
+      start_new_session: this.startsNewSession,
     });
   }
 
@@ -541,7 +545,7 @@ export class TalkComposer extends LitElement {
           ? await sendAgentControlVoiceTranscript(this.agent.id, {
               transcript: text,
               target_session_id: this.sessionId,
-              start_new_session: !this.sessionId,
+              start_new_session: this.startsNewSession,
               metadata: {
                 ...metadata,
                 input_method: 'browser_speech_recognition',
@@ -557,8 +561,12 @@ export class TalkComposer extends LitElement {
           : await sendAgentControlCommand(this.agent.id, {
               message: text,
               target_session_id: this.sessionId,
-              session_mode: this.sessionId ? 'existing' : 'new',
-              start_new_session: !this.sessionId,
+              session_mode: this.sessionId
+                ? 'existing'
+                : this.startsNewSession
+                  ? 'new'
+                  : 'current',
+              start_new_session: this.startsNewSession,
               metadata,
             });
       this.statusMessage =
@@ -644,7 +652,8 @@ export class TalkComposer extends LitElement {
     const hint = getAgentControlInstallHint(this.agent);
     const enabled = state.enabled;
     const microphoneAvailable =
-      this.localSpeechRecognitionAvailable || this.mediaRecorderAvailable;
+      this.agent?.supports_voice !== false &&
+      (this.localSpeechRecognitionAvailable || this.mediaRecorderAvailable);
     const listening = this.listening || this.recordingFallback;
 
     return html`
@@ -675,7 +684,8 @@ export class TalkComposer extends LitElement {
                     : nothing
                 }
                 ${
-                  this.controlMode === 'remote'
+                  this.controlMode === 'remote' &&
+                  this.agent?.control_capabilities?.includes('release')
                     ? html`<sl-button
                         size="small"
                         @click=${() => void this.releaseSession()}

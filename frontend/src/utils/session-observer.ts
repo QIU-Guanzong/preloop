@@ -160,6 +160,8 @@ export function formatSessionSourceLabel(sourceType: string | null): string {
   if (sourceType === 'claude_code') return 'Claude Code';
   if (sourceType === 'claude_desktop') return 'Claude Desktop';
   if (sourceType === 'gemini_cli') return 'Gemini CLI';
+  if (sourceType === 'pi') return 'Pi';
+  if (sourceType === 'deepseek') return 'DeepSeek Harness';
   if (sourceType === 'opencode') return 'OpenCode';
   return sourceType
     .split(/[_-]+/g)

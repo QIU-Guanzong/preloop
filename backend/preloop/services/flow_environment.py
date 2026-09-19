@@ -28,7 +28,7 @@ class EnvironmentProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
     version: Literal[1] = 1
     image: str = Field(pattern=r"^[^\s]+@sha256:[a-f0-9]{64}$")
-    harness: Literal["codex", "opencode"]
+    harness: Literal["codex", "opencode", "pi", "deepseek"]
     protocol_version: Literal[1] = 1
     setup_commands: list[str] = Field(default_factory=list)
     setup_timeout_seconds: int = Field(default=600, ge=1, le=3600)

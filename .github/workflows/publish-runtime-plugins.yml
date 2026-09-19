@@ -31,12 +31,13 @@ on:
     tags:
       - 'openclaw-plugin-v*'
       - 'hermes-plugin-v*'
+      - 'harness-plugin-v*'
   workflow_dispatch:
     inputs:
       plugin:
         description: 'Which plugin to build/publish'
         type: choice
-        options: [openclaw, hermes, both]
+        options: [openclaw, hermes, harness, both]
         default: both
       dry_run:
         description: 'Build and verify without publishing'
@@ -215,3 +216,36 @@ jobs:
         with:
           password: ${{ secrets.PLUGINS_PYPI_TOKEN }}
           packages-dir: runtime-plugins/hermes-preloop/dist/
+
+  publish-harness:
+    name: Publish Pi and DeepSeek Harness plugin (npm)
+    needs: verify
+    if: >-
+      startsWith(github.ref_name, 'harness-plugin-v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.plugin == 'harness')
+    runs-on: ubuntu-latest
+    environment: release
+    defaults:
+      run:
+        working-directory: runtime-plugins/harness-preloop
+    env:
+      PRELOOP_DISABLE_TELEMETRY: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Verify package
+        run: |
+          npm ci --ignore-scripts
+          npm test
+          npm pack --dry-run
+          case "$GITHUB_REF_NAME" in
+            harness-plugin-v*) test "$(node -p 'require("./package.json").version')" = "${GITHUB_REF_NAME#harness-plugin-v}" ;;
+          esac
+      - name: Publish
+        if: ${{ github.event_name == 'push' || inputs.dry_run == false }}
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

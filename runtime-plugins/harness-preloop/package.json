@@ -1,0 +1,26 @@
+{
+  "name": "@preloop-ai/harness-plugin",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Pi and DeepSeek Harness model routing, MCP, approvals and remote control for Preloop",
+  "license": "Apache-2.0",
+  "exports": {
+    "./pi": "./pi.mjs",
+    "./deepseek": "./deepseek.mjs"
+  },
+  "files": [
+    "*.mjs",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:runtime": "node test/runtime-smoke.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "ws": "^8.18.3"
+  }
+}

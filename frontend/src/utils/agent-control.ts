@@ -144,6 +144,8 @@ const AGENT_CONTROL_SUPPORTED_KINDS = new Set([
   'openclaw',
   'claude_code',
   'opencode',
+  'pi',
+  'deepseek',
 ]);
 
 /**

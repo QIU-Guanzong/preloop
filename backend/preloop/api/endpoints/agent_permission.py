@@ -39,7 +39,7 @@ class PermissionIdentity:
     account_id: str
     user_id: UUID
     api_key_id: UUID
-    managed_agent_id: UUID
+    managed_agent_id: Optional[UUID]
     runtime_session_id: Optional[UUID]
     managed_agent_name: str
 
@@ -50,12 +50,6 @@ def _resolve_permission_identity(token: str) -> PermissionIdentity:
         api_key = crud_api_key.get_by_key(db, key=token)
         user = _authenticate_with_api_key(db, api_key)
         managed_agent = _managed_agent_for_api_key(db, api_key)
-        if managed_agent is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token is not bound to a managed agent",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
         runtime_session = None
         runtime_session_id = _runtime_session_id_from_api_key(api_key)
         if runtime_session_id is not None:
@@ -64,17 +58,38 @@ def _resolve_permission_identity(token: str) -> PermissionIdentity:
                 account_id=api_key.account_id,
                 runtime_session_id=runtime_session_id,
             )
+        if managed_agent is None:
+            context = (
+                api_key.context_data if isinstance(api_key.context_data, dict) else {}
+            )
+            # Flow keys are ephemeral and account-scoped, and must name the
+            # exact execution session they were issued for. Ordinary API keys
+            # still cannot use this native approval endpoint.
+            execution_id = context.get("flow_execution_id")
+            if not (
+                execution_id
+                and runtime_session is not None
+                and runtime_session.session_source_type == "flow_execution"
+                and runtime_session.session_source_id == str(execution_id)
+                and runtime_session.ended_at is None
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token is not bound to a managed agent or active flow execution",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
         return PermissionIdentity(
             account_id=str(api_key.account_id),
             user_id=user.id,
             api_key_id=api_key.id,
-            managed_agent_id=managed_agent.id,
+            managed_agent_id=managed_agent.id if managed_agent else None,
             runtime_session_id=runtime_session.id
             if runtime_session
             else runtime_session_id,
             managed_agent_name=(
                 getattr(managed_agent, "display_name", None)
                 or getattr(managed_agent, "name", None)
+                or (runtime_session.runtime_principal_name if runtime_session else None)
                 or "Agent"
             ),
         )
@@ -86,6 +101,8 @@ def _claim_operator_note(identity: PermissionIdentity) -> Optional[str]:
     Never raises: a note is a bonus on this route, and a store problem must
     not turn a permission check into a denied tool call.
     """
+    if identity.managed_agent_id is None:
+        return None
     try:
         with get_session_factory()() as db:
             notes = operator_notes.claim_pending_notes(
@@ -127,7 +144,7 @@ class AgentPermissionCheckRequest(BaseModel):
         None,
         description=(
             "Originating agent adapter: 'claude_code', 'codex_cli', 'cursor', "
-            "'opencode', 'openclaw', or 'hermes'. Stored as the "
+            "'opencode', 'openclaw', 'hermes', 'pi', or 'deepseek'. Stored as the "
             "'_preloop_source' marker inside tool_args so approver surfaces "
             "can label the requester."
         ),

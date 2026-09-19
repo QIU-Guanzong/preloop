@@ -1,0 +1,172 @@
+// Opt-in, keyless integration test against installed, pinned real runtimes.
+// PRELOOP_TEST_RUNTIME_BIN=/path/to/node_modules/.bin node test/runtime-smoke.mjs
+import assert from "node:assert/strict";
+import http from "node:http";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+process.env.PRELOOP_DISABLE_TELEMETRY = "true";
+process.env.DSH_TELEMETRY_DISABLED = "true";
+const bin = process.env.PRELOOP_TEST_RUNTIME_BIN;
+if (!bin)
+  throw Error(
+    "Set PRELOOP_TEST_RUNTIME_BIN to the pinned runtimes bin directory",
+  );
+const plugin = fileURLToPath(new URL("../", import.meta.url));
+
+async function run(binary, args, env, cwd, input) {
+  const child = spawn(binary, args, {
+    env,
+    cwd,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.on("data", (data) => {
+    output += data;
+  });
+  child.stderr.on("data", (data) => {
+    output += data;
+  });
+  child.stdin.end(input);
+  const timer = setTimeout(() => child.kill("SIGKILL"), 60000);
+  const code = await new Promise((resolve, reject) => {
+    child.on("exit", resolve);
+    child.on("error", reject);
+  });
+  clearTimeout(timer);
+  assert.equal(code, 0, output);
+  return output;
+}
+
+for (const runtime of ["pi", "deepseek"]) {
+  const root = mkdtempSync(join(tmpdir(), "preloop-harness-smoke-"));
+  let approvals = 0,
+    results = 0,
+    sessionHeader;
+  const server = http.createServer(async (req, res) => {
+    let text = "";
+    for await (const chunk of req) text += chunk;
+    const body = JSON.parse(text);
+    if (req.url === "/api/v1/agents/permission-check") {
+      approvals++;
+      assert.equal(body.source, runtime);
+      assert.equal(body.tool_name, "Bash");
+      assert.ok(body.session_id);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({ decision: "deny", reason: "smoke-policy-denial" }),
+      );
+      return;
+    }
+    sessionHeader ||= req.headers["x-preloop-session-id"];
+    const toolResult = body.messages?.find(
+      (message) => message.role === "tool",
+    );
+    if (toolResult) {
+      assert.match(JSON.stringify(toolResult), /smoke-policy-denial/);
+      results++;
+    }
+    const delta =
+      body.tools?.length && !toolResult
+        ? {
+            role: "assistant",
+            tool_calls: [
+              {
+                index: 0,
+                id: "call-smoke",
+                type: "function",
+                function: {
+                  name: "bash",
+                  arguments: JSON.stringify({
+                    command: `touch ${join(root, "must-not-exist")}`,
+                  }),
+                },
+              },
+            ],
+          }
+        : { role: "assistant", content: "Harness smoke passed" };
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    const base = {
+      id: "smoke",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "test",
+    };
+    res.end(
+      "data: " +
+        JSON.stringify({
+          ...base,
+          choices: [{ index: 0, delta, finish_reason: null }],
+        }) +
+        "\n\ndata: " +
+        JSON.stringify({
+          ...base,
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: delta.tool_calls ? "tool_calls" : "stop",
+            },
+          ],
+        }) +
+        "\n\ndata: [DONE]\n\n",
+    );
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const api = `http://127.0.0.1:${server.address().port}`;
+    const env = {
+      ...process.env,
+      PRELOOP_HARNESS: runtime,
+      PRELOOP_NATIVE_APPROVALS: "on",
+      PRELOOP_API_URL: api,
+      PRELOOP_API_TOKEN: "test-token",
+      PRELOOP_MODEL_TOKEN: "test",
+      PI_CODING_AGENT_DIR: root,
+      DSH_HOME: root,
+      PRELOOP_HARNESS_MODEL: JSON.stringify({
+        api: "openai-completions",
+        baseUrl: api + "/v1",
+        models: [{ id: "test" }],
+      }),
+    };
+    await run(process.execPath, [join(plugin, "bootstrap.mjs")], env, root, "");
+    if (runtime === "pi") {
+      const extension = join(root, "extensions", "preloop");
+      mkdirSync(extension, { recursive: true });
+      writeFileSync(
+        join(extension, "index.ts"),
+        `export { default } from ${JSON.stringify(pathToFileURL(join(plugin, "pi.mjs")).href)};\n`,
+      );
+    } else {
+      writeFileSync(
+        join(root, "settings.yaml"),
+        "agent-default-model:\n  provider: deepseek\n  model: native-model\n",
+      );
+    }
+    const args =
+      runtime === "pi"
+        ? ["--print", "--mode", "json"]
+        : ["--profile", "headless"];
+    const output = await run(
+      join(bin, runtime === "pi" ? "pi" : "dsh"),
+      args,
+      env,
+      root,
+      "Run the requested command",
+    );
+    assert.match(output, /Harness smoke passed/);
+    assert.equal(approvals, 1, output);
+    assert.equal(results, 1, output);
+    assert.equal(existsSync(join(root, "must-not-exist")), false);
+    if (runtime === "pi") assert.ok(sessionHeader);
+    console.log(
+      `${runtime}: real runtime, model routing, native approval denial and clean exit passed`,
+    );
+  } finally {
+    server.close();
+  }
+}

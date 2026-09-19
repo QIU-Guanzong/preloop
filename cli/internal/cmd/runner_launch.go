@@ -84,7 +84,7 @@ func runnerLaunchFromJob(job map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("missing or unsupported private runner launch protocol; update the control plane and CLI")
 	}
 	agent, _ := job["agent_type"].(string)
-	if agent != "codex" && agent != "opencode" {
+	if agent != "codex" && agent != "opencode" && agent != "pi" && agent != "deepseek" {
 		return nil, fmt.Errorf("unsupported private runner harness")
 	}
 	script, _ := launch["script"].(string)

@@ -121,6 +121,8 @@ RUNTIME_SESSION_SOURCE_TYPES = {
     "gemini_cli",
     "opencode",
     "hermes",
+    "pi",
+    "deepseek",
     "desktop_agent",
     "custom",
 }

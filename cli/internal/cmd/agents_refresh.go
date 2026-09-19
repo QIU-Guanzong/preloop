@@ -277,6 +277,11 @@ func refreshAgentManagedModels(
 	if err := writeAgentConfigDocument(agent, outcome.Doc); err != nil {
 		return managedModelRefreshOutcome{}, fmt.Errorf("failed to write refreshed config: %w", err)
 	}
+	if isExtensionHarness(agent) {
+		if err := registerHarnessPlugin(agent); err != nil {
+			return managedModelRefreshOutcome{}, err
+		}
+	}
 	if err := updateLocalEnrollmentManagedSnapshot(agent, outcome.Doc); err != nil {
 		// The config write already succeeded; a stale snapshot only affects
 		// status displays, so warn instead of failing the refresh.
@@ -294,6 +299,9 @@ func refreshManagedModelDocument(
 	accountModels []aiModelResponse,
 	bindings []managedAgentModelBindingSummary,
 ) (managedModelRefreshOutcome, error) {
+	if isExtensionHarness(agent) {
+		return refreshHarnessModelDocument(agent, doc, accountModels, bindings)
+	}
 	switch {
 	case isClaudeCodeAgent(agent):
 		return refreshClaudeManagedModelDocument(agent, doc, accountModels, bindings)

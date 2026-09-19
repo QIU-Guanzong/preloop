@@ -108,8 +108,11 @@ func TestRunnerDockerFailureReportIsDelivered(t *testing.T) {
 
 func TestRunnerLaunchRejectsMissingAndUnsupported(t *testing.T) {
 	valid := map[string]any{"agent_type": "codex", "launch": map[string]any{"version": float64(1), "script": "echo work", "env": map[string]any{"OPENAI_API_KEY": "secret"}}}
-	if _, err := runnerLaunchFromJob(valid); err != nil {
-		t.Fatal(err)
+	for _, kind := range []string{"codex", "opencode", "pi", "deepseek"} {
+		valid["agent_type"] = kind
+		if _, err := runnerLaunchFromJob(valid); err != nil {
+			t.Fatalf("%s: %v", kind, err)
+		}
 	}
 	for _, job := range []map[string]any{
 		{}, {"agent_type": "unknown", "launch": valid["launch"]},

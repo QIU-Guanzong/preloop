@@ -21,6 +21,8 @@ export const NATIVE_ADAPTERS: ReadonlyArray<{
   { value: 'openclaw', label: 'OpenClaw' },
   { value: 'hermes', label: 'Hermes' },
   { value: 'opencode', label: 'OpenCode' },
+  { value: 'pi', label: 'Pi' },
+  { value: 'deepseek', label: 'DeepSeek Harness' },
 ];
 
 export const NATIVE_ADAPTER_LABELS = NATIVE_ADAPTERS.map(

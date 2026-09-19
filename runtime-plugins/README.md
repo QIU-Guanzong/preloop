@@ -27,3 +27,7 @@ Packages:
   OpenCode plugin (permission prompts bridged via OpenCode's plugin
   `event` hook; remote steering via the SDK `session.chat`/`session.prompt`
   and `session.abort` surfaces)
+
+- `harness-preloop`: `@preloop-ai/harness-plugin` (npm), Pi extensions and
+  DeepSeek Harness Cordis plugins for MCP, approvals, lifecycle hooks, and
+  active-session remote control. Also used by ephemeral flow workers.

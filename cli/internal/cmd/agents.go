@@ -80,6 +80,22 @@ type agentSpec struct {
 
 var agentSpecs = []agentSpec{
 	{
+		Name:                "Pi",
+		ConfigPaths:         []string{".pi/agent/preloop.json"},
+		DetectionPaths:      []string{".pi/agent/settings.json", ".pi/agent/auth.json"},
+		DetectionCommands:   []string{"pi"},
+		BootstrapConfigPath: ".pi/agent/preloop.json",
+		Parser:              parseGenericMCP,
+	},
+	{
+		Name:                "DeepSeek Harness",
+		ConfigPaths:         []string{".dsh/preloop.json"},
+		DetectionPaths:      []string{".dsh/settings.yaml", ".dsh/profiles"},
+		DetectionCommands:   []string{"dsh"},
+		BootstrapConfigPath: ".dsh/preloop.json",
+		Parser:              parseGenericMCP,
+	},
+	{
 		Name:        "Claude Code",
 		ConfigPaths: []string{".claude/settings.json", ".claude/mcp-servers.json"},
 		// Fresh or lightly-used installs write only ~/.claude.json (and put
@@ -1929,6 +1945,25 @@ func runAgentsValidate(cmd *cobra.Command, args []string) error {
 func runAgentsInstallPlugin(cmd *cobra.Command, args []string) error {
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	agentName := strings.Join(args, " ")
+	if isExtensionHarness(AgentConfig{Name: agentName}) {
+		if dryRun {
+			fmt.Fprintln(cmd.OutOrStdout(), "npm install --ignore-scripts --prefix", harnessPluginRoot(), harnessPluginSpec)
+			return nil
+		}
+		agents, err := discoverAgents(io.Discard, false)
+		if err != nil {
+			return err
+		}
+		agent, err := matchAgentConfigs(agents, agentName)
+		if err != nil {
+			return err
+		}
+		result := installHarnessPlugin(agent, cmd.OutOrStdout())
+		if result["control_plugin_verified"] != true {
+			return fmt.Errorf("harness plugin installation failed")
+		}
+		return nil
+	}
 	if runtimeSessionSourceTypeForAgent(agentName) == hermesSourceType {
 		// Hermes' `plugins install` only accepts Git URLs or owner/repo
 		// shorthands, so the marketplace command can never install the
@@ -3036,6 +3071,10 @@ func runtimeSessionSourceTypeForAgent(agentName string) string {
 		return "gemini_cli"
 	case "opencode":
 		return "opencode"
+	case "pi":
+		return "pi"
+	case "deepseek", "deepseek harness", "dsh":
+		return "deepseek"
 	case "hermes":
 		return hermesSourceType
 	default:
@@ -3651,6 +3690,9 @@ func resolveAgentTypeName(value string) (string, error) {
 //
 // Ambiguous matches return an error listing the candidates with their slugs.
 func matchAgentConfigs(candidates []AgentConfig, value string) (AgentConfig, error) {
+	if strings.EqualFold(strings.TrimSpace(value), "dsh") {
+		value = "DeepSeek Harness"
+	}
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
 		return AgentConfig{}, fmt.Errorf(
@@ -4002,7 +4044,7 @@ func refreshManagedPlanSnapshots(plan managedMCPEnrollmentPlan) (managedMCPEnrol
 
 func supportsManagedGateway(agent AgentConfig) bool {
 	switch strings.ToLower(strings.TrimSpace(agent.Name)) {
-	case "codex cli", "opencode", "claude code", "gemini cli", "hermes":
+	case "codex cli", "opencode", "claude code", "gemini cli", "hermes", "pi", "deepseek harness", "deepseek", "dsh":
 		return true
 	default:
 		return false
@@ -4026,6 +4068,8 @@ func applyManagedGatewayForAgent(
 		return applyClaudeManagedGateway(plan, baseURL, token, modelAlias, familyAliases)
 	case "gemini cli":
 		return applyGeminiManagedGateway(plan, baseURL, token, modelAlias)
+	case "pi", "deepseek harness", "deepseek", "dsh":
+		return applyHarnessManagedGateway(plan, baseURL, token, modelAlias, familyAliases)
 	case "hermes":
 		return applyHermesManagedGateway(plan, baseURL, token, modelAlias)
 	default:
@@ -6349,6 +6393,9 @@ func (a openClawManagedMCPAdapter) ValidateManagedConfig(doc map[string]interfac
 }
 
 func managedMCPAdapterForAgent(agent AgentConfig) managedMCPAdapter {
+	if isExtensionHarness(agent) {
+		return harnessManagedAdapter{genericManagedMCPAdapter{agent: agent}}
+	}
 	switch strings.ToLower(strings.TrimSpace(agent.Name)) {
 	case "openclaw":
 		return openClawManagedMCPAdapter{}

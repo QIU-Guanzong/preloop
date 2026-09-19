@@ -15,8 +15,8 @@ import (
 )
 
 var agentsInstallRuntimeCmd = &cobra.Command{
-	Use:   "install-runtime <hermes|openclaw>",
-	Short: "Install Hermes or OpenClaw locally and onboard through Preloop",
+	Use:   "install-runtime <hermes|openclaw|pi|deepseek>",
+	Short: "Install a supported agent locally and onboard through Preloop",
 	Long: `Install a supported long-running agent runtime on this machine, then onboard
 it into managed Preloop MCP and gateway access.
 
@@ -56,6 +56,21 @@ type runtimeInstallSpec struct {
 
 func runtimeInstallSpecForKind(kind string) (runtimeInstallSpec, error) {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "pi", "deepseek", "dsh", "deepseek harness":
+		runtime, name, pkg := "pi", "Pi", "@earendil-works/pi-coding-agent@0.85.1"
+		if !strings.EqualFold(strings.TrimSpace(kind), "pi") {
+			runtime, name, pkg = "deepseek", "DeepSeek Harness", "@deepseek-ai/dsh@0.1.5-rc.2"
+		}
+		command := []string{"npm", "install", "-g", "--ignore-scripts", pkg}
+		return runtimeInstallSpec{kind: runtime, displayName: name, installCommand: command, installSummary: strings.Join(command, " "), onboardAgentName: name,
+			postInstallNotes: []string{"Restart the agent after onboarding to activate Preloop's runtime plugin."},
+			prerequisiteCheck: func() error {
+				if _, err := exec.LookPath("npm"); err != nil {
+					return fmt.Errorf("Node.js 22 and npm are required to install %s", name)
+				}
+				return nil
+			},
+		}, nil
 	case "hermes", strings.ToLower(hermesAgentName):
 		return runtimeInstallSpec{
 			kind:             hermesSourceType,
@@ -98,7 +113,7 @@ func runtimeInstallSpecForKind(kind string) (runtimeInstallSpec, error) {
 		}, nil
 	default:
 		return runtimeInstallSpec{}, fmt.Errorf(
-			"unsupported runtime %q; supported values are hermes and openclaw",
+			"unsupported runtime %q; supported values are hermes, openclaw, pi and deepseek",
 			kind,
 		)
 	}

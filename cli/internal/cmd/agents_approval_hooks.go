@@ -51,6 +51,9 @@ const approvalHookTimeoutSeconds = defaultApprovalHookTimeoutSeconds
 // permissionSourceForAgent maps a discovered agent to its permission-check
 // source, or "" if the agent is not supported by the local hook adapters.
 func permissionSourceForAgent(agent AgentConfig) string {
+	if isExtensionHarness(agent) {
+		return runtimeSessionSourceTypeForAgent(agent.Name)
+	}
 	switch {
 	case isClaudeCodeAgent(agent):
 		return permissionSourceClaudeCode
@@ -247,6 +250,9 @@ func existingApprovalHookWaitBudget(agent AgentConfig) int {
 // native pre-tool hook for the agent. It is idempotent: re-running replaces our
 // existing entries rather than duplicating them.
 func installApprovalHooks(agent AgentConfig, baseURL, token string, out io.Writer) error {
+	if isExtensionHarness(agent) {
+		return installHarnessApprovals(agent, baseURL, token)
+	}
 	source := permissionSourceForAgent(agent)
 	if source == "" {
 		return nil
@@ -402,6 +408,9 @@ func printAgentPolicySummary(out io.Writer, source string, policyPaths []string,
 // removeApprovalHooks removes our hook entries and the per-agent credential
 // file. It is safe to call even when nothing was installed.
 func removeApprovalHooks(agent AgentConfig, out io.Writer) error {
+	if isExtensionHarness(agent) {
+		return removeHarnessPlugin(agent)
+	}
 	source := permissionSourceForAgent(agent)
 	if source == "" {
 		return nil

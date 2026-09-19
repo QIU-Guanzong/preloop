@@ -1,6 +1,6 @@
 # Preloop Architecture
 
-Preloop is an open-source, responsible AI automation platform. It can proxy tools from MCP servers, optionally adding a human approval layer with configurable policies. It provides event-driven agentic flows to intelligently automate common tasks using the agent harnesses registered in `preloop.agents.factory`: OpenHands, Aider, Codex CLI, Gemini CLI and OpenCode. It integrates with issue & code tracking systems like Jira, GitHub, GitLab, both for listening to events and for ingesting issues, comments, documentation and code. By leveraging vector-based similarity search, Preloop detects duplicate and overlapping issues, detects unmapped dependencies, evaluates compliance metrics, and offers intelligent suggestions to streamline workflows. The architecture now also includes Preloop-owned model-gateway surfaces so managed runtimes can route model traffic through a central enforcement point for telemetry, budgets, session observability, and secret custody. The architecture emphasizes flexibility, performance, and ease of integration, providing access via a REST API, a web UI, and an MCP server for various clients.
+Preloop is an open-source, responsible AI automation platform. It can proxy tools from MCP servers, optionally adding a human approval layer with configurable policies. It provides event-driven agentic flows to intelligently automate common tasks using the agent harnesses registered in `preloop.agents.factory`: OpenHands, Aider, Codex CLI, Gemini CLI, OpenCode, Pi and DeepSeek Harness. It integrates with issue & code tracking systems like Jira, GitHub, GitLab, both for listening to events and for ingesting issues, comments, documentation and code. By leveraging vector-based similarity search, Preloop detects duplicate and overlapping issues, detects unmapped dependencies, evaluates compliance metrics, and offers intelligent suggestions to streamline workflows. The architecture now also includes Preloop-owned model-gateway surfaces so managed runtimes can route model traffic through a central enforcement point for telemetry, budgets, session observability, and secret custody. The architecture emphasizes flexibility, performance, and ease of integration, providing access via a REST API, a web UI, and an MCP server for various clients.
 
 ARCHITECTURE.md is the map. Read one chapter under `docs/architecture/` for the subsystem you are changing. Do not load every chapter for context.
 
@@ -222,3 +222,17 @@ the history backfill, who may search) and
 Saved searches: [Saved session searches](docs/guide/session-saved-searches.md).
 Search auditing: [Auditing session content search](docs/guide/session-search-audit.md).
 The agent-facing tool: [search_sessions](docs/guide/agent-session-search.md).
+
+
+### Pi and DeepSeek Harness adapters
+
+The `pi` and `deepseek` kinds share `ExtensionHarnessAgent` for hosted and private
+Docker launches. `runtime-plugins/harness-preloop` supplies Pi extensions and
+DeepSeek Cordis plugins for MCP, fail-closed native approvals, lifecycle ingest,
+and authenticated active-session control. CLI enrollment owns a separate
+`preloop.json`, preserving native configuration, and registers only its own
+loader or marked patch nodes. DeepSeek's released headless startup is replaced
+with a stdin provider to keep prompts outside argv. Execution-scoped credentials
+can request native approvals only for their own active flow session. See the
+[adapter guide](runtime-plugins/harness-preloop/README.md) for version pins,
+capability limits, and publication order.

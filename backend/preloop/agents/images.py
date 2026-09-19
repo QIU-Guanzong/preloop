@@ -9,6 +9,8 @@ from typing import Optional
 # in one place so RemoteRunnerExecutor injects the same image the hosted
 # executor would have started.
 DEFAULT_AGENT_IMAGES: dict[str, str] = {
+    "pi": "node:22-bookworm",
+    "deepseek": "node:22-bookworm",
     "opencode": "docker/sandbox-templates:opencode",
     "codex": "ghcr.io/openai/codex-universal:latest",
     "aider": "dustinwashington/aider-ce:v0.88.6",
@@ -17,6 +19,8 @@ DEFAULT_AGENT_IMAGES: dict[str, str] = {
 }
 
 _IMAGE_ENV_VARS: dict[str, str] = {
+    "pi": "PI_IMAGE",
+    "deepseek": "DEEPSEEK_IMAGE",
     "opencode": "OPENCODE_IMAGE",
     "codex": "CODEX_IMAGE",
     "aider": "AIDER_IMAGE",

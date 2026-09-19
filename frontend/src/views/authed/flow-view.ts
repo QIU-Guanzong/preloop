@@ -68,6 +68,8 @@ const FLOW_RUNTIME_LABELS: Record<string, string> = {
   codex: 'Codex CLI',
   gemini: 'Gemini CLI',
   opencode: 'OpenCode',
+  pi: 'Pi',
+  deepseek: 'DeepSeek Harness',
 };
 
 /** The label for a flow's `agent_type`. */

@@ -12,6 +12,7 @@ from .aider import AiderAgent
 from .codex import CodexAgent
 from .gemini import GeminiAgent
 from .opencode import OpenCodeAgent
+from .harness import PiAgent, DeepSeekAgent
 
 __all__ = [
     "AgentExecutor",
@@ -23,6 +24,8 @@ __all__ = [
     "CodexAgent",
     "GeminiAgent",
     "OpenCodeAgent",
+    "PiAgent",
+    "DeepSeekAgent",
     "create_agent_executor",
     "create_executor_for_execution",
     "SUPPORTED_AGENT_TYPES",

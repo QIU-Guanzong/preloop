@@ -40,6 +40,8 @@ export const AGENT_KIND_PRESENTATION: Record<string, AgentKindPresentation> = {
     logo: '/images/logos/gemini-cli.svg',
   },
   opencode: { label: 'OpenCode', icon: '', logo: '/images/logos/opencode.svg' },
+  pi: { label: 'Pi', icon: 'terminal' },
+  deepseek: { label: 'DeepSeek Harness', icon: 'terminal' },
   hermes: { label: 'Hermes', icon: '', logo: '/images/logos/hermes.svg' },
   cursor: { label: 'Cursor', icon: '', logo: '/images/logos/cursor.svg' },
   windsurf: {
@@ -73,6 +75,8 @@ export const CLI_ONBOARDABLE_AGENT_KINDS: ReadonlySet<string> = new Set([
   'geminicli',
   'opencode',
   'hermes',
+  'pi',
+  'deepseek',
   'cursor',
   'windsurf',
   'vscode',

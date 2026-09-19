@@ -147,7 +147,14 @@ AGENT_CONTROL_CAPABILITIES = [
 ]
 AGENT_CONTROL_INPUT_MODES = ["text", "voice_transcript"]
 AGENT_CONTROL_OUTPUT_MODES = ["event", "status", "text"]
-AGENT_CONTROL_SUPPORTED_AGENT_KINDS = {"hermes", "openclaw", "claude_code", "opencode"}
+AGENT_CONTROL_SUPPORTED_AGENT_KINDS = {
+    "hermes",
+    "openclaw",
+    "claude_code",
+    "opencode",
+    "pi",
+    "deepseek",
+}
 AGENT_CONTROL_STATE_UNSUPPORTED = "unsupported"
 AGENT_CONTROL_STATE_INSTALL_PENDING = "install_pending"
 AGENT_CONTROL_STATE_PLUGIN_CONFIGURED = "plugin_configured"
@@ -229,6 +236,13 @@ def _openclaw_managed_gateway_configured(managed_config: dict) -> bool:
 
 def _generic_managed_gateway_configured(managed_config: dict) -> bool:
     """Return True for other adapter managed gateway config shapes."""
+    preloop = managed_config.get("preloop")
+    if isinstance(preloop, dict):
+        model = preloop.get("model")
+        if isinstance(model, dict):
+            return bool(
+                model.get("baseUrl") and model.get("apiKey") and model.get("models")
+            )
     models = managed_config.get("models")
     if isinstance(models, dict) and isinstance(models.get("providers"), dict):
         if "preloop" in models["providers"]:
@@ -680,7 +694,10 @@ def _managed_agent_control_fields(
         control_state = AGENT_CONTROL_STATE_INSTALL_PENDING
     else:
         control_state = AGENT_CONTROL_STATE_UNSUPPORTED
-    supports_interrupt = bool(control_enabled and snapshot.get("supports_interrupt"))
+    active_session_only = agent_kind in {"pi", "deepseek"}
+    supports_interrupt = bool(
+        control_enabled and snapshot.get("supports_interrupt", active_session_only)
+    )
     if snapshot.get("online"):
         session_mode = str(snapshot.get("session_mode") or "")
     else:
@@ -690,7 +707,13 @@ def _managed_agent_control_fields(
     elif session_mode not in {"local", "remote", "queued"}:
         session_mode = "remote"
     capabilities = list(AGENT_CONTROL_CAPABILITIES) if control_enabled else []
-    if control_enabled:
+    if active_session_only:
+        capabilities = [
+            capability
+            for capability in capabilities
+            if capability not in {"start_new_session", "send_voice_transcript"}
+        ]
+    if control_enabled and not active_session_only:
         capabilities.extend(["request_takeover", "release"])
     if supports_interrupt and "interrupt" not in capabilities:
         capabilities.append("interrupt")
@@ -700,14 +723,16 @@ def _managed_agent_control_fields(
         "control_state": control_state,
         "control_enabled": control_enabled,
         "control_online": control_online,
-        "supports_new_session": control_enabled,
+        "supports_new_session": control_enabled and not active_session_only,
         "supports_existing_session": control_enabled,
-        "supports_voice": control_enabled,
+        "supports_voice": control_enabled and not active_session_only,
         "supports_interrupt": supports_interrupt,
         "control_session_mode": session_mode,
         "control_last_heartbeat_at": heartbeat_at,
         "supported_input_modes": (
-            list(AGENT_CONTROL_INPUT_MODES) if control_enabled else []
+            (["text"] if active_session_only else list(AGENT_CONTROL_INPUT_MODES))
+            if control_enabled
+            else []
         ),
         "supported_output_modes": (
             list(AGENT_CONTROL_OUTPUT_MODES) if control_enabled else []
