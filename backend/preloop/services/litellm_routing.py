@@ -55,6 +55,12 @@ from preloop.services.tls_verify import ssl_verify_setting
 
 BEDROCK_PROVIDERS = frozenset({"bedrock", "amazon-bedrock", "aws"})
 
+# Vendor heads on Claude Code / OpenClaw slash ids that Bedrock stores as a
+# dotted prefix (``anthropic/claude-sonnet-4-5`` -> ``anthropic.claude-sonnet-4-5``).
+BEDROCK_MODEL_VENDORS = frozenset(
+    {"anthropic", "amazon", "meta", "mistral", "cohere", "ai21", "stability"}
+)
+
 PROVIDER_PREFIX: Dict[str, str] = {
     "openai": "openai",
     "openai-codex": "openai",
@@ -268,15 +274,20 @@ def _openrouter_model(identifier: str) -> str:
     return f"{OPENROUTER_PREFIX}{identifier}"
 
 
-def _strip_claude_context_window_suffix(identifier: str) -> str:
-    """Drop Claude Code's trailing ``[1m]`` (and similar) context marker."""
-    if not identifier.endswith("]") or "[" not in identifier:
-        return identifier
-    bracket = identifier.rfind("[")
-    marker = identifier[bracket + 1 : -1]
-    if marker and marker[-1].lower() == "m" and marker[:-1].isdigit():
-        return identifier[:bracket]
-    return identifier
+def strip_claude_context_window_suffix(identifier: str) -> str:
+    """Drop a trailing Claude Code context-window marker such as ``[1m]``.
+
+    Same rule as ``OpenAIGatewayService._strip_claude_variant_marker``: any
+    trailing ``[...]`` is a client variant, not part of the upstream id.
+    Keep these copies in lockstep; Claude Code today only emits ``[1m]``.
+    """
+    trimmed = (identifier or "").strip()
+    open_idx = trimmed.rfind("[")
+    if open_idx > 0 and trimmed.endswith("]"):
+        base = trimmed[:open_idx].strip()
+        if base:
+            return base
+    return trimmed
 
 
 def bedrock_litellm_model(identifier: str) -> str:
@@ -285,9 +296,12 @@ def bedrock_litellm_model(identifier: str) -> str:
     Claude 4.x inference profiles (``us.anthropic.claude-sonnet-4-5-...``)
     and application-inference-profile ARNs fail LiteLLM's Invoke parser with
     ``Unknown provider=None``. Converse accepts those ids. An explicit
-    ``bedrock/invoke/...`` identifier is preserved.
+    ``bedrock/invoke/...`` identifier is preserved. Slash-form vendor names
+    such as ``anthropic/claude-sonnet-4-5`` are rewritten to the dotted
+    Bedrock id ``anthropic.claude-sonnet-4-5``. Dated inference profiles
+    still require re-onboarding when only a family alias was stored.
     """
-    ident = _strip_claude_context_window_suffix((identifier or "").strip())
+    ident = strip_claude_context_window_suffix((identifier or "").strip())
     lower = ident.lower()
     if lower.startswith("arn:aws:bedrock:"):
         return f"bedrock/converse/{ident}"
@@ -315,11 +329,14 @@ def bedrock_litellm_model(identifier: str) -> str:
         elif head_lower == "invoke":
             explicit_route = "invoke"
             ident = rest
+        elif head_lower in BEDROCK_MODEL_VENDORS:
+            # Claude Code slash names (``anthropic/claude-sonnet-4-5``) become
+            # Bedrock dotted ids (``anthropic.claude-sonnet-4-5``). A bare
+            # remainder is not a catalog id.
+            ident = f"{head_lower}.{rest}"
         elif head_lower in known_litellm_providers() or head_lower in set(
             PROVIDER_PREFIX.values()
         ):
-            # Claude Code stores Anthropic Messages names (``anthropic/claude-sonnet-4-5``).
-            # The Bedrock id is the remainder; LiteLLM still needs converse.
             ident = rest
 
     route = explicit_route or "converse"

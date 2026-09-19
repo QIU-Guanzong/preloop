@@ -1981,6 +1981,45 @@ class TestBedrockModels:
         }
 
     @pytest.mark.asyncio
+    async def test_profile_listing_access_denied_keeps_foundation_ids(self, caplog):
+        from botocore.exceptions import ClientError
+
+        client = _bedrock_client(
+            [_foundation_summary("anthropic.claude-sonnet-4-5")],
+        )
+        client.list_inference_profiles.side_effect = ClientError(
+            {
+                "Error": {"Code": "AccessDeniedException"},
+                "ResponseMetadata": {"HTTPStatusCode": 403},
+            },
+            "ListInferenceProfiles",
+        )
+        session = MagicMock()
+        session.region_name = None
+        session.client.return_value = client
+
+        with (
+            patch("boto3.Session", return_value=session),
+            caplog.at_level(logging.WARNING),
+        ):
+            result = await get_available_models_for_provider(
+                "bedrock",
+                aws_auth={
+                    "aws_access_key_id": "AKIAIOSFODNN7EXAMPLE",
+                    "aws_secret_access_key": "secret",
+                    "aws_region_name": "us-east-1",
+                },
+            )
+
+        assert result.source == "live"
+        assert result.models == ["anthropic.claude-sonnet-4-5"]
+        assert any(
+            "ListInferenceProfiles" in record.message
+            or "inference-profile listing failed" in record.message
+            for record in caplog.records
+        )
+
+    @pytest.mark.asyncio
     async def test_rejected_credentials_raise_auth_error(self):
         from botocore.exceptions import ClientError
 

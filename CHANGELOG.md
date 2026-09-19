@@ -1262,8 +1262,11 @@ avatars.
   profile (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`) instead of
   rewriting `/model` selectors such as `sonnet` to the Anthropic Messages
   name `anthropic/claude-sonnet-4-5`. Gateway completions use LiteLLM's
-  Converse route (`bedrock/converse/<id>`). Discovery also lists system
-  inference profiles, not only `list_foundation_models`.
+  Converse route (`bedrock/converse/<id>`). A leftover slash-form vendor
+  name is rewritten to the dotted Bedrock id
+  (`anthropic.claude-sonnet-4-5`). Discovery also lists system inference
+  profiles (`bedrock:ListInferenceProfiles`); a permission miss keeps
+  foundation model ids and logs a warning.
 - Native MCP calls commit remaining database work on success and roll back on
   failure or cancellation. Database errors are sanitized in both raised errors
   and compliance batch results, while unrelated provider errors retain their

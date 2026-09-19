@@ -1170,12 +1170,14 @@ def _collect_bedrock_model_ids(client: Any) -> list[str]:
 
     try:
         profiles = client.list_inference_profiles(maxResults=1000, typeEquals="SYSTEM")
-    except TypeError:
-        try:
-            profiles = client.list_inference_profiles()
-        except Exception:
-            profiles = None
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Bedrock inference-profile listing failed (%s); "
+            "returning foundation models only. Grant "
+            "bedrock:ListInferenceProfiles to include geo ids such as "
+            "us.anthropic.claude-sonnet-4-5-...",
+            type(exc).__name__,
+        )
         profiles = None
 
     for summary in _list_attr_or_key(profiles, "inferenceProfileSummaries"):
@@ -1200,7 +1202,9 @@ async def _get_bedrock_models(
     are required for the picker; ambient instance-profile listing is not
     used. A bad key fails the call with an auth error, which raises
     ProviderAuthError. Inference-profile listing is best-effort: a
-    permission miss still returns foundation model ids.
+    permission miss still returns foundation model ids and logs a warning.
+    The caller also needs ``bedrock:ListInferenceProfiles`` to surface geo
+    ids such as ``us.anthropic.claude-sonnet-4-5-...``.
 
     Args:
         aws_auth: Mapping with ``aws_access_key_id``,

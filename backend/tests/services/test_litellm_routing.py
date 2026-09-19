@@ -398,12 +398,18 @@ class TestBedrockConverseRouting:
             == "bedrock/converse/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
         )
 
-    def test_anthropic_messages_name_does_not_invoke_bare_id(self):
-        # The onboard bug: family selector rewritten to anthropic/claude-sonnet-4-5
-        # then stripped to claude-sonnet-4-5, which LiteLLM Invoke rejects.
+    def test_anthropic_messages_name_becomes_dotted_bedrock_id(self):
+        # Legacy onboard stored Anthropic Messages names. Re-join the vendor
+        # with a dot so Converse sees a catalog-shaped id.
         assert (
             to_litellm_model(_model("amazon-bedrock", "anthropic/claude-sonnet-4-5"))
-            == "bedrock/converse/claude-sonnet-4-5"
+            == "bedrock/converse/anthropic.claude-sonnet-4-5"
+        )
+
+    def test_context_window_suffix_other_markers_are_stripped(self):
+        assert (
+            to_litellm_model(_model("bedrock", "anthropic.claude-sonnet-4-5[200k]"))
+            == "bedrock/converse/anthropic.claude-sonnet-4-5"
         )
 
     def test_explicit_invoke_route_is_preserved(self):
