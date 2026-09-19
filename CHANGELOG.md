@@ -1249,9 +1249,13 @@ avatars.
   runner setup failures from code failures. Startup failures and explicit
   pipeline infrastructure reasons use bounded escalation rather than code repair.
 
+- Codex CLI enrollments share one OAuth SecretReference per managed agent
+  instead of minting a second single-use lineage per model family. A
+  re-onboard of a split pre-fix enrollment repoints family rows onto the
+  live sibling secret (newest `last_verified` / `updated_at`), rather
+  than rotating another grant and tripping provider reuse detection.
 - Private-runner launch and server logs report the configured container image,
   including the legacy `docker_image` alias, instead of the harness default.
-
 - Agents in a split Kubernetes deployment call the gateway Service instead
   of the API Service. API pods run `PRELOOP_SERVICE_ROLE=api` and never
   mount `/openai/v1`, so a model row without an explicit
