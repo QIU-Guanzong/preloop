@@ -1248,6 +1248,11 @@ avatars.
 - Saved flow details expose the effective publication policy, including ungated
   legacy flows and configuration blockers, without claiming that configured
   isolation is an execution verification receipt.
+- Hosted workspace recovery preserves never-pushed branches and their base
+  commit identity across repeated checkpoints. Remote absence, divergence and
+  connection failures have distinct outcomes. Codex command transcripts no
+  longer masquerade as container/setup failures. The optional direct-checkpoint
+  Helm overlay supports 64 MiB archives with matching proxy limits.
 - Codex CLI enrollments share one OAuth SecretReference per managed agent
   instead of minting a second single-use lineage per model family. A
   re-onboard of a split pre-fix enrollment repoints family rows onto the

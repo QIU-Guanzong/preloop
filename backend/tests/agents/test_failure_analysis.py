@@ -6,6 +6,8 @@ error page from the proxy, a long stack trace, and a final line where the JS
 runtime stringified an error object instead of serialising it.
 """
 
+import pytest
+
 from preloop.agents.container import ContainerAgentExecutor
 from preloop.agents.failure_analysis import (
     GENERIC_FAILURE_MESSAGE,
@@ -519,3 +521,35 @@ class TestSourceContextNeverReachesClients:
         message = analyze_agent_failure(logs).message
 
         assert "return code 3 from the packaging step" in message
+
+
+@pytest.mark.parametrize(
+    "quoted",
+    [
+        '    "{ echo PRELOOP_SETUP_FAILED environment_harness_version_mismatch; exit 78; }"',
+        'SETUP_FAILED_MARKER = "PRELOOP_SETUP_FAILED"',
+        "The test expects PRELOOP_SETUP_FAILED exit=1.",
+    ],
+)
+def test_source_mentions_are_not_setup_failures(quoted: str) -> None:
+    logs = (
+        quoted + "\nPRELOOP_WORKSPACE_SNAPSHOT_SKIPPED size_exceeds_limit limit=2097152"
+    )
+    assert not analyze_agent_failure(logs).message.startswith("Setup commands failed")
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "exit=2",
+        "setup_timeout",
+        "setup_failed",
+        "environment_protocol_unsupported",
+        "environment_harness_version_mismatch",
+        "missing_executables:git,bash",
+    ],
+)
+def test_runtime_setup_markers_still_report_setup_failure(reason: str) -> None:
+    assert analyze_agent_failure(f"PRELOOP_SETUP_FAILED {reason}").message.startswith(
+        "Setup commands failed"
+    )
