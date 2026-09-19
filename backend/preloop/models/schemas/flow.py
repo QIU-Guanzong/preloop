@@ -6,6 +6,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from pydantic import (
+    computed_field,
     BaseModel,
     ConfigDict,
     Field,
@@ -16,6 +17,7 @@ from pydantic import (
 )
 
 from preloop.models.schemas.verification import (
+    EffectivePublicationPolicy,
     ResolvedVerificationPolicy,
     VerificationPolicy,
 )
@@ -1136,6 +1138,16 @@ class FlowResponse(FlowBase):
     ai_model_name: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+    @computed_field
+    @property
+    def effective_publication_policy(self) -> EffectivePublicationPolicy:
+        """Read-only description derived from this saved flow's configuration."""
+        from preloop.services.verification import describe_effective_publication_policy
+
+        return describe_effective_publication_policy(
+            self.git_clone_config.model_dump() if self.git_clone_config else None
+        )
 
     @model_validator(mode="after")
     def compute_schedule_state(self) -> "FlowResponse":

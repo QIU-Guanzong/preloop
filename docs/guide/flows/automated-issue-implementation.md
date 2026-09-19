@@ -218,3 +218,19 @@ number.
 The preset sets `timeout_seconds: 5400`. Reading an unfamiliar repository,
 writing tests, and running a suite regularly outlives the 3600s default, and a
 run killed at the finish line loses the commit.
+
+### Inspect a saved publication policy
+
+The flow detail page shows the API's read-only `effective_publication_policy`.
+Existing customized flows remain unchanged: an absent or disabled verification
+policy is explicitly **No verification gate**. A legacy gate is **Checks in
+agent sandbox**, whose log evidence is not a trusted publication attestation.
+An isolated policy with a valid profile and pinned image is **Isolated
+verification configured**. Missing configuration is shown as blocked with
+specific blocker codes.
+
+This is a description of saved configuration, not a pass receipt or deployment
+readiness check. Repository selection can still come from the trigger. Tracker
+permissions, the supported publication provider, isolation capabilities and
+checks on the final commit are validated by each execution. The console never
+labels a flow trusted merely because its saved policy requests isolation.
