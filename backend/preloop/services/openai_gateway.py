@@ -165,6 +165,7 @@ from preloop.services.litellm_routing import (
     is_openrouter_model,
     model_api_base,
     preloop_client_headers,
+    strip_claude_context_window_suffix,
     to_litellm_model,
 )
 from preloop.services.openai_responses_passthrough import (
@@ -3670,17 +3671,10 @@ class OpenAIGatewayService:
     def _strip_claude_variant_marker(model_ref: str) -> str:
         """Strip a trailing bracketed context-window marker.
 
-        Claude Code addresses context-window variants as ``<model>[1m]``. The
-        variant is a real upstream selector (forwarded verbatim on the OAuth
-        passthrough) but registry rows and pricing keys use the base id.
+        Delegates to ``strip_claude_context_window_suffix`` so Bedrock routing
+        and gateway registry lookup share one rule.
         """
-        trimmed = (model_ref or "").strip()
-        open_idx = trimmed.rfind("[")
-        if open_idx > 0 and trimmed.endswith("]"):
-            base = trimmed[:open_idx].strip()
-            if base:
-                return base
-        return trimmed
+        return strip_claude_context_window_suffix(model_ref)
 
     def _maybe_autoregister_claude_family_model(
         self,

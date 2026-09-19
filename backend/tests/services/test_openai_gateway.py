@@ -105,7 +105,7 @@ def test_call_litellm_allows_bedrock_ambient_credentials():
         )
 
     upstream_backend.completion.assert_called_once_with(
-        model="bedrock/us.anthropic.claude-opus-4-6-v1",
+        model="bedrock/converse/us.anthropic.claude-opus-4-6-v1",
         messages=[{"role": "user", "content": "Hello"}],
         timeout=600,
         aws_region_name="us-east-1",
@@ -154,7 +154,7 @@ def test_call_litellm_passes_imported_bedrock_credentials():
         )
 
     upstream_backend.completion.assert_called_once_with(
-        model="bedrock/us.anthropic.claude-opus-4-6-v1",
+        model="bedrock/converse/us.anthropic.claude-opus-4-6-v1",
         messages=[{"role": "user", "content": "Hello"}],
         timeout=600,
         aws_access_key_id="AKIA_TEST",

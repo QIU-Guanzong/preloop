@@ -3853,6 +3853,53 @@ func TestParseClaudeManagedGatewayUpstreamUsesShellExportsForBedrock(t *testing.
 	}
 }
 
+func TestParseClaudeManagedGatewayUpstreamResolvesBedrockFamilySelector(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "")
+	t.Setenv("ANTHROPIC_MODEL", "")
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "")
+
+	configPath := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("failed to create claude dir: %v", err)
+	}
+	if err := os.WriteFile(
+		configPath,
+		[]byte(`{
+  "model": "sonnet",
+  "env": {
+    "CLAUDE_CODE_USE_BEDROCK": "1",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "us.anthropic.claude-sonnet-4-5-20250929-v1:0[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "AWS_BEARER_TOKEN_BEDROCK": "bedrock-token"
+  }
+}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("failed to write claude config: %v", err)
+	}
+
+	upstream, err := parseClaudeManagedGatewayUpstream(
+		AgentConfig{Name: "Claude Code", ConfigPath: configPath},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if upstream == nil {
+		t.Fatal("expected Claude Bedrock upstream to be detected")
+	}
+	if upstream.ProviderName != "amazon-bedrock" {
+		t.Fatalf("expected Bedrock provider, got %#v", upstream.ProviderName)
+	}
+	if upstream.ModelIdentifier != "us.anthropic.claude-sonnet-4-5-20250929-v1:0" {
+		t.Fatalf("unexpected Claude Bedrock identifier: %#v", upstream.ModelIdentifier)
+	}
+	if upstream.ManagedModelAlias != "amazon-bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0" {
+		t.Fatalf("unexpected Claude Bedrock alias: %#v", upstream.ManagedModelAlias)
+	}
+}
+
 func TestOpenClawValidateManagedConfigSupportsAnthropicGateway(t *testing.T) {
 	adapter := managedMCPAdapterForAgent(AgentConfig{Name: "OpenClaw"})
 	result := adapter.ValidateManagedConfig(map[string]interface{}{

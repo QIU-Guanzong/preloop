@@ -1104,37 +1104,112 @@ def _is_bedrock_auth_error(exc: Exception) -> bool:
     return "nocredentials" in name or "credential" in name
 
 
+def _attr_or_key(obj: Any, name: str) -> Any:
+    """Read ``name`` from a boto3 dict response or an attribute-shaped stub."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _attr_or_key_str(obj: Any, name: str) -> str:
+    return str(_attr_or_key(obj, name) or "").strip()
+
+
 def _is_bedrock_chat_model(summary: Any) -> bool:
     """Keep ACTIVE foundation models that emit text; drop the rest.
 
     ``list_foundation_models`` also returns embedding, image and video
     generation models, which the LLM picker cannot use. A summary without an
     ``outputModalities`` field predates modality reporting and is kept rather
-    than guessed away.
+    than guessed away. Live boto3 returns plain dicts; tests may pass
+    attribute-shaped stubs.
     """
-    lifecycle = getattr(summary, "modelLifecycle", None)
+    lifecycle = _attr_or_key(summary, "modelLifecycle")
     if lifecycle is not None:
-        status = str(getattr(lifecycle, "status", "") or "").upper()
+        status = _attr_or_key_str(lifecycle, "status").upper()
         if status and status != "ACTIVE":
             return False
 
-    modalities = getattr(summary, "outputModalities", None) or []
+    modalities = _attr_or_key(summary, "outputModalities") or []
     if not modalities:
         return True
     return any(str(m).upper() == "TEXT" for m in modalities)
 
 
+def _is_bedrock_inference_profile(summary: Any) -> bool:
+    """Keep ACTIVE system inference profiles that can serve chat.
+
+    Geo ids such as ``us.anthropic.claude-sonnet-4-5-20250929-v1:0`` are what
+    Claude Code stores. Foundation-model listing does not include them.
+    """
+    status = _attr_or_key_str(summary, "status").upper()
+    profile_id = _attr_or_key_str(summary, "inferenceProfileId")
+    if status and status != "ACTIVE":
+        return False
+    if not profile_id:
+        return False
+    lower = profile_id.lower()
+    if any(
+        token in lower
+        for token in ("embed", "image", "stable-diffusion", "titan-embed", "video")
+    ):
+        return False
+    return True
+
+
+def _list_attr_or_key(obj: Any, name: str) -> list[Any]:
+    value = _attr_or_key(obj, name) or []
+    return value if isinstance(value, list) else []
+
+
+def _collect_bedrock_model_ids(client: Any) -> list[str]:
+    """Foundation models plus system inference profiles from one client."""
+    response = client.list_foundation_models()
+    model_ids: list[str] = []
+    for summary in _list_attr_or_key(response, "modelSummaries"):
+        model_id = _attr_or_key_str(summary, "modelId")
+        if model_id and _is_bedrock_chat_model(summary):
+            model_ids.append(model_id)
+
+    try:
+        profiles = client.list_inference_profiles(maxResults=1000, typeEquals="SYSTEM")
+    except Exception as exc:
+        logger.warning(
+            "Bedrock inference-profile listing failed (%s); "
+            "returning foundation models only. Grant "
+            "bedrock:ListInferenceProfiles to include geo ids such as "
+            "us.anthropic.claude-sonnet-4-5-...",
+            type(exc).__name__,
+        )
+        profiles = None
+
+    for summary in _list_attr_or_key(profiles, "inferenceProfileSummaries"):
+        if not _is_bedrock_inference_profile(summary):
+            continue
+        profile_id = _attr_or_key_str(summary, "inferenceProfileId")
+        if profile_id:
+            model_ids.append(profile_id)
+
+    return sorted(set(model_ids))
+
+
 async def _get_bedrock_models(
     aws_auth: Optional[Dict[str, Any]] = None,
 ) -> ModelDiscoveryResult:
-    """List AWS Bedrock foundation models via ``list_foundation_models``.
+    """List AWS Bedrock chat models via foundation models and inference profiles.
 
-    Control-plane API:
+    Control-plane APIs:
     https://docs.aws.amazon.com/bedrock/latest/APIReference/API_ListFoundationModels.html
+    https://docs.aws.amazon.com/bedrock/latest/APIReference/API_ListInferenceProfiles.html
     Uses boto3's ``bedrock`` client. Explicit access keys (typed or stored)
     are required for the picker; ambient instance-profile listing is not
     used. A bad key fails the call with an auth error, which raises
-    ProviderAuthError.
+    ProviderAuthError. Inference-profile listing is best-effort: a
+    permission miss still returns foundation model ids and logs a warning.
+    The caller also needs ``bedrock:ListInferenceProfiles`` to surface geo
+    ids such as ``us.anthropic.claude-sonnet-4-5-...``.
 
     Args:
         aws_auth: Mapping with ``aws_access_key_id``,
@@ -1142,7 +1217,8 @@ async def _get_bedrock_models(
             ``aws_region_name``.
 
     Returns:
-        ModelDiscoveryResult with sorted text-output foundation model ids.
+        ModelDiscoveryResult with sorted text-output model ids, including
+        geo inference profiles such as ``us.anthropic.claude-sonnet-4-5-...``.
 
     Raises:
         ProviderValidationError: When no region can be resolved.
@@ -1182,8 +1258,8 @@ async def _get_bedrock_models(
                 retries={"max_attempts": 1},
             ),
         )
-        # list_foundation_models is synchronous; keep it off the event loop.
-        response = await asyncio.to_thread(client.list_foundation_models)
+        # Control-plane listing is synchronous; keep it off the event loop.
+        model_ids = await asyncio.to_thread(_collect_bedrock_model_ids, client)
     except ProviderValidationError:
         raise
     except Exception as e:
@@ -1204,14 +1280,7 @@ async def _get_bedrock_models(
         )
         return _fallback([], _classify_fetch_error(e))
 
-    summaries = getattr(response, "modelSummaries", None) or []
-    model_ids = []
-    for summary in summaries:
-        model_id = str(getattr(summary, "modelId", "") or "").strip()
-        if model_id and _is_bedrock_chat_model(summary):
-            model_ids.append(model_id)
-
-    model_ids = sorted(set(model_ids))[:MAX_DISCOVERED_MODELS]
+    model_ids = model_ids[:MAX_DISCOVERED_MODELS]
     if not model_ids:
         logger.info("Bedrock returned no chat models")
         return _fallback([], ERROR_EMPTY_RESPONSE)

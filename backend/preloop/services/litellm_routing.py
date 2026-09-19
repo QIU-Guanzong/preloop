@@ -53,6 +53,14 @@ import litellm
 from preloop.models.models.ai_model import AIModel
 from preloop.services.tls_verify import ssl_verify_setting
 
+BEDROCK_PROVIDERS = frozenset({"bedrock", "amazon-bedrock", "aws"})
+
+# Vendor heads on Claude Code / OpenClaw slash ids that Bedrock stores as a
+# dotted prefix (``anthropic/claude-sonnet-4-5`` -> ``anthropic.claude-sonnet-4-5``).
+BEDROCK_MODEL_VENDORS = frozenset(
+    {"anthropic", "amazon", "meta", "mistral", "cohere", "ai21", "stability"}
+)
+
 PROVIDER_PREFIX: Dict[str, str] = {
     "openai": "openai",
     "openai-codex": "openai",
@@ -266,11 +274,83 @@ def _openrouter_model(identifier: str) -> str:
     return f"{OPENROUTER_PREFIX}{identifier}"
 
 
+def strip_claude_context_window_suffix(identifier: str) -> str:
+    """Drop a trailing Claude Code context-window marker such as ``[1m]``.
+
+    Same rule as ``OpenAIGatewayService._strip_claude_variant_marker``: any
+    trailing ``[...]`` is a client variant, not part of the upstream id.
+    Keep these copies in lockstep; Claude Code today only emits ``[1m]``.
+    """
+    trimmed = (identifier or "").strip()
+    open_idx = trimmed.rfind("[")
+    if open_idx > 0 and trimmed.endswith("]"):
+        base = trimmed[:open_idx].strip()
+        if base:
+            return base
+    return trimmed
+
+
+def bedrock_litellm_model(identifier: str) -> str:
+    """Build LiteLLM's Bedrock Converse model string.
+
+    Claude 4.x inference profiles (``us.anthropic.claude-sonnet-4-5-...``)
+    and application-inference-profile ARNs fail LiteLLM's Invoke parser with
+    ``Unknown provider=None``. Converse accepts those ids. An explicit
+    ``bedrock/invoke/...`` identifier is preserved. Slash-form vendor names
+    such as ``anthropic/claude-sonnet-4-5`` are rewritten to the dotted
+    Bedrock id ``anthropic.claude-sonnet-4-5``. Dated inference profiles
+    still require re-onboarding when only a family alias was stored.
+    """
+    ident = strip_claude_context_window_suffix((identifier or "").strip())
+    lower = ident.lower()
+    if lower.startswith("arn:aws:bedrock:"):
+        return f"bedrock/converse/{ident}"
+
+    explicit_route = ""
+    for prefix, route in (
+        ("bedrock/converse/", "converse"),
+        ("bedrock/invoke/", "invoke"),
+        ("bedrock/", ""),
+        ("amazon-bedrock/", ""),
+        ("aws/", ""),
+    ):
+        if lower.startswith(prefix):
+            ident = ident[len(prefix) :]
+            explicit_route = route
+            lower = ident.lower()
+            break
+
+    if "/" in ident and not lower.startswith("arn:"):
+        head, rest = ident.split("/", 1)
+        head_lower = head.lower()
+        if head_lower == "converse":
+            explicit_route = "converse"
+            ident = rest
+        elif head_lower == "invoke":
+            explicit_route = "invoke"
+            ident = rest
+        elif head_lower in BEDROCK_MODEL_VENDORS:
+            # Claude Code slash names (``anthropic/claude-sonnet-4-5``) become
+            # Bedrock dotted ids (``anthropic.claude-sonnet-4-5``). A bare
+            # remainder is not a catalog id.
+            ident = f"{head_lower}.{rest}"
+        elif head_lower in known_litellm_providers() or head_lower in set(
+            PROVIDER_PREFIX.values()
+        ):
+            ident = rest
+
+    route = explicit_route or "converse"
+    return f"bedrock/{route}/{ident}"
+
+
 def to_litellm_model(ai_model: AIModel) -> str:
     """Build the litellm model string for an AI model row."""
     provider = (ai_model.provider_name or "openai").strip().lower()
     identifier = (ai_model.model_identifier or "").strip()
     endpoint = getattr(ai_model, "api_endpoint", None)
+
+    if provider in BEDROCK_PROVIDERS:
+        return bedrock_litellm_model(identifier)
 
     # The user's explicit provider/endpoint choice outranks any vendor prefix
     # inside the model id (issue #172).
