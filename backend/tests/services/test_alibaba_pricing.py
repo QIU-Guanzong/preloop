@@ -681,6 +681,39 @@ def test_omni_completion_audio_tokens_do_not_use_the_text_output_rate() -> None:
     )
 
 
+def test_negative_prompt_modality_count_does_not_mask_completion_audio() -> None:
+    from preloop.services.alibaba_pricing import estimate, pricing_failure_reason
+
+    model = _model("qwen3.5-omni-plus")
+    mixed = {
+        "prompt_tokens_details": {"audio_tokens": -1},
+        "completion_tokens_details": {"audio_tokens": 800},
+    }
+    assert (
+        estimate(
+            model,
+            prompt_tokens=10_000,
+            completion_tokens=1_000,
+            usage_details=mixed,
+        )
+        is None
+    )
+    assert (
+        pricing_failure_reason(model, prompt_tokens=10_000, usage_details=mixed)
+        == "mixed_modality_usage"
+    )
+    only_neg = {"prompt_tokens_details": {"audio_tokens": -1}}
+    assert (
+        estimate(
+            model,
+            prompt_tokens=10_000,
+            completion_tokens=1_000,
+            usage_details=only_neg,
+        )
+        is None
+    )
+
+
 _SINGAPORE_COMPAT_CHAT_IDS = (
     "ZHIPU/GLM-5.3",
     "ccai-pro",

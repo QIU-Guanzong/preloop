@@ -588,12 +588,15 @@ def _mixed_modality_usage(tariff: Tariff, usage_details: dict[str, Any] | None) 
         for details in blobs:
             for key in keys:
                 raw = details.get(key)
-                if raw in (None, 0):
+                if raw is None:
                     continue
                 try:
-                    return int(raw) > 0
+                    value = int(raw)
                 except (TypeError, ValueError, OverflowError):
                     return True
+                if value == 0:
+                    continue
+                return True
         return False
 
     leftover_audio = any("audio" in kind or "multi_output" in kind for kind in extra)
