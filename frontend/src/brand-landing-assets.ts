@@ -11,6 +11,18 @@ const responsiveScreenshots = new Set(
   ].map((name) => `${screenshotDirectory}${name}.png`)
 );
 
+function responsiveDerivatives(original: string): {
+  src: string;
+  width: number;
+}[] {
+  if (!responsiveScreenshots.has(original)) return [];
+  const stem = original.slice(0, -4);
+  return [800, 1600].map((width) => ({
+    src: `${stem}-${width}.webp`,
+    width,
+  }));
+}
+
 /** Display derivatives for bundled stills; custom branding and animation pass through. */
 export function landingImageSources(original: string): {
   src: string;
@@ -18,11 +30,13 @@ export function landingImageSources(original: string): {
   width?: number;
   height?: number;
 } {
-  if (!responsiveScreenshots.has(original)) return { src: original };
-  const stem = original.slice(0, -4);
+  const derivatives = responsiveDerivatives(original);
+  if (!derivatives.length) return { src: original };
   return {
-    src: `${stem}-800.webp`,
-    srcset: `${stem}-800.webp 800w, ${stem}-1600.webp 1600w, ${original} 3200w`,
+    src: derivatives[0].src,
+    srcset: [...derivatives, { src: original, width: 3200 }]
+      .map(({ src, width }) => `${src} ${width}w`)
+      .join(', '),
     width: 3200,
     height: 1900,
   };
@@ -53,10 +67,9 @@ export function collectLandingPublicAssetPaths(brand: BrandConfig): string[] {
       paths.push(feature.placeholderImg);
     }
   }
-  const displayPaths = paths.flatMap((original) => {
-    if (!responsiveScreenshots.has(original)) return [original];
-    const stem = original.slice(0, -4);
-    return [original, `${stem}-800.webp`, `${stem}-1600.webp`];
-  });
+  const displayPaths = paths.flatMap((original) => [
+    original,
+    ...responsiveDerivatives(original).map(({ src }) => src),
+  ]);
   return [...new Set(displayPaths)].filter(isRootRelativeAssetPath);
 }
