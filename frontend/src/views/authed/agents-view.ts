@@ -87,6 +87,8 @@ import {
 const AVAILABLE_AGENT_KINDS = [
   { value: 'openclaw', label: 'OpenClaw' },
   { value: 'opencode', label: 'OpenCode' },
+  { value: 'pi', label: 'Pi' },
+  { value: 'deepseek', label: 'DeepSeek Harness' },
   { value: 'claude_code', label: 'Claude Code' },
   { value: 'claude_desktop', label: 'Claude Desktop' },
   { value: 'codex', label: 'Codex CLI' },

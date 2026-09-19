@@ -943,7 +943,7 @@ func executeManagedEnrollment(agent AgentConfig, opts managedEnrollmentOptions) 
 				// Non-fatal: hook-based approvals above already applied.
 				fmt.Fprintf(output, "  Warning: %v\n", err) //nolint:errcheck
 			}
-		case permissionSourceOpenCode:
+		case permissionSourceOpenCode, "pi", "deepseek":
 			// Same agent-scoped builtin so the backend treats this agent as
 			// approvals-governed; the claude -p hint does not apply, so the
 			// call stays quiet and the line prints only when the row is
@@ -1374,6 +1374,9 @@ func updateManagedAgentTags(client *api.Client, agentID string, tags map[string]
 // probe but the user didn't ask for it", which is gated upstream by the
 // “--skip-live-validate“ flag.
 func supportsManagedLiveValidation(agent AgentConfig) bool {
+	if isExtensionHarness(agent) {
+		return true
+	}
 	switch strings.ToLower(strings.TrimSpace(agent.Name)) {
 	case "openclaw",
 		"codex cli",
@@ -1423,6 +1426,9 @@ func runManagedAgentLiveValidation(
 	existingValidation map[string]interface{},
 ) (*managedLiveValidationOutcome, error) {
 	validationResult := mergeStringMaps(existingValidation, defaultManagedLiveValidationResult(agent))
+	if isExtensionHarness(agent) {
+		return runGatewayLiveValidation(client, agent, validationResult, "/openai/v1/chat/completions", buildHarnessLiveValidationSpec)
+	}
 	if !supportsManagedLiveValidation(agent) {
 		return &managedLiveValidationOutcome{
 			Attempted:        false,
@@ -1874,6 +1880,9 @@ func resolveManagedGatewayUpstreamWithHints(
 	agent AgentConfig,
 	hints managedGatewayResolutionHints,
 ) (*managedGatewayUpstream, error) {
+	if isExtensionHarness(agent) {
+		return parseHarnessManagedGatewayUpstream(agent)
+	}
 	switch strings.ToLower(strings.TrimSpace(agent.Name)) {
 	case "opencode":
 		return parseOpenCodeManagedGatewayUpstreamWithHints(agent, hints)
@@ -4008,7 +4017,7 @@ func buildOpenClawManagedMCPEnrollmentPlan(
 
 func supportsAgentControlChannel(agent AgentConfig) bool {
 	switch strings.ToLower(strings.TrimSpace(agent.Name)) {
-	case "openclaw", hermesSourceType, "claude code", "opencode":
+	case "openclaw", hermesSourceType, "claude code", "opencode", "pi", "deepseek harness", "deepseek", "dsh":
 		return true
 	default:
 		return false
@@ -4168,7 +4177,18 @@ func applyAgentControlConfigToDocument(
 	}
 	preloop := ensureObjectPath(doc, "preloop")
 	existing, _ := asObjectMap(preloop["control"])
-	preloop["control"] = preserveRuntimeApprovalConfig(runtimeSessionSourceTypeForAgent(agent.Name), existing, control)
+	if isExtensionHarness(agent) {
+		merged := cloneStringMap(control)
+		merged["native_tool_approvals"] = "off"
+		for _, key := range []string{"native_tool_approvals", "approval_timeout_ms", "remote_control_enabled"} {
+			if value, ok := existing[key]; ok {
+				merged[key] = value
+			}
+		}
+		preloop["control"] = merged
+	} else {
+		preloop["control"] = preserveRuntimeApprovalConfig(runtimeSessionSourceTypeForAgent(agent.Name), existing, control)
+	}
 }
 
 // Preserve only validated operator approval settings; onboarding refreshes
@@ -4429,6 +4449,9 @@ func agentControlConfigFromDocument(
 }
 
 func agentControlPluginPackageName(agent AgentConfig) string {
+	if isExtensionHarness(agent) {
+		return harnessPluginPackage
+	}
 	sourceType := runtimeSessionSourceTypeForAgent(agent.Name)
 	switch sourceType {
 	case hermesSourceType:
@@ -4524,6 +4547,9 @@ func runtimeExecutableSearchDescription(command string) string {
 }
 
 func agentControlPluginSourceDirName(agent AgentConfig) string {
+	if isExtensionHarness(agent) {
+		return "harness-preloop"
+	}
 	switch runtimeSessionSourceTypeForAgent(agent.Name) {
 	case hermesSourceType:
 		return "hermes-preloop"
@@ -4539,6 +4565,9 @@ func agentControlPluginSourceDirName(agent AgentConfig) string {
 }
 
 func installAgentControlRuntimePlugin(agent AgentConfig, writer io.Writer) map[string]interface{} {
+	if isExtensionHarness(agent) {
+		return installHarnessPlugin(agent, writer)
+	}
 	result := map[string]interface{}{}
 	installer := agentControlPluginInstallerCommand(agent)
 	installTarget := agentControlPluginInstallTarget(agent)
@@ -4868,6 +4897,9 @@ func existingAgentControlPluginSource(path string) (string, bool) {
 }
 
 func verifyAgentControlRuntimePlugin(agent AgentConfig) map[string]interface{} {
+	if isExtensionHarness(agent) {
+		return verifyHarnessPlugin(agent)
+	}
 	result := map[string]interface{}{
 		"control_plugin_installed":    false,
 		"control_plugin_verified":     false,
@@ -6967,6 +6999,9 @@ func loadTOMLDocument(path string) (map[string]interface{}, error) {
 }
 
 func allowsSynthesizedEmptyConfig(agent AgentConfig) bool {
+	if isExtensionHarness(agent) {
+		return true
+	}
 	switch strings.ToLower(strings.TrimSpace(agent.Name)) {
 	case "opencode":
 		return true
@@ -7118,6 +7153,13 @@ func openClawConfigPaths(home string) []string {
 }
 
 func expandAgentConfigPath(home string, path string) string {
+	for _, override := range []struct{ relative, env string }{{".pi/agent", "PI_CODING_AGENT_DIR"}, {".dsh", "DSH_HOME"}} {
+		prefix := filepath.Join(home, override.relative)
+		if dir := os.Getenv(override.env); dir != "" && (path == prefix || strings.HasPrefix(path, prefix+string(filepath.Separator))) {
+			return filepath.Join(dir, strings.TrimPrefix(strings.TrimPrefix(path, prefix), string(filepath.Separator)))
+		}
+	}
+
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
 		return ""

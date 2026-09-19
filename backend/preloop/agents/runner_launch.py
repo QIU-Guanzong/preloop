@@ -120,6 +120,7 @@ async def build_runner_launch(context: dict[str, Any]) -> dict[str, Any]:
     """
     from .codex import CodexAgent
     from .opencode import OpenCodeAgent
+    from .harness import PiAgent, DeepSeekAgent
 
     context = dict(context)
     agent_type = context.get("agent_type")
@@ -141,8 +142,11 @@ async def build_runner_launch(context: dict[str, Any]) -> dict[str, Any]:
         agent = OpenCodeAgent(config)
         context["opencode_model"] = model
         build_script = agent._build_opencode_script
+    elif agent_type in {"pi", "deepseek"}:
+        agent = PiAgent(config) if agent_type == "pi" else DeepSeekAgent(config)
+        build_script = agent._build_harness_script
     else:
-        raise ValueError("Private Docker launch supports only codex and opencode")
+        raise ValueError("Unsupported private Docker harness")
 
     from .images import effective_agent_image
 
@@ -245,7 +249,7 @@ def validate_runner_completion(
         return "FAILED", "Invalid runner completion status", result
     if status == "SUCCEEDED" and (
         leased_job.get("launch_version") != LAUNCH_VERSION
-        or leased_job.get("agent_type") not in {"codex", "opencode"}
+        or leased_job.get("agent_type") not in {"codex", "opencode", "pi", "deepseek"}
         or message.get("completion_protocol") != "docker_v1"
         or message.get("launch_version") != LAUNCH_VERSION
         or type(message.get("exit_code")) is not int

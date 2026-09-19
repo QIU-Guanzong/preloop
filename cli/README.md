@@ -43,6 +43,16 @@ onto an existing binary.
 Download the latest release from [GitHub Releases](https://github.com/preloop/preloop/releases)
 and verify against the `SHA256SUMS` asset.
 
+## Pi and DeepSeek Harness
+
+Use `preloop agents install-runtime pi` or `preloop agents install-runtime deepseek`
+to install and onboard. Existing installations can use
+`preloop agents onboard Pi --approvals` or
+`preloop agents onboard "DeepSeek Harness" --approvals`.
+Both support model routing, MCP, native approvals, and active-session control.
+See the [runtime guide](../runtime-plugins/harness-preloop/README.md) for configuration,
+custom home directories, offboarding, and supported versions.
+
 ## Quick Start
 
 ```bash

@@ -9,6 +9,7 @@ from .aider import AiderAgent
 from .codex import CodexAgent
 from .gemini import GeminiAgent
 from .opencode import OpenCodeAgent
+from .harness import PiAgent, DeepSeekAgent
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,8 @@ _AGENT_EXECUTOR_REGISTRY: Dict[str, type[AgentExecutor]] = {
     "codex": CodexAgent,
     "gemini": GeminiAgent,
     "opencode": OpenCodeAgent,
+    "pi": PiAgent,
+    "deepseek": DeepSeekAgent,
 }
 
 SUPPORTED_AGENT_TYPES = frozenset(_AGENT_EXECUTOR_REGISTRY)

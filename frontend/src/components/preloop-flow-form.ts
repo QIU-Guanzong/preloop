@@ -1602,6 +1602,8 @@ export class PreloopFlowForm extends LitElement {
                   <sl-option value="codex">Codex CLI</sl-option>
                   <sl-option value="gemini">Gemini CLI</sl-option>
                   <sl-option value="opencode">OpenCode</sl-option>
+                  <sl-option value="pi">Pi</sl-option>
+                  <sl-option value="deepseek">DeepSeek Harness</sl-option>
                 </sl-select>
                 <sl-select
                   label="Model"
@@ -3054,6 +3056,8 @@ export class PreloopFlowForm extends LitElement {
                     <sl-option value="codex">Codex CLI</sl-option>
                     <sl-option value="gemini">Gemini CLI</sl-option>
                     <sl-option value="opencode">OpenCode</sl-option>
+                    <sl-option value="pi">Pi</sl-option>
+                    <sl-option value="deepseek">DeepSeek Harness</sl-option>
                     <sl-option value="cursor"
                       >Cursor CLI (private runner host profile)</sl-option
                     >

@@ -432,7 +432,8 @@ def lease_job(
             if (
                 capability.get("version") != 1
                 or capability.get("helper_ready") is not True
-                or payload.get("agent_type") not in {"codex", "opencode"}
+                or payload.get("agent_type")
+                not in {"codex", "opencode", "pi", "deepseek"}
             ):
                 db.rollback()
                 continue

@@ -130,7 +130,7 @@ async def test_private_launch_delivers_evidence_capability_not_workspace():
 
 @pytest.mark.asyncio
 async def test_unsupported_harness_fails_explicitly():
-    with pytest.raises(ValueError, match="only codex and opencode"):
+    with pytest.raises(ValueError, match="Unsupported private Docker harness"):
         await build_runner_launch({"agent_type": "unknown"})
 
 

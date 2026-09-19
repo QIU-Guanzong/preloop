@@ -223,6 +223,37 @@ describe('talk-composer', () => {
     expect(controlCalls(fetchStub)[1].args[0]).to.contain('/control/command');
   });
 
+  it('uses the active harness session without requesting a new process', async () => {
+    fetchStub.resolves(
+      new Response(JSON.stringify({ status: 'delivered' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    const el = await mount(
+      agent({
+        agent_kind: 'pi',
+        supports_new_session: false,
+        supports_voice: false,
+        supports_interrupt: true,
+      })
+    );
+    el.sessionId = null;
+    await el.updateComplete;
+    expect(el.shadowRoot!.textContent).to.contain('Interrupt');
+    expect(el.shadowRoot!.textContent).not.to.contain('Release');
+    const input = textarea(el);
+    input.value = 'continue';
+    input.dispatchEvent(new CustomEvent('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })
+    );
+    await waitUntil(() => controlCalls(fetchStub).length === 1);
+    const body = JSON.parse(controlCalls(fetchStub)[0].args[1].body);
+    expect(body.start_new_session).to.equal(false);
+  });
+
   it('never releases the session on its own', async () => {
     fetchStub.resolves(
       new Response(JSON.stringify({ status: 'delivered', published: true }), {

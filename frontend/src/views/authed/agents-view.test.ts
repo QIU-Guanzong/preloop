@@ -706,6 +706,8 @@ describe('AgentsView', () => {
         'codex',
         'gemini_cli',
         'hermes',
+        'pi',
+        'deepseek',
         'cursor',
         'windsurf',
         'desktop_agent',

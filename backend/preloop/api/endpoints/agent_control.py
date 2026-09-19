@@ -110,7 +110,14 @@ _SERIALIZATION_ERRORS = (
 )
 
 HEARTBEAT_TOUCH_INTERVAL = timedelta(seconds=15)
-SUPPORTED_CONTROL_AGENT_KINDS = {"hermes", "openclaw", "claude_code", "opencode"}
+SUPPORTED_CONTROL_AGENT_KINDS = {
+    "hermes",
+    "openclaw",
+    "claude_code",
+    "opencode",
+    "pi",
+    "deepseek",
+}
 
 
 def _connection_context_from_auth(
@@ -1297,6 +1304,15 @@ async def _route_managed_agent_prompt(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Managed agent is not active",
+        )
+    if getattr(agent, "agent_kind", None) in {"pi", "deepseek"} and (
+        request.start_new_session
+        or request.spawn_worktree
+        or request.input_mode != "text"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This harness supports text messages to active sessions only",
         )
     if not _agent_has_control_config(
         db, account_id=str(current_user.account_id), agent=agent

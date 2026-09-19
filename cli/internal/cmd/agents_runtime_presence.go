@@ -110,6 +110,8 @@ var agentRuntimeProbes = map[string]agentRuntimeProbeSpec{
 		conclusiveOnDarwin:  true,
 		conclusiveElsewhere: true,
 	},
+	"pi":               {commands: []string{"pi"}, conclusiveOnDarwin: true, conclusiveElsewhere: true},
+	"deepseek harness": {commands: []string{"dsh"}, conclusiveOnDarwin: true, conclusiveElsewhere: true},
 	"hermes": {
 		commands:            []string{"hermes"},
 		conclusiveOnDarwin:  true,

@@ -1111,7 +1111,7 @@ class ContainerAgentExecutor(AgentExecutor):
                 allowed_mcp_tools,
                 account_api_token=account_api_token,
             )
-            env["MCP_CONFIG_JSON"] = json.dumps(mcp_config)
+            env.setdefault("MCP_CONFIG_JSON", json.dumps(mcp_config))
 
         # Create a writable workspace volume for the container
         # This ensures the agent has write permissions
@@ -1144,7 +1144,7 @@ class ContainerAgentExecutor(AgentExecutor):
                     env, execution_context
                 ).items()
             ],
-            "User": "10000:10000",  # Explicitly set user and group
+            "User": execution_context.get("_container_user", "10000:10000"),
             "WorkingDir": working_dir,  # Set working directory to git repo if configured
             "Labels": {
                 "preloop.flow_id": execution_context["flow_id"],
@@ -1165,6 +1165,19 @@ class ContainerAgentExecutor(AgentExecutor):
                 "CpuQuota": int(os.getenv("AGENT_CPU_QUOTA", "100000")),
             },
         }
+
+        # Shared command/env seam for plugin-based CLI harnesses, matching K8s.
+        if execution_context.get("_container_command"):
+            container_config["Entrypoint"] = execution_context["_container_command"]
+            container_config["Cmd"] = execution_context.get("_container_args", [])
+        if execution_context.get("_agent_env"):
+            env.update(execution_context["_agent_env"])
+            container_config["Env"] = [
+                f"{key}={value}"
+                for key, value in self._apply_git_credential_env(
+                    env, execution_context
+                ).items()
+            ]
 
         self._guard_docker_launch_payload(
             container_config, what=f"{self.agent_type} container for {execution_id}"
@@ -1341,7 +1354,7 @@ class ContainerAgentExecutor(AgentExecutor):
                 allowed_mcp_tools,
                 account_api_token=account_api_token,
             )
-            env["MCP_CONFIG_JSON"] = json.dumps(mcp_config)
+            env.setdefault("MCP_CONFIG_JSON", json.dumps(mcp_config))
 
         # Convert env dict to list of V1EnvVar. Git credentials are merged in
         # here rather than baked into the agent script, so the token stays out

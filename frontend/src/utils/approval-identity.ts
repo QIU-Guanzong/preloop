@@ -6,6 +6,8 @@ const SOURCE_LABELS: Record<string, string> = {
   codex_cli: 'Codex CLI',
   cursor: 'Cursor',
   opencode: 'OpenCode',
+  pi: 'Pi',
+  deepseek: 'DeepSeek Harness',
   openclaw: 'OpenClaw',
   hermes: 'Hermes',
 };

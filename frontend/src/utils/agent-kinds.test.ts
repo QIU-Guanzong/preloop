@@ -7,6 +7,12 @@ import {
 } from './agent-kinds';
 
 describe('agent kinds', () => {
+  it('identifies Pi and DeepSeek Harness independently of model providers', () => {
+    expect(getAgentKindPresentation('pi')?.label).to.equal('Pi');
+    expect(getAgentKindPresentation('deepseek')?.label).to.equal(
+      'DeepSeek Harness'
+    );
+  });
   it('folds case and separators into one key', () => {
     expect(normalizeAgentKind('Gemini CLI')).to.equal('gemini_cli');
     expect(normalizeAgentKind('gemini-cli')).to.equal('gemini_cli');
@@ -22,6 +28,8 @@ describe('agent kinds', () => {
       'codex',
       'opencode',
       'hermes',
+      'pi',
+      'deepseek',
       'cursor',
       'windsurf',
       'vscode',
