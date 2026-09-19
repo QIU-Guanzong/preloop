@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
+import json
 import tarfile
 import time
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from typing import Any
 from uuid import uuid4
 
@@ -28,6 +31,7 @@ import os, subprocess, sys
 os.makedirs('/tmp/preloop-check', exist_ok=False)
 os.chdir('/tmp/preloop-check')
 env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null', GIT_TERMINAL_PROMPT='0', GIT_CONFIG_COUNT='0')
+env.update(PRELOOP_VERIFY_HEAD=sys.argv[1], PRELOOP_VERIFY_BASE=sys.argv[3], PRELOOP_DISABLE_TELEMETRY='true')
 git = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'credential.helper=', '-c', 'protocol.file.allow=never', '-c', 'protocol.ext.allow=never']
 for args in [['init', '--template='], ['bundle', 'unbundle', '/tmp/branch.bundle'], ['checkout', '--detach', '--force', sys.argv[1]]]:
     subprocess.run(git + args, env=env, check=True)
@@ -92,21 +96,57 @@ async def verify_hosted_publication(
         raise PublicationError(
             "Isolated publication requires a trusted verification profile"
         )
-    checks = select_required_checks(profile, manifest["changed_files"]).commands
+    selection = select_required_checks(profile, manifest["changed_files"])
+    checks = selection.checks
     if not checks:
         raise PublicationError("No required checks selected; publication blocked")
+    manifest.update(
+        base_sha=policy.base_sha,
+        profile_id=profile.profile_id,
+        profile_version=profile.version,
+        profile_sha256=hashlib.sha256(
+            json.dumps(profile.model_dump(), sort_keys=True).encode()
+        ).hexdigest(),
+        environment={
+            "image": policy.verification_image,
+            "telemetry_disabled": True,
+            "runtime": "kubernetes" if executor.use_kubernetes else "docker",
+        },
+    )
+    # This cache lives only on the controller's executor, never in an agent
+    # workspace or result artifact. Successful adapters confirmed teardown
+    # before an entry was stored. Bind every input that can change the checks.
+    cache_key = (
+        policy.execution_id,
+        manifest["bundle_sha256"],
+        policy.base_sha,
+        manifest["profile_sha256"],
+        policy.verification_image,
+        bool(executor.use_kubernetes),
+    )
+    cache = getattr(executor, "_publication_check_cache", None)
+    if isinstance(cache, dict) and cache_key in cache:
+        cached = deepcopy(cache[cache_key])
+        return replace(
+            cached,
+            checks=tuple({**row, "reused": True} for row in cached.checks),
+        )
     outcomes = []
     try:
         async with asyncio.timeout(policy.verification_policy.gate_budget_seconds):
-            for check in checks:
+            for selected in checks:
+                check = selected.command
                 started = time.monotonic()
                 logs: list[str] = []
                 outcome = {
                     "id": check.id,
                     "command": check.command,
+                    "reason": check.reason,
+                    "selected_by": selected.selected_by,
                     "timeout_seconds": check.timeout_seconds,
                     "exit_code": None,
                     "log_tail": "",
+                    "reused": False,
                 }
                 outcomes.append(outcome)
                 if executor.use_kubernetes:
@@ -139,7 +179,7 @@ async def verify_hosted_publication(
         else:
             reason = "Isolated verifier runtime unavailable or removal unconfirmed; ensure the pinned toolchain supplies Python 3, Git and the required check dependencies"
         raise HostedVerificationError(reason, manifest, outcomes) from exc
-    return HostedVerification(
+    result = HostedVerification(
         VerifiedPublication(
             policy.execution_id, manifest["head_sha"], manifest["bundle_sha256"]
         ),
@@ -147,6 +187,13 @@ async def verify_hosted_publication(
         tuple(outcomes),
         policy.verification_image,
     )
+    if not isinstance(cache, dict):
+        cache = {}
+        executor._publication_check_cache = cache
+    if len(cache) >= 8:
+        cache.pop(next(iter(cache)))
+    cache[cache_key] = deepcopy(result)
+    return result
 
 
 async def _check_docker(
@@ -161,7 +208,12 @@ async def _check_docker(
     config = {
         "Image": policy.verification_image,
         "Entrypoint": ["python3", "-I", "-c"],
-        "Cmd": [CHECKOUT_SCRIPT, manifest["head_sha"], check.command],
+        "Cmd": [
+            CHECKOUT_SCRIPT,
+            manifest["head_sha"],
+            check.command,
+            policy.base_sha,
+        ],
         "Env": [
             "HOME=/tmp",
             "PATH=/usr/local/bin:/usr/bin:/bin",
@@ -330,6 +382,7 @@ async def _check_kubernetes(
                         CHECKOUT_SCRIPT,
                         manifest["head_sha"],
                         check.command,
+                        policy.base_sha,
                     ],
                     None,
                     logs,

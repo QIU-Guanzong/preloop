@@ -1245,6 +1245,16 @@ avatars.
 
 ### Fixed
 
+- Isolated publication checks receive the exact published base/head range and
+  retain profile, environment and selection evidence. Successful checks can be
+  reused only inside the controller for identical execution, artifact, profile
+  and runtime inputs after confirmed teardown. Unavailable checks and runtimes
+  are classified as `verification_blocked`, separately from failing tests.
+  Failed durable repairs keep their latest workspace and conversation while
+  recovering the prior PR binding through validated execution ancestry,
+  including explicitly adopted publishing executions. New commits still pass
+  the current verification gate before publication.
+
 - Saved flow details expose the effective publication policy, including ungated
   legacy flows and configuration blockers, without claiming that configured
   isolation is an execution verification receipt.
