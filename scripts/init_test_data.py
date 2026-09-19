@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import uuid
+from datetime import datetime, timezone
 
 import bcrypt
 from sqlalchemy.exc import SQLAlchemyError
@@ -41,6 +42,11 @@ async def create_test_data():
         if user:
             account = crud_account.get(db, id=user.account_id)
             logger.info(f"Admin user already exists (account ID: {account.id})")
+            if user.plan_choice_made_at is None:
+                user.plan_choice_made_at = datetime.now(timezone.utc)
+                db.add(user)
+                db.commit()
+                logger.info("Stamped plan_choice_made_at on existing admin")
         else:
             logger.info("Creating admin account and user...")
             account = crud_account.create(
@@ -65,6 +71,11 @@ async def create_test_data():
                     "email_verified": True,
                     "is_superuser": True,
                     "user_source": "local",
+                    # Seeded CI/dev admin is not a first-login signup. Stamp
+                    # this so a cloud overlay does not ask them to choose a
+                    # plan (EE frontend e2e timed out on "Choose your plan"
+                    # after #776 when this was left null).
+                    "plan_choice_made_at": datetime.now(timezone.utc),
                 },
             )
             account.primary_user_id = user.id
