@@ -2123,3 +2123,32 @@ class TestExtractSourceBranch:
             {"payload": {"merge_request": {"source_branch": "feat/x"}}}
         )
         assert branch == "feat/x"
+
+
+@pytest.mark.parametrize(
+    "tool_output",
+    [
+        "Traceback (most recent call last):\nValueError: expected regression",
+        '    echo "FATAL ERROR: Git clone failed!"',
+        "ERROR: first\nERROR: second\nERROR: third",
+    ],
+)
+def test_codex_tool_output_is_not_a_harness_failure(container_executor, tool_output):
+    logs = (
+        "PRELOOP_AGENT_EXEC_START\nexec\n"
+        '/bin/bash -lc "pytest" in /workspace/repo\n'
+        " exited 1 in 100ms:\n"
+        + tool_output
+        + "\ncodex\nI reproduced the bug and will fix it.\n"
+        "tokens used\n1000\n"
+        "PRELOOP_WORKSPACE_SNAPSHOT_SKIPPED size_exceeds_limit limit=2097152"
+    )
+    assert container_executor._detect_error_in_logs(logs) is False
+
+
+def test_codex_harness_failure_after_tool_output_is_detected(container_executor):
+    logs = (
+        'exec\n/bin/bash -lc "true" in /workspace/repo\n succeeded in 10ms:\n'
+        "codex\nAgent execution failed: connection lost"
+    )
+    assert container_executor._detect_error_in_logs(logs) is True

@@ -1245,6 +1245,12 @@ avatars.
 
 ### Fixed
 
+- Hosted workspace recovery preserves never-pushed branches and their base
+  commit identity across repeated checkpoints. Remote absence, divergence and
+  connection failures have distinct outcomes. Codex command transcripts no
+  longer masquerade as container/setup failures. The optional direct-checkpoint
+  Helm overlay supports 64 MiB archives with matching proxy limits.
+
 - Agents in a split Kubernetes deployment call the gateway Service instead
   of the API Service. API pods run `PRELOOP_SERVICE_ROLE=api` and never
   mount `/openai/v1`, so a model row without an explicit

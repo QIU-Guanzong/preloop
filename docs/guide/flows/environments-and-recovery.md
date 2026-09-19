@@ -71,7 +71,13 @@ agent-sandbox files and log markers cannot authorize isolated publication.
 ## Durable hosted artifacts
 
 Enable `FLOW_ARTIFACT_DIRECT_UPLOAD` when the runner can reach `PRELOOP_URL`.
-Without it, the legacy snapshot path remains in effect. With it, workspace
+The [checkpoint Helm overlay](../../../helm/preloop/values-native-checkpoints.yaml)
+enables direct uploads with a 64 MiB compressed cap and matching 80 MiB proxy
+limits. Merge its `extraEnv` entries with existing installation values.
+Without it, the legacy snapshot path remains in effect, including the 2 MiB
+Kubernetes log-channel cap. Raising `WORKSPACE_SNAPSHOT_MAX_BYTES` alone does
+not raise that log cap. A skipped legacy snapshot does not mean setup failed.
+With direct upload enabled, workspace
 checkpoints travel through authenticated HTTP, never the pod log channel.
 The service validates compressed and expanded size, archive paths and file
 kinds, encrypts the payload with the configured encryption key, and commits the
@@ -111,7 +117,11 @@ carry the same remote URL credential) and native session directories are
 excluded. This exclusion list is not a content-level secret detector; keep
 production credentials out of implementation workspaces. The trusted clone
 configuration recreates remotes. Divergent/newer remote commits are detected
-without checking out or overwriting the restored local branch. Missing, corrupt
+without checking out or overwriting the restored local branch. A restored
+branch that has never been pushed can continue when the remote confirms that
+the branch is absent. Authentication/network errors remain explicit
+`remote_unavailable` failures rather than being confused with divergence or
+absence. A branch identity mismatch blocks recovery. Missing, corrupt
 or expired checkpoints fail resume explicitly. Automatic cold branch fallback
 is disabled because a remote branch does not prove unpublished local work was
 preserved. Private executors never receive hosted artifact capabilities.

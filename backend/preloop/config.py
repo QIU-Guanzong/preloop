@@ -1024,9 +1024,10 @@ class Settings(BaseSettings):
             "Cap on the workspace snapshot (tar.gz of /workspace) captured at "
             "the end of every hosted flow run so an execution that failed "
             "before pushing can be restored. Workspaces larger than this are "
-            "skipped with a logged reason. On Kubernetes the snapshot travels "
-            "through the pod log stream and is additionally capped at 2 MiB "
-            "(K8S_WORKSPACE_STREAM_MAX_BYTES)."
+            "skipped with a logged reason. Direct HTTP checkpoints use this "
+            "limit on Docker and Kubernetes. Without FLOW_ARTIFACT_DIRECT_UPLOAD, "
+            "the legacy Kubernetes pod-log channel is additionally capped at "
+            "2 MiB (K8S_WORKSPACE_STREAM_MAX_BYTES)."
         ),
     )
     workspace_snapshot_ttl_hours: int = Field(
