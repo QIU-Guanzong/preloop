@@ -616,3 +616,31 @@ def test_image_and_tts_list_prices_need_matching_usage() -> None:
         completion_tokens=0,
         usage_details={"character_count": 20_000},
     ) == pytest.approx(0.2)
+
+
+def test_omni_audio_tokens_do_not_use_the_no_audio_chat_pair() -> None:
+    from preloop.services.alibaba_pricing import estimate, pricing_failure_reason
+
+    model = _model("qwen3.5-omni-plus")
+    assert estimate(
+        model,
+        prompt_tokens=10_000,
+        completion_tokens=1_000,
+        usage_details=None,
+    ) == pytest.approx(0.0223)
+    audio = {
+        "prompt_tokens_details": {"audio_tokens": 4000},
+    }
+    assert (
+        estimate(
+            model,
+            prompt_tokens=10_000,
+            completion_tokens=1_000,
+            usage_details=audio,
+        )
+        is None
+    )
+    assert (
+        pricing_failure_reason(model, prompt_tokens=10_000, usage_details=audio)
+        == "mixed_modality_usage"
+    )

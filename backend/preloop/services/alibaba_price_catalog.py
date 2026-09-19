@@ -264,8 +264,8 @@ def ingest_native_models(
         region: Overlay key, normally ``singapore-international``.
         replace: When True, the region bucket becomes exactly these tariffs.
 
-    Returns:
-    Count of models with a usable USD list tariff.
+        Returns:
+            Count of models with a usable USD list tariff.
 
     """
     incoming: dict[str, Tariff] = {}

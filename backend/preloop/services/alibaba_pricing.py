@@ -524,6 +524,8 @@ def estimate(
         return None
     if not tariff.has_token_rates():
         return _estimate_non_token(tariff, usage_details)
+    if _mixed_modality_usage(tariff, usage_details):
+        return None
     usage = usage_details or {}
     details = usage.get("prompt_tokens_details") or {}
     if not isinstance(details, dict):
@@ -566,6 +568,35 @@ def estimate(
         / 1_000_000,
         6,
     )
+
+
+def _mixed_modality_usage(tariff: Tariff, usage_details: dict[str, Any] | None) -> bool:
+    """True when leftover audio/vision rates cannot be applied to known tokens."""
+    extra = {kind.lower() for kind, _, _ in tariff.extra_rates}
+    if not extra:
+        return False
+    details = (usage_details or {}).get("prompt_tokens_details") or {}
+    if not isinstance(details, dict):
+        return False
+
+    def _positive(*keys: str) -> bool:
+        for key in keys:
+            raw = details.get(key)
+            if raw in (None, 0):
+                continue
+            try:
+                return int(raw) > 0
+            except (TypeError, ValueError, OverflowError):
+                return True
+        return False
+
+    if any("audio" in kind for kind in extra) and _positive("audio_tokens"):
+        return True
+    if any(
+        token in kind for kind in extra for token in ("image", "vision")
+    ) and _positive("image_tokens", "vision_tokens"):
+        return True
+    return False
 
 
 def _usage_int(usage: dict[str, Any], *keys: str) -> int | None:
@@ -652,6 +683,8 @@ def pricing_failure_reason(
         if _estimate_non_token(tariff, usage_details) is None:
             return "non_token_usage_required"
         return None
+    if _mixed_modality_usage(tariff, usage_details):
+        return "mixed_modality_usage"
     usage = usage_details or {}
     details = usage.get("prompt_tokens_details") or {}
     if not isinstance(details, dict):
