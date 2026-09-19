@@ -571,3 +571,52 @@ async def test_queued_isolated_launch_keeps_restored_pinned_git_configuration(
         build.await_args.args[0]["git_credentials_map"]["tracker"]["permission"]
         == "read"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_type", ["codex", "opencode"])
+@pytest.mark.parametrize(
+    "config, expected",
+    [
+        ({"image": "example.com/team/agent:v1"}, "example.com/team/agent:v1"),
+        ({"docker_image": "example.com/team/legacy:v2"}, "example.com/team/legacy:v2"),
+        (
+            {"image": "example.com/team/agent:v1", "docker_image": "ignored:v2"},
+            "example.com/team/agent:v1",
+        ),
+        (
+            {"image": "", "docker_image": "example.com/team/legacy:v2"},
+            "example.com/team/legacy:v2",
+        ),
+        (
+            {"image": "  ", "docker_image": " example.com/team/legacy:v2 "},
+            "example.com/team/legacy:v2",
+        ),
+        (
+            {"image": 123, "docker_image": "example.com/team/legacy:v2"},
+            "example.com/team/legacy:v2",
+        ),
+        ({}, None),
+    ],
+)
+async def test_private_launch_reports_effective_image(
+    agent_type: str,
+    config: dict,
+    expected: str | None,
+) -> None:
+    from preloop.agents.images import default_agent_image
+
+    launch = await build_runner_launch(
+        {
+            "agent_type": agent_type,
+            "agent_config": config,
+            "prompt": "Check the repository",
+            "model_identifier": "example-model",
+            "execution_id": str(uuid4()),
+            "flow_id": str(uuid4()),
+        }
+    )
+    assert (
+        f"Agent image reference: {expected or default_agent_image(agent_type)}"
+        in launch["script"]
+    )
