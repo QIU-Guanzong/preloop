@@ -271,12 +271,17 @@ _VERIFICATION_BLOCKED_RE = re.compile(
     r"|PRELOOP_VERIFICATION_DENIED status=blocked"
     r"|verification gate refused publication.{0,400}status=blocked"
     r"|required checks unavailable, empty, timed out, or working tree changed"
-    r"|required command is unavailable",
+    r"|required command is unavailable"
+    r"|Isolated verification check .+ failed with exit (?:126|127)\b"
+    r"|Isolated verification exceeded its configured budget"
+    r"|Isolated verifier runtime unavailable or removal unconfirmed"
+    r"|No required checks selected; publication blocked",
     re.IGNORECASE | re.DOTALL,
 )
 _VERIFICATION_FAILED_RE = re.compile(
     r"PRELOOP_VERIFICATION_DENIED"
-    r"|PRELOOP_VERIFICATION_VERDICT DENY",
+    r"|PRELOOP_VERIFICATION_VERDICT DENY"
+    r"|Isolated verification check .+ failed with exit",
     re.IGNORECASE,
 )
 # The completion-contract message written by the orchestrator.

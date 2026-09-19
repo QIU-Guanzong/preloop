@@ -11,13 +11,19 @@ import re
 import secrets
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 import httpx
 from sqlalchemy.orm import Session
 
 from preloop.config import settings
 from preloop.models import models
-from preloop.models.crud import crud_flow_execution, crud_project, crud_tracker
+from preloop.models.crud import (
+    crud_flow_execution,
+    crud_flow_feedback,
+    crud_project,
+    crud_tracker,
+)
 from preloop.services.publication_credentials import (
     mint_repository_lease,
     revoke_repository_lease,
@@ -328,6 +334,82 @@ async def _bind_isolated_repository(
     return target, resolved, read_lease, base, expected_remote, previous_records
 
 
+def _feedback_ancestor_publication(
+    db: Session,
+    *,
+    flow: models.Flow,
+    context: dict[str, Any],
+    prior: models.FlowExecution,
+    resume: dict[str, Any],
+) -> dict[str, Any]:
+    """Recover only publication authority across unpublished durable repairs.
+
+    The immediate prior remains the workspace and native-session source. An
+    ancestor receipt identifies the last published branch; it does not verify
+    any later commit, which must still pass the normal publication gate.
+    """
+    denied = "Continuation requires a trusted publication binding; legacy PRs must be explicitly migrated"
+    try:
+        thread_id = UUID(str(resume.get("thread_id")))
+    except (ValueError, TypeError):
+        raise PublicationError(denied) from None
+    thread = crud_flow_feedback.owned_thread(
+        db, thread_id=thread_id, account_id=flow.account_id, flow_id=flow.id
+    )
+    if (
+        thread is None
+        or str(thread.active_execution_id) != str(context["execution_id"])
+        or str(thread.latest_execution_id) != str(prior.id)
+        or thread.provider != "github"
+    ):
+        raise PublicationError(denied)
+    seen: set[str] = set()
+    for _ in range(64):
+        if prior is None or str(prior.flow_id) != str(flow.id):
+            raise PublicationError(denied)
+        details = prior.trigger_event_details
+        if not isinstance(details, dict) or str(
+            details.get("_thread_id") or details.get("_session_thread_id")
+        ) != str(thread.id):
+            raise PublicationError(denied)
+        if str(prior.id) in seen:
+            raise PublicationError(denied)
+        seen.add(str(prior.id))
+        result = prior.result if isinstance(prior.result, dict) else {}
+        receipt = result.get("trusted_publication")
+        if isinstance(receipt, dict):
+            rows = receipt.get("repositories") or [receipt]
+            try:
+                matches = [
+                    row
+                    for row in rows
+                    if isinstance(row, dict)
+                    and row.get("url") == thread.pr_url
+                    and row.get("branch") == thread.branch
+                    and row.get("provider") == thread.provider
+                    and row.get("repository_url")
+                    and thread.pr_url
+                    == normalize_repository_url(row["repository_url"]).removesuffix(
+                        ".git"
+                    )
+                    + "/pull/"
+                    + str(thread.pr_number)
+                    and is_git_sha(row.get("head_sha"))
+                ]
+            except (ValueError, TypeError, AttributeError):
+                raise PublicationError(denied) from None
+            if len(matches) != 1:
+                raise PublicationError(denied)
+            return receipt
+        parent = details.get("_resume")
+        if not isinstance(parent, dict) or not parent.get("execution_id"):
+            raise PublicationError(denied)
+        prior = crud_flow_execution.get(
+            db, id=parent["execution_id"], account_id=str(flow.account_id)
+        )
+    raise PublicationError(denied)
+
+
 async def prepare_isolated_publication(
     db: Session, flow: models.Flow, context: dict[str, Any]
 ) -> IsolatedPublicationPolicy:
@@ -385,8 +467,8 @@ async def prepare_isolated_publication(
         )
         prior_publication = prior_result.get("trusted_publication")
         if not isinstance(prior_publication, dict):
-            raise PublicationError(
-                "Continuation requires a trusted publication binding; legacy PRs must be explicitly migrated"
+            prior_publication = _feedback_ancestor_publication(
+                db, flow=flow, context=context, prior=prior, resume=resume
             )
         resume_topology_matches(prior_publication, repositories)
         prior_rows = prior_publication.get("repositories")
