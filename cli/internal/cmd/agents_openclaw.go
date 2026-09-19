@@ -2290,29 +2290,45 @@ func parseClaudeManagedGatewayUpstream(agent AgentConfig) (*managedGatewayUpstre
 	if modelRef == "" {
 		return nil, nil
 	}
-	if selection := claudeSelectionFromModelRef(modelRef); selection != "" {
-		if resolvedAlias := resolveClaudeSelectionGatewayModelAlias(selection, nil, nil); resolvedAlias != "" {
-			modelRef = resolvedAlias
+	if claudeUsesBedrock(document) {
+		resolved := resolveClaudeBedrockModelRef(document, modelRef)
+		if resolved != modelRef {
 			notes = append(
 				notes,
 				fmt.Sprintf(
-					"Resolved Claude Code model selector %q to current Anthropic model %s.",
-					selection,
+					"Resolved Claude Code Bedrock model selector %q to %s.",
 					modelRef,
+					resolved,
 				),
 			)
+			modelRef = resolved
 		}
-	}
-	if claudeUsesBedrock(document) {
-		providerID, modelID := splitOpenClawModelRef(modelRef)
-		if modelID == "" {
-			modelID = modelRef
+		if base, stripped := stripClaudeContextWindowSuffix(modelRef); stripped {
+			notes = append(
+				notes,
+				fmt.Sprintf(
+					"Claude Code's configured model %s uses a context-window variant; routing the base model %s through Preloop.",
+					modelRef,
+					base,
+				),
+			)
+			modelRef = base
 		}
-		switch strings.ToLower(strings.TrimSpace(providerID)) {
-		case "", "anthropic":
+		var providerID, modelID string
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelRef)), "arn:aws:bedrock:") {
 			providerID = "amazon-bedrock"
-		case "bedrock":
-			providerID = "amazon-bedrock"
+			modelID = strings.TrimSpace(modelRef)
+		} else {
+			providerID, modelID = splitOpenClawModelRef(modelRef)
+			if modelID == "" {
+				modelID = modelRef
+			}
+			switch strings.ToLower(strings.TrimSpace(providerID)) {
+			case "", "anthropic":
+				providerID = "amazon-bedrock"
+			case "bedrock":
+				providerID = "amazon-bedrock"
+			}
 		}
 		apiKey := strings.TrimSpace(resolveOpenClawEnvVar(document, "AWS_BEARER_TOKEN_BEDROCK"))
 		if apiKey != "" {
@@ -2342,6 +2358,19 @@ func parseClaudeManagedGatewayUpstream(agent AgentConfig) (*managedGatewayUpstre
 			ManagedModelAlias: managedAlias,
 			Notes:             notes,
 		}, nil
+	}
+	if selection := claudeSelectionFromModelRef(modelRef); selection != "" {
+		if resolvedAlias := resolveClaudeSelectionGatewayModelAlias(selection, nil, nil); resolvedAlias != "" {
+			modelRef = resolvedAlias
+			notes = append(
+				notes,
+				fmt.Sprintf(
+					"Resolved Claude Code model selector %q to current Anthropic model %s.",
+					selection,
+					modelRef,
+				),
+			)
+		}
 	}
 	apiKey, apiKeyNote := resolveClaudeAuthToken(document)
 	claudeSubscriptionOAuthDetected := false
@@ -7562,6 +7591,56 @@ func resolveOpenClawEnvVar(document map[string]interface{}, key string) string {
 func claudeUsesBedrock(document map[string]interface{}) bool {
 	value := strings.ToLower(strings.TrimSpace(resolveOpenClawEnvVar(document, "CLAUDE_CODE_USE_BEDROCK")))
 	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+// looksLikeBedrockModelID reports whether ref is a Bedrock foundation-model
+// id, geo inference profile, or inference-profile ARN. Claude Code family
+// selectors and Anthropic Messages names (“anthropic/claude-sonnet-4-5“)
+// are not Bedrock ids; LiteLLM Invoke cannot parse them.
+func looksLikeBedrockModelID(ref string) bool {
+	trimmed := strings.TrimSpace(ref)
+	if trimmed == "" {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "arn:aws:bedrock:") {
+		return true
+	}
+	if strings.Contains(trimmed, "/") {
+		return false
+	}
+	return strings.Contains(trimmed, ".")
+}
+
+// resolveClaudeBedrockModelRef maps a Claude Code family selector to the
+// Bedrock inference profile stored in ANTHROPIC_DEFAULT_<FAMILY>_MODEL.
+// Onboard used to rewrite "sonnet" through the Anthropic Messages catalog
+// (“anthropic/claude-sonnet-4-5“), which LiteLLM then invoked as
+// “bedrock/claude-sonnet-4-5“ and rejected.
+func resolveClaudeBedrockModelRef(document map[string]interface{}, modelRef string) string {
+	ref := strings.TrimSpace(modelRef)
+	if base, stripped := stripClaudeContextWindowSuffix(ref); stripped {
+		ref = base
+	}
+	if looksLikeBedrockModelID(ref) {
+		return ref
+	}
+	selection := claudeSelectionFromModelRef(ref)
+	if selection == "" {
+		return modelRef
+	}
+	family, ok := claudeFamilyForSelector(selection)
+	if !ok {
+		return modelRef
+	}
+	familyRef := strings.TrimSpace(resolveOpenClawEnvVar(document, family.envKey))
+	if base, stripped := stripClaudeContextWindowSuffix(familyRef); stripped {
+		familyRef = base
+	}
+	if looksLikeBedrockModelID(familyRef) {
+		return familyRef
+	}
+	return modelRef
 }
 
 // claudeShellBedrockOverrideNotes warns when the CLI's own process

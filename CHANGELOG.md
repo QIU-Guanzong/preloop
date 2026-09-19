@@ -1258,6 +1258,12 @@ avatars.
   prompt or completion fails closed instead of using the text chat pair.
   Native rows that publish no prices stay unpriced. See
   `docs/pricing/reviews/2026-09-19-alibaba.md`.
+- Claude Code onboarding through AWS Bedrock keeps the Bedrock inference
+  profile (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`) instead of
+  rewriting `/model` selectors such as `sonnet` to the Anthropic Messages
+  name `anthropic/claude-sonnet-4-5`. Gateway completions use LiteLLM's
+  Converse route (`bedrock/converse/<id>`). Discovery also lists system
+  inference profiles, not only `list_foundation_models`.
 - Native MCP calls commit remaining database work on success and roll back on
   failure or cancellation. Database errors are sanitized in both raised errors
   and compliance batch results, while unrelated provider errors retain their

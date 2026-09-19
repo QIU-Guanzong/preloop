@@ -1124,17 +1124,83 @@ def _is_bedrock_chat_model(summary: Any) -> bool:
     return any(str(m).upper() == "TEXT" for m in modalities)
 
 
+def _is_bedrock_inference_profile(summary: Any) -> bool:
+    """Keep ACTIVE system inference profiles that can serve chat.
+
+    Geo ids such as ``us.anthropic.claude-sonnet-4-5-20250929-v1:0`` are what
+    Claude Code stores. Foundation-model listing does not include them.
+    """
+    status = str(getattr(summary, "status", "") or "").upper()
+    if isinstance(summary, dict):
+        status = str(summary.get("status") or "").upper()
+        profile_id = str(summary.get("inferenceProfileId") or "").strip()
+    else:
+        profile_id = str(getattr(summary, "inferenceProfileId", "") or "").strip()
+    if status and status != "ACTIVE":
+        return False
+    if not profile_id:
+        return False
+    lower = profile_id.lower()
+    if any(
+        token in lower
+        for token in ("embed", "image", "stable-diffusion", "titan-embed", "video")
+    ):
+        return False
+    return True
+
+
+def _list_attr_or_key(obj: Any, name: str) -> list[Any]:
+    if obj is None:
+        return []
+    if isinstance(obj, dict):
+        value = obj.get(name) or []
+    else:
+        value = getattr(obj, name, None) or []
+    return value if isinstance(value, list) else []
+
+
+def _collect_bedrock_model_ids(client: Any) -> list[str]:
+    """Foundation models plus system inference profiles from one client."""
+    response = client.list_foundation_models()
+    model_ids: list[str] = []
+    for summary in _list_attr_or_key(response, "modelSummaries"):
+        model_id = str(getattr(summary, "modelId", "") or "").strip()
+        if model_id and _is_bedrock_chat_model(summary):
+            model_ids.append(model_id)
+
+    try:
+        profiles = client.list_inference_profiles(maxResults=1000, typeEquals="SYSTEM")
+    except TypeError:
+        try:
+            profiles = client.list_inference_profiles()
+        except Exception:
+            profiles = None
+    except Exception:
+        profiles = None
+
+    for summary in _list_attr_or_key(profiles, "inferenceProfileSummaries"):
+        if not _is_bedrock_inference_profile(summary):
+            continue
+        profile_id = str(getattr(summary, "inferenceProfileId", "") or "").strip()
+        if profile_id:
+            model_ids.append(profile_id)
+
+    return sorted(set(model_ids))
+
+
 async def _get_bedrock_models(
     aws_auth: Optional[Dict[str, Any]] = None,
 ) -> ModelDiscoveryResult:
-    """List AWS Bedrock foundation models via ``list_foundation_models``.
+    """List AWS Bedrock chat models via foundation models and inference profiles.
 
-    Control-plane API:
+    Control-plane APIs:
     https://docs.aws.amazon.com/bedrock/latest/APIReference/API_ListFoundationModels.html
+    https://docs.aws.amazon.com/bedrock/latest/APIReference/API_ListInferenceProfiles.html
     Uses boto3's ``bedrock`` client. Explicit access keys (typed or stored)
     are required for the picker; ambient instance-profile listing is not
     used. A bad key fails the call with an auth error, which raises
-    ProviderAuthError.
+    ProviderAuthError. Inference-profile listing is best-effort: a
+    permission miss still returns foundation model ids.
 
     Args:
         aws_auth: Mapping with ``aws_access_key_id``,
@@ -1142,7 +1208,8 @@ async def _get_bedrock_models(
             ``aws_region_name``.
 
     Returns:
-        ModelDiscoveryResult with sorted text-output foundation model ids.
+        ModelDiscoveryResult with sorted text-output model ids, including
+        geo inference profiles such as ``us.anthropic.claude-sonnet-4-5-...``.
 
     Raises:
         ProviderValidationError: When no region can be resolved.
@@ -1182,8 +1249,8 @@ async def _get_bedrock_models(
                 retries={"max_attempts": 1},
             ),
         )
-        # list_foundation_models is synchronous; keep it off the event loop.
-        response = await asyncio.to_thread(client.list_foundation_models)
+        # Control-plane listing is synchronous; keep it off the event loop.
+        model_ids = await asyncio.to_thread(_collect_bedrock_model_ids, client)
     except ProviderValidationError:
         raise
     except Exception as e:
@@ -1204,14 +1271,7 @@ async def _get_bedrock_models(
         )
         return _fallback([], _classify_fetch_error(e))
 
-    summaries = getattr(response, "modelSummaries", None) or []
-    model_ids = []
-    for summary in summaries:
-        model_id = str(getattr(summary, "modelId", "") or "").strip()
-        if model_id and _is_bedrock_chat_model(summary):
-            model_ids.append(model_id)
-
-    model_ids = sorted(set(model_ids))[:MAX_DISCOVERED_MODELS]
+    model_ids = model_ids[:MAX_DISCOVERED_MODELS]
     if not model_ids:
         logger.info("Bedrock returned no chat models")
         return _fallback([], ERROR_EMPTY_RESPONSE)

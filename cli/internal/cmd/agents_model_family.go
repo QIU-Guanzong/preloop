@@ -68,6 +68,21 @@ func claudeFamilyForAlias(alias string) (claudeModelFamily, bool) {
 	return claudeModelFamily{}, false
 }
 
+// claudeFamilyForSelector reports which family a Claude Code /model selector
+// belongs to ("sonnet", "haiku", "opus", "fable").
+func claudeFamilyForSelector(selector string) (claudeModelFamily, bool) {
+	lower := strings.ToLower(strings.TrimSpace(selector))
+	if lower == "" {
+		return claudeModelFamily{}, false
+	}
+	for _, family := range claudeModelFamilies {
+		if family.selector == lower {
+			return family, true
+		}
+	}
+	return claudeModelFamily{}, false
+}
+
 // claudeFamilyModelEnv builds the ANTHROPIC_DEFAULT_*_MODEL environment entries
 // for every family represented in aliases.
 //

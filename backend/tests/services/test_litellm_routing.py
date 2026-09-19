@@ -365,3 +365,53 @@ class TestRuleThreePrefixOverride:
         # or after this change (issue #172).
         model = _model("moonshot", "some-org/kimi-k3")
         assert to_litellm_model(model) == "moonshot/some-org/kimi-k3"
+
+
+class TestBedrockConverseRouting:
+    """Bedrock chat must use LiteLLM's converse route, not Invoke."""
+
+    def test_inference_profile_uses_converse(self):
+        assert (
+            to_litellm_model(
+                _model(
+                    "amazon-bedrock",
+                    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                )
+            )
+            == "bedrock/converse/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        )
+
+    def test_foundation_id_uses_converse(self):
+        assert (
+            to_litellm_model(_model("bedrock", "anthropic.claude-sonnet-4-5"))
+            == "bedrock/converse/anthropic.claude-sonnet-4-5"
+        )
+
+    def test_context_window_suffix_is_stripped(self):
+        assert (
+            to_litellm_model(
+                _model(
+                    "bedrock",
+                    "us.anthropic.claude-sonnet-4-5-20250929-v1:0[1m]",
+                )
+            )
+            == "bedrock/converse/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        )
+
+    def test_anthropic_messages_name_does_not_invoke_bare_id(self):
+        # The onboard bug: family selector rewritten to anthropic/claude-sonnet-4-5
+        # then stripped to claude-sonnet-4-5, which LiteLLM Invoke rejects.
+        assert (
+            to_litellm_model(_model("amazon-bedrock", "anthropic/claude-sonnet-4-5"))
+            == "bedrock/converse/claude-sonnet-4-5"
+        )
+
+    def test_explicit_invoke_route_is_preserved(self):
+        assert (
+            to_litellm_model(_model("bedrock", "bedrock/invoke/anthropic.claude-3"))
+            == "bedrock/invoke/anthropic.claude-3"
+        )
+
+    def test_arn_uses_converse(self):
+        arn = "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/abc"
+        assert to_litellm_model(_model("bedrock", arn)) == f"bedrock/converse/{arn}"

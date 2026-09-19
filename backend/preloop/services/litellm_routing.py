@@ -53,6 +53,8 @@ import litellm
 from preloop.models.models.ai_model import AIModel
 from preloop.services.tls_verify import ssl_verify_setting
 
+BEDROCK_PROVIDERS = frozenset({"bedrock", "amazon-bedrock", "aws"})
+
 PROVIDER_PREFIX: Dict[str, str] = {
     "openai": "openai",
     "openai-codex": "openai",
@@ -266,11 +268,72 @@ def _openrouter_model(identifier: str) -> str:
     return f"{OPENROUTER_PREFIX}{identifier}"
 
 
+def _strip_claude_context_window_suffix(identifier: str) -> str:
+    """Drop Claude Code's trailing ``[1m]`` (and similar) context marker."""
+    if not identifier.endswith("]") or "[" not in identifier:
+        return identifier
+    bracket = identifier.rfind("[")
+    marker = identifier[bracket + 1 : -1]
+    if marker and marker[-1].lower() == "m" and marker[:-1].isdigit():
+        return identifier[:bracket]
+    return identifier
+
+
+def bedrock_litellm_model(identifier: str) -> str:
+    """Build LiteLLM's Bedrock Converse model string.
+
+    Claude 4.x inference profiles (``us.anthropic.claude-sonnet-4-5-...``)
+    and application-inference-profile ARNs fail LiteLLM's Invoke parser with
+    ``Unknown provider=None``. Converse accepts those ids. An explicit
+    ``bedrock/invoke/...`` identifier is preserved.
+    """
+    ident = _strip_claude_context_window_suffix((identifier or "").strip())
+    lower = ident.lower()
+    if lower.startswith("arn:aws:bedrock:"):
+        return f"bedrock/converse/{ident}"
+
+    explicit_route = ""
+    for prefix, route in (
+        ("bedrock/converse/", "converse"),
+        ("bedrock/invoke/", "invoke"),
+        ("bedrock/", ""),
+        ("amazon-bedrock/", ""),
+        ("aws/", ""),
+    ):
+        if lower.startswith(prefix):
+            ident = ident[len(prefix) :]
+            explicit_route = route
+            lower = ident.lower()
+            break
+
+    if "/" in ident and not lower.startswith("arn:"):
+        head, rest = ident.split("/", 1)
+        head_lower = head.lower()
+        if head_lower == "converse":
+            explicit_route = "converse"
+            ident = rest
+        elif head_lower == "invoke":
+            explicit_route = "invoke"
+            ident = rest
+        elif head_lower in known_litellm_providers() or head_lower in set(
+            PROVIDER_PREFIX.values()
+        ):
+            # Claude Code stores Anthropic Messages names (``anthropic/claude-sonnet-4-5``).
+            # The Bedrock id is the remainder; LiteLLM still needs converse.
+            ident = rest
+
+    route = explicit_route or "converse"
+    return f"bedrock/{route}/{ident}"
+
+
 def to_litellm_model(ai_model: AIModel) -> str:
     """Build the litellm model string for an AI model row."""
     provider = (ai_model.provider_name or "openai").strip().lower()
     identifier = (ai_model.model_identifier or "").strip()
     endpoint = getattr(ai_model, "api_endpoint", None)
+
+    if provider in BEDROCK_PROVIDERS:
+        return bedrock_litellm_model(identifier)
 
     # The user's explicit provider/endpoint choice outranks any vendor prefix
     # inside the model id (issue #172).
