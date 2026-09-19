@@ -1,5 +1,6 @@
 """Alibaba tariffs must match the serving region and reported token classes."""
 
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -53,6 +54,7 @@ def _estimate(
         ("deepseek-v4-pro", 0.0288),
         ("deepseek-v4-flash", 0.0024),
         ("glm-5.2", 0.0184),
+        ("glm-5.3", 0.0184),
         ("kimi-k2.7-code", 0.0135),
         ("kimi-k3", 0.045),
         ("qwen3.8-flash", 0.00197),
@@ -62,6 +64,57 @@ def test_singapore_headline_list_costs(model: str, expected: float) -> None:
     result = _estimate(_model(model))
     assert result.source == "catalog"
     assert result.cost == pytest.approx(expected)
+
+
+def test_time_banded_deepseek_uses_utc8_night_window() -> None:
+    """Singapore International busy/idle rates follow 22:00-08:00 UTC+8."""
+    model = _model("deepseek-v4.1-flash")
+    # 04:00 UTC is 12:00 UTC+8 (daytime / busy).
+    busy = _estimate(
+        model, observed_at=datetime(2026, 9, 19, 4, 0, tzinfo=timezone.utc)
+    )
+    # 16:00 UTC is 00:00 UTC+8 (night / idle).
+    idle = _estimate(
+        model, observed_at=datetime(2026, 9, 19, 16, 0, tzinfo=timezone.utc)
+    )
+    assert busy.source == "catalog"
+    assert idle.source == "catalog"
+    assert busy.cost == pytest.approx(0.0042)
+    assert idle.cost == pytest.approx(0.0021)
+    flash_0731 = _estimate(
+        _model("deepseek-v4-flash-0731"),
+        observed_at=datetime(2026, 9, 19, 4, 0, tzinfo=timezone.utc),
+    )
+    assert flash_0731.cost == pytest.approx(0.00572)
+    cached = _estimate(
+        model,
+        {
+            "_preloop_cache_mode": "implicit",
+            "prompt_tokens_details": {"cached_tokens": 5000},
+        },
+        observed_at=datetime(2026, 9, 19, 4, 0, tzinfo=timezone.utc),
+    )
+    assert cached.cost == pytest.approx(0.00285)
+    unpriced_cache = _estimate(
+        _model("deepseek-v4-flash-0731"),
+        {
+            "_preloop_cache_mode": "implicit",
+            "prompt_tokens_details": {"cached_tokens": 5000},
+        },
+        observed_at=datetime(2026, 9, 19, 4, 0, tzinfo=timezone.utc),
+    )
+    assert unpriced_cache.cost is None
+    assert _catalog_entry(model) is not None
+
+
+def test_alibaba_idle_hours_follow_utc8_night_window() -> None:
+    from preloop.services.alibaba_pricing import is_alibaba_idle_hour
+
+    # 22:00 UTC+8 is 14:00 UTC; 08:00 UTC+8 is 00:00 UTC.
+    assert is_alibaba_idle_hour(datetime(2026, 9, 19, 14, 0, tzinfo=timezone.utc))
+    assert is_alibaba_idle_hour(datetime(2026, 9, 18, 23, 59, tzinfo=timezone.utc))
+    assert not is_alibaba_idle_hour(datetime(2026, 9, 19, 0, 0, tzinfo=timezone.utc))
+    assert not is_alibaba_idle_hour(datetime(2026, 9, 19, 13, 59, tzinfo=timezone.utc))
 
 
 @pytest.mark.parametrize(
@@ -264,6 +317,8 @@ def test_seed_covers_current_singapore_chat_skus() -> None:
     assert "qwen3.8-flash" in _SEED
     assert "qwen3.5-flash" in _SEED
     assert "qwen-plus" in _SEED
+    assert "deepseek-v4.1-flash" in _SEED
+    assert "glm-5.3" in _SEED
     assert len(_SEED) >= 80
 
 

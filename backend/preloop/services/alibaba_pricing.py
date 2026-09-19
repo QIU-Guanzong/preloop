@@ -6,8 +6,9 @@ from the public pricing page. The native ``GET /api/v1/models`` overlay
 from the same USD site response. Chat completions still report tokens only.
 
 Beijing and other CNY sites stay unpriced in USD accounting. Time-banded
-SKUs stay unpriced until a dedicated adapter exists. Do not substitute a
-native DeepSeek/Z.ai/Moonshot price for an Alibaba-hosted model.
+Singapore International SKUs use Model Studio night hours (22:00-08:00
+UTC+8, idle) versus daytime (busy). Do not substitute a native
+DeepSeek/Z.ai/Moonshot price for an Alibaba-hosted model.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -26,6 +27,9 @@ from preloop.services.litellm_routing import is_openrouter_model
 SEED_PATH = (
     Path(__file__).resolve().parent / "data" / "alibaba_international_prices.json"
 )
+
+
+UTC8 = timezone(timedelta(hours=8))
 
 
 @dataclass(frozen=True)
@@ -39,6 +43,32 @@ class Tariff:
     creation: float | None = None
     max_input: int | None = None
     tiers: tuple["Tariff", ...] = ()
+    time_bands: TimeBands | None = None
+
+
+@dataclass(frozen=True)
+class TimeBands:
+    """Model Studio night/daytime token tariffs for one SKU."""
+
+    idle: Tariff
+    busy: Tariff
+
+
+def is_alibaba_idle_hour(when: datetime) -> bool:
+    """True during Model Studio night hours, 22:00-08:00 UTC+8."""
+    aware = when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+    hour = aware.astimezone(UTC8).hour
+    return hour >= 22 or hour < 8
+
+
+def select_time_band(tariff: Tariff, observed_at: datetime | None) -> Tariff:
+    """Pick the idle or busy tariff for the request time, or the flat tariff."""
+    bands = tariff.time_bands
+    if bands is None:
+        return tariff
+    when = observed_at or datetime.now(timezone.utc)
+    chosen = bands.idle if is_alibaba_idle_hour(when) else bands.busy
+    return chosen
 
 
 def _host(ai_model: models.AIModel) -> str:
@@ -81,6 +111,28 @@ def usd_region(ai_model: models.AIModel) -> str | None:
 
 
 def _tariff_from_seed_entry(entry: dict[str, Any]) -> Tariff | None:
+    bands = entry.get("time_bands")
+    if isinstance(bands, dict):
+        idle = _tariff_from_seed_tiers(bands.get("idle"))
+        busy = _tariff_from_seed_tiers(bands.get("busy"))
+        if idle is None or busy is None:
+            return None
+        return Tariff(
+            input=busy.input,
+            output=busy.output,
+            implicit_read=busy.implicit_read,
+            explicit_read=busy.explicit_read,
+            creation=busy.creation,
+            max_input=busy.max_input,
+            tiers=busy.tiers,
+            time_bands=TimeBands(idle=idle, busy=busy),
+        )
+    return _tariff_from_seed_tiers(entry)
+
+
+def _tariff_from_seed_tiers(entry: Any) -> Tariff | None:
+    if not isinstance(entry, dict):
+        return None
     raw_tiers = entry.get("tiers")
     if not isinstance(raw_tiers, list) or not raw_tiers:
         return None
@@ -237,6 +289,7 @@ def catalog_entry(ai_model: models.AIModel) -> tuple[str, dict[str, Any]] | None
     tariff = tariff_for(ai_model)
     if tariff is None:
         return None
+    tariff = select_time_band(tariff, None)
     region = usd_region(ai_model) or "singapore-international"
     entry: dict[str, Any] = {
         "input_cost_per_token": tariff.input / 1_000_000,
@@ -366,14 +419,15 @@ def estimate(
     already include reasoning tokens, which must never be added a second time.
     The internal cache-mode tag comes from the forwarded request, not the model.
     """
-    resolved = tariff_for_usage(
+    parent = tariff_for_usage(
         ai_model,
         prompt_tokens=prompt_tokens,
         usage_details=usage_details,
         observed_at=observed_at,
     )
-    if resolved is None:
+    if parent is None:
         return None
+    resolved = select_time_band(parent, observed_at)
     tariff = select_tier(resolved, prompt_tokens)
     if tariff is None:
         return None
@@ -400,7 +454,7 @@ def estimate(
     if cached + created > prompt_tokens:
         return None
     if (cached or created) and _seed_cache_predates_evidence(
-        ai_model, resolved, observed_at
+        ai_model, parent, observed_at
     ):
         return None
     mode = usage.get("_preloop_cache_mode")
@@ -435,14 +489,15 @@ def pricing_failure_reason(
         return "unsupported_region"
     if reviewed_before_effective(ai_model, observed_at=observed_at):
         return "tariff_not_effective"
-    resolved = tariff_for_usage(
+    parent = tariff_for_usage(
         ai_model,
         prompt_tokens=prompt_tokens,
         usage_details=usage_details,
         observed_at=observed_at,
     )
-    if resolved is None:
+    if parent is None:
         return "missing_model_tariff"
+    resolved = select_time_band(parent, observed_at)
     tariff = select_tier(resolved, prompt_tokens)
     if tariff is None:
         return "context_out_of_range"
@@ -467,7 +522,7 @@ def pricing_failure_reason(
     if min(prompt_tokens, cached, created) < 0 or cached + created > prompt_tokens:
         return "invalid_usage"
     if (cached or created) and _seed_cache_predates_evidence(
-        ai_model, resolved, observed_at
+        ai_model, parent, observed_at
     ):
         return "cache_tariff_not_effective"
     mode = usage.get("_preloop_cache_mode")

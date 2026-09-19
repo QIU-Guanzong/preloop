@@ -4,8 +4,8 @@
     "service_site": "international",
     "region": "singapore",
     "source_url": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
-    "retrieved_at": "2026-09-13",
-    "note": "Singapore International standard token tariffs. Estimates, not invoices. Live native GET /api/v1/models overlays this seed.",
+    "retrieved_at": "2026-09-19",
+    "note": "Singapore International standard token tariffs. Estimates, not invoices. Live native GET /api/v1/models overlays this seed. Time-banded SKUs use Model Studio night hours 22:00-08:00 UTC+8.",
     "cache_source_url": "https://www.alibabacloud.com/help/en/model-studio/context-cache",
     "cache_verified_at": "2026-09-15",
     "cache_note": "Exact Singapore supported SKUs and documented ratios, with qwen3.8-flash operator-confirmed console tariffs. Other console-only cache-hit exceptions remain unpriced until a reviewed or native tariff supplies them."
@@ -43,6 +43,28 @@
       ],
       "implicit_read": 0.04
     },
+    "deepseek-v4-flash-0731": {
+      "time_bands": {
+        "idle": {
+          "tiers": [
+            {
+              "max_input": null,
+              "input": 0.22,
+              "output": 0.66
+            }
+          ]
+        },
+        "busy": {
+          "tiers": [
+            {
+              "max_input": null,
+              "input": 0.44,
+              "output": 1.32
+            }
+          ]
+        }
+      }
+    },
     "deepseek-v4-pro": {
       "tiers": [
         {
@@ -51,6 +73,52 @@
           "output": 4.8
         }
       ]
+    },
+    "deepseek-v4-pro-0813": {
+      "time_bands": {
+        "idle": {
+          "tiers": [
+            {
+              "max_input": null,
+              "input": 0.66,
+              "output": 1.98
+            }
+          ]
+        },
+        "busy": {
+          "tiers": [
+            {
+              "max_input": null,
+              "input": 1.32,
+              "output": 3.96
+            }
+          ]
+        }
+      }
+    },
+    "deepseek-v4.1-flash": {
+      "time_bands": {
+        "idle": {
+          "tiers": [
+            {
+              "max_input": null,
+              "input": 0.15,
+              "output": 0.6,
+              "implicit_read": 0.015
+            }
+          ]
+        },
+        "busy": {
+          "tiers": [
+            {
+              "max_input": null,
+              "input": 0.3,
+              "output": 1.2,
+              "implicit_read": 0.03
+            }
+          ]
+        }
+      }
     },
     "glm-5.1": {
       "tiers": [
@@ -78,6 +146,15 @@
           "max_input": null,
           "input": 2.8,
           "output": 8.8
+        }
+      ]
+    },
+    "glm-5.3": {
+      "tiers": [
+        {
+          "max_input": null,
+          "input": 1.4,
+          "output": 4.4
         }
       ]
     },

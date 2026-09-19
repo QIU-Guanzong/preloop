@@ -195,7 +195,10 @@ is required for new rates or newly reviewed SKUs within an opted-in region.
 The approved reviewed publication takes precedence until its expiry, so a native
 refresh cannot silently replace reviewed prices. Expired native/reviewed data is not treated as
 fresh. Historical requests cannot consume a tariff before its effective date.
-Unsupported currencies, time-band policies and unknown cache rates stay unpriced.
+Unsupported currencies and unknown cache rates stay unpriced. Time-banded
+Singapore International token SKUs use Model Studio night hours
+(22:00-08:00 UTC+8, idle) versus daytime (busy); a native row with only one
+band stays unpriced. Do not substitute native DeepSeek weekday UTC bands.
 The public Flash cache-hit table points to the console. The current Flash entry
 uses an operator-confirmed Singapore console snapshot, identified by
 `evidence_kind: operator_confirmed_console`; its source URL points to the official

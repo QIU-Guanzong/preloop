@@ -1,4 +1,4 @@
-"""Native Model Studio catalog parsing is token-only and skips time bands."""
+"""Native Model Studio catalog parsing is token-only and keeps both time bands."""
 
 from typing import Any, Callable
 from datetime import datetime, timedelta, timezone
@@ -275,6 +275,62 @@ def test_parse_skips_image_and_time_banded_rows() -> None:
     )
     assert image is None
     assert banded is None
+
+
+def test_parse_keeps_idle_and_busy_token_bands() -> None:
+    tariff = parse_native_model(
+        {
+            "model": "deepseek-v4.1-flash",
+            "prices": [
+                {
+                    "range_name": "Default",
+                    "prices": [
+                        {
+                            "type": "input_token",
+                            "price": "0.3",
+                            "price_unit": "Per 1M tokens",
+                            "time_band": "busy",
+                        },
+                        {
+                            "type": "output_token",
+                            "price": "1.2",
+                            "price_unit": "Per 1M tokens",
+                            "time_band": "busy",
+                        },
+                        {
+                            "type": "input_token_cache_implicit",
+                            "price": "0.03",
+                            "price_unit": "Per 1M tokens",
+                            "time_band": "busy",
+                        },
+                        {
+                            "type": "input_token",
+                            "price": "0.15",
+                            "price_unit": "Per 1M tokens",
+                            "time_band": "idle",
+                        },
+                        {
+                            "type": "output_token",
+                            "price": "0.6",
+                            "price_unit": "Per 1M tokens",
+                            "time_band": "idle",
+                        },
+                        {
+                            "type": "input_token_cache_implicit",
+                            "price": "0.015",
+                            "price_unit": "Per 1M tokens",
+                            "time_band": "idle",
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    assert tariff is not None
+    assert tariff.time_bands is not None
+    assert tariff.time_bands.busy.input == 0.3
+    assert tariff.time_bands.idle.input == 0.15
+    assert tariff.time_bands.idle.implicit_read == 0.015
 
 
 def test_parse_keeps_unbanded_token_tariff_and_tiers() -> None:

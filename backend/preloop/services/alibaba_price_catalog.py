@@ -7,7 +7,9 @@ Estimates remain list prices, never invoices.
 
 Currency is asserted from the serving region (Singapore International and
 US workspace native catalogs are USD). Beijing is not ingested into USD
-accounting. Time-banded rows are skipped until a dedicated adapter exists.
+accounting. Time-banded token rows become idle/busy tariffs using Model
+Studio night hours (22:00-08:00 UTC+8). Image and other non-token units
+stay unpriced.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import httpx
 from preloop.models import models
 from preloop.services.alibaba_pricing import (
     Tariff,
+    TimeBands,
     _host,
     is_alibaba,
 )
@@ -316,37 +319,64 @@ def parse_native_model(entry: Any) -> Tariff | None:
     """Parse one native catalog model into a USD token tariff.
 
     Image, audio, and other non-token units are ignored. A time_band on an
-    input or output row drops that row; if no unbanded input/output remain,
-    the model stays off the overlay.
+    input or output row is kept only when both idle and busy token rates are
+    present; a single band is not enough to estimate.
     """
     if not isinstance(entry, dict):
         return None
     groups = entry.get("prices")
     if not isinstance(groups, list) or not groups:
         return None
-    tiers: list[Tariff] = []
+    unbanded: list[Tariff] = []
+    banded: list[Tariff] = []
     for group in groups:
         if not isinstance(group, dict):
             continue
         tariff = _tariff_from_price_group(group)
         if tariff is not None:
-            tiers.append(tariff)
+            unbanded.append(tariff)
+            continue
+        both = _banded_tariff_from_price_group(group)
+        if both is not None:
+            banded.append(both)
+    if unbanded:
+        return _combine_tariff_tiers(unbanded)
+    if len(banded) == 1:
+        return banded[0]
+    return None
+
+
+def _combine_tariff_tiers(tiers: list[Tariff]) -> Tariff | None:
     if not tiers:
         return None
     if len(tiers) == 1:
         return tiers[0]
+    first = tiers[0]
     return Tariff(
-        input=tiers[0].input,
-        output=tiers[0].output,
-        implicit_read=tiers[0].implicit_read,
-        explicit_read=tiers[0].explicit_read,
-        creation=tiers[0].creation,
-        max_input=tiers[0].max_input,
+        input=first.input,
+        output=first.output,
+        implicit_read=first.implicit_read,
+        explicit_read=first.explicit_read,
+        creation=first.creation,
+        max_input=first.max_input,
         tiers=tuple(tiers),
     )
 
 
-def _tariff_from_price_group(group: dict[str, Any]) -> Tariff | None:
+def _normalize_time_band(value: Any) -> str | None:
+    raw = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+    if raw in {"", "default", "none"}:
+        return "default"
+    if raw in {"busy", "peak", "daytime", "day"}:
+        return "busy"
+    if raw in {"idle", "off-peak", "offpeak", "night"}:
+        return "idle"
+    return None
+
+
+def _tariff_from_price_group(
+    group: dict[str, Any], *, band: str | None = None
+) -> Tariff | None:
     items = group.get("prices")
     if not isinstance(items, list):
         return None
@@ -354,7 +384,11 @@ def _tariff_from_price_group(group: dict[str, Any]) -> Tariff | None:
     for item in items:
         if not isinstance(item, dict):
             continue
-        if item.get("time_band") not in (None, "", "Default"):
+        item_band = _normalize_time_band(item.get("time_band"))
+        if band is None:
+            if item_band not in (None, "default"):
+                continue
+        elif item_band != band:
             continue
         if not _is_token_unit(str(item.get("price_unit") or "")):
             continue
@@ -377,6 +411,22 @@ def _tariff_from_price_group(group: dict[str, Any]) -> Tariff | None:
         explicit_read=parsed.get("explicit_read"),
         creation=parsed.get("creation"),
         max_input=_parse_range_upper(str(group.get("range_name") or "")),
+    )
+
+
+def _banded_tariff_from_price_group(group: dict[str, Any]) -> Tariff | None:
+    busy = _tariff_from_price_group(group, band="busy")
+    idle = _tariff_from_price_group(group, band="idle")
+    if busy is None or idle is None:
+        return None
+    return Tariff(
+        input=busy.input,
+        output=busy.output,
+        implicit_read=busy.implicit_read,
+        explicit_read=busy.explicit_read,
+        creation=busy.creation,
+        max_input=busy.max_input,
+        time_bands=TimeBands(idle=idle, busy=busy),
     )
 
 

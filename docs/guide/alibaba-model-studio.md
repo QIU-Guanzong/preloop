@@ -66,8 +66,9 @@ current chat SKUs, then overlays live native `GET /api/v1/models` prices when
 Fetch Models, Fetch price, or an unpriced-row lookup succeeds. It does not
 substitute a native DeepSeek, Z.ai or Moonshot price for an Alibaba-hosted
 model. Beijing and other CNY sites stay unpriced in USD accounting. Time-banded
-SKUs and non-token units (image, audio) stay unpriced unless an operator supplies
-an override.
+Singapore International SKUs use Model Studio night hours (22:00-08:00 UTC+8,
+idle) versus daytime (busy). Non-token units (image, audio) stay unpriced unless
+an operator supplies an override.
 
 See [Alibaba's model pricing](https://www.alibabacloud.com/help/en/model-studio/model-pricing)
 for published rates and [List models](https://www.alibabacloud.com/help/en/model-studio/list-models)

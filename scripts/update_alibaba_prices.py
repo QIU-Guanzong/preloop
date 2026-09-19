@@ -86,6 +86,38 @@ def _models_from_payload(payload: Any) -> tuple[list[dict[str, Any]], dict[str, 
     return rows, meta
 
 
+def _tier_payload(tier: Any) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in {
+            "max_input": tier.max_input,
+            "input": tier.input,
+            "output": tier.output,
+            "implicit_read": tier.implicit_read,
+            "explicit_read": tier.explicit_read,
+            "creation": tier.creation,
+        }.items()
+        if value is not None
+    }
+
+
+def _band_payload(tariff: Any) -> dict[str, Any]:
+    tiers = list(tariff.tiers) if tariff.tiers else [tariff]
+    return {"tiers": [_tier_payload(tier) for tier in tiers]}
+
+
+def _seed_model_entry(tariff: Any) -> dict[str, Any]:
+    bands = tariff.time_bands
+    if bands is not None:
+        return {
+            "time_bands": {
+                "idle": _band_payload(bands.idle),
+                "busy": _band_payload(bands.busy),
+            }
+        }
+    return _band_payload(tariff)
+
+
 def build_seed(payload: Any) -> dict[str, Any]:
     """Convert a verified complete dump without changing its retrieval date."""
     rows, meta = _models_from_payload(payload)
@@ -95,24 +127,7 @@ def build_seed(payload: Any) -> dict[str, Any]:
         tariff = parse_native_model(entry)
         if tariff is None:
             continue
-        tiers = list(tariff.tiers) if tariff.tiers else [tariff]
-        models[ident] = {
-            "tiers": [
-                {
-                    key: value
-                    for key, value in {
-                        "max_input": tier.max_input,
-                        "input": tier.input,
-                        "output": tier.output,
-                        "implicit_read": tier.implicit_read,
-                        "explicit_read": tier.explicit_read,
-                        "creation": tier.creation,
-                    }.items()
-                    if value is not None
-                }
-                for tier in tiers
-            ]
-        }
+        models[ident] = _seed_model_entry(tariff)
     if not models:
         raise ValueError("Native dump contains no supported USD token tariffs")
     return {

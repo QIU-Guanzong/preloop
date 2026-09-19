@@ -67,6 +67,40 @@ def test_native_seed_preserves_original_evidence_and_absent_cache(dump: dict) ->
     assert seed["models"]["example-chat"]["tiers"] == [{"input": 0.2, "output": 0.8}]
 
 
+def test_native_seed_keeps_idle_and_busy_bands(dump: dict) -> None:
+    dump["output"]["models"][0]["model"] = "deepseek-v4.1-flash"
+    dump["output"]["models"][0]["prices"][0]["prices"] = [
+        {
+            "type": "input_token",
+            "price": "0.3",
+            "price_unit": "Per 1M tokens",
+            "time_band": "busy",
+        },
+        {
+            "type": "output_token",
+            "price": "1.2",
+            "price_unit": "Per 1M tokens",
+            "time_band": "busy",
+        },
+        {
+            "type": "input_token",
+            "price": "0.15",
+            "price_unit": "Per 1M tokens",
+            "time_band": "idle",
+        },
+        {
+            "type": "output_token",
+            "price": "0.6",
+            "price_unit": "Per 1M tokens",
+            "time_band": "idle",
+        },
+    ]
+    seed = load_script("update_alibaba_prices").build_seed(dump)
+    bands = seed["models"]["deepseek-v4.1-flash"]["time_bands"]
+    assert bands["busy"]["tiers"] == [{"input": 0.3, "output": 1.2}]
+    assert bands["idle"]["tiers"] == [{"input": 0.15, "output": 0.6}]
+
+
 @pytest.mark.parametrize(
     "fault", ["partial", "wrong_region", "stale", "duplicate", "empty", "raw", "future"]
 )

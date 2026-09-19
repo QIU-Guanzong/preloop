@@ -709,8 +709,9 @@ avatars.
   are matched by family token and hidden from the chat picker. Costs are
   estimates: Singapore International USD list tariffs seed the map, live
   native `GET /api/v1/models` prices overlay it per host and region, and
-  CNY sites, time-banded SKUs and non-token units stay unpriced rather
-  than guessed. AI approval policies honour the configured region.
+  CNY sites and non-token units stay unpriced rather than guessed.
+  Time-banded Singapore International SKUs use Model Studio night hours
+  (22:00-08:00 UTC+8). AI approval policies honour the configured region.
   Docs: `docs/guide/alibaba-model-studio.md`.
 - **AWS Bedrock** as a model provider. The add-model dialog asks for an
   access key, a secret key, an optional session token and a region in place
@@ -1245,6 +1246,14 @@ avatars.
 
 ### Fixed
 
+- Alibaba Model Studio flow estimates cover time-banded Singapore
+  International chat SKUs. `deepseek-v4.1-flash`, `deepseek-v4-flash-0731`
+  and `deepseek-v4-pro-0813` were skipped because a native `time_band`
+  was treated as unpriced, so a Qwen-hosted DeepSeek Flash flow had no
+  dollar estimate. Idle is 22:00-08:00 UTC+8 from the public pricing
+  page; daytime is busy. `glm-5.3` is on the same Singapore list. Image,
+  audio, and a native row with only one band stay unpriced. See
+  `docs/pricing/reviews/2026-09-19-alibaba.md`.
 - Agents in a split Kubernetes deployment call the gateway Service instead
   of the API Service. API pods run `PRELOOP_SERVICE_ROLE=api` and never
   mount `/openai/v1`, so a model row without an explicit
