@@ -543,11 +543,11 @@ def payload_for_log(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Identifiers only — never tokens, prompt, git config, or agent_config."""
 
     agent_config = payload.get("agent_config")
-    image = None
-    if isinstance(agent_config, dict):
-        raw = agent_config.get("image")
-        if isinstance(raw, str) and raw.strip():
-            image = raw.strip()
+    from .images import effective_agent_image
+
+    image = (
+        effective_agent_image(agent_config) if isinstance(agent_config, dict) else None
+    )
     return {
         "execution_id": payload.get("execution_id"),
         "agent_type": payload.get("agent_type"),

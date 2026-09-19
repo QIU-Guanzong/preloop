@@ -51,8 +51,13 @@ def agent_config_has_image(agent_config: dict[str, object]) -> bool:
     Returns:
         True if ``image`` or ``docker_image`` is a non-empty string.
     """
+    return effective_agent_image(agent_config) is not None
+
+
+def effective_agent_image(agent_config: dict[str, object]) -> Optional[str]:
+    """Resolve the private runner's canonical/legacy image override."""
     for key in ("image", "docker_image"):
         value = agent_config.get(key)
         if isinstance(value, str) and value.strip():
-            return True
-    return False
+            return value.strip()
+    return None

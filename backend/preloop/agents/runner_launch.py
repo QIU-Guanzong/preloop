@@ -144,14 +144,11 @@ async def build_runner_launch(context: dict[str, Any]) -> dict[str, Any]:
     else:
         raise ValueError("Private Docker launch supports only codex and opencode")
 
-    # Match the runner's image/legacy-alias precedence and whitespace handling.
-    # The hosted adapter constructor knows only the harness default; this bridge
-    # renders a script for the image selected by the private runner instead.
-    for key in ("image", "docker_image"):
-        image = config.get(key)
-        if isinstance(image, str) and image.strip():
-            agent.image = image.strip()
-            break
+    from .images import effective_agent_image
+
+    # The hosted constructor knows only the default; render for the image the
+    # private runner will execute, including the legacy configuration alias.
+    agent.image = effective_agent_image(config) or agent.image
 
     context["prompt"] = (context.get("prompt") or "") + (
         "\nBefore exiting, write /workspace/result.json with a recognized completion "
