@@ -23,6 +23,7 @@ export default async function preloop(pi) {
       })),
     });
   const clients = [];
+  let mcpUnavailable = false;
   try {
     for (const [serverName, server] of Object.entries(
       config.mcpServers || {},
@@ -67,9 +68,10 @@ export default async function preloop(pi) {
         cursor = page.nextCursor;
       } while (cursor);
     }
-  } catch (error) {
+  } catch {
     await Promise.allSettled(clients.map((client) => client.close()));
-    throw error;
+    // Pi continues after extension load failures, so keep the native gate loaded.
+    mcpUnavailable = true;
   }
   pi.on("session_start", async (_event, ctx) => {
     bridge.sessions.clear();
@@ -92,6 +94,12 @@ export default async function preloop(pi) {
     event.headers["X-Preloop-Session-Id"] = ctx.sessionManager.getSessionId();
   });
   pi.on("tool_call", async (event, ctx) => {
+    if (mcpUnavailable)
+      return {
+        block: true,
+        reason:
+          "Preloop MCP is unavailable. Restore connectivity and restart Pi.",
+      };
     const decision = await bridge.check(
       event.toolName,
       event.input,

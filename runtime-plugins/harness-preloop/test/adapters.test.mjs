@@ -111,3 +111,29 @@ test("DeepSeek forces managed routing over native selections and blocks empty ca
     hooks.get("dispose")();
   }
 });
+
+test("Pi retains its native gate when MCP initialization fails", async () => {
+  const previous = process.env.PRELOOP_HARNESS_CONFIG;
+  const path = configuration("pi");
+  writeFileSync(
+    path,
+    JSON.stringify({
+      mcpServers: { preloop: { url: "http://127.0.0.1:1/mcp/v1" } },
+      preloop: { control: { enabled: false, native_tool_approvals: "on" } },
+    }),
+  );
+  process.env.PRELOOP_HARNESS_CONFIG = path;
+  const hooks = new Map();
+  try {
+    await piPlugin({ on: (name, handler) => hooks.set(name, handler) });
+    const result = await hooks.get("tool_call")(
+      { toolName: "bash", input: { command: "echo should-not-run" } },
+      { sessionManager: { getSessionId: () => "native-pi-session" } },
+    );
+    assert.equal(result.block, true);
+    assert.match(result.reason, /MCP.*unavailable/);
+  } finally {
+    if (previous === undefined) delete process.env.PRELOOP_HARNESS_CONFIG;
+    else process.env.PRELOOP_HARNESS_CONFIG = previous;
+  }
+});
