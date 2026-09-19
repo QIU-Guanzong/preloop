@@ -707,11 +707,13 @@ avatars.
   adapter covers streaming, tool calls, provider usage, thinking controls
   and ephemeral cache markers; omni, speech-to-speech and translate SKUs
   are matched by family token and hidden from the chat picker. Costs are
-  estimates: Singapore International USD list tariffs seed the map, live
-  native `GET /api/v1/models` prices overlay it per host and region, and
-  CNY sites and non-token units stay unpriced rather than guessed.
+  estimates: Singapore International USD list tariffs from the native
+  catalog seed the map, live `GET /api/v1/models` prices overlay it per
+  host and region, and CNY sites stay unpriced rather than guessed.
   Time-banded Singapore International SKUs use Model Studio night hours
-  (22:00-08:00 UTC+8). AI approval policies honour the configured region.
+  (22:00-08:00 UTC+8). Mixed leftover audio/vision rates stay unpriced
+  when usage reports those token classes. AI approval policies honour
+  the configured region.
   Docs: `docs/guide/alibaba-model-studio.md`.
 - **AWS Bedrock** as a model provider. The add-model dialog asks for an
   access key, a secret key, an optional session token and a region in place
@@ -1252,8 +1254,18 @@ avatars.
   and time-banded DeepSeek rows keep their first-party list prices.
   `deepseek-v4.1-flash` uses Model Studio night hours 22:00-08:00 UTC+8.
   Reviewed feeds round-trip `time_bands` instead of crashing or flattening
-  a 2x idle/busy gap. Native rows that publish no prices stay unpriced.
-  See `docs/pricing/reviews/2026-09-19-alibaba.md`.
+  a 2x idle/busy gap. Audio-bearing omni usage fails closed instead of
+  using the no-audio chat pair. Native rows that publish no prices stay
+  unpriced. See `docs/pricing/reviews/2026-09-19-alibaba.md`.
+- Saved flow details expose the effective publication policy, including ungated
+  legacy flows and configuration blockers, without claiming that configured
+  isolation is an execution verification receipt.
+- Hosted workspace recovery preserves never-pushed branches and their base
+  commit identity across repeated checkpoints. Remote absence, divergence and
+  connection failures have distinct outcomes. Codex command transcripts no
+  longer masquerade as container/setup failures. The optional direct-checkpoint
+  Helm overlay supports 64 MiB archives with matching proxy limits.
+
 - Codex CLI enrollments share one OAuth SecretReference per managed agent
   instead of minting a second single-use lineage per model family. A
   re-onboard of a split pre-fix enrollment repoints family rows onto the
@@ -1262,6 +1274,9 @@ avatars.
 
 - Private-runner launch and server logs report the configured container image,
   including the legacy `docker_image` alias, instead of the harness default.
+- CI feedback uses bounded current-head GitHub Actions job evidence to separate
+  runner setup failures from code failures. Startup failures and explicit
+  pipeline infrastructure reasons use bounded escalation rather than code repair.
 - Agents in a split Kubernetes deployment call the gateway Service instead
   of the API Service. API pods run `PRELOOP_SERVICE_ROLE=api` and never
   mount `/openai/v1`, so a model row without an explicit

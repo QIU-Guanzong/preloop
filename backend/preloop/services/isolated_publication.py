@@ -43,7 +43,10 @@ from preloop.services.trusted_publisher import (
     read_publication_bundle,
 )
 from preloop.models.schemas.verification import ResolvedVerificationPolicy
-from preloop.services.verification import resolve_verification_policy
+from preloop.services.verification import (
+    pinned_verification_image,
+    resolve_verification_policy,
+)
 from preloop.utils.pr_metadata import PublicationRecord
 
 
@@ -349,9 +352,7 @@ async def prepare_isolated_publication(
             "Isolated publication requires a trusted verification profile"
         )
     verification_image = (config.get("verification") or {}).get("image", "")
-    if not isinstance(verification_image, str) or not re.fullmatch(
-        r"[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}", verification_image
-    ):
+    if pinned_verification_image(verification_image) is None:
         raise PublicationError(
             "Isolated verification requires a digest-pinned generic toolchain image containing the configured check dependencies"
         )

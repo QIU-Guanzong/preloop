@@ -488,11 +488,61 @@ def _reanalyze_generated_message(text: str) -> Optional[AgentFailureAnalysis]:
     )
 
 
+# Captured CLI versions use integer milliseconds even for long commands.
+# Accept seconds/minutes too, while requiring the full completion-header shape.
+_CODEX_COMMAND_COMPLETED_RE = re.compile(
+    r" (?:succeeded|exited -?\d+) in "
+    r"(?:\d+ms|(?:\d+m )?\d+(?:\.\d+)?s):"
+)
+
+
+def runtime_log_text(logs_text: str) -> str:
+    """Exclude Codex command transcripts from runtime failure heuristics.
+
+    A coding agent deliberately runs failing tests and reads source containing
+    our own error markers. Those command results are not harness failures.
+    Keep the surrounding CLI output, including terminal errors and summaries.
+    """
+    lines = logs_text.splitlines()
+    result: list[str] = []
+    command: list[str] | None = None
+    completed = False
+    for index, line in enumerate(lines):
+        starts_command = (
+            line == "exec"
+            and index + 1 < len(lines)
+            and lines[index + 1].startswith(("/bin/", "/usr/bin/"))
+        )
+        # Only CLI phase headers delimit output. Bare "user"/"tool" lines
+        # commonly occur in source listings and are not transcript boundaries.
+        boundary = starts_command or line in {"codex", "thinking", "tokens used"}
+        if boundary and command is not None:
+            if not completed:
+                result.extend(command)
+            command = None
+        if starts_command:
+            command = [line]
+            completed = False
+        elif command is not None:
+            command.append(line)
+            if _CODEX_COMMAND_COMPLETED_RE.fullmatch(line):
+                completed = True
+        else:
+            result.append(line)
+    # An unterminated block may end in a CLI crash, not tool output. Preserve
+    # it so diagnostics never hide that failure. Complete transcripts carry a
+    # following phase header (including the final token summary).
+    if command is not None:
+        result.extend(command)
+    return "\n".join(result)
+
+
 # The container-side setup block prints this marker before exiting when a
 # ``git_clone_config.setup_commands`` entry fails. Setup runs before the agent
 # ever starts, so "setup broke" must never be reported as an agent failure.
 _SETUP_FAILED_LINE_RE = re.compile(
-    rf"{re.escape(SETUP_FAILED_MARKER)}(?:\s+exit=(\d+))?"
+    rf"^{re.escape(SETUP_FAILED_MARKER)}(?: exit=(\d+)| [a-z_]+(?::[a-zA-Z0-9_,.+/-]+)?)?[ \t]*$",
+    re.MULTILINE,
 )
 
 
@@ -568,6 +618,7 @@ def analyze_agent_failure(logs_text: str) -> AgentFailureAnalysis:
         An :class:`AgentFailureAnalysis`. ``message`` is always safe to store
         on ``FlowExecution.error_message`` and show to a user.
     """
+    logs_text = runtime_log_text(logs_text)
     lines = _content_lines(logs_text)
     if not lines:
         return AgentFailureAnalysis(message="")

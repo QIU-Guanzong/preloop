@@ -571,6 +571,44 @@ export class FlowView extends LitElement {
     }
   }
 
+  private renderPublicationPolicy() {
+    const policy = this.flow?.effective_publication_policy;
+    if (!policy || policy.mode === 'disabled') return '';
+    const labels = {
+      ungated: 'No verification gate',
+      sandbox_gated: 'Checks in agent sandbox',
+      isolated: 'Isolated verification configured',
+      blocked: 'Publication configuration blocked',
+    };
+    return html`
+      <sl-card data-publication-policy>
+        <div slot="header">Publication policy</div>
+        <strong>${labels[policy.mode] ?? 'Publication policy'}</strong>
+        <p>${policy.reason}</p>
+        ${
+          policy.configured_check_ids.length
+            ? html`<p>
+                Configured checks: ${policy.configured_check_ids.join(', ')}
+              </p>`
+            : ''
+        }
+        ${
+          policy.blockers.length
+            ? html`<p>Resolve: ${policy.blockers.join(', ')}</p>`
+            : ''
+        }
+        ${
+          policy.runtime_validation_required
+            ? html`<p>
+                Each execution must validate authorization and pass checks on
+                its final commit.
+              </p>`
+            : ''
+        }
+      </sl-card>
+    `;
+  }
+
   render() {
     if (!this.flowReady) {
       return html`
@@ -823,6 +861,7 @@ ${this.flow.prompt_template}</pre>
                 `
               : ''
           }
+          ${this.renderPublicationPolicy()}
           ${
             this.flow.git_clone_config?.enabled &&
             (this.flow.git_clone_config.repositories?.length || 0) > 0

@@ -90,6 +90,29 @@ async def run_probe(context: dict[str, Any], *, kubernetes: bool) -> str:
         ref = await agent.start(context)
         deadline = time.monotonic() + 150
         while time.monotonic() < deadline:
+            if context.get("loss_mode") and (
+                not kubernetes or context["loss_mode"] == "pod"
+            ):
+                live_logs = await agent.get_logs(ref)
+                text = (
+                    "\n".join(live_logs)
+                    if isinstance(live_logs, list)
+                    else str(live_logs)
+                )
+                if "PERIODIC_CHECKPOINT_READY" in text:
+                    if not kubernetes:
+                        await agent._containers[ref].kill(signal="SIGKILL")
+                        return text
+                    pods = await agent._k8s_core_api.list_namespaced_pod(
+                        agent.agent_namespace, label_selector=f"job-name={ref}"
+                    )
+                    assert pods.items, "agent pod disappeared before loss injection"
+                    await agent._k8s_core_api.delete_namespaced_pod(
+                        pods.items[0].metadata.name,
+                        agent.agent_namespace,
+                        grace_period_seconds=0,
+                    )
+                    return text
             if kubernetes:
                 job = await agent._k8s_batch_api.read_namespaced_job(
                     ref, agent.agent_namespace
@@ -113,6 +136,9 @@ async def run_probe(context: dict[str, Any], *, kubernetes: bool) -> str:
 
 async def main(args: argparse.Namespace) -> None:
     """Verify real SQL/browser dependencies and recover after a killed sandbox."""
+    args.loss_mode = args.loss_mode or ("pod" if args.kubeconfig else "process")
+    if (args.loss_mode == "pod") != bool(args.kubeconfig):
+        raise ValueError("pod loss requires Kubernetes; process loss requires Docker")
     if args.kubeconfig:
         os.environ["KUBECONFIG"] = str(Path(args.kubeconfig).resolve())
         os.environ["AGENT_EXECUTION_NAMESPACE"] = "default"
@@ -201,6 +227,7 @@ async def main(args: argparse.Namespace) -> None:
                     **scope,
                     "execution_id": str(original.id),
                     "trigger_event_data": original.trigger_event_details,
+                    "loss_mode": args.loss_mode,
                 }
                 context["checkpoint_env"] = checkpoint_context(db, context)
                 context[
@@ -214,10 +241,21 @@ echo committed > /workspace/repo/tracked
 git -C /workspace/repo add tracked
 git -C /workspace/repo commit -m unpushed >/dev/null
 git -C /workspace/repo rev-parse HEAD > /workspace/expected-head
+git -C /workspace/repo push /tmp/nonexistent-remote HEAD:main && exit 99
+echo staged > /workspace/repo/staged
+git -C /workspace/repo add staged
 echo uncommitted > /workspace/repo/tracked
 echo untracked > /workspace/repo/scratch
-_preloop_checkpoint
-kill -9 $$
+python3 -c "from pathlib import Path; import os; Path('/workspace/repo/large-source.bin').write_bytes(os.urandom(3 * 1024 * 1024))"
+sha256sum /workspace/repo/large-source.bin | cut -d' ' -f1 > /workspace/expected-digest
+# No manual upload: recovery must use the periodic loop started by init.
+while [ ! -s /tmp/preloop-checkpoint-reference.json ]; do sleep 1; done
+sleep 2
+echo after-checkpoint > /workspace/repo/scratch
+echo PERIODIC_CHECKPOINT_READY
+# The controller kills the Docker container or deletes the Kubernetes pod.
+sleep 120
+exit 99
 """
                 first = await run_probe(context, kubernetes=bool(args.kubeconfig))
                 assert "DATABASE_PROBE_OK" in first and "BROWSER_PROBE_OK" in first, (
@@ -252,11 +290,19 @@ kill -9 $$
                 ] = """test "$(git -C /workspace/repo rev-parse HEAD)" = "$(cat /workspace/expected-head)"
 test "$(cat /workspace/repo/tracked)" = uncommitted
 test "$(cat /workspace/repo/scratch)" = untracked
+test "$(git -C /workspace/repo show :staged)" = staged
+test "$(sha256sum /workspace/repo/large-source.bin | cut -d' ' -f1)" = "$(cat /workspace/expected-digest)"
 echo RECOVERY_PROBE_OK
 """
                 second = await run_probe(followup, kubernetes=bool(args.kubeconfig))
                 assert "RECOVERY_PROBE_OK" in second, second[-3000:]
                 assert "PRELOOP_ENVIRONMENT cache_hit" in second, second[-3000:]
+                import re
+
+                age = re.search(
+                    r"PRELOOP_CHECKPOINT restored age_seconds=(\d+)", second
+                )
+                assert age and int(age.group(1)) >= 1, second[-3000:]
                 print(
                     json.dumps(
                         {
@@ -264,6 +310,11 @@ echo RECOVERY_PROBE_OK
                             "database": "passed",
                             "browser": "passed",
                             "killed_execution_recovery": "passed",
+                            "loss_mode": args.loss_mode,
+                            "periodic_checkpoint_over_2mib": "passed",
+                            "staged_unstaged_untracked": "passed",
+                            "post_checkpoint_write_excluded": "passed",
+                            "checkpoint_age_seconds": int(age.group(1)),
                             "cached_setup": "passed",
                         }
                     )
@@ -283,6 +334,7 @@ if __name__ == "__main__":
     parser.add_argument("--endpoint", default="http://host.docker.internal:25440")
     parser.add_argument("--port", type=int, default=25440)
     parser.add_argument("--kubeconfig")
+    parser.add_argument("--loss-mode", choices=["process", "pod"])
     parser.add_argument("--kube-context", default="kind-preloop-recovery-test")
     parser.add_argument("--expected-api-server")
     asyncio.run(main(parser.parse_args()))
