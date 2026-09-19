@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from threading import Thread
 from typing import Any
 
@@ -18,9 +19,10 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize("kind", ["pi", "deepseek"])
+@pytest.mark.parametrize("transport", ["hosted", "private"])
 @pytest.mark.asyncio
 async def test_real_worker_bootstrap(
-    kind: str, monkeypatch: pytest.MonkeyPatch
+    kind: str, transport: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A private launch drops root, writes in a fresh volume, and gates a tool."""
     approvals: list[dict[str, Any]] = []
@@ -108,6 +110,15 @@ async def test_real_worker_bootstrap(
             }
         )
         env = {**launch["env"], "PRELOOP_URL": api}
+        script = launch["script"]
+        if transport == "private":
+            # Exercise the actual CLI wrapper: it pipes the script into bash,
+            # unlike the hosted Docker path's bash -c invocation.
+            source = (
+                Path(__file__).parents[3] / "cli/internal/cmd/runner_launch.go"
+            ).read_text()
+            script = source.split("const runnerBootstrap = `", 1)[1].split("`", 1)[0]
+            env["PRELOOP_RUNNER_SCRIPT"] = launch["script"]
         run = subprocess.run(
             [
                 "docker",
@@ -124,7 +135,7 @@ async def test_real_worker_bootstrap(
                 *[arg for key in env for arg in ("--env", key)],
                 f"preloop-harness-{kind}:test",
                 "-c",
-                launch["script"],
+                script,
             ],
             capture_output=True,
             text=True,
@@ -132,6 +143,8 @@ async def test_real_worker_bootstrap(
             env={**os.environ, **env},
         )
         assert run.returncode == 0, run.stdout + run.stderr
+        if transport == "private":
+            assert "PRELOOP_RUNNER_RESULT_V1 " in run.stdout
         assert "worker-smoke-complete" in run.stdout
         lines = run.stdout.splitlines()
         assert "PRELOOP_AGENT_EXEC_START" in lines

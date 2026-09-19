@@ -155,7 +155,7 @@ class ExtensionHarnessAgent(ContainerAgentExecutor):
 if [ "$(id -u)" -eq 0 ]; then
     mkdir -p /workspace /tmp/preloop-home
     chown -R 10000:10000 /workspace /tmp/preloop-home
-    exec setpriv --reuid 10000 --regid 10000 --clear-groups /bin/bash -c "$BASH_EXECUTION_STRING"
+    exec setpriv --reuid 10000 --regid 10000 --clear-groups /bin/bash -c "${BASH_EXECUTION_STRING:-${PRELOOP_RUNNER_SCRIPT:?Missing harness script}}"
 fi
 """
         return f"""set -euo pipefail
