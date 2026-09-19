@@ -1,4 +1,6 @@
-import { LitElement, html, css, unsafeCSS } from 'lit';
+import { LitElement, html, css, unsafeCSS, type TemplateResult } from 'lit';
+import { ifDefined } from 'lit/directives/if-defined.js';
+import { landingImageSources } from '../../brand-landing-assets';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { getBrandConfig } from '../../brand-config';
 import { customElement, state, query } from 'lit/decorators.js';
@@ -1021,6 +1023,40 @@ export class LandingView extends LitElement {
     }
   }
 
+  private _openScreenshot(event: MouseEvent, original: string): void {
+    if (
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    )
+      return;
+    event.preventDefault();
+    this._lightboxImage = original;
+  }
+
+  private _renderScreenshot(
+    original: string,
+    alt: string,
+    sizes: string,
+    className = '',
+    lazy = false
+  ): TemplateResult {
+    const image = landingImageSources(original);
+    return html`<img
+      src=${image.src}
+      srcset=${ifDefined(image.srcset)}
+      sizes=${ifDefined(image.srcset ? sizes : undefined)}
+      width=${ifDefined(image.width)}
+      height=${ifDefined(image.height)}
+      alt=${alt}
+      class=${className}
+      loading=${lazy ? 'lazy' : 'eager'}
+      decoding="async"
+    />`;
+  }
+
   render() {
     return html`
       <app-header></app-header>
@@ -1230,7 +1266,11 @@ export class LandingView extends LitElement {
                     }"
                     @click=${this._playHeroVideo}
                   >
-                    <img src=${this._heroImage} alt=${this._heroImageAlt} />
+                    ${this._renderScreenshot(
+                      this._heroImage,
+                      this._heroImageAlt,
+                      '(max-width: 1150px) calc(100vw - 32px), (max-width: 1232px) calc(100vw - 600px), 632px'
+                    )}
                     ${
                       this._heroVideoActive
                         ? html`
@@ -1274,13 +1314,18 @@ export class LandingView extends LitElement {
                     }
                   </div>`
                 : this._heroImage
-                  ? html`<div
+                  ? html`<a
                       class="hero-visual"
-                      aria-hidden="true"
-                      @click=${() => (this._lightboxImage = this._heroImage)}
+                      href=${this._heroImage}
+                      title="Click to enlarge"
+                      @click=${(event: MouseEvent) => this._openScreenshot(event, this._heroImage)}
                     >
-                      <img src=${this._heroImage} alt=${this._heroImageAlt} />
-                    </div>`
+                      ${this._renderScreenshot(
+                        this._heroImage,
+                        this._heroImageAlt,
+                        '(max-width: 1150px) calc(100vw - 32px), (max-width: 1232px) calc(100vw - 600px), 632px'
+                      )}
+                    </a>`
                   : ''
             }
           </div>
@@ -1581,20 +1626,39 @@ export class LandingView extends LitElement {
                                         </div>
                                       `
                                     : html`
-                                        <div
+                                        <a
                                           class="image-placeholder"
-                                          @click=${() =>
-                                            slide.videoUrl
-                                              ? this._playVideo(index)
-                                              : null}
+                                          href=${ifDefined(slide.videoUrl || slide.placeholderImg || undefined)}
+                                          @click=${(event: MouseEvent) => {
+                                            if (
+                                              event.button !== 0 ||
+                                              event.metaKey ||
+                                              event.ctrlKey ||
+                                              event.shiftKey ||
+                                              event.altKey
+                                            )
+                                              return;
+                                            if (slide.videoUrl) {
+                                              event.preventDefault();
+                                              this._playVideo(index);
+                                            } else if (slide.placeholderImg) {
+                                              this._openScreenshot(
+                                                event,
+                                                slide.placeholderImg
+                                              );
+                                            }
+                                          }}
                                         >
                                           ${
                                             slide.placeholderImg
                                               ? html`
-                                                  <img
-                                                    src=${slide.placeholderImg}
-                                                    alt=${slide.title}
-                                                  />
+                                                  ${this._renderScreenshot(
+                                                    slide.placeholderImg,
+                                                    slide.title,
+                                                    '(max-width: 768px) calc(100vw - 32px), (max-width: 1232px) calc(66.67vw - 53px), 768px',
+                                                    '',
+                                                    true
+                                                  )}
                                                   ${
                                                     slide.videoUrl
                                                       ? html`<div
@@ -1605,7 +1669,7 @@ export class LandingView extends LitElement {
                                                 `
                                               : ''
                                           }
-                                        </div>
+                                        </a>
                                       `
                                 }
                               </div>
@@ -1665,18 +1729,20 @@ export class LandingView extends LitElement {
                             ${
                               slide.placeholderImg
                                 ? html`
-                                    <div
+                                    <a
                                       class="feature-stacked-image-wrapper"
-                                      @click=${() =>
-                                        (this._lightboxImage =
-                                          slide.placeholderImg)}
+                                      href=${slide.placeholderImg}
+                                      title="Click to enlarge"
+                                      @click=${(event: MouseEvent) => this._openScreenshot(event, slide.placeholderImg)}
                                     >
-                                      <img
-                                        src="${slide.placeholderImg}"
-                                        class="feature-stacked-image"
-                                        alt="${slide.title} preview"
-                                      />
-                                    </div>
+                                      ${this._renderScreenshot(
+                                        slide.placeholderImg,
+                                        `${slide.title} preview`,
+                                        '(max-width: 1099px) calc(100vw - 32px), (max-width: 1232px) calc(60vw - 77px), 662px',
+                                        'feature-stacked-image',
+                                        true
+                                      )}
+                                    </a>
                                   `
                                 : html`<div style="flex: 1.5;"></div>`
                             }

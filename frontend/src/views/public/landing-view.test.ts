@@ -278,7 +278,10 @@ describe('LandingView hero video', () => {
       '.hero-visual--video img'
     ) as HTMLImageElement;
     expect(img).to.exist;
-    expect(img.getAttribute('src')).to.equal(HERO_WITH_VIDEO.hero.image);
+    expect(img.getAttribute('src')).to.equal(
+      HERO_WITH_VIDEO.hero.image.replace('.png', '-800.webp')
+    );
+    expect(img.srcset).to.contain(`${HERO_WITH_VIDEO.hero.image} 3200w`);
     // Click-to-load: nothing in the shadow DOM references YouTube yet.
     expect(el.shadowRoot?.querySelector('iframe')).to.not.exist;
     expect(el.shadowRoot?.innerHTML).to.not.contain('youtube');
@@ -431,5 +434,160 @@ describe('LandingView hero CTA row and footer disclaimer', () => {
     expect((disclaimer?.textContent || '').trim()).to.equal(
       HERO_WITH_INSTALL_AND_LEGAL.legal_disclaimer
     );
+  });
+});
+
+describe('LandingView responsive screenshots', () => {
+  const original = '/assets/screenshots/quickstart/dark/agent_bubble.png';
+  const feature = '/assets/screenshots/quickstart/dark/cost_page.png';
+  let fetchStub: sinon.SinonStub;
+
+  beforeEach(() => {
+    (window as any).BRAND_CONFIG = BRAND_CONFIG;
+  });
+
+  afterEach(() => {
+    fetchStub.restore();
+    delete (window as any).BRAND_CONFIG;
+  });
+
+  for (const source of ['JSON', 'slotted HTML']) {
+    it(`uses responsive previews and original lightbox links from ${source}`, async () => {
+      fetchStub = stubFetch({
+        hero: { title: 'Hero', image: original, image_alt: 'Active agents' },
+        features: [
+          { title: 'Costs', text: 'Track spending.', placeholderImg: feature },
+        ],
+        faqs: [],
+      });
+      const el = (await fixture(
+        source === 'JSON'
+          ? html`<landing-view></landing-view>`
+          : html`
+              <landing-view>
+                <h1 slot="hero-title">Hero</h1>
+                <div
+                  slot="hero-image"
+                  data-src=${original}
+                  data-alt="Active agents"
+                ></div>
+                <div
+                  slot="feature-0"
+                  data-title="Costs"
+                  data-text="Track spending."
+                  data-img=${feature}
+                ></div>
+              </landing-view>
+            `
+      )) as LandingView;
+      await tick();
+      await el.updateComplete;
+      const hero =
+        el.shadowRoot!.querySelector<HTMLImageElement>('.hero-visual img')!;
+      const preview = el.shadowRoot!.querySelector<HTMLImageElement>(
+        '.feature-stacked-image'
+      )!;
+      expect(hero.getAttribute('src')).to.equal(
+        original.replace('.png', '-800.webp')
+      );
+      expect(hero.srcset).to.contain('1600.webp 1600w');
+      expect(hero.srcset).to.contain(`${original} 3200w`);
+      expect(hero.sizes).to.contain('1150px');
+      expect(hero.loading).to.equal('eager');
+      expect(preview.loading).to.equal('lazy');
+      expect(preview.srcset).to.contain('cost_page-800.webp 800w');
+      const link = hero.closest('a')!;
+      expect(link.getAttribute('href')).to.equal(original);
+      expect(link.hasAttribute('aria-hidden')).to.be.false;
+      expect(preview.closest('a')!.getAttribute('href')).to.equal(feature);
+      // Enter on an anchor dispatches a click, opening the same full-size lightbox.
+      link.click();
+      await el.updateComplete;
+      expect(
+        el.shadowRoot!.querySelector('.lightbox-image')?.getAttribute('src')
+      ).to.equal(original);
+      // Modified clicks keep the browser's native new-tab behavior.
+      const modifiedClick = new MouseEvent('click', {
+        ctrlKey: true,
+        cancelable: true,
+      });
+      let intercepted = true;
+      link.addEventListener(
+        'click',
+        (event) => {
+          intercepted = event.defaultPrevented;
+          event.preventDefault(); // Keep the test page in place after checking the handler.
+        },
+        { once: true }
+      );
+      link.dispatchEvent(modifiedClick);
+      expect(intercepted).to.be.false;
+    });
+  }
+
+  it('opens carousel stills at full size and keeps video thumbnails playable', async () => {
+    fetchStub = stubFetch({
+      hero: { title: 'Hero' },
+      features_layout: 'carousel',
+      features: [
+        { title: 'Still', text: 'Screenshot', placeholderImg: feature },
+        {
+          title: 'Video',
+          text: 'Video',
+          placeholderImg: original,
+          videoUrl: 'https://www.youtube.com/watch?v=Y_geb2Or8zM',
+        },
+      ],
+    });
+    const el = await fixture<LandingView>(html`<landing-view></landing-view>`);
+    await tick();
+    await el.updateComplete;
+    const links = el.shadowRoot!.querySelectorAll<HTMLAnchorElement>(
+      'sl-carousel-item:not([data-clone]) .image-placeholder'
+    );
+    const stillLink = Array.from(links).find(
+      (link) => link.getAttribute('href') === feature
+    )!;
+    const videoLink = Array.from(links).find((link) =>
+      link.getAttribute('href')!.startsWith('https://www.youtube.com/')
+    )!;
+    expect(stillLink).to.exist;
+    stillLink.click();
+    await el.updateComplete;
+    expect(
+      el.shadowRoot!.querySelector('.lightbox-image')?.getAttribute('src')
+    ).to.equal(feature);
+    let videoClickIntercepted = true;
+    videoLink.addEventListener(
+      'click',
+      (event) => {
+        videoClickIntercepted = event.defaultPrevented;
+        event.preventDefault();
+      },
+      { once: true }
+    );
+    videoLink.dispatchEvent(
+      new MouseEvent('click', { metaKey: true, cancelable: true })
+    );
+    expect(videoClickIntercepted).to.be.false;
+    videoLink.click();
+    await el.updateComplete;
+    expect(
+      el.shadowRoot!.querySelector('.video-wrapper iframe')?.getAttribute('src')
+    ).to.contain('Y_geb2Or8zM');
+  });
+
+  it('keeps custom brand images usable without guessed derivatives', async () => {
+    fetchStub = stubFetch({
+      hero: { title: 'Hero', image: '/custom.png' },
+      features: [],
+    });
+    const el = await fixture<LandingView>(html`<landing-view></landing-view>`);
+    await tick();
+    await el.updateComplete;
+    const image = el.shadowRoot!.querySelector('.hero-visual img')!;
+    expect(image.getAttribute('src')).to.equal('/custom.png');
+    expect(image.hasAttribute('srcset')).to.be.false;
+    expect(image.hasAttribute('sizes')).to.be.false;
   });
 });
