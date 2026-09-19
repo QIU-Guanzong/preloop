@@ -32,6 +32,7 @@ stays unpushed.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence
 
 from pydantic import BaseModel, Field
@@ -303,8 +304,6 @@ def evaluate_publication(
 
 def pinned_verification_image(value: Any) -> Optional[str]:
     """Return a valid verifier image, using the publication boundary's grammar."""
-    import re
-
     if isinstance(value, str) and re.fullmatch(
         r"[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}", value
     ):

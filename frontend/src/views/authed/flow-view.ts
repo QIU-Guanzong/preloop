@@ -583,7 +583,7 @@ export class FlowView extends LitElement {
     return html`
       <sl-card data-publication-policy>
         <div slot="header">Publication policy</div>
-        <strong>${labels[policy.mode]}</strong>
+        <strong>${labels[policy.mode] ?? 'Publication policy'}</strong>
         <p>${policy.reason}</p>
         ${
           policy.configured_check_ids.length

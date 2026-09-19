@@ -217,6 +217,31 @@ describe('FlowView detail page language', () => {
     }
   });
 
+  it('keeps future policy modes readable before a console update', async () => {
+    const element = await renderDetail({
+      effective_publication_policy: {
+        mode: 'future_mode',
+        reason: 'A newly supported publication policy.',
+        configured_check_ids: [],
+        blockers: [],
+        runtime_validation_required: true,
+      },
+    });
+    try {
+      const card = element.shadowRoot.querySelector(
+        '[data-publication-policy]'
+      );
+      expect(card.querySelector('strong').textContent).to.equal(
+        'Publication policy'
+      );
+      expect(card.textContent).to.include(
+        'A newly supported publication policy.'
+      );
+    } finally {
+      element.remove();
+    }
+  });
+
   it('renders an ungated customized flow explicitly', async () => {
     const element = await renderDetail({
       effective_publication_policy: {
