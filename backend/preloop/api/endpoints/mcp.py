@@ -183,7 +183,12 @@ def _with_tool_db(
             if scope.session is not None:
                 try:
                     if scope.session.is_active and scope.session.in_transaction():
-                        scope.session.commit()
+                        prev_expire = getattr(scope.session, "expire_on_commit", True)
+                        scope.session.expire_on_commit = False
+                        try:
+                            scope.session.commit()
+                        finally:
+                            scope.session.expire_on_commit = prev_expire
                 except Exception as commit_exc:
                     logger.error(
                         f"Database commit failed after tool {tool.__name__}: {commit_exc}",

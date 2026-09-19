@@ -408,3 +408,45 @@ async def test_tool_call_commits_on_success(monkeypatch: pytest.MonkeyPatch) -> 
     result = await sample_tool()
     assert result == "done"
     assert commit_called is True
+
+
+@pytest.mark.asyncio
+async def test_tool_call_does_not_detach_preloaded_instances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tool commit must not expire and detach preloaded ORM instance attributes."""
+    from sqlalchemy import Column, Integer, String
+    from sqlalchemy.orm import declarative_base
+
+    base = declarative_base()
+
+    class Item(base):
+        __tablename__ = "items"
+        id = Column(Integer, primary_key=True)
+        name = Column(String)
+
+    engine = create_engine("sqlite://")
+    base.metadata.create_all(engine)
+    test_session = Session(bind=engine)
+
+    item = Item(id=42, name="test-item")
+    test_session.add(item)
+    test_session.commit()
+    # Populate attribute in instance dict while session is open
+    assert item.id == 42
+
+    def get_db() -> Generator[Session, None, None]:
+        yield test_session
+
+    monkeypatch.setattr(mcp, "get_db", get_db)
+
+    @mcp._with_tool_db
+    async def sample_tool() -> str:
+        db = mcp._get_tool_db()
+        db.execute(text("SELECT 1"))
+        return "ok"
+
+    result = await sample_tool()
+    assert result == "ok"
+    # Even after tool's unit-of-work commit and cleanup, preloaded attributes must remain accessible
+    assert item.id == 42
