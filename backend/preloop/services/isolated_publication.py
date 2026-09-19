@@ -368,15 +368,24 @@ def _feedback_ancestor_publication(
         if prior is None or str(prior.flow_id) != str(flow.id):
             raise PublicationError(denied)
         details = prior.trigger_event_details
-        if not isinstance(details, dict) or str(
-            details.get("_thread_id") or details.get("_session_thread_id")
-        ) != str(thread.id):
+        result = prior.result if isinstance(prior.result, dict) else {}
+        receipt = result.get("trusted_publication")
+        if not isinstance(details, dict):
+            raise PublicationError(denied)
+        source_thread = details.get("_thread_id") or details.get("_session_thread_id")
+        thread_context = thread.context if isinstance(thread.context, dict) else {}
+        adoption = thread_context.get("adoption")
+        adopted_source = (
+            not source_thread
+            and isinstance(adoption, dict)
+            and adoption.get("source_execution_id") == str(prior.id)
+            and isinstance(receipt, dict)
+        )
+        if str(source_thread) != str(thread.id) and not adopted_source:
             raise PublicationError(denied)
         if str(prior.id) in seen:
             raise PublicationError(denied)
         seen.add(str(prior.id))
-        result = prior.result if isinstance(prior.result, dict) else {}
-        receipt = result.get("trusted_publication")
         if isinstance(receipt, dict):
             rows = receipt.get("repositories") or [receipt]
             try:

@@ -23,6 +23,7 @@ def lineage() -> tuple[
         branch="preloop/issue-1",
         pr_number="1",
         pr_url="https://github.com/example/project/pull/1",
+        context={},
     )
     receipt = {
         "provider": "github",
@@ -248,3 +249,43 @@ async def test_prepare_after_failed_repair_uses_current_gate_and_original_branch
         "source_branch": thread.branch,
     }
     assert mint.call_args.kwargs["write"] is False
+
+
+@pytest.mark.parametrize(
+    "binding", ["owned", "other_source", "no_receipt", "foreign_thread"]
+)
+def test_explicit_adoption_only_accepts_exact_published_source(binding: str) -> None:
+    flow, thread, original, failed, context = lineage()
+    original.trigger_event_details = {}
+    thread.context = {"adoption": {"source_execution_id": str(original.id)}}
+    if binding == "other_source":
+        thread.context["adoption"]["source_execution_id"] = str(uuid4())
+    elif binding == "no_receipt":
+        original.result = {}
+    elif binding == "foreign_thread":
+        original.trigger_event_details = {"_session_thread_id": str(uuid4())}
+    with (
+        patch(
+            "preloop.services.isolated_publication.crud_flow_feedback.owned_thread",
+            return_value=thread,
+        ),
+        patch(
+            "preloop.services.isolated_publication.crud_flow_execution.get",
+            return_value=original,
+        ),
+    ):
+
+        def recover() -> dict:
+            return _feedback_ancestor_publication(
+                None,
+                flow=flow,
+                context=context,
+                prior=failed,
+                resume=context["trigger_event_data"]["_resume"],
+            )
+
+        if binding == "owned":
+            assert recover() is original.result["trusted_publication"]
+        else:
+            with pytest.raises(PublicationError):
+                recover()
