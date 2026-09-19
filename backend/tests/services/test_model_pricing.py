@@ -1215,24 +1215,29 @@ def test_alibaba_detailed_estimate_forwards_historical_instant_and_provenance(
 
 
 @pytest.mark.parametrize(
-    "native_input,native_read,created,prompt_tokens,can_fallback",
+    "native_input,native_read,native_max_input,created,prompt_tokens,expected_cost",
     [
-        (0.15, None, 0, 60000, True),
-        (0.2, None, 0, 60000, False),
-        (0.15, 0.02, 1000, 60000, False),
-        (0.15, None, 0, 1000001, False),
+        (0.15, None, None, 0, 60000, 0.003038),
+        (0.15, None, 1_000_000, 0, 60000, None),
+        (0.2, None, None, 0, 60000, None),
+        (0.15, 0.02, None, 1000, 60000, None),
+        (0.15, None, None, 0, 1_000_001, 0.144038),
+        (0.15, None, 1_000_000, 0, 1_000_001, None),
     ],
 )
-@pytest.mark.parametrize("native_max_input", [1000000, None])
 def test_partial_native_flash_tariff_only_uses_matching_verified_seed(
     native_input: float,
     native_read: float | None,
+    native_max_input: int | None,
     created: int,
     prompt_tokens: int,
-    can_fallback: bool,
-    native_max_input: int | None,
+    expected_cost: float | None,
 ) -> None:
-    """Missing native dimensions cannot erase matching seed evidence or mix prices."""
+    """Missing native dimensions cannot erase matching seed evidence or mix prices.
+
+    Native qwen3.8-flash is unbounded. A native 1M cap is a different context
+    policy than the seed, so cache rates must not be spliced from seed.
+    """
     from preloop.models import models
     from preloop.services import alibaba_price_catalog
     from preloop.services.alibaba_pricing import Tariff
@@ -1267,14 +1272,14 @@ def test_partial_native_flash_tariff_only_uses_matching_verified_seed(
                 },
             },
         )
-        if can_fallback:
-            assert result.cost == pytest.approx(0.003038)
+        if expected_cost is None:
+            assert result.cost is None
+            assert result.source == "unpriced"
+        else:
+            assert result.cost == pytest.approx(expected_cost)
             assert result.source == "catalog"
             assert result.pricing_snapshot is not None
             assert "seed" in result.pricing_snapshot["source"]
-        else:
-            assert result.cost is None
-            assert result.source == "unpriced"
         assert alibaba_price_catalog.native_tariff(model) is partial_native
         assert partial_native.implicit_read == native_read
     finally:
