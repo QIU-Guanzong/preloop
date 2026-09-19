@@ -97,6 +97,18 @@ Native MCP tool functions own a lazy database session per invocation through
 and the session closes on success, error, or cancellation. FastMCP invokes these
 functions directly, so FastAPI does not manage their database dependencies.
 
+Successful calls commit any remaining active transaction without expiring loaded
+ORM attributes. Errors and cancellation roll back before cleanup; failed
+rollbacks invalidate the connection. Database exceptions, including those wrapped
+by HTTP errors, return a generic message without SQL or bound parameters. Error
+classification uses exception types and chains, not provider message text.
+Compliance batch tools also roll back and sanitize database failures caught per
+item, so the next item can use the session normally.
+
+This boundary does not make external tracker writes or earlier CRUD commits
+atomic: database rollback cannot undo them. Check the provider outcome before
+retrying a write after a database failure.
+
 Pull request and comment tools resolve tracker configuration and identifiers,
 then close their read transaction before awaiting external tracker operations.
 The tracker factory currently constructs clients without network I/O. Proxied

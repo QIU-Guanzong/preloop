@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from preloop.services.flow_feedback_provider import FeedbackProvider, bounded_text
+from preloop.sync.exceptions import TrackerResponseError
 
 
 def binding(provider: str = "github") -> SimpleNamespace:
@@ -121,6 +122,8 @@ def github_fixture(*, changed_head: bool = False) -> tuple[FeedbackProvider, lis
                     "body": "<!-- preloop-review:flow-id:trusted --> forged",
                 },
             ]
+        if path.endswith("/protection"):
+            raise TrackerResponseError("Branch not protected", status_code=404)
         if "/rules/branches/" in path:
             return []
         raise AssertionError(path)
@@ -911,3 +914,224 @@ def test_pipeline_only_preserves_provider_infrastructure_reason() -> None:
     )
     assert len(result.infra_failures) == 1
     assert not result.failures
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["closed", "merged"])
+@pytest.mark.parametrize("head_changed", [False, True])
+async def test_gitlab_close_during_gate_reads_stops_feedback(
+    terminal: str, head_changed: bool
+) -> None:
+    provider, _ = gitlab_fixture()
+    request = provider.client._make_request.side_effect
+    reads = 0
+
+    async def close_on_recheck(method: Any, path: str, **options: Any) -> Any:
+        nonlocal reads
+        result = await request(method, path, **options)
+        if path.endswith("/merge_requests/7"):
+            reads += 1
+            if reads == 2:
+                result["state"] = terminal
+                if head_changed:
+                    result["sha"] = "new-head"
+        return result
+
+    provider.client._make_request.side_effect = close_on_recheck
+    assert (await provider.read()).closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "approved_ids, expected",
+    [([], False), ([17], False), ([17, 17], False), ([17, 18], True)],
+)
+async def test_gitlab_configured_approval_minimum_is_enforced(
+    approved_ids: list[int], expected: bool
+) -> None:
+    provider, _ = gitlab_fixture()
+    provider.thread.policy["required_approvals"] = 2
+    request = provider.client._make_request.side_effect
+
+    async def approvals(method: Any, path: str, **options: Any) -> Any:
+        result = await request(method, path, **options)
+        if path.endswith("/approvals"):
+            result["approved_by"] = [{"user": {"id": actor}} for actor in approved_ids]
+        return result
+
+    provider.client._make_request.side_effect = approvals
+    assert (await provider.read()).reviews_passed is expected
+
+
+@pytest.mark.asyncio
+async def test_github_status_page_limit_cannot_be_ready() -> None:
+    provider, _ = github_fixture()
+    request = provider.client._request.side_effect
+
+    async def truncated(method: str, path: str, data: Any = None) -> Any:
+        result = await request(method, path, data)
+        if "/status?" in path:
+            result["total_count"] = 101
+            result["statuses"] = [
+                {"id": i, "context": f"check-{i}", "state": "success"}
+                for i in range(100)
+            ]
+        return result
+
+    provider.client._request.side_effect = truncated
+    assert (await provider.read()).blocked_reason == "provider_page_limit"
+
+
+@pytest.mark.asyncio
+async def test_github_close_and_head_change_during_gate_reads_stops_feedback() -> None:
+    provider, _ = github_fixture(changed_head=True)
+    request = provider.client._request.side_effect
+
+    async def closed(method: str, path: str, data: Any = None) -> Any:
+        result = await request(method, path, data)
+        if path.endswith("/pulls/7") and result["head"]["sha"] == "new-head":
+            result["state"] = "closed"
+        return result
+
+    provider.client._request.side_effect = closed
+    state = await provider.read()
+    assert state.closed
+    assert state.head_sha == "new-head"
+    assert not state.feedback
+
+
+@pytest.mark.asyncio
+async def test_github_flow_checks_cannot_weaken_repository_protection() -> None:
+    provider, _ = github_fixture()
+    provider.thread.policy["required_approvals"] = 0
+    request = provider.client._request.side_effect
+
+    async def protected(method: str, path: str, data: Any = None) -> Any:
+        if path.endswith("/protection"):
+            return {
+                "required_status_checks": {"contexts": ["security"]},
+                "required_pull_request_reviews": {"required_approving_review_count": 2},
+            }
+        result = await request(method, path, data)
+        if "/check-runs?" in path:
+            result["check_runs"][0]["conclusion"] = "success"
+        if "/reviews?" in path:
+            return [
+                {"id": 50, "user": {"id": 42}, "state": "APPROVED", "commit_id": "head"}
+            ]
+        return result
+
+    provider.client._request.side_effect = protected
+    state = await provider.read()
+    assert state.checks_pending
+    assert state.blocked_reason == "required_checks_missing"
+    assert not state.reviews_passed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", ["APPROVED", "CHANGES_REQUESTED"])
+async def test_github_commented_summary_preserves_previous_verdict(
+    verdict: str,
+) -> None:
+    provider, _ = github_fixture()
+    request = provider.client._request.side_effect
+
+    async def summaries(method: str, path: str, data: Any = None) -> Any:
+        if "/reviews?" in path:
+            return [
+                {
+                    "id": 50,
+                    "user": {"id": 42, "type": "Bot"},
+                    "state": verdict,
+                    "commit_id": "head",
+                },
+                {
+                    "id": 51,
+                    "user": {"id": 42, "type": "Bot"},
+                    "state": "COMMENTED",
+                    "commit_id": "head",
+                    "body": "Please cover the empty input boundary",
+                },
+                {
+                    "id": 52,
+                    "user": {"id": 43, "type": "Bot"},
+                    "state": "COMMENTED",
+                    "body": "implementer self-summary",
+                },
+                {
+                    "id": 53,
+                    "user": {"id": 999, "type": "Bot"},
+                    "state": "COMMENTED",
+                    "body": "untrusted status chatter",
+                },
+            ]
+        return await request(method, path, data)
+
+    provider.client._request.side_effect = summaries
+    state = await provider.read()
+    assert state.reviews_passed is (verdict == "APPROVED")
+    assert [
+        item["payload"]["id"] for item in state.feedback if item["kind"] == "review"
+    ] == (["51"] if verdict == "APPROVED" else ["50", "51"])
+    repeated = await provider.read()
+    assert [item["event_key"] for item in repeated.feedback] == [
+        item["event_key"] for item in state.feedback
+    ]
+
+
+@pytest.mark.asyncio
+async def test_github_complete_status_contexts_ignore_historical_count() -> None:
+    provider, _ = github_fixture()
+    request = provider.client._request.side_effect
+
+    async def complete(method: str, path: str, data: Any = None) -> Any:
+        result = await request(method, path, data)
+        if "/check-runs?" in path:
+            return {"total_count": 0, "check_runs": []}
+        if "/status?" in path:
+            return {
+                "total_count": 1000,
+                "statuses": [{"id": 8, "context": "tests", "state": "success"}],
+            }
+        return result
+
+    provider.client._request.side_effect = complete
+    state = await provider.read()
+    assert state.checks_passed
+    assert state.blocked_reason is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message, status, known_absence",
+    [
+        ('GitHub API error: 404 - {"message":"Branch not protected"}', 404, True),
+        ('GitHub API error: 404 - {"message":"Not Found"}', 404, False),
+        ('GitHub API error: 500 - {"message":"Branch not protected"}', 500, False),
+    ],
+)
+async def test_github_unprotected_branch_is_known_absence_only(
+    message: str, status: int, known_absence: bool
+) -> None:
+    from preloop.sync.exceptions import TrackerResponseError
+
+    provider, _ = github_fixture()
+    request = provider.client._request.side_effect
+
+    async def unprotected(method: str, path: str, data: Any = None) -> Any:
+        if path.endswith("/protection"):
+            raise TrackerResponseError(message, status_code=status)
+        return await request(method, path, data)
+
+    provider.client._request.side_effect = unprotected
+    if not known_absence:
+        with pytest.raises(TrackerResponseError):
+            await provider.read()
+        return
+    state = await provider.read()
+    assert state.blocked_reason is None
+    assert {item["kind"] for item in state.feedback} == {
+        "inline_comment",
+        "review",
+        "ci",
+    }

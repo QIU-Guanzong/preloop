@@ -1254,9 +1254,26 @@ avatars.
   and time-banded DeepSeek rows keep their first-party list prices.
   `deepseek-v4.1-flash` uses Model Studio night hours 22:00-08:00 UTC+8.
   Reviewed feeds round-trip `time_bands` instead of crashing or flattening
-  a 2x idle/busy gap. Audio-bearing omni usage fails closed instead of
-  using the no-audio chat pair. Native rows that publish no prices stay
-  unpriced. See `docs/pricing/reviews/2026-09-19-alibaba.md`.
+  a 2x idle/busy gap. Omni usage that reports audio or vision tokens on
+  prompt or completion fails closed instead of using the text chat pair.
+  Native rows that publish no prices stay unpriced. See
+  `docs/pricing/reviews/2026-09-19-alibaba.md`.
+- Native MCP calls commit remaining database work on success and roll back on
+  failure or cancellation. Database errors are sanitized in both raised errors
+  and compliance batch results, while unrelated provider errors retain their
+  original status and detail. Failed batch items no longer poison the next
+  item's database transaction (#805).
+
+- Isolated publication checks receive the exact published base/head range and
+  retain profile, environment and selection evidence. Successful checks can be
+  reused only inside the controller for identical execution, artifact, profile
+  and runtime inputs after confirmed teardown. Unavailable checks and runtimes
+  are classified as `verification_blocked`, separately from failing tests.
+  Failed durable repairs keep their latest workspace and conversation while
+  recovering the prior PR binding through validated execution ancestry,
+  including explicitly adopted publishing executions. New commits still pass
+  the current verification gate before publication.
+
 - Saved flow details expose the effective publication policy, including ungated
   legacy flows and configuration blockers, without claiming that configured
   isolation is an execution verification receipt.

@@ -113,15 +113,22 @@ create duplicate execution turns.
 A PostgreSQL row lease protects each thread. Creating the next PENDING execution
 and assigning its feedback receipts is one transaction. If dispatch fails or a
 worker crashes, normal execution recovery dispatches the same execution ID.
-Feedback that arrives during execution stays pending. The agent runner exits
+Feedback that arrives during execution stays pending. A stopped, cancelled or
+aborted publisher or repair stops its subscription; a cancelled execution with an
+older publication can still be adopted explicitly. The agent runner exits
 between turns; CI waiting and stuck-job deadlines belong to the scheduler.
 
 ## Provider gates
 
 GitHub reconciliation reads the current PR head, checks, legacy commit statuses,
 submitted reviews, unresolved inline review threads and conversation comments.
-It incorporates configured required checks, branch protection and effective
-ruleset check/review requirements. A failing check run contributes its own
+It combines configured required checks with branch protection and effective
+ruleset check/review requirements; flow configuration cannot lower repository
+requirements. GitHub's explicit `404 Branch not protected` response establishes
+empty classic protection; an ambiguous 404 does not establish that requirements
+are absent. Nonempty submitted review summaries in the COMMENTED state enter
+feedback without replacing the reviewer's previous approval or changes-requested
+verdict. A failing check run contributes its own
 bounded, redacted `output` title/summary/text as diagnostic evidence. For failing
 GitHub Actions checks, reconciliation reads at most two job-detail records on
 the bound repository. The job must match the current head and check-run ID.
@@ -144,8 +151,11 @@ pipeline has no readable job (a configuration error, or jobs the token cannot
 list), its own status and any explicit provider failure reason are the evidence instead. Job and pipeline reads stay inside
 one provider page, like notes and statuses.
 
-Both paths recheck the head after reading gates and stop repairing closed or
-merged PRs.
+Both paths recheck the head and open/closed state after reading gates and stop
+repairing closed or merged PRs, including closure during the gate reads. GitLab
+approval readiness requires both the provider approval rules and any configured
+`required_approvals` minimum, counted by distinct approving users. GitHub legacy
+commit-status pagination blocks readiness just like truncated check-run results.
 
 Only current-head check failures trigger repairs, and only when provider details
 attribute the failure to the branch. Pending or missing required checks wait
@@ -363,7 +373,13 @@ Unit fixtures cover archive identity, traversal, symlinks, credential isolation,
 expiry, scheduler policy and provider outcomes. Set
 `FLOW_FEEDBACK_TEST_DATABASE_URL` to a disposable PostgreSQL database for the
 lease, crash and concurrent-worker integration tests. The suite never substitutes
-the application database for this fixture.
+the application database for this fixture. CI explicitly opts in using its
+disposable PostgreSQL service; each fixture creates and drops an isolated schema.
+`test_flow_feedback_lifecycle.py` connects fake GitHub and GitLab HTTP responses
+to real CRUD reservations and scheduler turns, covering publication-time feedback,
+coalesced CI/review repair, duplicate deliveries, missing events, worker restarts,
+same branch/session identity, current-head readiness and manual merge. These tests
+do not run a real model or publish to a provider.
 
 `NATIVE_SESSION_IMAGE_SMOKE=1` enables immutable-image Codex/OpenCode tests with a
 local deterministic model HTTP fixture. The first container seeds a fact; a

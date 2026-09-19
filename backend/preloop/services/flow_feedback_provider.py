@@ -609,23 +609,36 @@ class FeedbackProvider:
         # Repository policy is authoritative; absent explicit config is not proof
         # that required checks are empty. Branch protection errors fail closed.
         requirements_unknown = False
-        if "required_checks" not in self.thread.policy:
-            try:
-                protection = await request(
-                    "GET",
-                    f"{repo}/branches/{quote(pr['base']['ref'], safe='')}/protection",
-                )
-            except TrackerPermissionError:
-                protection = {}
-                requirements_unknown = True
-            required = (protection.get("required_status_checks") or {}).get(
-                "contexts", []
+        try:
+            protection = await request(
+                "GET",
+                f"{repo}/branches/{quote(pr['base']['ref'], safe='')}/protection",
             )
-            count = int(
+        except TrackerPermissionError:
+            protection = {}
+            requirements_unknown = True
+        except TrackerResponseError as error:
+            # GitHub distinguishes an unprotected branch from a masked or
+            # unreadable resource in its response message. Only its explicit
+            # absence response establishes empty classic requirements.
+            if (
+                error.status_code != 404
+                or "branch not protected" not in str(error).lower()
+            ):
+                raise
+            protection = {}
+        required = sorted(
+            set(required)
+            | set((protection.get("required_status_checks") or {}).get("contexts", []))
+        )
+        count = max(
+            count,
+            int(
                 (protection.get("required_pull_request_reviews") or {}).get(
-                    "required_approving_review_count", count
+                    "required_approving_review_count", 0
                 )
-            )
+            ),
+        )
         try:
             rules = await request(
                 "GET", f"{repo}/rules/branches/{quote(pr['base']['ref'], safe='')}"
@@ -664,6 +677,9 @@ class FeedbackProvider:
             thread_page_limit
             or any(len(items) >= 100 for items in (reviews, comments, discussion))
             or checks.get("total_count", 0) > 100
+            # Combined status returns latest-per-context objects. Bound that
+            # page directly instead of inferring missing contexts from totals.
+            or len(statuses.get("statuses", [])) >= 100
         ):
             state.blocked_reason = "provider_page_limit"
         if unsupported_gate:
@@ -682,7 +698,12 @@ class FeedbackProvider:
             comments, "inline_comment", sha
         ) + self._comments(discussion, "comment", sha)
         state.feedback += self._comments(
-            [r for r in latest.values() if r.get("state") == "CHANGES_REQUESTED"],
+            [r for r in latest.values() if r.get("state") == "CHANGES_REQUESTED"]
+            + [
+                r
+                for r in reviews
+                if r.get("state") == "COMMENTED" and (r.get("body") or "").strip()
+            ],
             "review",
             sha,
         )
@@ -697,6 +718,7 @@ class FeedbackProvider:
         if current["head"]["sha"] != sha:
             return FeedbackState(
                 current["head"]["sha"],
+                closed=state.closed,
                 checks_pending=True,
                 blocked_reason="head_changed_during_reconciliation",
             )
@@ -741,17 +763,26 @@ class FeedbackProvider:
             or jobs_truncated
         ):
             state.blocked_reason = "provider_page_limit"
-        state.reviews_passed = approvals.get("approvals_left", 1) == 0 and bool(
-            mr.get("blocking_discussions_resolved", False)
+        approved_by = {
+            str(item["user"]["id"])
+            for item in approvals.get("approved_by", [])
+            if (item.get("user") or {}).get("id") is not None
+        }
+        state.reviews_passed = (
+            approvals.get("approvals_left", 1) == 0
+            and len(approved_by) >= int(self.thread.policy.get("required_approvals", 0))
+            and bool(mr.get("blocking_discussions_resolved", False))
         )
         await self._gitlab_traces(get, repo, failed)
         state.feedback = self._comments(notes, "comment", sha) + [
             receipt("ci", item, head_sha=sha) for item in failed
         ]
         current = await get(base)
+        state.closed = current.get("state") in {"closed", "merged"}
         if current["sha"] != sha:
             return FeedbackState(
                 current["sha"],
+                closed=state.closed,
                 checks_pending=True,
                 blocked_reason="head_changed_during_reconciliation",
             )
