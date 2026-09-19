@@ -24,6 +24,11 @@ avatars.
 
 ### Added
 
+- Pi and DeepSeek Harness agents: CLI installation and onboarding, console/API
+  identities, ephemeral Docker/Kubernetes/private-runner flows, native tool
+  approvals, lifecycle events, and message/interrupt control of active sessions.
+  The shared `@preloop-ai/harness-plugin` connects both runtimes to Preloop.
+
 - `run-flow` composite GitHub Action (`.github/actions/run-flow`) and a
   guide, `docs/guide/flows/github-actions.md`. The action installs a
   pinned CLI, triggers a flow with the payload piped through stdin, and

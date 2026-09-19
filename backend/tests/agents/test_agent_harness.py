@@ -117,3 +117,50 @@ async def test_private_runner_uses_same_bootstrap(kind: str) -> None:
         leased_job={"launch_version": 1, "agent_type": kind},
     )
     assert status == "SUCCEEDED"
+
+
+@pytest.mark.parametrize("cls", [PiAgent, DeepSeekAgent])
+@pytest.mark.parametrize("global_non_root", ["false", "true"])
+@pytest.mark.asyncio
+async def test_kubernetes_harness_runs_directly_as_unprivileged_user(
+    cls: type, global_non_root: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import base64
+
+    from preloop.agents.container import K8S_INNER_SCRIPT_ENV_PREFIX
+
+    monkeypatch.setenv("AGENT_RUN_AS_NON_ROOT", global_non_root)
+    agent = cls({})
+    agent.use_kubernetes = True
+    agent._init_kubernetes_clients = AsyncMock()
+    agent._create_kubernetes_job = AsyncMock(return_value="job-id")
+    context = {
+        "execution_id": "test-execution",
+        "flow_id": "test-flow",
+        "prompt": "Write a result",
+        "model_identifier": "test-model",
+        "model_api_key": "test-key",
+    }
+    assert await agent.start(context) == "job-id"
+    job = agent._create_kubernetes_job.call_args.args[0]
+    pod = job.spec.template.spec
+    container = pod.containers[0]
+    assert container.security_context.run_as_user == 10000
+    assert container.security_context.run_as_non_root is True
+    assert container.security_context.capabilities.drop == ["ALL"]
+    assert not container.security_context.capabilities.add
+    assert pod.security_context.run_as_group == 10000
+    assert pod.security_context.fs_group == 10000
+    env = {item.name: item.value for item in container.env}
+    assert env["HOME"] == "/tmp/preloop-home"
+    assert sum(item.name == "HOME" for item in container.env) == 1
+    chunks = sorted(
+        (name, value)
+        for name, value in env.items()
+        if name.startswith(K8S_INNER_SCRIPT_ENV_PREFIX) and name[-1].isdigit()
+    )
+    script = base64.b64decode("".join(value for _, value in chunks)).decode()
+    assert "setpriv" not in script
+    assert "BASH_EXECUTION_STRING" not in script
+    assert "PRELOOP_AGENT_EXEC_START" in script
+    subprocess.run(["bash", "-n"], input=script, text=True, check=True)

@@ -16,6 +16,7 @@ import (
 )
 
 const harnessPluginPackage = "@preloop-ai/harness-plugin"
+const harnessPluginSpec = harnessPluginPackage + "@0.1.0"
 const harnessPatchMarker = "Managed by Preloop: Pi / DeepSeek Harness"
 
 func isExtensionHarness(agent AgentConfig) bool {
@@ -78,7 +79,7 @@ func (a harnessManagedAdapter) ValidateManagedConfig(doc map[string]interface{},
 
 func installHarnessPlugin(agent AgentConfig, out io.Writer) map[string]interface{} {
 	result := map[string]interface{}{"control_plugin_installed": false, "control_plugin_verified": false}
-	target := harnessPluginPackage + "@0.1.0"
+	target := harnessPluginSpec
 	if local, ok := findAgentControlRuntimePluginSource(agent); ok {
 		target = local
 	}

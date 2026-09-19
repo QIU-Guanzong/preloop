@@ -1947,7 +1947,7 @@ func runAgentsInstallPlugin(cmd *cobra.Command, args []string) error {
 	agentName := strings.Join(args, " ")
 	if isExtensionHarness(AgentConfig{Name: agentName}) {
 		if dryRun {
-			fmt.Fprintln(cmd.OutOrStdout(), "npm install --ignore-scripts --prefix", harnessPluginRoot(), harnessPluginPackage+"@0.1.0")
+			fmt.Fprintln(cmd.OutOrStdout(), "npm install --ignore-scripts --prefix", harnessPluginRoot(), harnessPluginSpec)
 			return nil
 		}
 		agents, err := discoverAgents(io.Discard, false)

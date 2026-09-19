@@ -696,7 +696,7 @@ def _managed_agent_control_fields(
         control_state = AGENT_CONTROL_STATE_UNSUPPORTED
     active_session_only = agent_kind in {"pi", "deepseek"}
     supports_interrupt = bool(
-        control_enabled and (active_session_only or snapshot.get("supports_interrupt"))
+        control_enabled and snapshot.get("supports_interrupt", active_session_only)
     )
     if snapshot.get("online"):
         session_mode = str(snapshot.get("session_mode") or "")

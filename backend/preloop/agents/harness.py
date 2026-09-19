@@ -14,7 +14,7 @@ from preloop.utils.execve_limits import (
     build_prompt_materialization_shell,
 )
 
-from .container import ContainerAgentExecutor
+from .container import ContainerAgentExecutor, KUBERNETES_AVAILABLE
 from .images import default_agent_image
 from .kubernetes import detect_kubernetes_environment
 
@@ -39,8 +39,9 @@ class ExtensionHarnessAgent(ContainerAgentExecutor):
     async def start(self, execution_context: dict[str, Any]) -> str:
         context = dict(execution_context)
         context["_agent_env"] = await self._prepare_environment(context)
+        # Docker bootstraps fresh volume ownership; Kubernetes uses fsGroup.
         context["_container_user"] = (
-            "0:0"  # Bootstrap volume ownership, then drop privileges.
+            "10000:10000" if self.use_kubernetes and KUBERNETES_AVAILABLE else "0:0"
         )
         context["_container_command"] = ["/bin/bash"]
         context["_container_args"] = ["-c", self._build_harness_script(context)]
@@ -135,7 +136,7 @@ class ExtensionHarnessAgent(ContainerAgentExecutor):
         # Custom worker images may bake both packages. Generic Node workers
         # install to writable /tmp; no root permission or global npm install.
         executable = "pi" if self.harness == "pi" else "dsh"
-        version = "0.85.1" if self.harness == "pi" else "0.1.5-rc.2"
+        version = package.rsplit("@", 1)[1]
         plugin_install = "npm install --ignore-scripts --no-audit --no-fund --prefix /tmp/preloop-harness-tools @preloop-ai/harness-plugin@0.1.0"
         runtime_install = f"npm install --ignore-scripts --no-audit --no-fund --prefix /tmp/preloop-harness-tools {package}"
         if self.environment_profile:
@@ -147,14 +148,19 @@ class ExtensionHarnessAgent(ContainerAgentExecutor):
         )
         post = self._prepare_git_post_execution_commands(context)
         command = command.replace("/opt/preloop-harness/", '"$PRELOOP_PLUGIN_DIR"/')
-        return f"""set -euo pipefail
-umask 077
-# Docker creates fresh named volumes as root. K8s uses the pod fsGroup.
+        root_bootstrap = ""
+        if context.get("_container_user") != "10000:10000":
+            root_bootstrap = """
+# Docker creates fresh named volumes as root.
 if [ "$(id -u)" -eq 0 ]; then
     mkdir -p /workspace /tmp/preloop-home
     chown -R 10000:10000 /workspace /tmp/preloop-home
     exec setpriv --reuid 10000 --regid 10000 --clear-groups /bin/bash -c "$BASH_EXECUTION_STRING"
 fi
+"""
+        return f"""set -euo pipefail
+umask 077
+{root_bootstrap}
 mkdir -p /tmp/preloop-home
 export npm_config_cache=/tmp/preloop-npm-cache
 export PATH="/tmp/preloop-harness-tools/node_modules/.bin:$PATH"

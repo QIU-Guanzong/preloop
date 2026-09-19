@@ -82,3 +82,21 @@ def test_harness_enrollment_is_idempotent_and_filterable(
     assert session is not None
     assert session.runtime_principal_id == payload["runtime_principal_id"]
     assert session.ended_at is not None
+
+
+@pytest.mark.parametrize("kind", ["pi", "deepseek"])
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_harness_interrupt_honors_runtime_presence(
+    kind: str, interrupt: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "preloop.api.endpoints.agent_control.agent_control_snapshot",
+        lambda _id: {"online": True, "supports_interrupt": interrupt},
+    )
+    fields = _managed_agent_control_fields(
+        {"id": "test-agent", "agent_kind": kind, "lifecycle_state": "active"},
+        {"validation_result": {"control_channel_configured": True}},
+    )
+    assert fields["control_online"] is True
+    assert fields["supports_interrupt"] is interrupt
+    assert ("interrupt" in fields["control_capabilities"]) is interrupt

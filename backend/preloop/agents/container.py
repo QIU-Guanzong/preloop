@@ -1416,7 +1416,13 @@ class ContainerAgentExecutor(AgentExecutor):
         run_as_non_root = os.getenv("AGENT_RUN_AS_NON_ROOT", "false").lower() == "true"
         agent_uid = 1000 if run_as_non_root else 0
         agent_gid = 1000 if run_as_non_root else 0
-        home_dir = "/home/agent" if run_as_non_root else "/root"
+        # Honor the same numeric user override as Docker. Harness images can
+        # run directly unprivileged, without SETUID/SETGID in their pod.
+        container_user = execution_context.get("_container_user")
+        if container_user is not None:
+            agent_uid, agent_gid = (int(part) for part in container_user.split(":"))
+            run_as_non_root = agent_uid != 0
+        home_dir = env.get("HOME") or ("/home/agent" if run_as_non_root else "/root")
 
         # Volume mounts: /workspace for git repos.
         # No init container needed — the container overlay FS makes the image's
@@ -1447,7 +1453,8 @@ class ContainerAgentExecutor(AgentExecutor):
                     name="agent-home", mount_path=home_dir, sub_path=None
                 )
             )
-            env_vars.append(client.V1EnvVar(name="HOME", value=home_dir))
+            if "HOME" not in env:
+                env_vars.append(client.V1EnvVar(name="HOME", value=home_dir))
         # When running as root, /root comes from the image overlay (writable,
         # with all pre-installed tools) — no emptyDir mount needed.
 
