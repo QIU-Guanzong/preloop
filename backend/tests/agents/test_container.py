@@ -2133,11 +2133,14 @@ class TestExtractSourceBranch:
         "ERROR: first\nERROR: second\nERROR: third",
     ],
 )
-def test_codex_tool_output_is_not_a_harness_failure(container_executor, tool_output):
+@pytest.mark.parametrize("duration", ["100ms", "59868ms", "4.56s", "1m 02s"])
+def test_codex_tool_output_is_not_a_harness_failure(
+    container_executor, tool_output, duration
+):
     logs = (
         "PRELOOP_AGENT_EXEC_START\nexec\n"
         '/bin/bash -lc "pytest" in /workspace/repo\n'
-        " exited 1 in 100ms:\n"
+        f" exited 1 in {duration}:\n"
         + tool_output
         + "\ncodex\nI reproduced the bug and will fix it.\n"
         "tokens used\n1000\n"

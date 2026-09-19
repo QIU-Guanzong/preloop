@@ -488,6 +488,14 @@ def _reanalyze_generated_message(text: str) -> Optional[AgentFailureAnalysis]:
     )
 
 
+# Captured CLI versions use integer milliseconds even for long commands.
+# Accept seconds/minutes too, while requiring the full completion-header shape.
+_CODEX_COMMAND_COMPLETED_RE = re.compile(
+    r" (?:succeeded|exited -?\d+) in "
+    r"(?:\d+ms|(?:\d+m )?\d+(?:\.\d+)?s):"
+)
+
+
 def runtime_log_text(logs_text: str) -> str:
     """Exclude Codex command transcripts from runtime failure heuristics.
 
@@ -517,7 +525,7 @@ def runtime_log_text(logs_text: str) -> str:
             completed = False
         elif command is not None:
             command.append(line)
-            if re.fullmatch(r" (?:succeeded|exited -?\d+) in \d+ms:", line):
+            if _CODEX_COMMAND_COMPLETED_RE.fullmatch(line):
                 completed = True
         else:
             result.append(line)
