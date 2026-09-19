@@ -251,6 +251,7 @@ def test_incompatible_litellm_keeps_warmed_last_good_prices_and_revision(
     from litellm import utils
 
     original_invalidate = utils._invalidate_model_cost_lowercase_map
+    original_cache_clear = getattr(utils.get_model_info, "cache_clear", None)
     litellm.model_cost["example/model"].update({"mode": "chat", "max_tokens": 4096})
     refresher.apply(payload)
     previous = litellm.model_cost
@@ -313,6 +314,10 @@ def test_incompatible_litellm_keeps_warmed_last_good_prices_and_revision(
         original_invalidate,
         raising=False,
     )
+    if original_cache_clear is not None:
+        monkeypatch.setattr(
+            utils.get_model_info, "cache_clear", original_cache_clear, raising=False
+        )
     assert refresher.apply(revised) == 1
     assert price() == pytest.approx((0.005, 0.002))
 
@@ -876,3 +881,81 @@ def test_published_flash_workspace_feed_uses_confirmed_console_cache_rates(
         ) == pytest.approx(0.2)
     finally:
         alibaba_price_catalog.reset_live_state_for_tests()
+
+
+def test_alibaba_policy_rejects_flat_tiers_with_time_bands(payload: dict) -> None:
+    entry = _alibaba_entry(payload)
+    entry["alibaba_policy"]["time_bands"] = {
+        "idle": {"tiers": [{"input": 0.1, "output": 0.2}]},
+        "busy": {"tiers": [{"input": 0.2, "output": 0.4}]},
+    }
+    payload["models"] = {"alibaba/singapore-international/example-chat": entry}
+    with pytest.raises(ValueError, match="flat tiers"):
+        validate_feed(payload)
+
+
+def test_alibaba_apply_rejects_flattening_seed_time_bands(payload: dict) -> None:
+    from preloop.services.alibaba_price_catalog import reset_live_state_for_tests
+
+    reset_live_state_for_tests()
+    entry = _alibaba_entry(payload)
+    entry["alibaba_policy"]["model_identifier"] = "deepseek-v4.1-flash"
+    payload["models"] = {"alibaba/singapore-international/deepseek-v4.1-flash": entry}
+    updater = ReviewedPriceRefresher(
+        url="https://example.com/feed",
+        allowed_models=["alibaba/singapore-international/deepseek-v4.1-flash"],
+        interval_seconds=60,
+    )
+    try:
+        with pytest.raises(ValueError, match="flatten time_bands"):
+            updater.apply(payload)
+    finally:
+        reset_live_state_for_tests()
+
+
+def test_alibaba_time_bands_feed_estimates_idle_and_busy(payload: dict) -> None:
+    from types import SimpleNamespace
+
+    from preloop.services.alibaba_price_catalog import reset_live_state_for_tests
+    from preloop.services.alibaba_pricing import estimate
+
+    reset_live_state_for_tests()
+    entry = _alibaba_entry(payload)
+    entry["alibaba_policy"].pop("tiers")
+    entry["alibaba_policy"]["model_identifier"] = "banded-chat"
+    entry["alibaba_policy"]["time_bands"] = {
+        "idle": {"tiers": [{"input": 0.15, "output": 0.6}]},
+        "busy": {"tiers": [{"input": 0.3, "output": 1.2}]},
+    }
+    key = "alibaba/singapore-international/banded-chat"
+    payload["models"] = {key: entry}
+    model = SimpleNamespace(
+        provider_name="qwen",
+        model_identifier="banded-chat",
+        api_endpoint="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    )
+    updater = ReviewedPriceRefresher(
+        url="https://example.com/feed",
+        allowed_models=[key],
+        interval_seconds=60,
+    )
+    try:
+        assert updater.apply(payload) == 1
+        busy = estimate(
+            model,
+            prompt_tokens=10_000,
+            completion_tokens=1_000,
+            usage_details=None,
+            observed_at=datetime(2026, 9, 19, 4, 0, tzinfo=timezone.utc),
+        )
+        idle = estimate(
+            model,
+            prompt_tokens=10_000,
+            completion_tokens=1_000,
+            usage_details=None,
+            observed_at=datetime(2026, 9, 19, 16, 0, tzinfo=timezone.utc),
+        )
+        assert busy == pytest.approx(0.0042)
+        assert idle == pytest.approx(0.0021)
+    finally:
+        reset_live_state_for_tests()

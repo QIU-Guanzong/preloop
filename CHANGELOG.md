@@ -1246,13 +1246,14 @@ avatars.
 
 ### Fixed
 
-- Alibaba Model Studio flow estimates cover time-banded Singapore
-  International chat SKUs. `deepseek-v4.1-flash`, `deepseek-v4-flash-0731`
-  and `deepseek-v4-pro-0813` were skipped because a native `time_band`
-  was treated as unpriced, so a Qwen-hosted DeepSeek Flash flow had no
-  dollar estimate. Idle is 22:00-08:00 UTC+8 from the public pricing
-  page; daytime is busy. `glm-5.3` is on the same Singapore list. See
-  `docs/pricing/reviews/2026-09-19-alibaba.md`.
+- Alibaba Model Studio flow estimates cover the Singapore International
+  native catalog, not only chat SKUs. `GET /api/v1/models` is fetched
+  without a text-generation filter so image, embedding, TTS, ASR, omni,
+  and time-banded DeepSeek rows keep their first-party list prices.
+  `deepseek-v4.1-flash` uses Model Studio night hours 22:00-08:00 UTC+8.
+  Reviewed feeds round-trip `time_bands` instead of crashing or flattening
+  a 2x idle/busy gap. Native rows that publish no prices stay unpriced.
+  See `docs/pricing/reviews/2026-09-19-alibaba.md`.
 - Private-runner launch and server logs report the configured container image,
   including the legacy `docker_image` alias, instead of the harness default.
 

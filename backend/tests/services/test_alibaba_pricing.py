@@ -58,6 +58,8 @@ def _estimate(
         ("kimi-k2.7-code", 0.0135),
         ("kimi-k3", 0.045),
         ("qwen3.8-flash", 0.00197),
+        ("qwen3-next-80b-a3b-thinking", 0.0027),
+        ("text-embedding-v4", 0.0007),
     ],
 )
 def test_singapore_headline_list_costs(model: str, expected: float) -> None:
@@ -95,7 +97,7 @@ def test_time_banded_deepseek_uses_utc8_night_window() -> None:
         observed_at=datetime(2026, 9, 19, 4, 0, tzinfo=timezone.utc),
     )
     assert cached.cost == pytest.approx(0.00285)
-    unpriced_cache = _estimate(
+    dated_cache = _estimate(
         _model("deepseek-v4-flash-0731"),
         {
             "_preloop_cache_mode": "implicit",
@@ -103,8 +105,20 @@ def test_time_banded_deepseek_uses_utc8_night_window() -> None:
         },
         observed_at=datetime(2026, 9, 19, 4, 0, tzinfo=timezone.utc),
     )
-    assert unpriced_cache.cost is None
+    assert dated_cache.cost == pytest.approx(0.00374)
     assert _catalog_entry(model) is not None
+    _, catalog = _catalog_entry(model)
+    assert catalog["time_band"] in {"idle", "busy"}
+    from preloop.services.alibaba_price_catalog import pricing_snapshot
+
+    busy_snap = pricing_snapshot(
+        model, observed_at=datetime(2026, 9, 19, 4, 0, tzinfo=timezone.utc)
+    )
+    idle_snap = pricing_snapshot(
+        model, observed_at=datetime(2026, 9, 19, 16, 0, tzinfo=timezone.utc)
+    )
+    assert busy_snap is not None and busy_snap["time_band"] == "busy"
+    assert idle_snap is not None and idle_snap["time_band"] == "idle"
 
 
 def test_alibaba_idle_hours_follow_utc8_night_window() -> None:
@@ -156,7 +170,7 @@ def test_unknown_snapshot_and_gateway_alias_do_not_borrow_a_price() -> None:
 
 
 @pytest.mark.parametrize("mode", ["implicit", "explicit"])
-def test_native_cache_observations_without_currency_are_not_prices(mode: str) -> None:
+def test_native_seed_cache_rates_price_qwen_max(mode: str) -> None:
     result = _estimate(
         _model(),
         {
@@ -165,8 +179,8 @@ def test_native_cache_observations_without_currency_are_not_prices(mode: str) ->
             "completion_tokens_details": {"reasoning_tokens": 900},
         },
     )
-    assert result.cost is None
-    assert result.source == "unpriced"
+    assert result.cost == pytest.approx(0.01725 if mode == "implicit" else 0.01685)
+    assert result.source == "catalog"
 
 
 def test_old_cached_usage_without_mode_is_unknown() -> None:
@@ -176,7 +190,7 @@ def test_old_cached_usage_without_mode_is_unknown() -> None:
     )
 
 
-def test_nested_cache_creation_never_uses_an_unverified_tariff() -> None:
+def test_native_seed_cache_creation_prices_qwen_max() -> None:
     usage = {
         "_preloop_cache_mode": "explicit",
         "prompt_tokens_details": {
@@ -185,7 +199,7 @@ def test_nested_cache_creation_never_uses_an_unverified_tariff() -> None:
         },
         "completion_tokens_details": {"reasoning_tokens": 900},
     }
-    assert _estimate(_model(), usage).cost is None
+    assert _estimate(_model(), usage).cost == pytest.approx(0.01918)
 
 
 def test_official_glm_cache_ratio_and_reasoning_are_not_double_counted() -> None:
@@ -194,8 +208,8 @@ def test_official_glm_cache_ratio_and_reasoning_are_not_double_counted() -> None
         "prompt_tokens_details": {"cached_tokens": 5000},
         "completion_tokens_details": {"reasoning_tokens": 900},
     }
-    # 5k standard at1.4 +5k cached at25% +1k total output at4.4 per1M.
-    assert _estimate(_model("glm-5.2"), usage).cost == pytest.approx(0.01315)
+    # 5k standard at 1.4 + 5k cached at native 0.28 + 1k total output at 4.4 per 1M.
+    assert _estimate(_model("glm-5.2"), usage).cost == pytest.approx(0.0128)
 
 
 def test_openrouter_route_keeps_its_authoritative_provider_accounting() -> None:
@@ -213,17 +227,14 @@ def test_whitespace_on_endpoint_does_not_change_tariff() -> None:
     assert result.cost == pytest.approx(0.026)
 
 
-def test_unknown_cache_tariff_stays_unpriced() -> None:
-    assert (
-        _estimate(
-            _model("deepseek-v4-pro"),
-            {
-                "_preloop_cache_mode": "implicit",
-                "prompt_tokens_details": {"cached_tokens": 1000},
-            },
-        ).cost
-        is None
-    )
+def test_native_deepseek_pro_cache_rate_is_priced() -> None:
+    assert _estimate(
+        _model("deepseek-v4-pro"),
+        {
+            "_preloop_cache_mode": "implicit",
+            "prompt_tokens_details": {"cached_tokens": 1000},
+        },
+    ).cost == pytest.approx(0.0266)
 
 
 def test_operator_override_remains_authoritative() -> None:
@@ -249,7 +260,7 @@ def test_undocumented_provider_money_cannot_bypass_tariff(currency: str | None) 
 
 def test_qwen_context_limit_does_not_fall_back_to_a_lower_tier() -> None:
     result = estimate_ai_model_usage_cost_detailed(
-        _model(),
+        _model("qwen3.7-flash"),
         prompt_tokens=1_000_001,
         completion_tokens=1000,
         total_tokens=1_001_001,
@@ -319,7 +330,10 @@ def test_seed_covers_current_singapore_chat_skus() -> None:
     assert "qwen-plus" in _SEED
     assert "deepseek-v4.1-flash" in _SEED
     assert "glm-5.3" in _SEED
-    assert len(_SEED) >= 80
+    assert "qwen-image-plus" in _SEED
+    assert "text-embedding-v4" in _SEED
+    assert "qwen3-next-80b-a3b-thinking" in _SEED
+    assert len(_SEED) >= 200
 
 
 def test_verified_standard_cache_ratios_cover_supported_qwen() -> None:
@@ -384,26 +398,24 @@ def test_operator_verified_flash_workspace_cache_tariffs(
     )
 
 
-def test_console_seed_cache_quote_does_not_invent_historical_applicability() -> None:
+def test_native_seed_cache_rates_apply_with_the_list_tariff() -> None:
     from datetime import datetime, timezone
     from preloop.services.alibaba_pricing import estimate
 
     model = _model("qwen3.8-flash")
-    before = datetime(2026, 9, 15, 16, 26, 49, tzinfo=timezone.utc)
-    confirmed = datetime(2026, 9, 15, 16, 26, 50, tzinfo=timezone.utc)
     usage = {
         "_preloop_cache_mode": "implicit",
         "prompt_tokens_details": {"cached_tokens": 48000},
     }
     kwargs = {"prompt_tokens": 50000, "completion_tokens": 1000, "usage_details": usage}
-    assert estimate(model, **kwargs, observed_at=before) is None
-    assert estimate(model, **kwargs, observed_at=confirmed) == pytest.approx(0.001538)
+    asof = datetime(2026, 9, 19, 2, 0, tzinfo=timezone.utc)
+    assert estimate(model, **kwargs, observed_at=asof) == pytest.approx(0.001538)
     assert estimate(
         model,
         prompt_tokens=50000,
         completion_tokens=1000,
         usage_details=None,
-        observed_at=before,
+        observed_at=asof,
     ) == pytest.approx(0.00797)
 
 
@@ -575,3 +587,32 @@ def test_reviewed_effective_dates_are_per_model_and_block_seed_fallback() -> Non
     assert estimate(_model("qwen3.8-max"), **kwargs) is None
     kwargs["observed_at"] = later
     assert estimate(_model("qwen3.8-max"), **kwargs) == pytest.approx(0.0034)
+
+
+def test_image_and_tts_list_prices_need_matching_usage() -> None:
+    from preloop.services.alibaba_pricing import estimate, pricing_failure_reason
+
+    image = _model("qwen-image-plus")
+    key, entry = _catalog_entry(image)
+    assert "image" in key or entry["input_cost_per_image"] == 0.03
+    assert entry["input_cost_per_image"] == 0.03
+    assert _estimate(image).cost is None
+    assert (
+        pricing_failure_reason(image, prompt_tokens=10000, usage_details=None)
+        == "non_token_usage_required"
+    )
+    assert estimate(
+        image,
+        prompt_tokens=0,
+        completion_tokens=0,
+        usage_details={"image_count": 2},
+    ) == pytest.approx(0.06)
+    tts = _model("qwen3-tts-flash")
+    _, tts_entry = _catalog_entry(tts)
+    assert tts_entry["output_cost_per_10k_characters"] == 0.1
+    assert estimate(
+        tts,
+        prompt_tokens=0,
+        completion_tokens=0,
+        usage_details={"character_count": 20_000},
+    ) == pytest.approx(0.2)

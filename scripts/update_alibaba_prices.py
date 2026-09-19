@@ -106,15 +106,43 @@ def _band_payload(tariff: Any) -> dict[str, Any]:
     return {"tiers": [_tier_payload(tier) for tier in tiers]}
 
 
+def _unit_payload(tariff: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key in (
+        "per_image",
+        "per_image_input",
+        "per_image_output",
+        "per_second",
+        "per_10k_characters",
+        "per_voice",
+    ):
+        value = getattr(tariff, key, None)
+        if value is not None:
+            payload[key] = value
+    extra = getattr(tariff, "extra_rates", ()) or ()
+    if extra:
+        payload["extra_rates"] = [
+            {"type": kind, "unit": unit, "amount": amount}
+            for kind, unit, amount in extra
+        ]
+    return payload
+
+
 def _seed_model_entry(tariff: Any) -> dict[str, Any]:
     bands = tariff.time_bands
+    units = _unit_payload(tariff)
     if bands is not None:
         return {
             "time_bands": {
                 "idle": _band_payload(bands.idle),
                 "busy": _band_payload(bands.busy),
-            }
+            },
+            **units,
         }
+    if tariff.has_token_rates():
+        return {**_band_payload(tariff), **units}
+    if units:
+        return units
     return _band_payload(tariff)
 
 
@@ -129,7 +157,7 @@ def build_seed(payload: Any) -> dict[str, Any]:
             continue
         models[ident] = _seed_model_entry(tariff)
     if not models:
-        raise ValueError("Native dump contains no supported USD token tariffs")
+        raise ValueError("Native dump contains no supported USD list tariffs")
     return {
         "_meta": {
             **meta,
@@ -139,7 +167,10 @@ def build_seed(payload: Any) -> dict[str, Any]:
                 for row in rows
                 if row["model"].strip() not in models
             ),
-            "note": "Verified Singapore International token tariffs. Estimates, not invoices.",
+            "note": (
+                "Verified Singapore International list tariffs from native "
+                "GET /api/v1/models. Estimates, not invoices."
+            ),
         },
         "models": {key: models[key] for key in sorted(models)},
     }

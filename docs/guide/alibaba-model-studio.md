@@ -26,7 +26,8 @@ an explicit reason and does not substitute guessed model IDs.
 The picker covers chat and agent models, including third-party models served by
 Model Studio. Selecting DeepSeek, GLM, or Kimi there keeps Alibaba as the upstream.
 Image/video generation, dedicated audio, translation, and separate Qwen-VL lines
-are outside this picker. Listing a model is not an end-to-end compatibility test
+are outside this picker. Pricing still reads the full native catalog (not only
+text-generation SKUs). Listing a model is not an end-to-end compatibility test
 of every capability it advertises.
 
 ## Chat and agent controls
@@ -61,14 +62,16 @@ breakdown of completion tokens and are not charged a second time. Cache-read
 and cache-creation counts retain the provider's detailed usage.
 
 Catalog dollar values are **estimates**, not invoices. Preloop uses Singapore
-International USD list tariffs from the public pricing page as a seed covering
-current chat SKUs, then overlays live native `GET /api/v1/models` prices when
-Fetch Models, Fetch price, or an unpriced-row lookup succeeds. It does not
-substitute a native DeepSeek, Z.ai or Moonshot price for an Alibaba-hosted
-model. Beijing and other CNY sites stay unpriced in USD accounting. Time-banded
-Singapore International SKUs use Model Studio night hours (22:00-08:00 UTC+8,
-idle) versus daytime (busy). Non-token units (image, audio) stay unpriced unless
-an operator supplies an override.
+International USD list tariffs from a native `GET /api/v1/models` seed covering
+the SKUs Model Studio returns for a Singapore International key, then overlays
+live native prices when Fetch Models, Fetch price, or an unpriced-row lookup
+succeeds. It does not substitute a native DeepSeek, Z.ai or Moonshot price for
+an Alibaba-hosted model. Beijing and other CNY sites stay unpriced in USD
+accounting. Time-banded Singapore International SKUs use Model Studio night
+hours (22:00-08:00 UTC+8, idle) versus daytime (busy). Mixed-modality leftover
+rates stay on the tariff as extra fields instead of being blended. Native rows
+that publish no prices, and compatible-mode aliases that are not in the native
+catalog, stay unpriced rather than guessed.
 
 See [Alibaba's model pricing](https://www.alibabacloud.com/help/en/model-studio/model-pricing)
 for published rates and [List models](https://www.alibabacloud.com/help/en/model-studio/list-models)

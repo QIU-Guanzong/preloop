@@ -160,6 +160,61 @@ def test_regional_feed_copies_dedicated_seed(dump: dict) -> None:
         )
 
 
+def test_regional_feed_round_trips_time_bands(dump: dict) -> None:
+    dump["output"]["models"][0]["model"] = "deepseek-v4.1-flash"
+    dump["output"]["models"][0]["prices"][0]["prices"] = [
+        {
+            "type": "input_token",
+            "price": "0.3",
+            "price_unit": "Per 1M tokens",
+            "time_band": "busy",
+        },
+        {
+            "type": "output_token",
+            "price": "1.2",
+            "price_unit": "Per 1M tokens",
+            "time_band": "busy",
+        },
+        {
+            "type": "input_token",
+            "price": "0.15",
+            "price_unit": "Per 1M tokens",
+            "time_band": "idle",
+        },
+        {
+            "type": "output_token",
+            "price": "0.6",
+            "price_unit": "Per 1M tokens",
+            "time_band": "idle",
+        },
+    ]
+    seed = load_script("update_alibaba_prices").build_seed(dump)
+    now = datetime.now(timezone.utc)
+    key = "alibaba/singapore-international/deepseek-v4.1-flash"
+    manifest = {
+        "schema_version": 1,
+        "currency": "USD",
+        "revision": "test-1",
+        "published_at": now.isoformat(),
+        "expires_at": (now + timedelta(days=7)).isoformat(),
+        "models": {
+            key: {
+                "policy": "alibaba_regional_tokens",
+                "source_url": "https://example.com/pricing",
+                "verified_at": dump["_meta"]["retrieved_at"],
+                "effective_from": dump["_meta"]["retrieved_at"],
+            }
+        },
+    }
+    feed = load_script("build_reviewed_model_prices").build_feed(
+        {}, manifest, {"singapore-international": seed}
+    )
+    policy = feed["models"][key]["alibaba_policy"]
+    assert policy.get("tiers") is None
+    assert policy["time_bands"]["busy"]["tiers"][0]["input"] == 0.3
+    assert policy["time_bands"]["idle"]["tiers"][0]["input"] == 0.15
+
+
 def test_weekly_installer_renders_valid_bound_schedule_and_is_idempotent() -> None:
     installer = load_script("install_model_price_review")
     payload = installer.render_flow(

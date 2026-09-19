@@ -8,8 +8,10 @@ Estimates remain list prices, never invoices.
 Currency is asserted from the serving region (Singapore International and
 US workspace native catalogs are USD). Beijing is not ingested into USD
 accounting. Time-banded token rows become idle/busy tariffs using Model
-Studio night hours (22:00-08:00 UTC+8). Image and other non-token units
-stay unpriced.
+Studio night hours (22:00-08:00 UTC+8). Token SKUs keep a chat-shaped
+input/output pair when the native row has one. Image, audio, video, and
+other non-token list prices stay on the tariff as unit rates instead of
+being converted into invented token prices.
 """
 
 from __future__ import annotations
@@ -263,7 +265,8 @@ def ingest_native_models(
         replace: When True, the region bucket becomes exactly these tariffs.
 
     Returns:
-        Count of models with a usable USD token tariff.
+    Count of models with a usable USD list tariff.
+
     """
     incoming: dict[str, Tariff] = {}
     for entry in entries:
@@ -316,11 +319,13 @@ def native_tariff(ai_model: models.AIModel) -> Tariff | None:
 
 
 def parse_native_model(entry: Any) -> Tariff | None:
-    """Parse one native catalog model into a USD token tariff.
+    """Parse one native catalog model into a USD list tariff.
 
-    Image, audio, and other non-token units are ignored. A time_band on an
-    input or output row is kept only when both idle and busy token rates are
-    present; a single band is not enough to estimate.
+    Token rows become an input/output pair when the native types map to a
+    single chat-shaped rate. Mixed-modality leftovers and non-token units
+    are kept as extra or unit rates. A time_band on an input or output row
+    is kept only when both idle and busy token rates are present; a single
+    band is not enough to estimate.
     """
     if not isinstance(entry, dict):
         return None
@@ -329,6 +334,7 @@ def parse_native_model(entry: Any) -> Tariff | None:
         return None
     unbanded: list[Tariff] = []
     banded: list[Tariff] = []
+    units: list[Tariff] = []
     for group in groups:
         if not isinstance(group, dict):
             continue
@@ -339,10 +345,16 @@ def parse_native_model(entry: Any) -> Tariff | None:
         both = _banded_tariff_from_price_group(group)
         if both is not None:
             banded.append(both)
+            continue
+        unit = _unit_tariff_from_price_group(group)
+        if unit is not None:
+            units.append(unit)
     if unbanded:
         return _combine_tariff_tiers(unbanded)
     if len(banded) == 1:
         return banded[0]
+    if len(units) == 1:
+        return units[0]
     return None
 
 
@@ -365,7 +377,7 @@ def _combine_tariff_tiers(tiers: list[Tariff]) -> Tariff | None:
 
 def _normalize_time_band(value: Any) -> str | None:
     raw = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
-    if raw in {"", "default", "none"}:
+    if raw in {"", "default", "none", "standard"}:
         return "default"
     if raw in {"busy", "peak", "daytime", "day"}:
         return "busy"
@@ -374,13 +386,14 @@ def _normalize_time_band(value: Any) -> str | None:
     return None
 
 
-def _tariff_from_price_group(
+def _collect_price_items(
     group: dict[str, Any], *, band: str | None = None
-) -> Tariff | None:
+) -> list[tuple[str, str, float]]:
+    """Return ``(type, compact_unit, amount)`` rows for one price group."""
     items = group.get("prices")
     if not isinstance(items, list):
-        return None
-    parsed: dict[str, float] = {}
+        return []
+    collected: list[tuple[str, str, float]] = []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -390,10 +403,9 @@ def _tariff_from_price_group(
                 continue
         elif item_band != band:
             continue
-        if not _is_token_unit(str(item.get("price_unit") or "")):
-            continue
-        kind = _price_type(str(item.get("type") or ""))
-        if kind is None:
+        kind = str(item.get("type") or "").strip()
+        unit = _compact_unit(str(item.get("price_unit") or ""))
+        if not kind or not unit:
             continue
         try:
             amount = float(item.get("price"))
@@ -401,17 +413,224 @@ def _tariff_from_price_group(
             continue
         if amount < 0 or not math.isfinite(amount):
             continue
-        parsed[kind] = amount
-    if "input" not in parsed or "output" not in parsed:
+        collected.append((kind, unit, amount))
+    return collected
+
+
+def _tariff_from_price_group(
+    group: dict[str, Any], *, band: str | None = None
+) -> Tariff | None:
+    items = _collect_price_items(group, band=band)
+    token_items = [
+        (kind, amount) for kind, unit, amount in items if _is_token_unit(unit)
+    ]
+    if not token_items:
         return None
-    return Tariff(
-        input=parsed["input"],
-        output=parsed["output"],
-        implicit_read=parsed.get("implicit_read"),
-        explicit_read=parsed.get("explicit_read"),
-        creation=parsed.get("creation"),
-        max_input=_parse_range_upper(str(group.get("range_name") or "")),
+    parsed = {kind: amount for kind, amount in token_items}
+    tariff = _resolve_token_tariff(
+        parsed, max_input=_parse_range_upper(str(group.get("range_name") or ""))
     )
+    return tariff
+
+
+def _resolve_token_tariff(
+    parsed: dict[str, float], *, max_input: int | None
+) -> Tariff | None:
+    """Map native token types onto a chat-shaped input/output pair."""
+    pairs = (
+        (
+            "input_token",
+            "output_token",
+            ("input_token_cache", "input_token_cache_implicit"),
+            ("input_token_cache_read", "input_token_cache_explicit"),
+            ("input_token_cache_creation_5m", "input_token_cache_creation"),
+        ),
+        (
+            "thinking_input_token",
+            "thinking_output_token",
+            ("thinking_input_token_cache",),
+            (),
+            (),
+        ),
+        (
+            "omni_input_token",
+            "omni_output_token",
+            ("omni_input_token_cache",),
+            (),
+            (),
+        ),
+        (
+            "omni_no_audio_input_token",
+            "omni_no_audio_output_token",
+            (),
+            (),
+            (),
+        ),
+        (
+            "text_input_token",
+            "purein_text_output_token",
+            ("text_input_token_cache",),
+            (),
+            (),
+        ),
+    )
+    used: set[str] = set()
+    chosen: Tariff | None = None
+    for inp, out, implicit_keys, explicit_keys, creation_keys in pairs:
+        if inp not in parsed or out not in parsed:
+            continue
+        used.update({inp, out, *implicit_keys, *explicit_keys, *creation_keys})
+        chosen = Tariff(
+            input=parsed[inp],
+            output=parsed[out],
+            implicit_read=_first_rate(parsed, implicit_keys),
+            explicit_read=_first_rate(parsed, explicit_keys),
+            creation=_first_rate(parsed, creation_keys),
+            max_input=max_input,
+        )
+        break
+    if chosen is None and "embedding_token" in parsed:
+        used.add("embedding_token")
+        chosen = Tariff(
+            input=parsed["embedding_token"], output=0.0, max_input=max_input
+        )
+    if (
+        chosen is None
+        and "audio_input_token" in parsed
+        and "multiin_text_output_token" in parsed
+        and "text_input_token" not in parsed
+    ):
+        used.update({"audio_input_token", "multiin_text_output_token"})
+        chosen = Tariff(
+            input=parsed["audio_input_token"],
+            output=parsed["multiin_text_output_token"],
+            max_input=max_input,
+        )
+    if chosen is None:
+        extra = _extra_rates_from_parsed(parsed, set())
+        chat_types = {
+            "input_token",
+            "output_token",
+            "input_token_cache",
+            "input_token_cache_implicit",
+            "input_token_cache_read",
+            "input_token_cache_explicit",
+            "input_token_cache_creation_5m",
+            "input_token_cache_creation",
+        }
+        if extra and all(kind in chat_types for kind, _, _ in extra):
+            return None
+        if extra:
+            return Tariff(extra_rates=extra, max_input=max_input)
+        return None
+    extra = _extra_rates_from_parsed(parsed, used)
+    if not extra:
+        return chosen
+    return Tariff(
+        input=chosen.input,
+        output=chosen.output,
+        implicit_read=chosen.implicit_read,
+        explicit_read=chosen.explicit_read,
+        creation=chosen.creation,
+        max_input=chosen.max_input,
+        extra_rates=extra,
+    )
+
+
+def _first_rate(parsed: dict[str, float], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        if key in parsed:
+            return parsed[key]
+    return None
+
+
+def _extra_rates_from_parsed(
+    parsed: dict[str, float], used: set[str]
+) -> tuple[tuple[str, str, float], ...]:
+    leftover = []
+    for kind, amount in sorted(parsed.items()):
+        if kind in used:
+            continue
+        leftover.append((kind, "Per 1M tokens", amount))
+    return tuple(leftover)
+
+
+def _unit_tariff_from_price_group(group: dict[str, Any]) -> Tariff | None:
+    """Parse a non-token list price group without inventing a token rate."""
+    items = _collect_price_items(group)
+    non_token = [
+        (kind, unit, amount) for kind, unit, amount in items if not _is_token_unit(unit)
+    ]
+    if not non_token:
+        return None
+    types = {kind for kind, _, _ in non_token}
+    if types == {"image_number"} and all(
+        unit == "per image" for _, unit, _ in non_token
+    ):
+        amounts = {amount for _, _, amount in non_token}
+        if len(amounts) == 1:
+            return Tariff(per_image=next(iter(amounts)))
+    qima_in = {
+        amount for kind, unit, amount in non_token if kind.startswith("qima_input_")
+    }
+    qima_out = {
+        amount for kind, unit, amount in non_token if kind.startswith("qima_output_")
+    }
+    qima_only = all(kind.startswith("qima_") for kind, _, _ in non_token)
+    if qima_only and qima_in and qima_out and len(qima_in) == 1 and len(qima_out) == 1:
+        return Tariff(
+            per_image_input=next(iter(qima_in)),
+            per_image_output=next(iter(qima_out)),
+        )
+    if types == {"cosy_tts_number"} and len(non_token) == 1:
+        _, unit, amount = non_token[0]
+        if unit in {"per 10000 characters", "per 10,000 characters"}:
+            return Tariff(per_10k_characters=amount)
+        if unit == "per voice":
+            return Tariff(per_voice=amount)
+    if types == {"content_duration"} and all(
+        unit == "per second" for _, unit, _ in non_token
+    ):
+        amounts = {amount for _, _, amount in non_token}
+        if len(amounts) == 1:
+            return Tariff(per_second=next(iter(amounts)))
+    if types == {"tts_vc_model"} and all(
+        unit == "per voice" for _, unit, _ in non_token
+    ):
+        amounts = {amount for _, _, amount in non_token}
+        if len(amounts) == 1:
+            return Tariff(per_voice=next(iter(amounts)))
+    extra = tuple(
+        (kind, _display_unit(unit), amount) for kind, unit, amount in non_token
+    )
+    units = {unit for _, unit, _ in extra}
+    amounts = {amount for _, _, amount in extra}
+    if (
+        units == {"Per second"}
+        and amounts
+        and all(
+            kind.startswith("video_ratio") or kind.endswith("_no_audio")
+            for kind, _, _ in extra
+        )
+    ):
+        if len(amounts) == 1:
+            return Tariff(per_second=next(iter(amounts)), extra_rates=extra)
+        return Tariff(extra_rates=extra)
+    if extra:
+        return Tariff(extra_rates=extra)
+    return None
+
+
+def _display_unit(compact: str) -> str:
+    if compact == "per 10000 characters":
+        return "Per 10,000 characters"
+    if compact == "per image":
+        return "Per image"
+    if compact == "per second":
+        return "Per second"
+    if compact == "per voice":
+        return "Per voice"
+    return compact
 
 
 def _banded_tariff_from_price_group(group: dict[str, Any]) -> Tariff | None:
@@ -430,27 +649,13 @@ def _banded_tariff_from_price_group(group: dict[str, Any]) -> Tariff | None:
     )
 
 
-def _is_token_unit(unit: str) -> bool:
+def _compact_unit(unit: str) -> str:
     compact = " ".join(unit.strip().lower().replace("-", " ").split())
-    return compact in _TOKEN_UNITS
+    return compact.replace(",", "")
 
 
-def _price_type(raw: str) -> str | None:
-    kind = raw.strip().lower()
-    if kind == "input_token":
-        return "input"
-    if kind == "output_token":
-        return "output"
-    if kind in {"input_token_cache", "input_token_cache_implicit"}:
-        return "implicit_read"
-    if kind in {"input_token_cache_read", "input_token_cache_explicit"}:
-        return "explicit_read"
-    if kind in {
-        "input_token_cache_creation_5m",
-        "input_token_cache_creation",
-    }:
-        return "creation"
-    return None
+def _is_token_unit(unit: str) -> bool:
+    return _compact_unit(unit) in _TOKEN_UNITS
 
 
 def _parse_range_upper(range_name: str) -> int | None:
@@ -567,7 +772,6 @@ def _download_catalog(
                 headers={"Authorization": f"Bearer {api_key}"},
                 timeout=min(NATIVE_TIMEOUT_SECONDS, remaining),
                 params={
-                    "capabilities": "TG",
                     "service_site": service_site,
                     "language": "en-US",
                     "page_no": page_no,
@@ -656,6 +860,7 @@ def pricing_snapshot(
     from preloop.services.alibaba_pricing import (
         _SEED,
         _SEED_CACHE_DATES,
+        applied_time_band,
         tariff_for_usage,
     )
 
@@ -666,14 +871,24 @@ def pricing_snapshot(
         usage_details=usage_details,
         observed_at=observed_at,
     )
+
+    def _stamp(payload: dict[str, Any], parent: Tariff | None) -> dict[str, Any]:
+        band = applied_time_band(parent, observed_at) if parent is not None else None
+        if band is not None:
+            payload["time_band"] = band
+        return payload
+
     if selected is not None and selected is _SEED.get(ident):
         stamp = _SEED_CACHE_DATES.get(ident)
-        return {
-            "provider": "alibaba",
-            "region": "singapore-international",
-            "source": "seed",
-            "cache_effective_from": stamp.isoformat() if stamp else None,
-        }
+        return _stamp(
+            {
+                "provider": "alibaba",
+                "region": "singapore-international",
+                "source": "seed",
+                "cache_effective_from": stamp.isoformat() if stamp else None,
+            },
+            selected,
+        )
     tariff = live_tariff(ai_model, observed_at=observed_at)
     target = native_catalog_target(ai_model)
     if tariff is None or target is None:
@@ -682,19 +897,25 @@ def pricing_snapshot(
     ident = (ai_model.model_identifier or "").strip()
     with _lock:
         if _reviewed.get(region, {}).get(ident) is not tariff:
-            return {"provider": "alibaba", "region": region, "source": "native-catalog"}
-        return {
-            "provider": "alibaba",
-            "region": region,
-            "source": "reviewed-catalog",
-            "revision": _reviewed_revision,
-            "stale": _reviewed_expires_at is not None
-            and _utcnow() >= _reviewed_expires_at,
-            "verified_at": _reviewed_verified_at.isoformat()
-            if _reviewed_verified_at
-            else None,
-            "effective_from": _reviewed_effective[region][ident].isoformat(),
-            "expires_at": _reviewed_expires_at.isoformat()
-            if _reviewed_expires_at
-            else None,
-        }
+            return _stamp(
+                {"provider": "alibaba", "region": region, "source": "native-catalog"},
+                tariff,
+            )
+        return _stamp(
+            {
+                "provider": "alibaba",
+                "region": region,
+                "source": "reviewed-catalog",
+                "revision": _reviewed_revision,
+                "stale": _reviewed_expires_at is not None
+                and _utcnow() >= _reviewed_expires_at,
+                "verified_at": _reviewed_verified_at.isoformat()
+                if _reviewed_verified_at
+                else None,
+                "effective_from": _reviewed_effective[region][ident].isoformat(),
+                "expires_at": _reviewed_expires_at.isoformat()
+                if _reviewed_expires_at
+                else None,
+            },
+            tariff,
+        )

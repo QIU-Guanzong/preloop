@@ -88,7 +88,7 @@ def _alibaba_refresh_error(status: object) -> str:
             "regional catalog or an override verified against the Model Studio console."
         )
     if status is CatalogRefreshStatus.empty:
-        return "Alibaba Cloud Model Studio's price catalog listed no token tariffs"
+        return "Alibaba Cloud Model Studio's price catalog listed no list tariffs"
     return "Alibaba Cloud Model Studio's price catalog could not be reached"
 
 

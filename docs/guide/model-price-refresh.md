@@ -199,10 +199,10 @@ Unsupported currencies and unknown cache rates stay unpriced. Time-banded
 Singapore International token SKUs use Model Studio night hours
 (22:00-08:00 UTC+8, idle) versus daytime (busy); a native row with only one
 band stays unpriced. Do not substitute native DeepSeek weekday UTC bands.
-The public Flash cache-hit table points to the console. The current Flash entry
-uses an operator-confirmed Singapore console snapshot, identified by
-`evidence_kind: operator_confirmed_console`; its source URL points to the official
-exception guidance, and the review document records the supplied rates. A generic
+A reviewed Alibaba feed must carry `time_bands` for SKUs whose seed is
+banded; flattening idle/busy into a single `tiers` list is rejected.
+The public Flash cache-hit table points to the console. Native catalog cache
+rows are used as list prices when present. A generic
 Qwen discount must never replace model-specific console evidence.
 
 To regenerate the Singapore seed from an explicitly supplied native dump, combine
