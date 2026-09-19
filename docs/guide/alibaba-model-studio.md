@@ -71,7 +71,10 @@ accounting. Time-banded Singapore International SKUs use Model Studio night
 hours (22:00-08:00 UTC+8, idle) versus daytime (busy). Mixed-modality leftover
 rates stay on the tariff as extra fields instead of being blended. Native rows
 that publish no prices, and compatible-mode aliases that are not in the native
-catalog, stay unpriced rather than guessed.
+catalog (`ccai-pro`, `qwen-coder-plus`, `qwen2-7b-instruct`,
+`qwq-plus-2025-03-05`), stay unpriced rather than guessed. Mixed leftover
+audio or vision rates fail closed when usage reports those tokens on either
+the prompt or the completion side.
 
 See [Alibaba's model pricing](https://www.alibabacloud.com/help/en/model-studio/model-pricing)
 for published rates and [List models](https://www.alibabacloud.com/help/en/model-studio/list-models)

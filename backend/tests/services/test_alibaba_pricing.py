@@ -644,3 +644,147 @@ def test_omni_audio_tokens_do_not_use_the_no_audio_chat_pair() -> None:
         pricing_failure_reason(model, prompt_tokens=10_000, usage_details=audio)
         == "mixed_modality_usage"
     )
+
+
+def test_omni_completion_audio_tokens_do_not_use_the_text_output_rate() -> None:
+    from preloop.services.alibaba_pricing import estimate, pricing_failure_reason
+
+    plus = _model("qwen3.5-omni-plus")
+    plus_audio = {"completion_tokens_details": {"audio_tokens": 800}}
+    assert (
+        estimate(
+            plus,
+            prompt_tokens=10_000,
+            completion_tokens=1_000,
+            usage_details=plus_audio,
+        )
+        is None
+    )
+    assert (
+        pricing_failure_reason(plus, prompt_tokens=10_000, usage_details=plus_audio)
+        == "mixed_modality_usage"
+    )
+    turbo = _model("qwen-omni-turbo")
+    turbo_audio = {"completion_tokens_details": {"audio_tokens": 800}}
+    assert (
+        estimate(
+            turbo,
+            prompt_tokens=10_000,
+            completion_tokens=1_000,
+            usage_details=turbo_audio,
+        )
+        is None
+    )
+    assert (
+        pricing_failure_reason(turbo, prompt_tokens=10_000, usage_details=turbo_audio)
+        == "mixed_modality_usage"
+    )
+
+
+_SINGAPORE_COMPAT_CHAT_IDS = (
+    "ZHIPU/GLM-5.3",
+    "ccai-pro",
+    "deepseek-v3.2",
+    "deepseek-v4-flash",
+    "deepseek-v4-flash-0731",
+    "deepseek-v4-pro",
+    "deepseek-v4-pro-0813",
+    "deepseek-v4.1-flash",
+    "glm-5.1",
+    "glm-5.2",
+    "glm-5.2-fast-preview",
+    "glm-5.3",
+    "kimi-k2.7-code",
+    "kimi-k3",
+    "kimi/kimi-k3",
+    "qwen-coder-plus",
+    "qwen-flash",
+    "qwen-flash-character",
+    "qwen-max",
+    "qwen-plus",
+    "qwen-plus-2025-01-25",
+    "qwen-plus-2025-04-28",
+    "qwen-plus-2025-07-14",
+    "qwen-plus-2025-09-11",
+    "qwen-plus-2025-12-01",
+    "qwen-plus-character",
+    "qwen-plus-latest",
+    "qwen-turbo",
+    "qwen2-7b-instruct",
+    "qwen3-14b",
+    "qwen3-235b-a22b",
+    "qwen3-235b-a22b-instruct-2507",
+    "qwen3-235b-a22b-thinking-2507",
+    "qwen3-30b-a3b",
+    "qwen3-30b-a3b-instruct-2507",
+    "qwen3-30b-a3b-thinking-2507",
+    "qwen3-32b",
+    "qwen3-8b",
+    "qwen3-coder-480b-a35b-instruct",
+    "qwen3-coder-flash",
+    "qwen3-coder-next",
+    "qwen3-coder-plus",
+    "qwen3-coder-plus-2025-07-22",
+    "qwen3-coder-plus-2025-09-23",
+    "qwen3-max",
+    "qwen3-max-2025-09-23",
+    "qwen3-max-2026-01-23",
+    "qwen3-max-preview",
+    "qwen3-next-80b-a3b-instruct",
+    "qwen3-next-80b-a3b-thinking",
+    "qwen3.5-122b-a10b",
+    "qwen3.5-27b",
+    "qwen3.5-35b-a3b",
+    "qwen3.5-397b-a17b",
+    "qwen3.5-flash",
+    "qwen3.5-flash-2026-02-23",
+    "qwen3.5-plus",
+    "qwen3.5-plus-2026-02-15",
+    "qwen3.5-plus-2026-04-20",
+    "qwen3.6-27b",
+    "qwen3.6-35b-a3b",
+    "qwen3.6-flash",
+    "qwen3.6-flash-2026-04-16",
+    "qwen3.6-max-preview",
+    "qwen3.6-plus",
+    "qwen3.6-plus-2026-04-02",
+    "qwen3.7-flash",
+    "qwen3.7-flash-2026-07-15",
+    "qwen3.7-max",
+    "qwen3.7-max-2026-05-17",
+    "qwen3.7-max-2026-05-20",
+    "qwen3.7-max-2026-06-08",
+    "qwen3.7-max-preview",
+    "qwen3.7-plus",
+    "qwen3.7-plus-2026-05-26",
+    "qwen3.8-2.4t-a95b",
+    "qwen3.8-27b",
+    "qwen3.8-flash",
+    "qwen3.8-max",
+    "qwen3.8-max-0902",
+    "qwq-plus",
+    "qwq-plus-2025-03-05",
+)
+_UNPRICED_COMPAT_ALIASES = frozenset(
+    {
+        "ccai-pro",
+        "qwen-coder-plus",
+        "qwen2-7b-instruct",
+        "qwq-plus-2025-03-05",
+    }
+)
+
+
+def test_singapore_compat_chat_ids_have_native_seed_prices() -> None:
+    """Compatible-mode chat IDs price from native Singapore rows, not aliases."""
+    from preloop.services.alibaba_pricing import tariff_for
+
+    missing = [
+        ident
+        for ident in _SINGAPORE_COMPAT_CHAT_IDS
+        if ident not in _UNPRICED_COMPAT_ALIASES and tariff_for(_model(ident)) is None
+    ]
+    assert missing == []
+    for ident in _UNPRICED_COMPAT_ALIASES:
+        assert tariff_for(_model(ident)) is None
+        assert _estimate(_model(ident)).cost is None

@@ -575,26 +575,34 @@ def _mixed_modality_usage(tariff: Tariff, usage_details: dict[str, Any] | None) 
     extra = {kind.lower() for kind, _, _ in tariff.extra_rates}
     if not extra:
         return False
-    details = (usage_details or {}).get("prompt_tokens_details") or {}
-    if not isinstance(details, dict):
+    usage = usage_details or {}
+    blobs: list[dict[str, Any]] = []
+    for key in ("prompt_tokens_details", "completion_tokens_details"):
+        details = usage.get(key) or {}
+        if isinstance(details, dict):
+            blobs.append(details)
+    if not blobs:
         return False
 
     def _positive(*keys: str) -> bool:
-        for key in keys:
-            raw = details.get(key)
-            if raw in (None, 0):
-                continue
-            try:
-                return int(raw) > 0
-            except (TypeError, ValueError, OverflowError):
-                return True
+        for details in blobs:
+            for key in keys:
+                raw = details.get(key)
+                if raw in (None, 0):
+                    continue
+                try:
+                    return int(raw) > 0
+                except (TypeError, ValueError, OverflowError):
+                    return True
         return False
 
-    if any("audio" in kind for kind in extra) and _positive("audio_tokens"):
-        return True
-    if any(
+    leftover_audio = any("audio" in kind or "multi_output" in kind for kind in extra)
+    leftover_vision = any(
         token in kind for kind in extra for token in ("image", "vision")
-    ) and _positive("image_tokens", "vision_tokens"):
+    )
+    if leftover_audio and _positive("audio_tokens"):
+        return True
+    if leftover_vision and _positive("image_tokens", "vision_tokens"):
         return True
     return False
 
