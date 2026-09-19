@@ -375,6 +375,8 @@ def _feedback_ancestor_publication(
         source_thread = details.get("_thread_id") or details.get("_session_thread_id")
         thread_context = thread.context if isinstance(thread.context, dict) else {}
         adoption = thread_context.get("adoption")
+        # Both native_resume and published_branch_handoff need this binding.
+        # Unlike source_cold_handoff, this never bypasses native restoration.
         adopted_source = (
             not source_thread
             and isinstance(adoption, dict)

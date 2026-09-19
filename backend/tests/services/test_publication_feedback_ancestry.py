@@ -254,10 +254,18 @@ async def test_prepare_after_failed_repair_uses_current_gate_and_original_branch
 @pytest.mark.parametrize(
     "binding", ["owned", "other_source", "no_receipt", "foreign_thread"]
 )
-def test_explicit_adoption_only_accepts_exact_published_source(binding: str) -> None:
+@pytest.mark.parametrize("recovery_mode", ["native_resume", "published_branch_handoff"])
+def test_explicit_adoption_only_accepts_exact_published_source(
+    binding: str, recovery_mode: str
+) -> None:
     flow, thread, original, failed, context = lineage()
     original.trigger_event_details = {}
-    thread.context = {"adoption": {"source_execution_id": str(original.id)}}
+    thread.context = {
+        "adoption": {
+            "source_execution_id": str(original.id),
+            "recovery_mode": recovery_mode,
+        }
+    }
     if binding == "other_source":
         thread.context["adoption"]["source_execution_id"] = str(uuid4())
     elif binding == "no_receipt":
