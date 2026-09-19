@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from preloop.services.flow_feedback_provider import FeedbackProvider, bounded_text
+from preloop.sync.exceptions import TrackerResponseError
 
 
 def binding(provider: str = "github") -> SimpleNamespace:
@@ -122,7 +123,7 @@ def github_fixture(*, changed_head: bool = False) -> tuple[FeedbackProvider, lis
                 },
             ]
         if path.endswith("/protection"):
-            return {}
+            raise TrackerResponseError("Branch not protected", status_code=404)
         if "/rules/branches/" in path:
             return []
         raise AssertionError(path)
@@ -1098,3 +1099,39 @@ async def test_github_complete_status_contexts_ignore_historical_count() -> None
     state = await provider.read()
     assert state.checks_passed
     assert state.blocked_reason is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message, status, known_absence",
+    [
+        ('GitHub API error: 404 - {"message":"Branch not protected"}', 404, True),
+        ('GitHub API error: 404 - {"message":"Not Found"}', 404, False),
+        ('GitHub API error: 500 - {"message":"Branch not protected"}', 500, False),
+    ],
+)
+async def test_github_unprotected_branch_is_known_absence_only(
+    message: str, status: int, known_absence: bool
+) -> None:
+    from preloop.sync.exceptions import TrackerResponseError
+
+    provider, _ = github_fixture()
+    request = provider.client._request.side_effect
+
+    async def unprotected(method: str, path: str, data: Any = None) -> Any:
+        if path.endswith("/protection"):
+            raise TrackerResponseError(message, status_code=status)
+        return await request(method, path, data)
+
+    provider.client._request.side_effect = unprotected
+    if not known_absence:
+        with pytest.raises(TrackerResponseError):
+            await provider.read()
+        return
+    state = await provider.read()
+    assert state.blocked_reason is None
+    assert {item["kind"] for item in state.feedback} == {
+        "inline_comment",
+        "review",
+        "ci",
+    }

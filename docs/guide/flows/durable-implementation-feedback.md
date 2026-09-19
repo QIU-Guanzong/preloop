@@ -124,7 +124,9 @@ GitHub reconciliation reads the current PR head, checks, legacy commit statuses,
 submitted reviews, unresolved inline review threads and conversation comments.
 It combines configured required checks with branch protection and effective
 ruleset check/review requirements; flow configuration cannot lower repository
-requirements. Nonempty submitted review summaries in the COMMENTED state enter
+requirements. GitHub's explicit `404 Branch not protected` response establishes
+empty classic protection; an ambiguous 404 does not establish that requirements
+are absent. Nonempty submitted review summaries in the COMMENTED state enter
 feedback without replacing the reviewer's previous approval or changes-requested
 verdict. A failing check run contributes its own
 bounded, redacted `output` title/summary/text as diagnostic evidence. For failing

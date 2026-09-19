@@ -617,6 +617,16 @@ class FeedbackProvider:
         except TrackerPermissionError:
             protection = {}
             requirements_unknown = True
+        except TrackerResponseError as error:
+            # GitHub distinguishes an unprotected branch from a masked or
+            # unreadable resource in its response message. Only its explicit
+            # absence response establishes empty classic requirements.
+            if (
+                error.status_code != 404
+                or "branch not protected" not in str(error).lower()
+            ):
+                raise
+            protection = {}
         required = sorted(
             set(required)
             | set((protection.get("required_status_checks") or {}).get("contexts", []))

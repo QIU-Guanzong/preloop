@@ -14,6 +14,7 @@ from preloop.models import models
 from preloop.models.crud import crud_flow_feedback
 from preloop.services.flow_feedback import ingest_feedback, run_feedback_tick
 from preloop.services.flow_feedback_provider import FeedbackProvider
+from preloop.sync.exceptions import TrackerResponseError
 from backend.tests.services import test_flow_feedback_durable as durable_fixtures
 
 NOW = durable_fixtures.NOW
@@ -137,7 +138,7 @@ class ProviderLifecycle:
                 else []
             )
         if path.endswith("/protection"):
-            return {}
+            raise TrackerResponseError("Branch not protected", status_code=404)
         if "/issues/" in path or "/rules/branches/" in path:
             return []
         raise AssertionError((method, path))
