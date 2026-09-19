@@ -911,3 +911,87 @@ def test_pipeline_only_preserves_provider_infrastructure_reason() -> None:
     )
     assert len(result.infra_failures) == 1
     assert not result.failures
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["closed", "merged"])
+@pytest.mark.parametrize("head_changed", [False, True])
+async def test_gitlab_close_during_gate_reads_stops_feedback(
+    terminal: str, head_changed: bool
+) -> None:
+    provider, _ = gitlab_fixture()
+    request = provider.client._make_request.side_effect
+    reads = 0
+
+    async def close_on_recheck(method: Any, path: str, **options: Any) -> Any:
+        nonlocal reads
+        result = await request(method, path, **options)
+        if path.endswith("/merge_requests/7"):
+            reads += 1
+            if reads == 2:
+                result["state"] = terminal
+                if head_changed:
+                    result["sha"] = "new-head"
+        return result
+
+    provider.client._make_request.side_effect = close_on_recheck
+    assert (await provider.read()).closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "approved_ids, expected",
+    [([], False), ([17], False), ([17, 17], False), ([17, 18], True)],
+)
+async def test_gitlab_configured_approval_minimum_is_enforced(
+    approved_ids: list[int], expected: bool
+) -> None:
+    provider, _ = gitlab_fixture()
+    provider.thread.policy["required_approvals"] = 2
+    request = provider.client._make_request.side_effect
+
+    async def approvals(method: Any, path: str, **options: Any) -> Any:
+        result = await request(method, path, **options)
+        if path.endswith("/approvals"):
+            result["approved_by"] = [{"user": {"id": actor}} for actor in approved_ids]
+        return result
+
+    provider.client._make_request.side_effect = approvals
+    assert (await provider.read()).reviews_passed is expected
+
+
+@pytest.mark.asyncio
+async def test_github_status_page_limit_cannot_be_ready() -> None:
+    provider, _ = github_fixture()
+    request = provider.client._request.side_effect
+
+    async def truncated(method: str, path: str, data: Any = None) -> Any:
+        result = await request(method, path, data)
+        if "/status?" in path:
+            result["total_count"] = 101
+            result["statuses"] = [
+                {"id": i, "context": f"check-{i}", "state": "success"}
+                for i in range(100)
+            ]
+        return result
+
+    provider.client._request.side_effect = truncated
+    assert (await provider.read()).blocked_reason == "provider_page_limit"
+
+
+@pytest.mark.asyncio
+async def test_github_close_and_head_change_during_gate_reads_stops_feedback() -> None:
+    provider, _ = github_fixture(changed_head=True)
+    request = provider.client._request.side_effect
+
+    async def closed(method: str, path: str, data: Any = None) -> Any:
+        result = await request(method, path, data)
+        if path.endswith("/pulls/7") and result["head"]["sha"] == "new-head":
+            result["state"] = "closed"
+        return result
+
+    provider.client._request.side_effect = closed
+    state = await provider.read()
+    assert state.closed
+    assert state.head_sha == "new-head"
+    assert not state.feedback

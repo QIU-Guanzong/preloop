@@ -664,6 +664,8 @@ class FeedbackProvider:
             thread_page_limit
             or any(len(items) >= 100 for items in (reviews, comments, discussion))
             or checks.get("total_count", 0) > 100
+            or statuses.get("total_count", 0) > 100
+            or len(statuses.get("statuses", [])) >= 100
         ):
             state.blocked_reason = "provider_page_limit"
         if unsupported_gate:
@@ -697,6 +699,7 @@ class FeedbackProvider:
         if current["head"]["sha"] != sha:
             return FeedbackState(
                 current["head"]["sha"],
+                closed=state.closed,
                 checks_pending=True,
                 blocked_reason="head_changed_during_reconciliation",
             )
@@ -741,17 +744,26 @@ class FeedbackProvider:
             or jobs_truncated
         ):
             state.blocked_reason = "provider_page_limit"
-        state.reviews_passed = approvals.get("approvals_left", 1) == 0 and bool(
-            mr.get("blocking_discussions_resolved", False)
+        approved_by = {
+            str(item["user"]["id"])
+            for item in approvals.get("approved_by", [])
+            if (item.get("user") or {}).get("id") is not None
+        }
+        state.reviews_passed = (
+            approvals.get("approvals_left", 1) == 0
+            and len(approved_by) >= int(self.thread.policy.get("required_approvals", 0))
+            and bool(mr.get("blocking_discussions_resolved", False))
         )
         await self._gitlab_traces(get, repo, failed)
         state.feedback = self._comments(notes, "comment", sha) + [
             receipt("ci", item, head_sha=sha) for item in failed
         ]
         current = await get(base)
+        state.closed = current.get("state") in {"closed", "merged"}
         if current["sha"] != sha:
             return FeedbackState(
                 current["sha"],
+                closed=state.closed,
                 checks_pending=True,
                 blocked_reason="head_changed_during_reconciliation",
             )
