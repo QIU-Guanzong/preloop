@@ -6,7 +6,6 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
-from preloop.models.models.mixins import TimestampMixin
 from preloop.schemas.gateway_usage import (
     GatewayTokenUsage,
     GatewayUsageByDay,
@@ -187,7 +186,7 @@ class AIModelUpdate(BaseModel):
         return self
 
 
-class AIModelInDBBase(TimestampMixin, BaseModel):
+class AIModelInDBBase(BaseModel):
     """Base schema for AIModel entries as stored in the database."""
 
     id: uuid.UUID = Field(..., description="Primary key")
@@ -214,6 +213,9 @@ class AIModelInDBBase(TimestampMixin, BaseModel):
     )
     credential_type: Optional[str] = Field(
         None, description="Logical credential type stored for the model"
+    )
+    updated_at: Optional[datetime] = Field(
+        None, description="When this AI model row was last updated"
     )
     credentials_status: Optional[str] = Field(
         None, description="Status of the model's credential secret"

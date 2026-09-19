@@ -12984,6 +12984,13 @@ components:
           - type: 'null'
           title: Credential Type
           description: Logical credential type stored for the model
+        updated_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Updated At
+          description: When this AI model row was last updated
         credentials_status:
           anyOf:
           - type: string

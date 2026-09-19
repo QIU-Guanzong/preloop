@@ -1,6 +1,7 @@
 """Tests for AIModel model and CRUD operations."""
 
 import json
+from datetime import datetime
 
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
@@ -233,6 +234,17 @@ def test_create_ai_model_with_structured_credentials(
     response_model = AIModelRead.model_validate(ai_model)
     assert response_model.credential_type == "oauth_openai_codex"
     assert response_model.has_api_key is True
+    assert response_model.updated_at is not None
+    # Secret create stamps last_verified_at; overwrite it so the read
+    # schema is shown to follow the secret, not the model row.
+    verified_at = datetime(2026, 9, 18, 12, 0, 0)
+    ai_model.credentials_secret.last_verified_at = verified_at
+    db_session.add(ai_model.credentials_secret)
+    db_session.commit()
+    db_session.refresh(ai_model)
+
+    live_read = AIModelRead.model_validate(ai_model)
+    assert live_read.credentials_last_verified_at == verified_at
 
 
 def test_get_ai_models_by_account(db_session: Session, create_account):

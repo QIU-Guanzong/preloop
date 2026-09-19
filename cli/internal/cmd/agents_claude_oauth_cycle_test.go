@@ -781,7 +781,7 @@ func TestPrintClaudeCodeOAuthOffboardNote(t *testing.T) {
 	}
 }
 
-func TestFindManagedClaudeCodeOAuthSiblingNilAgentOnlyMatchesUntaggedRows(t *testing.T) {
+func TestFindManagedOAuthCredentialSiblingNilAgentOnlyMatchesUntaggedRows(t *testing.T) {
 	// Review finding 2: with no managed agent yet, the finder must never
 	// attach to a row tagged with some other machine's managed_agent_id.
 	tagged := claudeManagedOAuthSiblingForTest(
@@ -798,9 +798,8 @@ func TestFindManagedClaudeCodeOAuthSiblingNilAgentOnlyMatchesUntaggedRows(t *tes
 	)
 	delete(untagged.MetaData, "managed_agent_id")
 
-	got := findManagedClaudeCodeOAuthSibling(
+	got := findManagedOAuthCredentialSibling(
 		[]aiModelResponse{tagged},
-		AgentConfig{Name: "Claude Code"},
 		nil,
 		"oauth_anthropic_claude_code",
 		"",
@@ -809,9 +808,8 @@ func TestFindManagedClaudeCodeOAuthSiblingNilAgentOnlyMatchesUntaggedRows(t *tes
 		t.Fatalf("nil managed agent must not match a row tagged for another agent, got %#v", got)
 	}
 
-	got = findManagedClaudeCodeOAuthSibling(
+	got = findManagedOAuthCredentialSibling(
 		[]aiModelResponse{tagged, untagged},
-		AgentConfig{Name: "Claude Code"},
 		nil,
 		"oauth_anthropic_claude_code",
 		"",
@@ -820,9 +818,8 @@ func TestFindManagedClaudeCodeOAuthSiblingNilAgentOnlyMatchesUntaggedRows(t *tes
 		t.Fatalf("nil managed agent should fall back to the untagged row only, got %#v", got)
 	}
 
-	got = findManagedClaudeCodeOAuthSibling(
+	got = findManagedOAuthCredentialSibling(
 		[]aiModelResponse{tagged, untagged},
-		AgentConfig{Name: "Claude Code"},
 		&managedAgentSummary{ID: "agent-1"},
 		"oauth_anthropic_claude_code",
 		"",
