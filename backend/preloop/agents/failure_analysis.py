@@ -497,17 +497,35 @@ def runtime_log_text(logs_text: str) -> str:
     """
     lines = logs_text.splitlines()
     result: list[str] = []
-    in_command = False
+    command: list[str] | None = None
+    completed = False
     for index, line in enumerate(lines):
-        if line == "exec" and index + 1 < len(lines):
-            following = lines[index + 1]
-            if following.startswith(("/bin/", "/usr/bin/")):
-                in_command = True
-                continue
-        if in_command and line in {"codex", "thinking", "tokens used", "tool", "user"}:
-            in_command = False
-        if not in_command:
+        starts_command = (
+            line == "exec"
+            and index + 1 < len(lines)
+            and lines[index + 1].startswith(("/bin/", "/usr/bin/"))
+        )
+        # Only CLI phase headers delimit output. Bare "user"/"tool" lines
+        # commonly occur in source listings and are not transcript boundaries.
+        boundary = starts_command or line in {"codex", "thinking", "tokens used"}
+        if boundary and command is not None:
+            if not completed:
+                result.extend(command)
+            command = None
+        if starts_command:
+            command = [line]
+            completed = False
+        elif command is not None:
+            command.append(line)
+            if re.fullmatch(r" (?:succeeded|exited -?\d+) in \d+ms:", line):
+                completed = True
+        else:
             result.append(line)
+    # An unterminated block may end in a CLI crash, not tool output. Preserve
+    # it so diagnostics never hide that failure. Complete transcripts carry a
+    # following phase header (including the final token summary).
+    if command is not None:
+        result.extend(command)
     return "\n".join(result)
 
 

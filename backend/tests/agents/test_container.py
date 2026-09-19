@@ -2152,3 +2152,25 @@ def test_codex_harness_failure_after_tool_output_is_detected(container_executor)
         "codex\nAgent execution failed: connection lost"
     )
     assert container_executor._detect_error_in_logs(logs) is True
+
+
+def test_unterminated_codex_command_keeps_real_harness_failure(container_executor):
+    logs = 'exec\n/bin/bash -lc "true" in /workspace/repo\n succeeded in 1ms:\nAgent execution failed: CLI crashed'
+    assert container_executor._detect_error_in_logs(logs) is True
+
+
+@pytest.mark.parametrize("source_line", ["user", "tool"])
+def test_source_words_do_not_end_codex_command_transcript(
+    container_executor, source_line
+):
+    logs = (
+        'exec\n/bin/bash -lc "cat source.py" in /workspace/repo\n succeeded in 1ms:\n'
+        + source_line
+        + "\nTraceback (most recent call last):\ncodex\nI inspected the fixture."
+    )
+    assert container_executor._detect_error_in_logs(logs) is False
+
+
+def test_unconfirmed_command_header_does_not_suppress_failure(container_executor):
+    logs = 'exec\n/bin/bash -lc "true"\nAgent execution failed: cannot start CLI\ncodex\nStopped'
+    assert container_executor._detect_error_in_logs(logs) is True
