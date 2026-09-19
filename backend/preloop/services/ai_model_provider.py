@@ -1104,21 +1104,35 @@ def _is_bedrock_auth_error(exc: Exception) -> bool:
     return "nocredentials" in name or "credential" in name
 
 
+def _attr_or_key(obj: Any, name: str) -> Any:
+    """Read ``name`` from a boto3 dict response or an attribute-shaped stub."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _attr_or_key_str(obj: Any, name: str) -> str:
+    return str(_attr_or_key(obj, name) or "").strip()
+
+
 def _is_bedrock_chat_model(summary: Any) -> bool:
     """Keep ACTIVE foundation models that emit text; drop the rest.
 
     ``list_foundation_models`` also returns embedding, image and video
     generation models, which the LLM picker cannot use. A summary without an
     ``outputModalities`` field predates modality reporting and is kept rather
-    than guessed away.
+    than guessed away. Live boto3 returns plain dicts; tests may pass
+    attribute-shaped stubs.
     """
-    lifecycle = getattr(summary, "modelLifecycle", None)
+    lifecycle = _attr_or_key(summary, "modelLifecycle")
     if lifecycle is not None:
-        status = str(getattr(lifecycle, "status", "") or "").upper()
+        status = _attr_or_key_str(lifecycle, "status").upper()
         if status and status != "ACTIVE":
             return False
 
-    modalities = getattr(summary, "outputModalities", None) or []
+    modalities = _attr_or_key(summary, "outputModalities") or []
     if not modalities:
         return True
     return any(str(m).upper() == "TEXT" for m in modalities)
@@ -1130,12 +1144,8 @@ def _is_bedrock_inference_profile(summary: Any) -> bool:
     Geo ids such as ``us.anthropic.claude-sonnet-4-5-20250929-v1:0`` are what
     Claude Code stores. Foundation-model listing does not include them.
     """
-    status = str(getattr(summary, "status", "") or "").upper()
-    if isinstance(summary, dict):
-        status = str(summary.get("status") or "").upper()
-        profile_id = str(summary.get("inferenceProfileId") or "").strip()
-    else:
-        profile_id = str(getattr(summary, "inferenceProfileId", "") or "").strip()
+    status = _attr_or_key_str(summary, "status").upper()
+    profile_id = _attr_or_key_str(summary, "inferenceProfileId")
     if status and status != "ACTIVE":
         return False
     if not profile_id:
@@ -1150,12 +1160,7 @@ def _is_bedrock_inference_profile(summary: Any) -> bool:
 
 
 def _list_attr_or_key(obj: Any, name: str) -> list[Any]:
-    if obj is None:
-        return []
-    if isinstance(obj, dict):
-        value = obj.get(name) or []
-    else:
-        value = getattr(obj, name, None) or []
+    value = _attr_or_key(obj, name) or []
     return value if isinstance(value, list) else []
 
 
@@ -1164,7 +1169,7 @@ def _collect_bedrock_model_ids(client: Any) -> list[str]:
     response = client.list_foundation_models()
     model_ids: list[str] = []
     for summary in _list_attr_or_key(response, "modelSummaries"):
-        model_id = str(getattr(summary, "modelId", "") or "").strip()
+        model_id = _attr_or_key_str(summary, "modelId")
         if model_id and _is_bedrock_chat_model(summary):
             model_ids.append(model_id)
 
@@ -1183,7 +1188,7 @@ def _collect_bedrock_model_ids(client: Any) -> list[str]:
     for summary in _list_attr_or_key(profiles, "inferenceProfileSummaries"):
         if not _is_bedrock_inference_profile(summary):
             continue
-        profile_id = str(getattr(summary, "inferenceProfileId", "") or "").strip()
+        profile_id = _attr_or_key_str(summary, "inferenceProfileId")
         if profile_id:
             model_ids.append(profile_id)
 
