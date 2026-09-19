@@ -5871,6 +5871,32 @@ func pickLiveOAuthSibling(candidates []*aiModelResponse) *aiModelResponse {
 	return best
 }
 
+// targetOAuthSecretLiveness extracts secret-derived liveness
+// (credentials_last_verified_at, then metadata timestamps) for the target row,
+// but only when the target already holds a same-type OAuth secret. It intentionally
+// omits updated_at fallback so that row-edit timestamps (e.g. from meta sync or
+// rename) on a credentialless or wrong-type target do not masquerade as a live
+// OAuth secret and block sibling attachment or re-seeding.
+func targetOAuthSecretLiveness(target *aiModelResponse, wantType string) time.Time {
+	if target == nil || !target.HasAPIKey || strings.TrimSpace(target.CredentialsSecretID) == "" {
+		return time.Time{}
+	}
+	if strings.TrimSpace(target.CredentialType) != strings.TrimSpace(wantType) {
+		return time.Time{}
+	}
+	if liveAt := apiTimeValue(target.CredentialsLastVerifiedAt); !liveAt.IsZero() {
+		return liveAt
+	}
+	if target.MetaData != nil {
+		for _, key := range []string{"last_verified_at", "last_verified", "last_refresh"} {
+			if liveAt := parseOAuthSiblingTime(target.MetaData[key]); !liveAt.IsZero() {
+				return liveAt
+			}
+		}
+	}
+	return time.Time{}
+}
+
 func oauthSiblingLiveness(model *aiModelResponse) time.Time {
 	if model == nil {
 		return time.Time{}
@@ -6035,6 +6061,11 @@ func syncManagedGatewayAIModel(
 		// liveness against it here: if this row already holds a newer
 		// secret than any sibling, keep it. Otherwise the first-synced
 		// live holder would be repointed onto a consumed copy.
+		//
+		// Only secret-derived liveness (credentials_last_verified_at or
+		// metadata timestamps on a same-type secret) participates: row-edit
+		// updated_at on a credentialless or wrong-type target must never
+		// block sibling attachment or re-seeding.
 		sharedSibling := findManagedOAuthCredentialSibling(
 			existing,
 			managedAgent,
@@ -6044,7 +6075,8 @@ func syncManagedGatewayAIModel(
 		var sharedSecret string
 		targetHoldsLiveLineage := false
 		if sharedSibling != nil {
-			if oauthSiblingLiveness(target).After(oauthSiblingLiveness(sharedSibling)) {
+			targetLiveness := targetOAuthSecretLiveness(target, upstream.CredentialType)
+			if !targetLiveness.IsZero() && targetLiveness.After(oauthSiblingLiveness(sharedSibling)) {
 				targetHoldsLiveLineage = true
 			} else {
 				sharedSecret = applySharedClaudeCodeOAuthSecret(sharedSibling)

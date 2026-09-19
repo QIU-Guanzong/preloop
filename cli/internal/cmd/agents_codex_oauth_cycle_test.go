@@ -402,6 +402,69 @@ func TestSyncManagedGatewayAIModelDoesNotRepointLiveTargetOntoStaleSibling(t *te
 	}
 }
 
+func TestSyncManagedGatewayAIModelCredentiallessTargetWithNewerUpdatedAtAttachesLiveSibling(t *testing.T) {
+	// A credentialless target whose row was edited recently (e.g. metadata sync or rename)
+	// has a recent UpdatedAt. That row-edit timestamp must not masquerade as a live secret
+	// or block attaching to an older, live OAuth sibling.
+	credentiallessTarget := codexManagedOAuthSiblingForTest(
+		"target-codex-gpt4",
+		"gpt-4o",
+		"openai/gpt-4o",
+		"",
+	)
+	credentiallessTarget.HasAPIKey = false
+	credentiallessTarget.CredentialType = ""
+	credentiallessTarget.CredentialsLastVerifiedAt = nil
+	credentiallessTarget.UpdatedAt = apiTimePtr("2026-09-18T12:00:00Z")
+
+	// Sibling holds a live OAuth secret verified earlier (e.g. 5 days ago over an idle weekend).
+	liveSibling := codexManagedOAuthSiblingForTest(
+		"sibling-codex-o3",
+		"o3-mini",
+		"openai/o3-mini",
+		"secret-live",
+	)
+	liveSibling.CredentialsLastVerifiedAt = apiTimePtr("2026-09-13T00:00:00Z")
+	liveSibling.UpdatedAt = apiTimePtr("2026-09-13T00:00:00Z")
+
+	writes := []recordedAIModelWrite{}
+	server := newCodexFamilyLineageServer(t, []aiModelResponse{liveSibling, credentiallessTarget}, &writes)
+	defer server.Close()
+
+	freshExpiry := time.Now().UTC().Add(4 * time.Hour).UnixMilli()
+	upstream := codexUpstreamForTest("gpt-4o", "openai/gpt-4o", map[string]interface{}{
+		"access":  "sk-codex-oat-fresh",
+		"refresh": "sk-codex-ort-fresh",
+		"expires": freshExpiry,
+	})
+
+	if _, _, err := syncManagedGatewayAIModel(
+		api.NewClientWithToken(server.URL, "tok"),
+		&managedAgentSummary{ID: "agent-codex-1"},
+		AgentConfig{Name: "Codex CLI"},
+		upstream,
+		server.URL+"/openai/v1",
+	); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	attached := false
+	for _, write := range writes {
+		if write.Method != http.MethodPut || !strings.HasSuffix(write.Path, "/target-codex-gpt4") {
+			continue
+		}
+		if write.Body["credentials_secret_id"] == "secret-live" {
+			attached = true
+		}
+		if _, ok := write.Body["credential_payload"]; ok {
+			t.Fatalf("credentialless target must attach sibling secret rather than re-seeding: %#v", write)
+		}
+	}
+	if !attached {
+		t.Fatalf("expected credentialless target to attach live sibling secret even with newer UpdatedAt; writes: %#v", writes)
+	}
+}
+
 func TestCodexServerHasReusableGatewayCredential(t *testing.T) {
 	sibling := codexManagedOAuthSiblingForTest(
 		"codex-o3-mini",
