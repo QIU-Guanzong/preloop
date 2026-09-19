@@ -869,6 +869,37 @@ async def test_provider_job_urls_cannot_redirect_requests_or_launder_user_steps(
     assert enriched[0]["failure_reason"] == "script_failure"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason", ["script_failure", "test_failure", " SCRIPT_FAILURE "]
+)
+@pytest.mark.parametrize("denied", [False, True])
+async def test_pipeline_code_reason_without_job_evidence_blocks(
+    reason: str, denied: bool
+) -> None:
+    from preloop.sync.exceptions import TrackerResponseError
+
+    provider, _ = gitlab_fixture(
+        statuses=[],
+        head_pipeline={
+            "id": 900,
+            "sha": "head",
+            "project_id": 123,
+            "status": "failed",
+            "failure_reason": reason,
+        },
+        jobs=[],
+        errors={"/jobs?": TrackerResponseError("GitLab API error: 403 - denied")}
+        if denied
+        else {},
+    )
+    state = await provider.read()
+    assert state.blocked_reason == "ci_failure_unclassified"
+    assert not state.feedback
+    assert not state.infra_failures
+    assert not state.checks_passed
+
+
 def test_pipeline_only_preserves_provider_infrastructure_reason() -> None:
     from preloop.services.flow_feedback_provider import _pipeline_only, classify_checks
 

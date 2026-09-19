@@ -162,7 +162,6 @@ BLOCKED_OUTCOMES = frozenset(
         "cancelled",
         "canceled",
         "action_required",
-        "startup_failure",
         "manual",
         "error",
         "stale",
@@ -365,6 +364,11 @@ def _pipeline_only(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
     """
     if not pipeline.get("status"):
         return []
+    reason = pipeline.get("failure_reason")
+    if str(reason or "").strip().lower() in CODE_FAILURE_REASONS:
+        # A pipeline summary cannot replace the missing job diagnostics that a
+        # repair needs. Keep platform reasons for bounded retry or escalation.
+        reason = None
     return [
         {
             "id": pipeline.get("id"),
@@ -372,7 +376,7 @@ def _pipeline_only(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
             "status": pipeline.get("status"),
             "web_url": pipeline.get("web_url"),
             "details_unavailable": True,
-            "failure_reason": pipeline.get("failure_reason"),
+            "failure_reason": reason,
         }
     ]
 

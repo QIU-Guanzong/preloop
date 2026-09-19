@@ -35,12 +35,10 @@ GITHUB_CI_EVENT_TYPES = frozenset({"check_run", "check_suite", "workflow_run"})
 GITLAB_CI_EVENT_TYPES = frozenset({"pipeline", "job"})
 CI_FAILURE_EVENT_TYPES = GITHUB_CI_EVENT_TYPES | GITLAB_CI_EVENT_TYPES
 
-# GitHub conclusions that mean "the branch is broken". ``cancelled`` and
-# ``skipped`` are excluded: they are usually a human or a concurrency group,
-# not a defect the agent can fix.
-GITHUB_FAILED_CONCLUSIONS = frozenset(
-    {"failure", "timed_out", "startup_failure", "action_required"}
-)
+# The legacy webhook path cannot fetch diagnostic evidence. Platform outcomes
+# (startup failure, timeout, required human action) must not start code repair.
+# Durable subscriptions bypass this path and reconcile provider evidence.
+GITHUB_FAILED_CONCLUSIONS = frozenset({"failure"})
 GITLAB_FAILED_STATUSES = frozenset({"failed"})
 
 # Reserved key on the trigger event payload, mirroring ``_resume``. The

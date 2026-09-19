@@ -1,5 +1,6 @@
 """Tests for CI-failure retrigger of a bound implementation flow."""
 
+from typing import Any, Callable
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -320,6 +321,33 @@ class TestBindCiFailureResumeOrSkip:
             )
             is None
         )
+
+    @pytest.mark.parametrize(
+        "conclusion", ["startup_failure", "action_required", "timed_out"]
+    )
+    @pytest.mark.parametrize(
+        "event_type, factory",
+        [
+            ("check_run", github_check_run),
+            ("check_suite", github_check_suite),
+            ("workflow_run", github_workflow_run),
+        ],
+    )
+    def test_platform_outcome_does_not_resume(
+        self,
+        crud: MagicMock,
+        conclusion: str,
+        event_type: str,
+        factory: Callable[[str], dict[str, Any]],
+    ) -> None:
+        crud.get_by_flow.return_value = [bound_execution()]
+        event = factory(conclusion)
+        assert (
+            bind_ci_failure_resume_or_skip(MagicMock(), FakeFlow(), event_type, event)
+            is None
+        )
+        assert "_resume" not in event
+        assert CI_FAILURE_KEY not in event
 
     def test_running_execution_for_same_pr_skips(self, crud):
         execution = bound_execution()

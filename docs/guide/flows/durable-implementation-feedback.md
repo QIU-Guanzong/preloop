@@ -162,9 +162,9 @@ log text (a trace is untrusted task data and cannot request a repair):
 
 | Evidence | Outcome |
 | --- | --- |
-| GitLab `script_failure`/`test_failure`, GitHub Actions failing user step, or a non-Actions check-run `failure` | code failure: one coalesced repair round |
+| GitLab job `script_failure`/`test_failure`, GitHub Actions failing user step, or a non-Actions check-run `failure` | code failure: one coalesced repair round |
 | Runner, API, scheduler, image-pull and similar platform reasons | infrastructure: bounded wait, then `ci_infrastructure_failure` |
-| GitLab timeout reasons, GitHub `timed_out` | infrastructure: bounded wait, then `ci_timeout` |
+| GitLab timeout reasons, GitHub `timed_out` without a more specific failed-step reason | infrastructure: bounded wait, then `ci_timeout` |
 | Quota, archived project, blocked user, protected environment, upstream permission reasons | `ci_permission_required`, a human must act |
 | `unknown_failure`, an unrecognised reason, or a failing check with no readable job | `ci_failure_unclassified` |
 | A retried attempt whose newer attempt decided the check | ignored |
@@ -174,6 +174,11 @@ Infrastructure failures never consume a repair turn. They are retried for
 `ci_infrastructure_failure_retry`/`ci_timeout_retry`), then the thread blocks with
 the reason above. A new head or a recovered rerun clears that allowance. Review
 feedback that arrives while CI infrastructure is broken still repairs normally.
+
+Flows without durable feedback still use the legacy webhook resume path. That
+path ignores `startup_failure`, `timed_out`, and `action_required` rather than
+starting a code repair without job evidence. Its ordinary `failure` handling
+is unchanged; bounded job-detail enrichment applies to durable subscriptions.
 
 Readiness requires passing checks and review gates on the current head. Provider
 permission errors, pagination beyond the bounded reconciliation window, and
