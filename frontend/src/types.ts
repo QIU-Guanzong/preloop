@@ -130,6 +130,13 @@ export interface Flow {
     allow_self?: boolean;
   }> | null;
   git_clone_config?: GitCloneConfig;
+  effective_publication_policy?: {
+    mode: 'disabled' | 'ungated' | 'sandbox_gated' | 'isolated' | 'blocked';
+    reason: string;
+    configured_check_ids: string[];
+    blockers: string[];
+    runtime_validation_required: boolean;
+  };
   notifications?: FlowNotifications | null;
   custom_commands?: FlowCustomCommands;
   timeout_seconds?: number | null;

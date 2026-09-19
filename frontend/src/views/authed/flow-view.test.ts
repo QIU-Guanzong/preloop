@@ -194,6 +194,49 @@ describe('FlowView detail page language', () => {
     return element;
   }
 
+  it('shows effective saved publication policy without claiming verification passed', async () => {
+    const element = await renderDetail({
+      effective_publication_policy: {
+        mode: 'isolated',
+        reason: 'Tracker authorization and isolation are checked at execution.',
+        configured_check_ids: ['lint', 'unit-tests'],
+        blockers: [],
+        runtime_validation_required: true,
+      },
+    });
+    try {
+      const card = element.shadowRoot.querySelector(
+        '[data-publication-policy]'
+      );
+      expect(card.textContent).to.include('Isolated verification configured');
+      expect(card.textContent).to.include('lint, unit-tests');
+      expect(card.textContent).to.include('Each execution must validate');
+      expect(card.textContent).not.to.include('Verification passed');
+    } finally {
+      element.remove();
+    }
+  });
+
+  it('renders an ungated customized flow explicitly', async () => {
+    const element = await renderDetail({
+      effective_publication_policy: {
+        mode: 'ungated',
+        reason: 'Publication has no required verification gate.',
+        configured_check_ids: [],
+        blockers: [],
+        runtime_validation_required: false,
+      },
+    });
+    try {
+      expect(
+        element.shadowRoot.querySelector('[data-publication-policy]')
+          .textContent
+      ).to.include('No verification gate');
+    } finally {
+      element.remove();
+    }
+  });
+
   it('uses the list verbs in the header actions', async () => {
     // The header said "Edit Flow / Disable / Test Run" for the three commands
     // the list kebab calls Edit, Pause and Run now, and "Test Run" implied a
