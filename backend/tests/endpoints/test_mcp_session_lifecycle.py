@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import QueuePool
 
 from preloop.api.endpoints import mcp
+from preloop.models import models
 
 
 @pytest.fixture
@@ -309,9 +310,9 @@ async def test_failed_tool_call_rolls_back_session_and_recovers_next_call(
 
     monkeypatch.setattr(mcp, "get_user_from_token_if_valid", valid_token)
 
-    # Induce a database error matching the exact issue #805 incident on tool call 1
+    # Simulate a driver error; real PostgreSQL recovery is tested separately.
     leaked_sql = "SELECT issue.title FROM issue JOIN tracker WHERE issue.external_url = %(external_url_1)s"
-    leaked_params = {"external_url_1": "https://secret-internal.preloop.ai/issues/123"}
+    leaked_params = {"external_url_1": "https://secret-internal.example.com/issues/123"}
 
     def failing_project_or_issue(*args: Any, **kwargs: Any) -> Any:
         shared_session.aborted = True
@@ -415,25 +416,15 @@ async def test_tool_call_does_not_detach_preloaded_instances(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Tool commit must not expire and detach preloaded ORM instance attributes."""
-    from sqlalchemy import Column, Integer, String
-    from sqlalchemy.orm import declarative_base
-
-    base = declarative_base()
-
-    class Item(base):
-        __tablename__ = "items"
-        id = Column(Integer, primary_key=True)
-        name = Column(String)
-
     engine = create_engine("sqlite://")
-    base.metadata.create_all(engine)
+    models.Permission.__table__.create(engine)
     test_session = Session(bind=engine)
 
-    item = Item(id=42, name="test-item")
+    item = models.Permission(name="test-item", description="Example", category="test")
     test_session.add(item)
     test_session.commit()
     # Populate attribute in instance dict while session is open
-    assert item.id == 42
+    assert item.name == "test-item"
 
     def get_db() -> Generator[Session, None, None]:
         yield test_session
@@ -449,4 +440,6 @@ async def test_tool_call_does_not_detach_preloaded_instances(
     result = await sample_tool()
     assert result == "ok"
     # Even after tool's unit-of-work commit and cleanup, preloaded attributes must remain accessible
-    assert item.id == 42
+    assert item.name == "test-item"
+    test_session.close()
+    engine.dispose()

@@ -1245,6 +1245,12 @@ avatars.
 
 ### Fixed
 
+- Native MCP calls commit remaining database work on success and roll back on
+  failure or cancellation. Database errors are sanitized in both raised errors
+  and compliance batch results, while unrelated provider errors retain their
+  original status and detail. Failed batch items no longer poison the next
+  item's database transaction (#805).
+
 - Codex CLI enrollments share one OAuth SecretReference per managed agent
   instead of minting a second single-use lineage per model family. A
   re-onboard of a split pre-fix enrollment repoints family rows onto the
