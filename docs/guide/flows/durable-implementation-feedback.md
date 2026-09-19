@@ -122,7 +122,14 @@ GitHub reconciliation reads the current PR head, checks, legacy commit statuses,
 submitted reviews, unresolved inline review threads and conversation comments.
 It incorporates configured required checks, branch protection and effective
 ruleset check/review requirements. A failing check run contributes its own
-bounded, redacted `output` title/summary/text as diagnostic evidence.
+bounded, redacted `output` title/summary/text as diagnostic evidence. For failing
+GitHub Actions checks, reconciliation reads at most two job-detail records on
+the bound repository. The job must match the current head and check-run ID.
+A failure in the provider-owned first setup step is infrastructure; a failing
+user step is code evidence. Missing, stale, denied or over-budget job evidence
+blocks classification instead of starting a speculative repair. Job URLs never
+become outbound request destinations. `startup_failure` uses the existing
+bounded infrastructure retry/escalation policy.
 
 GitLab reconciliation reads MR notes, current-head commit statuses, approvals and
 blocking discussion state. It also reads the current head's pipeline (from the MR
@@ -134,7 +141,7 @@ diagnostic evidence. The trace is streamed and discarded as it arrives, so an
 enormous log never enters memory whole, and credentials are redacted before the
 tail is cut. A missing or forbidden trace is simply absent. When the
 pipeline has no readable job (a configuration error, or jobs the token cannot
-list), its own status is the evidence instead. Job and pipeline reads stay inside
+list), its own status and any explicit provider failure reason are the evidence instead. Job and pipeline reads stay inside
 one provider page, like notes and statuses.
 
 Both paths recheck the head after reading gates and stop repairing closed or
@@ -155,9 +162,9 @@ log text (a trace is untrusted task data and cannot request a repair):
 
 | Evidence | Outcome |
 | --- | --- |
-| GitLab `script_failure`/`test_failure`, or a GitHub check-run `failure` | code failure: one coalesced repair round |
+| GitLab job `script_failure`/`test_failure`, GitHub Actions failing user step, or a non-Actions check-run `failure` | code failure: one coalesced repair round |
 | Runner, API, scheduler, image-pull and similar platform reasons | infrastructure: bounded wait, then `ci_infrastructure_failure` |
-| GitLab timeout reasons, GitHub `timed_out` | infrastructure: bounded wait, then `ci_timeout` |
+| GitLab timeout reasons, GitHub `timed_out` without a more specific failed-step reason | infrastructure: bounded wait, then `ci_timeout` |
 | Quota, archived project, blocked user, protected environment, upstream permission reasons | `ci_permission_required`, a human must act |
 | `unknown_failure`, an unrecognised reason, or a failing check with no readable job | `ci_failure_unclassified` |
 | A retried attempt whose newer attempt decided the check | ignored |
@@ -167,6 +174,11 @@ Infrastructure failures never consume a repair turn. They are retried for
 `ci_infrastructure_failure_retry`/`ci_timeout_retry`), then the thread blocks with
 the reason above. A new head or a recovered rerun clears that allowance. Review
 feedback that arrives while CI infrastructure is broken still repairs normally.
+
+Flows without durable feedback still use the legacy webhook resume path. That
+path ignores `startup_failure`, `timed_out`, and `action_required` rather than
+starting a code repair without job evidence. Its ordinary `failure` handling
+is unchanged; bounded job-detail enrichment applies to durable subscriptions.
 
 Readiness requires passing checks and review gates on the current head. Provider
 permission errors, pagination beyond the bounded reconciliation window, and
