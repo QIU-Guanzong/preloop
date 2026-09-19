@@ -28,7 +28,11 @@ from preloop.services.flow_failure_category import (
 
 from .base import AgentExecutionResult, AgentExecutor, AgentStatus, ContainerTermination
 from .errors import AgentStartError
-from .failure_analysis import AgentFailureAnalysis, analyze_agent_failure
+from .failure_analysis import (
+    AgentFailureAnalysis,
+    analyze_agent_failure,
+    runtime_log_text,
+)
 from preloop.services.mcp_config_service import MCPConfigService
 from preloop.agents.verification import build_verification_gate_shell
 from preloop.services.tracker_git_token import APP_AUTH_TYPES
@@ -2738,6 +2742,7 @@ class ContainerAgentExecutor(AgentExecutor):
         Returns:
             True if critical error patterns detected, False otherwise
         """
+        logs_text = runtime_log_text(logs_text)
         # Extract only the agent output (after the exec start marker)
         # to avoid false positives from prompt echo in init commands.
         agent_output = logs_text
@@ -3606,10 +3611,10 @@ class ContainerAgentExecutor(AgentExecutor):
 
         A correlated resume seeds ``/workspace`` from the previous execution's
         snapshot, which keeps commits that were never pushed. In that case the
-        repository is already there: fetch and check out the PR branch inside
-        it instead of cloning over the top. The check is made in the container
-        (``[ -d <repo>/.git ]``) rather than in Python, so a restore that
-        failed silently still falls back to the clone.
+        repository is already there: compare the remote head without changing
+        local commits or dirty files. A never-pushed branch has no remote head.
+        The container checks for the restored repository. Direct recovery fails
+        explicitly if it is missing; only the legacy path permits a cold clone.
         """
 
         if not self.workspace_restore_planned(execution_context):
@@ -3645,13 +3650,33 @@ class ContainerAgentExecutor(AgentExecutor):
             )
             if repo_url:
                 restore_steps.append(
-                    f"git remote add origin {shlex.quote(repo_url)} || git remote set-url origin {shlex.quote(repo_url)}"
+                    f"(git remote add origin {shlex.quote(repo_url)} || git remote set-url origin {shlex.quote(repo_url)})"
                 )
             if branch:
                 restore_steps.extend(
                     [
-                        f"git fetch origin {shlex.quote(branch)}",
-                        "git merge-base --is-ancestor FETCH_HEAD HEAD || { echo PRELOOP_CHECKPOINT remote_diverged; exit 1; }",
+                        f"""{{
+if [ "$(git symbolic-ref --quiet --short HEAD)" != {shlex.quote(branch)} ]; then
+    echo PRELOOP_CHECKPOINT branch_mismatch
+    exit 1
+fi
+if git ls-remote --exit-code --heads origin {shlex.quote("refs/heads/" + branch)} >/dev/null; then
+    git fetch origin {shlex.quote("refs/heads/" + branch)} || {{
+        echo PRELOOP_CHECKPOINT remote_unavailable; exit 1;
+    }}
+    git merge-base --is-ancestor FETCH_HEAD HEAD || {{
+        echo PRELOOP_CHECKPOINT remote_diverged; exit 1;
+    }}
+else
+    _pl_remote_rc=$?
+    if [ "$_pl_remote_rc" -eq 2 ]; then
+        echo PRELOOP_CHECKPOINT remote_branch_absent preserving_local_work
+    else
+        echo PRELOOP_CHECKPOINT remote_unavailable
+        exit 1
+    fi
+fi
+}}""",
                     ]
                 )
         if branch and not direct_restore:
@@ -3667,9 +3692,11 @@ class ContainerAgentExecutor(AgentExecutor):
                     f"git merge --ff-only origin/{branch} || true",
                 ]
             )
-        restore_steps.append("git log --oneline -3 || true")
+        restore_steps.append("(git log --oneline -3 || true)")
 
         restore_block = " && ".join(restore_steps)
+        if direct_restore:
+            clone_command = "echo PRELOOP_CHECKPOINT repository_missing; exit 1"
         return (
             f"if [ -d {shlex.quote(repo_path)}/.git ]; then\n"
             f"{restore_block}\n"

@@ -617,3 +617,27 @@ def test_one_unwrapping_serves_the_lease_payload_and_the_owner_lookup(
     the other, so both now call this.
     """
     assert unwrap_agent_config(config) == expected
+
+
+def test_checkpoint_keeps_base_after_restore_redacts_git_config(tmp_path) -> None:
+    upstream = init_repo(tmp_path / "upstream")
+    (upstream / "tracked").write_text("base")
+    git(upstream, "add", ".")
+    git(upstream, "commit", "-m", "base")
+    source = tmp_path / "source"
+    subprocess.run(
+        ["git", "clone", str(upstream), str(source)], check=True, capture_output=True
+    )
+    git(source, "config", "user.name", "Jane Doe")
+    git(source, "config", "user.email", "jane@example.com")
+    git(source, "checkout", "-b", "implementation/new")
+    (source / "tracked").write_text("unpushed")
+    git(source, "commit", "-am", "local work")
+    expected_base = subprocess.check_output(
+        ["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True
+    ).strip()
+    restored = tmp_path / "restored"
+    first = restore(capture(source, max_bytes=2_000_000), restored)
+    assert first["repositories"][0]["base_sha"] == expected_base
+    second = restore(capture(restored, max_bytes=2_000_000), tmp_path / "again")
+    assert second["repositories"][0]["base_sha"] == expected_base
