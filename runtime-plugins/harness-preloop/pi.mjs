@@ -2,6 +2,21 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Bridge, loadConfig } from "./bridge.mjs";
 
+/** Allowlisted MCP init failure label. Never includes URLs, headers, or bodies. */
+export function describeMcpInitFailure(error) {
+  if (error == null) return "unknown error";
+  const status = Number(
+    error.status ?? error.statusCode ?? error.cause?.status ?? error.cause?.statusCode,
+  );
+  if (Number.isInteger(status) && status >= 100 && status <= 599) return `HTTP ${status}`;
+  const code = String(error.code ?? error.cause?.code ?? "");
+  if (/^[A-Z][A-Z0-9_]+$/.test(code)) return code;
+  const name = String(error.name ?? error.cause?.name ?? "");
+  if (name === "AbortError" || name === "TimeoutError" || name === "TypeError")
+    return name;
+  return "unknown error";
+}
+
 /** Pi extension; MCP discovery completes before the first model turn. */
 export default async function preloop(pi) {
   const config = loadConfig("pi");
@@ -68,9 +83,13 @@ export default async function preloop(pi) {
         cursor = page.nextCursor;
       } while (cursor);
     }
-  } catch {
+  } catch (error) {
     await Promise.allSettled(clients.map((client) => client.close()));
     // Pi continues after extension load failures, so keep the native gate loaded.
+    console.error(
+      "Preloop MCP initialization failed; native tools stay blocked:",
+      describeMcpInitFailure(error),
+    );
     mcpUnavailable = true;
   }
   pi.on("session_start", async (_event, ctx) => {

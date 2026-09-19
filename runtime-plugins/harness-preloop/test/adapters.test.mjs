@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import piPlugin from "../pi.mjs";
+import piPlugin, { describeMcpInitFailure } from "../pi.mjs";
 import { apply as deepseekPlugin } from "../deepseek.mjs";
 
 function configuration(runtime) {
@@ -124,6 +124,9 @@ test("Pi retains its native gate when MCP initialization fails", async () => {
   );
   process.env.PRELOOP_HARNESS_CONFIG = path;
   const hooks = new Map();
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args.map(String).join(" "));
   try {
     await piPlugin({ on: (name, handler) => hooks.set(name, handler) });
     const result = await hooks.get("tool_call")(
@@ -132,8 +135,23 @@ test("Pi retains its native gate when MCP initialization fails", async () => {
     );
     assert.equal(result.block, true);
     assert.match(result.reason, /MCP.*unavailable/);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /native tools stay blocked/);
+    assert.match(errors[0], /ECONNREFUSED|unknown error|TypeError/);
+    assert.doesNotMatch(errors[0], /127\.0\.0\.1/);
   } finally {
+    console.error = originalError;
     if (previous === undefined) delete process.env.PRELOOP_HARNESS_CONFIG;
     else process.env.PRELOOP_HARNESS_CONFIG = previous;
   }
+});
+
+test("describeMcpInitFailure keeps status and OS codes, not URLs", () => {
+  assert.equal(describeMcpInitFailure({ status: 401, message: "https://secret" }), "HTTP 401");
+  assert.equal(
+    describeMcpInitFailure({ code: "ECONNREFUSED", message: "connect http://127.0.0.1" }),
+    "ECONNREFUSED",
+  );
+  assert.equal(describeMcpInitFailure({ name: "TimeoutError", message: "token=abc" }), "TimeoutError");
+  assert.equal(describeMcpInitFailure({ message: "https://preloop.example/mcp" }), "unknown error");
 });
