@@ -748,3 +748,135 @@ async def test_github_classifies_only_explicit_permission_denials(
         with pytest.raises(TrackerResponseError) as error:
             await tracker._request("GET", "/repositories/123/branches/main/protection")
     assert isinstance(error.value, TrackerPermissionError) is permission
+
+
+def test_provider_startup_failure_retries_infrastructure_not_code() -> None:
+    from preloop.services.flow_feedback_provider import classify_checks
+
+    result = classify_checks(
+        [{"name": "tests", "conclusion": "startup_failure"}], ["tests"]
+    )
+    assert not result.failures
+    assert len(result.infra_failures) == 1
+    assert not result.passed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["setup", "code", "missing", "stale", "wrong_check"])
+async def test_github_actions_reads_bound_job_evidence(kind: str) -> None:
+    provider, paths = github_fixture()
+    original = provider.client._request.side_effect
+
+    async def request(method: str, path: str, data: Any = None) -> Any:
+        if "/actions/jobs/" in path:
+            paths.append(path)
+            if kind == "missing":
+                from preloop.sync.exceptions import TrackerPermissionError
+
+                raise TrackerPermissionError("unavailable")
+            return {
+                "head_sha": "stale" if kind == "stale" else "head",
+                "check_run_url": "https://api.github.com/repos/example/repo/check-runs/"
+                + ("99" if kind == "wrong_check" else "3"),
+                "steps": [
+                    {
+                        "number": 1 if kind == "setup" else 3,
+                        "name": "Set up job" if kind == "setup" else "Run tests",
+                        "conclusion": "failure",
+                    }
+                ],
+            }
+        result = await original(method, path, data)
+        if "/check-runs" in path:
+            result["check_runs"][0].update(
+                {
+                    "app": {"slug": "github-actions"},
+                    "head_sha": "head",
+                    "details_url": "https://github.com/example/repo/actions/runs/4/job/5",
+                }
+            )
+        return result
+
+    provider.client._request.side_effect = request
+    state = await provider.read()
+    ci = [event for event in state.feedback if event["kind"] == "ci"]
+    assert "/repositories/123/actions/jobs/5" in paths
+    if kind == "setup":
+        assert len(state.infra_failures) == 1
+        assert not ci
+    elif kind == "code":
+        assert len(ci) == 1
+        assert ci[0]["payload"]["failure_reason"] == "script_failure"
+    else:
+        assert not ci and not state.infra_failures
+        assert state.blocked_reason == "ci_failure_unclassified"
+
+
+@pytest.mark.asyncio
+async def test_actions_detail_reads_are_bounded_and_missing_evidence_blocks() -> None:
+    from preloop.services.flow_feedback_provider import classify_checks
+
+    provider, _ = github_fixture()
+    checks = [
+        {
+            "id": index,
+            "name": f"job-{index}",
+            "head_sha": "head",
+            "app": {"slug": "github-actions"},
+            "conclusion": "failure",
+            "details_url": f"https://github.com/example/repo/actions/runs/1/job/{index}",
+        }
+        for index in range(1, 5)
+    ]
+    request = AsyncMock(return_value=None)
+    enriched = await provider._github_job_details(
+        request, "/repositories/123", checks, "head", []
+    )
+    assert request.await_count == 2
+    result = classify_checks(enriched, [])
+    assert result.blocked_reason == "ci_failure_unclassified"
+    assert not result.failures
+
+
+@pytest.mark.asyncio
+async def test_provider_job_urls_cannot_redirect_requests_or_launder_user_steps() -> (
+    None
+):
+    provider, _ = github_fixture()
+    check = {
+        "id": 3,
+        "name": "tests",
+        "head_sha": "head",
+        "app": {"slug": "github-actions"},
+        "conclusion": "failure",
+        "details_url": "https://evil.example.com/actions/runs/4/job/5",
+    }
+    request = AsyncMock()
+    enriched = await provider._github_job_details(
+        request, "/repositories/123", [check], "head", []
+    )
+    request.assert_not_awaited()
+    assert enriched[0]["details_unavailable"]
+    check["details_url"] = "https://github.com/example/repo/actions/runs/4/job/5"
+    request.return_value = {
+        "head_sha": "head",
+        "check_run_url": "https://api.github.com/repos/example/repo/check-runs/3",
+        "steps": [{"number": 3, "name": "Set up job", "conclusion": "failure"}],
+    }
+    enriched = await provider._github_job_details(
+        request, "/repositories/123", [check], "head", []
+    )
+    assert enriched[0]["failure_reason"] == "script_failure"
+
+
+def test_pipeline_only_preserves_provider_infrastructure_reason() -> None:
+    from preloop.services.flow_feedback_provider import _pipeline_only, classify_checks
+
+    result = classify_checks(
+        _pipeline_only(
+            {"id": 1, "status": "failed", "failure_reason": "runner_system_failure"}
+        ),
+        [],
+    )
+    assert len(result.infra_failures) == 1
+    assert not result.failures

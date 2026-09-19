@@ -28,6 +28,9 @@ JOB_TRACE_TAIL_BYTES = 4000
 JOB_TRACE_READ_BYTES = 64000
 # Failing jobs whose trace is read during one reconciliation.
 MAX_JOB_TRACES = 3
+# Keep Actions enrichment within the adoption preflight's twelve-read budget.
+MAX_ACTIONS_JOB_READS = 2
+PROVIDER_INFRA_OUTCOMES = frozenset({"startup_failure"})
 # GitLab job/pipeline reads stay inside one page, like notes and statuses.
 PROVIDER_PAGE_SIZE = 100
 # A diagnostic read of a resource that is absent or not visible to this
@@ -238,6 +241,8 @@ def classify_failure(item: dict[str, Any]) -> str:
     if reason and reason not in UNCLASSIFIED_REASONS:
         return "unknown"
     outcome = item.get("conclusion") or item.get("state") or item.get("status")
+    if outcome in PROVIDER_INFRA_OUTCOMES:
+        return "infra"
     if outcome == "timed_out":
         return "timeout"
     if reason in UNCLASSIFIED_REASONS or item.get("details_unavailable") is True:
@@ -278,7 +283,7 @@ def classify_checks(
             continue
         if conclusion in PENDING_OUTCOMES:
             pending = True
-        elif conclusion in FAILED_OUTCOMES:
+        elif conclusion in FAILED_OUTCOMES | PROVIDER_INFRA_OUTCOMES:
             category = classify_failure(item)
             if category == "code":
                 failures.append(item)
@@ -367,6 +372,7 @@ def _pipeline_only(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
             "status": pipeline.get("status"),
             "web_url": pipeline.get("web_url"),
             "details_unavailable": True,
+            "failure_reason": pipeline.get("failure_reason"),
         }
     ]
 
@@ -471,6 +477,80 @@ class FeedbackProvider:
             results.append(receipt(kind, item, head_sha=sha))
         return results
 
+    async def _github_job_details(
+        self,
+        request: Any,
+        repo: str,
+        checks: list[dict[str, Any]],
+        sha: str,
+        required: list[str],
+    ) -> list[dict[str, Any]]:
+        """Enrich failing Actions checks using bounded, current-head job metadata.
+
+        Never fetch a provider-supplied URL. Only a numeric job identity is
+        extracted; the read stays on the authoritative repository endpoint.
+        Missing, stale and over-budget evidence blocks speculative code repair.
+        """
+        enriched = []
+        reads = 0
+        for original in checks:
+            item = dict(original)
+            enriched.append(item)
+            if (
+                (item.get("app") or {}).get("slug") != "github-actions"
+                or item.get("conclusion") not in FAILED_OUTCOMES
+                or (required and item.get("name") not in required)
+            ):
+                continue
+            item["details_unavailable"] = True
+            identity = re.fullmatch(
+                r"https://github\.com/[^/]+/[^/]+/actions/runs/[0-9]+/job/([0-9]+)(?:\?.*)?",
+                str(item.get("details_url") or ""),
+            )
+            if (
+                item.get("head_sha") != sha
+                or identity is None
+                or reads >= MAX_ACTIONS_JOB_READS
+            ):
+                continue
+            reads += 1
+            job = await _optional(
+                request("GET", f"{repo}/actions/jobs/{identity.group(1)}")
+            )
+            if not isinstance(job, dict) or job.get("head_sha") != sha:
+                continue
+            if not str(job.get("check_run_url") or "").endswith(
+                f"/check-runs/{item.get('id')}"
+            ):
+                continue
+            steps = job.get("steps")
+            if not isinstance(steps, list):
+                continue
+            failed = [
+                step
+                for step in steps
+                if isinstance(step, dict) and step.get("conclusion") == "failure"
+            ]
+            # Only the provider-owned first step proves a bootstrap failure.
+            # A user can name an ordinary step "Set up job", so name alone is
+            # insufficient. Missing steps and cleanup-only failures stay unknown.
+            if failed and all(
+                step.get("number") == 1 and step.get("name") == "Set up job"
+                for step in failed
+            ):
+                item["failure_reason"] = "runner_system_failure"
+            elif any(
+                isinstance(step.get("number"), int)
+                and step["number"] > 1
+                and step.get("name") != "Complete job"
+                for step in failed
+            ):
+                item["failure_reason"] = "script_failure"
+            else:
+                continue
+            item.pop("details_unavailable", None)
+        return enriched
+
     async def _github(self) -> FeedbackState:
         request = self.client._request
         repo = f"/repositories/{quote(self.thread.repository_id, safe='')}"
@@ -566,15 +646,16 @@ class FeedbackProvider:
                 )
             elif rule.get("type") in {"workflows", "code_scanning"}:
                 unsupported_gate = True
+        check_runs = await self._github_job_details(
+            request, repo, checks.get("check_runs", []), sha, required
+        )
         (
             state.checks_pending,
             state.checks_passed,
             state.blocked_reason,
             failed,
             state.infra_failures,
-        ) = classify_checks(
-            checks.get("check_runs", []) + statuses.get("statuses", []), required
-        )
+        ) = classify_checks(check_runs + statuses.get("statuses", []), required)
         if (
             thread_page_limit
             or any(len(items) >= 100 for items in (reviews, comments, discussion))
