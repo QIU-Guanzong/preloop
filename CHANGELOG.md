@@ -1245,6 +1245,12 @@ avatars.
 
 ### Fixed
 
+- Native MCP calls commit remaining database work on success and roll back on
+  failure or cancellation. Database errors are sanitized in both raised errors
+  and compliance batch results, while unrelated provider errors retain their
+  original status and detail. Failed batch items no longer poison the next
+  item's database transaction (#805).
+
 - Isolated publication checks receive the exact published base/head range and
   retain profile, environment and selection evidence. Successful checks can be
   reused only inside the controller for identical execution, artifact, profile

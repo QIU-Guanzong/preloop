@@ -98,6 +98,76 @@ _tool_db: ContextVar[_ToolDatabase | None] = ContextVar(
 )
 
 
+_DATABASE_ERRORS: list[type[BaseException]] = [SQLAlchemyError]
+try:
+    import psycopg2
+
+    _DATABASE_ERRORS.append(psycopg2.Error)
+except ImportError:
+    pass
+try:
+    import psycopg
+
+    _DATABASE_ERRORS.append(psycopg.Error)
+except ImportError:
+    pass
+_DATABASE_ERROR_TYPES = tuple(_DATABASE_ERRORS)
+
+DATABASE_ERROR_DETAIL = "database error, transaction rolled back, retry"
+
+
+def _is_database_error(exc: BaseException) -> bool:
+    """Identify database exception types through wrappers without guessing from text."""
+    pending = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, _DATABASE_ERROR_TYPES):
+            return True
+        for wrapped in (current.__cause__, current.__context__):
+            if wrapped is not None:
+                pending.append(wrapped)
+    return False
+
+
+def _rollback_tool_session(session: Session) -> bool:
+    """Roll back a failed invocation, discarding its connection if recovery fails."""
+    try:
+        session.rollback()
+        return True
+    except Exception:
+        logger.warning(
+            "Database session rollback failed after tool error", exc_info=True
+        )
+        try:
+            session.invalidate()
+        except Exception:
+            logger.warning("Database session invalidation failed", exc_info=True)
+        return False
+
+
+def _database_error_detail(rolled_back: bool) -> str:
+    """Do not claim a successful rollback when session recovery itself failed."""
+    if rolled_back:
+        return DATABASE_ERROR_DETAIL
+    return (
+        "database error, rollback failed; reconnect and check operation outcome "
+        "before retrying"
+    )
+
+
+def _batch_error_detail(exc: Exception, db: Session, prefix: str) -> str:
+    """Sanitize DB errors caught inside batch tools and recover before the next item."""
+    if _is_database_error(exc):
+        logger.error("Database error processing batch tool item", exc_info=exc)
+        return _database_error_detail(_rollback_tool_session(db))
+    detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+    return f"{prefix}: {detail}"
+
+
 def _with_tool_db(
     tool: Callable[_ToolParams, Awaitable[_ToolResult]],
 ) -> Callable[_ToolParams, Awaitable[_ToolResult]]:
@@ -107,6 +177,10 @@ def _with_tool_db(
     A bare ``next(get_db())`` does not keep the dependency generator alive;
     queries reopen the session after its finalizer and leak the new checkout.
     Scope ownership here guarantees cleanup on errors and cancellation too.
+
+    Commit remaining work on success and roll back on errors. Earlier CRUD
+    commits and external provider writes are outside this final transaction.
+    Database exceptions are sanitized before returning them to agents.
     """
 
     @wraps(tool)
@@ -114,9 +188,38 @@ def _with_tool_db(
         *args: _ToolParams.args, **kwargs: _ToolParams.kwargs
     ) -> _ToolResult:
         stack = ExitStack()
-        token = _tool_db.set(_ToolDatabase(stack))
+        scope = _ToolDatabase(stack)
+        token = _tool_db.set(scope)
         try:
-            return await tool(*args, **kwargs)
+            result = await tool(*args, **kwargs)
+            if scope.session is not None:
+                if not scope.session.is_active:
+                    # A handler may deliberately report a partial provider write
+                    # after a cache flush fails. Preserve that result and recover.
+                    _rollback_tool_session(scope.session)
+                elif scope.session.in_transaction():
+                    prev_expire = scope.session.expire_on_commit
+                    scope.session.expire_on_commit = False
+                    try:
+                        scope.session.commit()
+                    finally:
+                        scope.session.expire_on_commit = prev_expire
+            return result
+        except BaseException as exc:
+            rolled_back = True
+            if scope.session is not None:
+                rolled_back = _rollback_tool_session(scope.session)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            if _is_database_error(exc):
+                logger.error(
+                    "Database error executing tool %s", tool.__name__, exc_info=True
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=_database_error_detail(rolled_back),
+                ) from None
+            raise
         finally:
             _tool_db.reset(token)
             stack.close()
@@ -1236,7 +1339,7 @@ async def estimate_compliance(
         if isinstance(result, Exception):
             # Handle unexpected exceptions from gather
             issue_identifier = validated_issues[i]
-            error_msg = f"Processing exception: {str(result)}"
+            error_msg = _batch_error_detail(result, db, "Processing exception")
             failed_issues.append(issue_identifier)
             errors.append(f"{issue_identifier}: {error_msg}")
             logger.error(
@@ -1310,7 +1413,7 @@ async def _process_single_issue_estimate(
         )
         return ProcessingResult(
             success=False,
-            error=f"API error: {e.detail}",
+            error=_batch_error_detail(e, db, "API error"),
             issue_identifier=issue_identifier,
         )
     except Exception as e:
@@ -1320,7 +1423,7 @@ async def _process_single_issue_estimate(
         )
         return ProcessingResult(
             success=False,
-            error=f"Unexpected error: {str(e)}",
+            error=_batch_error_detail(e, db, "Unexpected error"),
             issue_identifier=issue_identifier,
         )
 
@@ -1371,7 +1474,7 @@ async def _process_single_issue_compliance(
         )
         return ProcessingResult(
             success=False,
-            error=f"API error: {e.detail}",
+            error=_batch_error_detail(e, db, "API error"),
             issue_identifier=issue_identifier,
         )
     except Exception as e:
@@ -1381,7 +1484,7 @@ async def _process_single_issue_compliance(
         )
         return ProcessingResult(
             success=False,
-            error=f"Unexpected error: {str(e)}",
+            error=_batch_error_detail(e, db, "Unexpected error"),
             issue_identifier=issue_identifier,
         )
 
@@ -1445,7 +1548,7 @@ async def improve_compliance(
         if isinstance(result, Exception):
             # Handle unexpected exceptions from gather
             issue_identifier = validated_issues[i]
-            error_msg = f"Processing exception: {str(result)}"
+            error_msg = _batch_error_detail(result, db, "Processing exception")
             failed_issues.append(issue_identifier)
             errors.append(f"{issue_identifier}: {error_msg}")
             logger.error(
