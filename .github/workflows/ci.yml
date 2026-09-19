@@ -420,6 +420,8 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://test_user:test_password@${{ fromJSON(needs.pick-runner.outputs.backend_plan)[matrix.group].db_host }}:5432/test_db
+      # Explicit opt-in for isolated schema lease/crash/lifecycle fixtures.
+      FLOW_FEEDBACK_TEST_DATABASE_URL: postgresql://test_user:test_password@${{ fromJSON(needs.pick-runner.outputs.backend_plan)[matrix.group].db_host }}:5432/test_db
       OPENAI_API_KEY: mock_key
       ANTHROPIC_API_KEY: mock_key
       PRELOOP_DISABLE_TELEMETRY: "true"

@@ -137,3 +137,14 @@ class ResolvedVerificationPolicy(BaseModel):
     )
     profile: Optional[VerificationProfile] = None
     gate_budget_seconds: int = Field(default=3600, ge=30, le=14400)
+
+
+class EffectivePublicationPolicy(BaseModel):
+    """Saved configuration summary, never an attestation that checks passed."""
+
+    mode: Literal["disabled", "ungated", "sandbox_gated", "isolated", "blocked"]
+    reason: str
+    verification: Optional[ResolvedVerificationPolicy] = None
+    configured_check_ids: List[str] = Field(default_factory=list)
+    blockers: List[str] = Field(default_factory=list)
+    runtime_validation_required: bool = False

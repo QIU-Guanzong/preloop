@@ -16,6 +16,40 @@ from preloop.services.trusted_publisher import PublicationError
 from preloop.services.verification import resolve_verification_policy
 
 
+@pytest.mark.parametrize(
+    "reason,category",
+    [
+        (
+            "Isolated verification check regression failed with exit 1",
+            "verification_failed",
+        ),
+        (
+            "Isolated verification check database failed with exit 127",
+            "verification_blocked",
+        ),
+        (
+            "Isolated verification check lint failed with exit 126",
+            "verification_blocked",
+        ),
+        (
+            "Isolated verification exceeded its configured budget",
+            "verification_blocked",
+        ),
+        (
+            "Isolated verifier runtime unavailable or removal unconfirmed",
+            "verification_blocked",
+        ),
+        ("No required checks selected; publication blocked", "verification_blocked"),
+    ],
+)
+def test_hosted_failure_category_distinguishes_checks_from_environment(
+    reason: str, category: str
+) -> None:
+    from preloop.services.flow_failure_category import derive_failure_category
+
+    assert derive_failure_category(status="FAILED", error_message=reason) == category
+
+
 @pytest.mark.asyncio
 async def test_kubernetes_adapter_streams_input_and_deletes_job_before_return():
     execution = str(uuid4())
@@ -41,7 +75,9 @@ async def test_kubernetes_adapter_streams_input_and_deletes_job_before_return():
         use_kubernetes=True,
     )
     policy = SimpleNamespace(
-        execution_id=execution, verification_image="generic@sha256:" + "a" * 64
+        execution_id=execution,
+        verification_image="generic@sha256:" + "a" * 64,
+        base_sha="c" * 40,
     )
     check = SimpleNamespace(command="pytest tests/unit", timeout_seconds=10)
     network = SimpleNamespace(
@@ -82,6 +118,7 @@ async def test_kubernetes_adapter_streams_input_and_deletes_job_before_return():
     assert deny.spec.egress == []
     assert execute.call_args_list[0].args[-1] == b"frozen-bundle"
     assert execute.call_args_list[1].args[-1] is None
+    assert execute.call_args_list[1].args[3][-1] == policy.base_sha
     remove.assert_awaited_once_with(executor, job.metadata.name, execution)
     network.delete_namespaced_network_policy.assert_awaited_once()
 
@@ -253,3 +290,129 @@ async def test_additive_network_policies_cannot_override_verifier_denial(
             )
     else:
         await _require_isolated_network_policy(api, "namespace", {"job-name": "owned"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changed", ["bundle", "base", "profile", "image", "execution", "runtime"]
+)
+async def test_controller_cache_reuse_requires_every_verification_input(
+    changed: str,
+) -> None:
+    policy = SimpleNamespace(
+        execution_id=str(uuid4()),
+        base_sha="a" * 40,
+        verification_image="toolchain@sha256:" + "b" * 64,
+        verification_policy=resolve_verification_policy(
+            {
+                "verification": {
+                    "mode": "gate",
+                    "profile": {
+                        "profile_id": "cache",
+                        "always": [
+                            {"id": "check", "command": "true", "reason": "required"},
+                        ],
+                    },
+                }
+            }
+        ),
+    )
+    executor = SimpleNamespace(use_kubernetes=False)
+    import hashlib
+
+    def inspect(bundle: bytes, base: str) -> dict:
+        return {
+            "head_sha": "c" * 40,
+            "changed_files": ["file"],
+            "bundle_sha256": hashlib.sha256(bundle).hexdigest(),
+        }
+
+    with (
+        patch(
+            "preloop.services.publication_hosted_verifier.inspect_bundle",
+            side_effect=inspect,
+        ),
+        patch(
+            "preloop.services.publication_hosted_verifier._check_docker",
+            new=AsyncMock(return_value=0),
+        ) as docker,
+        patch(
+            "preloop.services.publication_hosted_verifier._check_kubernetes",
+            new=AsyncMock(return_value=0),
+        ) as kubernetes,
+    ):
+        first = await verify_hosted_publication(executor, policy, b"bundle")
+        assert first.checks[0]["reused"] is False
+        reused = await verify_hosted_publication(executor, policy, b"bundle")
+        assert reused.checks[0]["reused"] is True
+        assert docker.await_count == 1
+        bundle = b"bundle"
+        if changed == "bundle":
+            bundle = b"another"
+        elif changed == "base":
+            policy.base_sha = "d" * 40
+        elif changed == "profile":
+            policy.verification_policy.profile.always[0].command = "echo changed"
+        elif changed == "image":
+            policy.verification_image = "toolchain@sha256:" + "e" * 64
+        elif changed == "execution":
+            policy.execution_id = str(uuid4())
+        else:
+            executor.use_kubernetes = True
+        fresh = await verify_hosted_publication(executor, policy, bundle)
+        assert fresh.checks[0]["reused"] is False
+        assert docker.await_count + kubernetes.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [7, PublicationError("removal unconfirmed")])
+async def test_failed_check_or_unconfirmed_teardown_never_populates_cache(
+    failure: int | PublicationError,
+) -> None:
+    policy = SimpleNamespace(
+        execution_id=str(uuid4()),
+        base_sha="a" * 40,
+        verification_image="toolchain@sha256:" + "b" * 64,
+        verification_policy=resolve_verification_policy(
+            {
+                "verification": {
+                    "mode": "gate",
+                    "profile": {
+                        "profile_id": "cache",
+                        "always": [
+                            {"id": "check", "command": "true", "reason": "required"},
+                        ],
+                    },
+                }
+            }
+        ),
+    )
+    executor = SimpleNamespace(use_kubernetes=False)
+    with (
+        patch(
+            "preloop.services.publication_hosted_verifier.inspect_bundle",
+            return_value={
+                "head_sha": "c" * 40,
+                "changed_files": ["file"],
+                "bundle_sha256": "d" * 64,
+            },
+        ),
+        patch(
+            "preloop.services.publication_hosted_verifier._check_docker",
+            new=AsyncMock(side_effect=[failure, 0]),
+        ) as check,
+    ):
+        with pytest.raises(PublicationError):
+            await verify_hosted_publication(executor, policy, b"bundle")
+        assert not getattr(executor, "_publication_check_cache", {})
+        good = await verify_hosted_publication(executor, policy, b"bundle")
+        assert check.await_count == 2
+        good.manifest["head_sha"] = "tampered after return"
+        good.checks[0]["exit_code"] = 7
+        reused = await verify_hosted_publication(executor, policy, b"bundle")
+        assert reused.manifest["head_sha"] == "c" * 40
+        assert reused.checks[0]["exit_code"] == 0
+        reused.checks[0]["exit_code"] = 9
+        again = await verify_hosted_publication(executor, policy, b"bundle")
+        assert again.checks[0]["exit_code"] == 0
+        assert check.await_count == 2

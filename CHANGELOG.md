@@ -1251,6 +1251,24 @@ avatars.
   original status and detail. Failed batch items no longer poison the next
   item's database transaction (#805).
 
+- Isolated publication checks receive the exact published base/head range and
+  retain profile, environment and selection evidence. Successful checks can be
+  reused only inside the controller for identical execution, artifact, profile
+  and runtime inputs after confirmed teardown. Unavailable checks and runtimes
+  are classified as `verification_blocked`, separately from failing tests.
+  Failed durable repairs keep their latest workspace and conversation while
+  recovering the prior PR binding through validated execution ancestry,
+  including explicitly adopted publishing executions. New commits still pass
+  the current verification gate before publication.
+
+- Saved flow details expose the effective publication policy, including ungated
+  legacy flows and configuration blockers, without claiming that configured
+  isolation is an execution verification receipt.
+- Hosted workspace recovery preserves never-pushed branches and their base
+  commit identity across repeated checkpoints. Remote absence, divergence and
+  connection failures have distinct outcomes. Codex command transcripts no
+  longer masquerade as container/setup failures. The optional direct-checkpoint
+  Helm overlay supports 64 MiB archives with matching proxy limits.
 - Codex CLI enrollments share one OAuth SecretReference per managed agent
   instead of minting a second single-use lineage per model family. A
   re-onboard of a split pre-fix enrollment repoints family rows onto the
@@ -1258,6 +1276,9 @@ avatars.
   than rotating another grant and tripping provider reuse detection.
 - Private-runner launch and server logs report the configured container image,
   including the legacy `docker_image` alias, instead of the harness default.
+- CI feedback uses bounded current-head GitHub Actions job evidence to separate
+  runner setup failures from code failures. Startup failures and explicit
+  pipeline infrastructure reasons use bounded escalation rather than code repair.
 - Agents in a split Kubernetes deployment call the gateway Service instead
   of the API Service. API pods run `PRELOOP_SERVICE_ROLE=api` and never
   mount `/openai/v1`, so a model row without an explicit

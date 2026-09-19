@@ -19,9 +19,9 @@ The preset ships as `backend/presets/011-automated-issue-implementation.yaml`
 | Verify the final commit against the trusted test profile | flow (runner-controlled verifier) |
 | Push the branch and open the pull request | flow (`git_clone_config.create_pull_request`) |
 
-The split matters. The agent has no tool that can push, open, or merge a pull
-request, so a confused run cannot publish anything. Its toolset is
+The preset separates implementation from publication. Its MCP toolset is
 `get_issue`, `get_pull_request`, `add_comment`, `update_comment`, `ask_user`.
+Credential isolation additionally requires the opt-in isolated mode below.
 There is no approval tool: gating belongs to your deployment's policies, not
 to a preset prompt.
 
@@ -93,10 +93,17 @@ git_clone_config:
 Check commands run in the repository working tree with
 `PRELOOP_DISABLE_TELEMETRY=true` and a `PRELOOP_VERIFY_BASE` /
 `PRELOOP_VERIFY_HEAD` range contract, so a check can scope itself to the
-published diff. They have the agent's setup (from
-`git_clone_config.setup_commands`) available; a check that cannot run
-because a dependency is missing is recorded as `blocked` and the flow will
-not publish until the environment provides it.
+published diff. Legacy sandbox checks inherit the agent's setup from
+`git_clone_config.setup_commands`. Isolated checks start in fresh runtimes and
+inherit neither that setup nor its writable caches. Each trusted command must
+find its dependencies in the pinned image or perform bounded setup itself.
+A database needed by a check must be available inside that check runtime;
+external services are unreachable because verifier network access is denied.
+A command that cannot start (exit 126/127), runtime failure or timeout is
+`verification_blocked`. A check that runs and exits nonzero is
+`verification_failed`; an operator profile can use an explicit prerequisite
+check returning 127 to distinguish an unavailable database from test failure.
+Both outcomes prevent publication and retain the commit and diagnostics.
 
 What the agent sees and what the runner sees are two different report
 fields. The agent's `result.json` `status` says what it *implemented*; the
@@ -218,3 +225,65 @@ number.
 The preset sets `timeout_seconds: 5400`. Reading an unfamiliar repository,
 writing tests, and running a suite regularly outlives the 3600s default, and a
 run killed at the finish line loses the commit.
+
+### Inspect a saved publication policy
+
+The flow detail page shows the API's read-only `effective_publication_policy`.
+Existing customized flows remain unchanged: an absent or disabled verification
+policy is explicitly **No verification gate**. A legacy gate is **Checks in
+agent sandbox**, whose log evidence is not a trusted publication attestation.
+An isolated policy with a valid profile and pinned image is **Isolated
+verification configured**. Missing configuration is shown as blocked with
+specific blocker codes.
+
+This is a description of saved configuration, not a pass receipt or deployment
+readiness check. Repository selection can still come from the trigger. Tracker
+permissions, the supported publication provider, isolation capabilities and
+checks on the final commit are validated by each execution. The console never
+labels a flow trusted merely because its saved policy requests isolation.
+
+## Isolated publication rollout and repair
+
+Set `git_clone_config.publication_mode: isolated` explicitly and configure
+`verification.image` with an immutable `image@sha256:<64 hexadecimal digits>`
+toolchain reference. Bind a supported GitHub App installation tracker and
+repository-specific trusted checks. The generic preset intentionally refuses
+unknown non-documentation changes. Existing saved customized flows are not
+silently migrated. Review the effective-policy panel, then enable isolation
+for that saved flow after its profile and runtime prerequisites are ready.
+GitLab, PAT trackers and unsupported runtime capabilities must not be described
+as trusted isolated publication paths.
+
+The controller freezes the Git bundle, confirms agent teardown, selects checks
+from its saved profile and executes each check in a fresh credential-free
+checkout. Both adapters supply the exact controller-pinned base/head range.
+The audit manifest records the base/head/tree and bundle digest, profile ID,
+version and content digest, pinned image and runtime. Check records include
+selection reasons, commands, exit codes, bounded diagnostic tails and duration.
+A scoped write credential is acquired only after successful verification.
+
+The controller can reuse successful evidence within the same executor and
+execution when the exact bundle, base, profile content, pinned image and
+runtime adapter are unchanged. Reuse is marked on each check. This bounded
+in-memory cache contains only checks whose runtime teardown was confirmed;
+failures are never cached. Agent-written JSON and writable dependency caches
+cannot supply evidence. Changing any bound input runs fresh checks. Pinned
+images provide reusable dependency layers without sharing agent-writable state.
+
+An unpublished feedback repair keeps its own workspace and native conversation
+as the next repair's source. For a currently reserved durable thread, the
+controller may recover the last publication binding from a bounded same-flow,
+same-thread execution ancestry. That receipt identifies the existing PR branch;
+it does not attest the failed repair or authorize its next commit. Each new
+execution must pass its current saved verification policy before publication.
+Legacy resumes without a durable binding still require explicit migration.
+
+Local acceptance exercises real Git bundles and Docker runtimes with fake
+provider writes in `backend/tests/services/test_publication_worker.py`.
+Set `PRELOOP_DISABLE_TELEMETRY=true` and
+`PRELOOP_PUBLICATION_DOCKER_IMAGE` to a local toolchain image containing Python 3
+and Git, then run that file with pytest. The fixtures cover failing checks,
+repair, exact-artifact rejection, narrow selection, missing database setup,
+credential exclusion, teardown and successful initial/resumed publication.
+Adapter tests cover Kubernetes API contracts; these tests do not establish a
+live deployment's network isolation or operator profile readiness.

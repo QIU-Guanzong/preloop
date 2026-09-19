@@ -445,7 +445,8 @@ async def _reconcile(
             now=now,
         )
         return
-    completed_repair = thread.active_execution_id is not None and thread.turns > 0
+    completed_execution = thread.active_execution_id is not None
+    completed_repair = completed_execution and thread.turns > 0
     if not crud_flow_feedback.finish_active(db, thread):
         crud_flow_feedback.update(db, thread_id, token, changes={}, now=now)
         return
@@ -453,8 +454,25 @@ async def _reconcile(
         thread.no_progress = (
             thread.no_progress + 1 if thread.head_sha == state.head_sha else 0
         )
+    if completed_execution:
         prior_execution = crud_flow_execution.get(db, id=thread.latest_execution_id)
-        if prior_execution and prior_execution.status == "STOPPED":
+        # Explicit adoption authorizes continuing this historical publication,
+        # including one published before its source execution was cancelled.
+        # That permission never extends to a later cancelled repair.
+        adoption = (thread.context or {}).get("adoption") or {}
+        adopted_source = thread.turns == 0 and adoption.get(
+            "source_execution_id"
+        ) == str(thread.latest_execution_id)
+        if (
+            not adopted_source
+            and prior_execution
+            and prior_execution.status
+            in {
+                "STOPPED",
+                "CANCELLED",
+                "ABORTED",
+            }
+        ):
             crud_flow_feedback.update(
                 db,
                 thread_id,

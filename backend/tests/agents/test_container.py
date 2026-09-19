@@ -2123,3 +2123,57 @@ class TestExtractSourceBranch:
             {"payload": {"merge_request": {"source_branch": "feat/x"}}}
         )
         assert branch == "feat/x"
+
+
+@pytest.mark.parametrize(
+    "tool_output",
+    [
+        "Traceback (most recent call last):\nValueError: expected regression",
+        '    echo "FATAL ERROR: Git clone failed!"',
+        "ERROR: first\nERROR: second\nERROR: third",
+    ],
+)
+@pytest.mark.parametrize("duration", ["100ms", "59868ms", "4.56s", "1m 02s"])
+def test_codex_tool_output_is_not_a_harness_failure(
+    container_executor, tool_output, duration
+):
+    logs = (
+        "PRELOOP_AGENT_EXEC_START\nexec\n"
+        '/bin/bash -lc "pytest" in /workspace/repo\n'
+        f" exited 1 in {duration}:\n"
+        + tool_output
+        + "\ncodex\nI reproduced the bug and will fix it.\n"
+        "tokens used\n1000\n"
+        "PRELOOP_WORKSPACE_SNAPSHOT_SKIPPED size_exceeds_limit limit=2097152"
+    )
+    assert container_executor._detect_error_in_logs(logs) is False
+
+
+def test_codex_harness_failure_after_tool_output_is_detected(container_executor):
+    logs = (
+        'exec\n/bin/bash -lc "true" in /workspace/repo\n succeeded in 10ms:\n'
+        "codex\nAgent execution failed: connection lost"
+    )
+    assert container_executor._detect_error_in_logs(logs) is True
+
+
+def test_unterminated_codex_command_keeps_real_harness_failure(container_executor):
+    logs = 'exec\n/bin/bash -lc "true" in /workspace/repo\n succeeded in 1ms:\nAgent execution failed: CLI crashed'
+    assert container_executor._detect_error_in_logs(logs) is True
+
+
+@pytest.mark.parametrize("source_line", ["user", "tool"])
+def test_source_words_do_not_end_codex_command_transcript(
+    container_executor, source_line
+):
+    logs = (
+        'exec\n/bin/bash -lc "cat source.py" in /workspace/repo\n succeeded in 1ms:\n'
+        + source_line
+        + "\nTraceback (most recent call last):\ncodex\nI inspected the fixture."
+    )
+    assert container_executor._detect_error_in_logs(logs) is False
+
+
+def test_unconfirmed_command_header_does_not_suppress_failure(container_executor):
+    logs = 'exec\n/bin/bash -lc "true"\nAgent execution failed: cannot start CLI\ncodex\nStopped'
+    assert container_executor._detect_error_in_logs(logs) is True

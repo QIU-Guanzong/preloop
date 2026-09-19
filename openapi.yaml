@@ -17498,6 +17498,44 @@ components:
         Default is ``deny`` (fail closed). Set ``allow`` to skip the timed-out
 
         rule and continue evaluation.'
+    EffectivePublicationPolicy:
+      properties:
+        mode:
+          type: string
+          enum:
+          - disabled
+          - ungated
+          - sandbox_gated
+          - isolated
+          - blocked
+          title: Mode
+        reason:
+          type: string
+          title: Reason
+        verification:
+          anyOf:
+          - $ref: '#/components/schemas/ResolvedVerificationPolicy'
+          - type: 'null'
+        configured_check_ids:
+          items:
+            type: string
+          type: array
+          title: Configured Check Ids
+        blockers:
+          items:
+            type: string
+          type: array
+          title: Blockers
+        runtime_validation_required:
+          type: boolean
+          title: Runtime Validation Required
+          default: false
+      type: object
+      required:
+      - mode
+      - reason
+      title: EffectivePublicationPolicy
+      description: Saved configuration summary, never an attestation that checks passed.
     EmailVerificationRequest:
       properties:
         token:
@@ -18996,11 +19034,16 @@ components:
           - type: string
           - type: 'null'
           title: Ai Model Name
+        effective_publication_policy:
+          $ref: '#/components/schemas/EffectivePublicationPolicy'
+          description: Read-only description derived from this saved flow's configuration.
+          readOnly: true
       type: object
       required:
       - id
       - created_at
       - updated_at
+      - effective_publication_policy
       title: FlowResponse
     FlowSuccessNotifications:
       properties:
@@ -24326,6 +24369,41 @@ components:
         window really contained no rows" (the exact confusion behind "reprice
 
         examined 0 rows" on large windows).'
+    ResolvedVerificationPolicy:
+      properties:
+        mode:
+          type: string
+          enum:
+          - 'off'
+          - gate
+          title: Mode
+          default: 'off'
+        reason:
+          type: string
+          title: Reason
+          default: no verification policy configured; publication is not gated
+        profile:
+          anyOf:
+          - $ref: '#/components/schemas/VerificationProfile'
+          - type: 'null'
+        gate_budget_seconds:
+          type: integer
+          maximum: 14400.0
+          minimum: 30.0
+          title: Gate Budget Seconds
+          default: 3600
+      type: object
+      title: ResolvedVerificationPolicy
+      description: 'Effective policy as computed for one flow, for display and gating.
+
+
+        Existing saved flows predate the gate: they resolve to ``mode="off"``
+
+        with an explicit ``reason`` so consoles can *show* the effective policy
+
+        instead of leaving behaviour implicit. Flows are never silently moved to
+
+        the gate by a schema default; enabling it is a configuration act.'
     ResumeRequest:
       properties:
         reason:

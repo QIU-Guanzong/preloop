@@ -136,6 +136,11 @@ async def test_real_docker_checks_run_fresh_without_credentials_and_fail_closed(
     )
     checks = [
         {
+            "id": "range",
+            "command": f'test "$PRELOOP_VERIFY_BASE" = {base} && test "$PRELOOP_VERIFY_HEAD" = {head} && git diff --check "$PRELOOP_VERIFY_BASE...$PRELOOP_VERIFY_HEAD"',
+            "reason": "controller-pinned published range",
+        },
+        {
             "id": "first",
             "command": 'test -z "$GITHUB_TOKEN$PRELOOP_API_TOKEN" && test ! -e /var/run/docker.sock && echo changed > "test with spaces.py"',
             "reason": "isolation",
@@ -168,12 +173,50 @@ async def test_real_docker_checks_run_fresh_without_credentials_and_fail_closed(
             executor, policy, (source / "branch.bundle").read_bytes()
         )
         assert result.verification.head_sha == head
-        assert [check["exit_code"] for check in result.checks] == [0, 0]
+        assert [check["exit_code"] for check in result.checks] == [0, 0, 0]
+        assert result.manifest["base_sha"] == base
+        assert result.manifest["profile_id"] == "local"
+        assert result.manifest["profile_version"] == "v1"
+        assert len(result.manifest["profile_sha256"]) == 64
+        assert result.manifest["environment"] == {
+            "image": executor.image,
+            "telemetry_disabled": True,
+            "runtime": "docker",
+        }
+        assert result.checks[0]["selected_by"] == ["always"]
+        assert result.checks[0]["reason"] == "controller-pinned published range"
+        from unittest.mock import AsyncMock, patch
+
+        with patch(
+            "preloop.services.publication_hosted_verifier._check_docker",
+            new=AsyncMock(),
+        ) as check_again:
+            reused = await verify_hosted_publication(
+                executor, policy, (source / "branch.bundle").read_bytes()
+            )
+        check_again.assert_not_awaited()
+        assert all(row["reused"] for row in reused.checks)
         policy.verification_policy.profile.always[0].command = "exit 7"
         with pytest.raises(PublicationError, match="exit 7"):
             await verify_hosted_publication(
                 executor, policy, (source / "branch.bundle").read_bytes()
             )
+        # A database dependency must exist inside the isolated check runtime.
+        # An operator-owned bounded setup can provision it in the same command.
+        database_check = "python3 -c 'import sqlite3; sqlite3.connect(\"file:/tmp/checks.sqlite?mode=rw\", uri=True)'"
+        policy.verification_policy.profile.always[0].command = database_check
+        with pytest.raises(PublicationError, match="failed with exit 1"):
+            await verify_hosted_publication(
+                executor, policy, (source / "branch.bundle").read_bytes()
+            )
+        policy.verification_policy.profile.always[0].command = (
+            "python3 -c 'import sqlite3; sqlite3.connect(\"/tmp/checks.sqlite\").close()' && "
+            + database_check
+        )
+        repaired_setup = await verify_hosted_publication(
+            executor, policy, (source / "branch.bundle").read_bytes()
+        )
+        assert all(row["exit_code"] == 0 for row in repaired_setup.checks)
         docker = await executor._get_docker_client()
         residual = await docker.containers.list(
             all=True, filters={"label": [f"preloop.execution_id={policy.execution_id}"]}
@@ -257,3 +300,224 @@ def test_changed_path_preserves_leading_whitespace_for_check_selection(candidate
     git("bundle", "create", str(source / "branch.bundle"), "HEAD")
     manifest = inspect_bundle((source / "branch.bundle").read_bytes(), base)
     assert manifest["changed_files"] == [" leading.py"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not os.environ.get("PRELOOP_PUBLICATION_DOCKER_IMAGE"),
+    reason="Explicit local Docker fixture image required",
+)
+@pytest.mark.parametrize("repair", [False, True])
+async def test_isolated_fail_repair_verify_publish_with_fake_provider(
+    candidate, repair
+):
+    """Real immutable checkouts, real publisher import, fake remote writes only."""
+    import io
+    import json
+    import tarfile
+    from dataclasses import replace
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from uuid import uuid4
+
+    import httpx
+
+    from preloop.agents.container import ContainerAgentExecutor
+    from preloop.services.isolated_publication import (
+        IsolatedPublicationPolicy,
+        finish_isolated_publication,
+    )
+    from preloop.services.publication_hosted_verifier import (
+        HostedVerificationError,
+        verify_hosted_publication,
+    )
+    from preloop.services.publication_verification import VerifiedPublication
+    from preloop.services.trusted_publisher import CleanGitRepository, PublicationLease
+    from preloop.services.verification import resolve_verification_policy
+
+    source, base, _, git = candidate
+    executor = ContainerAgentExecutor(
+        "codex", {}, os.environ["PRELOOP_PUBLICATION_DOCKER_IMAGE"]
+    )
+    policy = IsolatedPublicationPolicy(
+        tracker_id="tracker",
+        account_id="account",
+        repository_url="https://github.com/example/project.git",
+        branch="preloop/issue-1",
+        base="main",
+        expected_remote_sha=base if repair else None,
+        execution_id=str(uuid4()),
+        previous_records=(),
+        read_lease=None,
+        configured_title="Repair selected behavior",
+        configured_body="Local fixture",
+        issue_number="1",
+        base_sha=base,
+        verification_image=executor.image,
+        verification_policy=resolve_verification_policy(
+            {
+                "verification": {
+                    "mode": "gate",
+                    "profile": {
+                        "profile_id": "lifecycle",
+                        "version": "v1",
+                        "always": [
+                            {
+                                "id": "invariant",
+                                "command": 'git diff --check "$PRELOOP_VERIFY_BASE...$PRELOOP_VERIFY_HEAD" && test "$PRELOOP_DISABLE_TELEMETRY" = true && test -z "$GITHUB_TOKEN$PRELOOP_API_TOKEN"',
+                                "reason": "always required",
+                            }
+                        ],
+                        "rules": [
+                            {
+                                "id": "focused",
+                                "path_globs": ["*.py"],
+                                "description": "changed behavior",
+                                "commands": [
+                                    {
+                                        "id": "regression",
+                                        "command": 'test "$(cat "test with spaces.py")" = repaired',
+                                        "reason": "focused regression",
+                                    }
+                                ],
+                            },
+                            {
+                                "id": "frontend",
+                                "path_globs": ["frontend/**"],
+                                "description": "unrelated browser suite",
+                                "commands": [
+                                    {
+                                        "id": "browser",
+                                        "command": "exit 99",
+                                        "reason": "unrelated",
+                                    }
+                                ],
+                            },
+                        ],
+                        "unknown_default": [
+                            {
+                                "id": "unknown",
+                                "command": "exit 98",
+                                "reason": "fail unknown changes",
+                            }
+                        ],
+                    },
+                }
+            }
+        ),
+    )
+    writes = []
+    minted = AsyncMock(
+        return_value=PublicationLease(
+            "fake-write",
+            policy.repository_url,
+            datetime.now(timezone.utc) + timedelta(minutes=10),
+        )
+    )
+    revoked = AsyncMock()
+
+    def provider(request):
+        assert request.url.host == "api.github.com"
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        assert request.method == "POST"
+        writes.append("create")
+        return httpx.Response(
+            201,
+            json={
+                "number": 1,
+                "html_url": "https://github.com/example/project/pull/1",
+                "body": json.loads(request.content)["body"],
+            },
+        )
+
+    def push(repo, binding, lease):
+        assert repo.run("rev-parse", binding.head_sha) == binding.head_sha
+        lease.validate(binding)
+        writes.append("push")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(provider))
+
+    async def publish(bundle, evidence):
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            member = tarfile.TarInfo("branch.bundle")
+            member.size = len(bundle)
+            archive.addfile(member, io.BytesIO(bundle))
+        with (
+            patch(
+                "preloop.services.isolated_publication.crud_tracker.get_by_id_and_account",
+                return_value=SimpleNamespace(id="tracker"),
+            ),
+            patch(
+                "preloop.services.isolated_publication.require_human_publication_approval"
+            ),
+            patch(
+                "preloop.services.isolated_publication.mint_repository_lease",
+                new=minted,
+            ),
+            patch(
+                "preloop.services.isolated_publication.revoke_repository_lease",
+                new=revoked,
+            ),
+            patch("preloop.services.isolated_publication.httpx.AsyncClient") as factory,
+            patch.object(CleanGitRepository, "publish", new=push),
+        ):
+            factory.return_value.__aenter__.return_value = client
+            return await finish_isolated_publication(
+                None,
+                policy,
+                {"result": {"status": "success"}},
+                buffer.getvalue(),
+                evidence,
+            )
+
+    try:
+        failed_bundle = (source / "branch.bundle").read_bytes()
+        with pytest.raises(
+            HostedVerificationError, match="regression failed"
+        ) as failed:
+            await verify_hosted_publication(executor, policy, failed_bundle)
+        assert [row["id"] for row in failed.value.evidence["checks"]] == [
+            "invariant",
+            "regression",
+        ]
+        assert failed.value.evidence["checks"][-1]["exit_code"] == 1
+        with pytest.raises(PublicationError):
+            await publish(failed_bundle, None)
+        assert writes == []
+        minted.assert_not_awaited()
+
+        repo_path = Path(git("rev-parse", "--show-toplevel"))
+        (repo_path / "test with spaces.py").write_text("repaired\n")
+        git("add", "test with spaces.py")
+        git("commit", "-m", "Repair selected regression")
+        git("bundle", "create", str(source / "branch.bundle"), "HEAD")
+        repaired_bundle = (source / "branch.bundle").read_bytes()
+        verified = await verify_hosted_publication(executor, policy, repaired_bundle)
+        assert [row["id"] for row in verified.checks] == ["invariant", "regression"]
+        evidence = verified.verification
+        for invalid in (
+            None,
+            {"status": "passed", "head_sha": evidence.head_sha},
+            replace(evidence, execution_id=str(uuid4())),
+            replace(evidence, head_sha="f" * 40),
+            VerifiedPublication(
+                policy.execution_id,
+                evidence.head_sha,
+                hashlib.sha256(failed_bundle).hexdigest(),
+            ),
+        ):
+            with pytest.raises(PublicationError):
+                await publish(repaired_bundle, invalid)
+            assert writes == []
+            minted.assert_not_awaited()
+        result = await publish(repaired_bundle, evidence)
+        assert result["head_sha"] == git("rev-parse", "HEAD")
+        assert writes == ["push", "create"]
+        minted.assert_awaited_once()
+        revoked.assert_awaited_once()
+    finally:
+        await client.aclose()
+        await executor.cleanup()

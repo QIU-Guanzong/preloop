@@ -1430,3 +1430,201 @@ def test_plain_native_marker_replay_preserves_uploaded_artifact(
         stale.commit()
         stale.refresh(source)
         assert source.cli_session["artifact_reference"] == {"artifact_id": "captured"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["STOPPED", "CANCELLED", "ABORTED"])
+@pytest.mark.parametrize("turns", [0, 1])
+async def test_cancelled_publisher_or_repair_stops_subscription(
+    database: Engine, status: str, turns: int
+) -> None:
+    with Session(database) as db:
+        thread = create_thread(db)
+        source = db.get(models.FlowExecution, thread.latest_execution_id)
+        source.status = status
+        thread.active_execution_id = source.id
+        thread.turns = turns
+        db.commit()
+        provider = SimpleNamespace(
+            read=AsyncMock(
+                return_value=FeedbackState("head", feedback=[event("review")])
+            )
+        )
+        with (
+            patch(
+                "preloop.services.flow_feedback.FeedbackProvider.for_thread",
+                AsyncMock(return_value=provider),
+            ),
+            patch(
+                "preloop.services.flow_execution_dispatcher.flow_execution_worker_enabled",
+                return_value=True,
+            ),
+            patch(
+                "preloop.services.flow_execution_dispatcher.dispatch_execute",
+                AsyncMock(),
+            ) as dispatch,
+        ):
+            await _reconcile(db, *crud_flow_feedback.claim_due(db, now=NOW)[0], now=NOW)
+        db.refresh(thread)
+        assert thread.state == "stopped"
+        assert thread.stop_reason == "execution_cancelled"
+        assert thread.active_execution_id is None
+        dispatch.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "limits, reason",
+    [
+        ({"turns": 5}, "turn_budget_exhausted"),
+        ({"cost": 100}, "cost_budget_exhausted"),
+        ({"no_progress": 2}, "no_progress"),
+        ({"expires_at": NOW}, "subscription_expired"),
+    ],
+)
+def test_feedback_limits_stop_actionable_feedback(
+    limits: dict[str, Any], reason: str
+) -> None:
+    pending = [SimpleNamespace(kind="review", head_sha="head")]
+    assert (
+        decide(thread_stub(**limits), FeedbackState("head"), pending, now=NOW)[1]
+        == reason
+    )
+
+
+@pytest.mark.asyncio
+async def test_close_stops_active_repair_and_releases_scheduler(
+    database: Engine,
+) -> None:
+    with Session(database) as db:
+        thread = create_thread(db)
+        source = db.get(models.FlowExecution, thread.latest_execution_id)
+        source.status = "RUNNING"
+        thread.active_execution_id = source.id
+        db.commit()
+        source_id = source.id
+        provider = SimpleNamespace(
+            read=AsyncMock(return_value=FeedbackState("head", closed=True))
+        )
+        with (
+            patch(
+                "preloop.services.flow_feedback.FeedbackProvider.for_thread",
+                AsyncMock(return_value=provider),
+            ),
+            patch("preloop.sync.services.event_bus.get_nats_client", AsyncMock()),
+            patch(
+                "preloop.services.flow_orchestrator.FlowExecutionOrchestrator.send_command",
+                AsyncMock(),
+            ) as stop,
+        ):
+            await _reconcile(db, *crud_flow_feedback.claim_due(db, now=NOW)[0], now=NOW)
+        db.refresh(source)
+        db.refresh(thread)
+        assert source.status == "STOPPED"
+        assert source.error_message == "pr_closed_or_merged"
+        assert thread.state == "closed"
+        assert thread.lease_token is None
+        assert crud_flow_feedback.claim_due(db, now=NOW + timedelta(seconds=121)) == []
+        assert stop.await_args.args[:2] == (str(source_id), "stop")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["STOPPED", "CANCELLED", "ABORTED"])
+@pytest.mark.parametrize("mode", ["native_resume", "published_branch_handoff"])
+async def test_explicit_adoption_of_cancelled_source_can_start_first_repair(
+    database: Engine, status: str, mode: str
+) -> None:
+    from datetime import UTC
+    from sqlalchemy.orm import sessionmaker
+    from preloop.services import flow_continuation_adoption as adoption
+    from preloop.schemas.flow_continuation import (
+        ContinuationAdoptRequest,
+        ContinuationPreview,
+    )
+
+    with Session(database) as db:
+        old_thread = create_thread(db)
+        account, source_id, flow_id = (
+            old_thread.account_id,
+            old_thread.latest_execution_id,
+            old_thread.flow_id,
+        )
+        source = db.get(models.FlowExecution, source_id)
+        source.status = status
+        source.trigger_event_details = {
+            **source.trigger_event_details,
+            "source": "github",
+            "tracker_id": str(old_thread.tracker_id),
+            "payload": {"repository": {"id": "123"}, "issue": {"number": 185}},
+        }
+        source.result = {
+            "pr_url": old_thread.pr_url,
+            "pr_source_branch": old_thread.branch,
+        }
+        readiness = ContinuationPreview(
+            execution_id=source_id,
+            flow_id=flow_id,
+            pr_url=old_thread.pr_url,
+            branch=old_thread.branch,
+            head_sha="a" * 40,
+            feedback_enabled=True,
+            artifact_upload_enabled=True,
+            feedback_readable=True,
+            native_resume_available=mode == "native_resume",
+            allowed_recovery_modes=[mode],
+            warnings=[],
+        )
+        db.delete(old_thread)
+        db.commit()
+        request = ContinuationAdoptRequest(
+            recovery_mode=mode,
+            expected_head_sha="a" * 40,
+            acknowledge_fresh_conversation=mode == "published_branch_handoff",
+        )
+        with (
+            patch.object(adoption, "preview_continuation", return_value=readiness),
+            patch.object(
+                adoption, "get_session_factory", return_value=sessionmaker(database)
+            ),
+        ):
+            adopted = adoption.adopt_continuation(account, source_id, request)
+        thread = db.get(models.FlowThread, adopted.thread_id)
+        assert thread.active_execution_id == source_id
+        now = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=1)
+        provider = SimpleNamespace(
+            read=AsyncMock(
+                return_value=FeedbackState("head", feedback=[event("review")])
+            )
+        )
+        with (
+            patch(
+                "preloop.services.flow_feedback.FeedbackProvider.for_thread",
+                AsyncMock(return_value=provider),
+            ),
+            patch(
+                "preloop.services.flow_execution_dispatcher.flow_execution_worker_enabled",
+                return_value=True,
+            ),
+            patch(
+                "preloop.services.flow_execution_dispatcher.dispatch_execute",
+                AsyncMock(),
+            ) as dispatch,
+        ):
+            await _reconcile(db, *crud_flow_feedback.claim_due(db, now=now)[0], now=now)
+            db.refresh(thread)
+            assert thread.state == "repairing"
+            assert thread.turns == 1
+            assert thread.active_execution_id != source_id
+            dispatch.assert_awaited_once_with(thread.active_execution_id)
+            # Explicit permission is for that historical source, not permission
+            # to restart a later repair cancelled by the operator.
+            repair = db.get(models.FlowExecution, thread.active_execution_id)
+            repair.status = status
+            db.commit()
+            later = now + timedelta(seconds=31)
+            await _reconcile(
+                db, *crud_flow_feedback.claim_due(db, now=later)[0], now=later
+            )
+            db.refresh(thread)
+            assert thread.state == "stopped"
+            assert thread.stop_reason == "execution_cancelled"
+            dispatch.assert_awaited_once()

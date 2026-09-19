@@ -32,11 +32,13 @@ stays unpushed.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence
 
 from pydantic import BaseModel, Field
 
 from preloop.models.schemas.verification import (
+    EffectivePublicationPolicy,
     ResolvedVerificationPolicy,
     VerificationCommand,
     VerificationProfile,
@@ -298,3 +300,72 @@ def evaluate_publication(
         changed_files=changed_files,
     )
     return PublicationDecision.model_validate(raw)
+
+
+def pinned_verification_image(value: Any) -> Optional[str]:
+    """Return a valid verifier image, using the publication boundary's grammar."""
+    if isinstance(value, str) and re.fullmatch(
+        r"[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}", value
+    ):
+        return value
+    return None
+
+
+def describe_effective_publication_policy(
+    git_config: Optional[Mapping[str, Any]],
+) -> EffectivePublicationPolicy:
+    """Describe saved policy without mutating it or claiming runtime readiness.
+
+    Tracker authorization, runtime isolation and actual verification receipts
+    require execution context. Configuration alone must never certify them.
+    Invalid policies are described without echoing commands or raising on read.
+    """
+    config = git_config or {}
+    if not config.get("enabled"):
+        return EffectivePublicationPolicy(
+            mode="disabled", reason="Repository publication is disabled."
+        )
+    isolated = config.get("publication_mode") == "isolated"
+    try:
+        policy = resolve_verification_policy(config)
+    except (ValueError, TypeError):
+        return EffectivePublicationPolicy(
+            mode="blocked",
+            reason="The saved verification policy is invalid.",
+            blockers=["verification_policy_invalid"],
+            runtime_validation_required=isolated,
+        )
+    if policy.mode != "gate" or policy.profile is None:
+        return EffectivePublicationPolicy(
+            mode="blocked" if isolated else "ungated",
+            reason=(
+                "Isolated publication requires a verification profile."
+                if isolated
+                else "Publication has no required verification gate."
+            ),
+            verification=policy,
+            blockers=["verification_gate_required"] if isolated else [],
+            runtime_validation_required=isolated,
+        )
+    checks = [
+        command.id for command in configured_verification_commands(policy.profile)
+    ]
+    blockers = [] if checks else ["verification_profile_empty"]
+    if isolated and not pinned_verification_image(
+        (config.get("verification") or {}).get("image")
+    ):
+        blockers.append("isolated_verification_image_required")
+    return EffectivePublicationPolicy(
+        mode="blocked" if blockers else ("isolated" if isolated else "sandbox_gated"),
+        reason=(
+            "Publication configuration needs attention before it can run."
+            if blockers
+            else "Isolated verification is configured. Tracker authorization, runtime isolation and the final commit must still pass execution-time checks."
+            if isolated
+            else "Checks run inside the agent sandbox. Their logs are not a trusted publication attestation."
+        ),
+        verification=policy,
+        configured_check_ids=checks,
+        blockers=blockers,
+        runtime_validation_required=isolated,
+    )
