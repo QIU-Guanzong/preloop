@@ -667,7 +667,8 @@ class FeedbackProvider:
             thread_page_limit
             or any(len(items) >= 100 for items in (reviews, comments, discussion))
             or checks.get("total_count", 0) > 100
-            or statuses.get("total_count", 0) > 100
+            # Combined status returns latest-per-context objects. Bound that
+            # page directly instead of inferring missing contexts from totals.
             or len(statuses.get("statuses", [])) >= 100
         ):
             state.blocked_reason = "provider_page_limit"

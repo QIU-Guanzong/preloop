@@ -14,11 +14,12 @@ from preloop.models import models
 from preloop.models.crud import crud_flow_feedback
 from preloop.services.flow_feedback import ingest_feedback, run_feedback_tick
 from preloop.services.flow_feedback_provider import FeedbackProvider
-from backend.tests.services.test_flow_feedback_durable import (
-    NOW,
-    create_thread,
-    database,  # noqa: F401 - shared disposable PostgreSQL fixture
-)
+from backend.tests.services import test_flow_feedback_durable as durable_fixtures
+
+NOW = durable_fixtures.NOW
+create_thread = durable_fixtures.create_thread
+# Pytest discovers shared fixtures through module globals.
+database = durable_fixtures.database
 
 
 class ProviderLifecycle:
@@ -186,7 +187,7 @@ class ProviderLifecycle:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider_name", ["github", "gitlab"])
 async def test_provider_lifecycle_coalesces_recovers_and_waits_for_human_merge(
-    database: Engine,  # noqa: F811 - imported pytest fixture
+    database: Engine,
     provider_name: str,
 ) -> None:
     remote = ProviderLifecycle(provider_name)

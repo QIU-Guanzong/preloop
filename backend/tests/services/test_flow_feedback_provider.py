@@ -1076,3 +1076,25 @@ async def test_github_commented_summary_preserves_previous_verdict(
     assert [item["event_key"] for item in repeated.feedback] == [
         item["event_key"] for item in state.feedback
     ]
+
+
+@pytest.mark.asyncio
+async def test_github_complete_status_contexts_ignore_historical_count() -> None:
+    provider, _ = github_fixture()
+    request = provider.client._request.side_effect
+
+    async def complete(method: str, path: str, data: Any = None) -> Any:
+        result = await request(method, path, data)
+        if "/check-runs?" in path:
+            return {"total_count": 0, "check_runs": []}
+        if "/status?" in path:
+            return {
+                "total_count": 1000,
+                "statuses": [{"id": 8, "context": "tests", "state": "success"}],
+            }
+        return result
+
+    provider.client._request.side_effect = complete
+    state = await provider.read()
+    assert state.checks_passed
+    assert state.blocked_reason is None
