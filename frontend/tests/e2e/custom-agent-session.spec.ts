@@ -66,6 +66,7 @@ import {
 } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { dismissPlanChoiceIfShown } from './login';
 
 const IS_STAGING = process.env.PRELOOP_E2E_TARGET === 'staging';
 
@@ -122,6 +123,7 @@ async function login(page: Page, creds: Creds): Promise<void> {
       timeout: 30_000,
     })
     .not.toBeNull();
+  await dismissPlanChoiceIfShown(page);
 }
 
 /**
