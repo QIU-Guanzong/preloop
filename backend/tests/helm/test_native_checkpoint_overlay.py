@@ -38,7 +38,7 @@ def test_checkpoint_overlay_reaches_api_and_execution_workers(template: str) -> 
             env = {item["name"]: item for item in env_items}
             assert len(env) == len(env_items)
             assert env["FLOW_ARTIFACT_DIRECT_UPLOAD"]["value"] == "true"
-            assert env["WORKSPACE_SNAPSHOT_MAX_BYTES"]["value"] == "16777216"
+            assert env["WORKSPACE_SNAPSHOT_MAX_BYTES"]["value"] == "67108864"
             assert env["FLOW_NATIVE_SESSION_RETENTION_HOURS"]["value"] == "168"
             assert env["WORKSPACE_SNAPSHOT_TTL_HOURS"]["value"] == "168"
             signing_refs.append(env["SECRET_KEY"]["valueFrom"])
@@ -50,8 +50,9 @@ def test_checkpoint_overlay_reaches_api_and_execution_workers(template: str) -> 
 
 def test_checkpoint_overlay_preserves_keys_and_proxy_limits() -> None:
     overlay = yaml.safe_load((CHART_DIR / OVERLAY).read_text())
-    assert set(overlay) == {"extraEnv"}
+    assert set(overlay) == {"extraEnv", "gateway"}
     env = {item["name"]: item for item in overlay["extraEnv"]}
     assert "SECRET_KEY" not in env and "SECURITY__ENCRYPTION_KEY" not in env
     assert load_values()["gateway"]["proxy"]["bodySize"] == "32m"
-    assert int(env["WORKSPACE_SNAPSHOT_MAX_BYTES"]["value"]) < 32 * 1024**2
+    assert overlay["gateway"]["proxy"]["bodySize"] == "80m"
+    assert int(env["WORKSPACE_SNAPSHOT_MAX_BYTES"]["value"]) == 64 * 1024**2

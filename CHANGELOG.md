@@ -1248,6 +1248,11 @@ avatars.
 - CI feedback uses bounded current-head GitHub Actions job evidence to separate
   runner setup failures from code failures. Startup failures and explicit
   pipeline infrastructure reasons use bounded escalation rather than code repair.
+- Hosted workspace recovery preserves never-pushed branches and their base
+  commit identity across repeated checkpoints. Remote absence, divergence and
+  connection failures have distinct outcomes. Codex command transcripts no
+  longer masquerade as container/setup failures. The optional direct-checkpoint
+  Helm overlay supports 64 MiB archives with matching proxy limits.
 
 - Codex CLI enrollments share one OAuth SecretReference per managed agent
   instead of minting a second single-use lineage per model family. A

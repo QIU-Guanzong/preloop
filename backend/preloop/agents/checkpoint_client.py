@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import stat
 import subprocess
 import tarfile
@@ -98,6 +99,33 @@ def is_git_config(path: Path, root: Path) -> bool:
     return ".git" in path.relative_to(root).parts
 
 
+def checkpoint_base(repo: Path, root: Path) -> str | None:
+    """Keep a base identity after credential-bearing Git config is redacted."""
+    upstream = git_value(repo, "rev-parse", "@{upstream}")
+    if upstream:
+        return upstream
+    try:
+        prior = json.loads((root / ".preloop-checkpoint.json").read_text())
+    except (OSError, ValueError, UnicodeDecodeError):
+        prior = {}
+    repositories = prior.get("repositories", []) if isinstance(prior, dict) else []
+    for record in repositories if isinstance(repositories, list) else []:
+        if not isinstance(record, dict) or record.get("path") != str(
+            repo.relative_to(root)
+        ):
+            continue
+        base = record.get("base_sha")
+        if (
+            isinstance(base, str)
+            and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base)
+            and git_value(repo, "merge-base", "--is-ancestor", base, "HEAD") is not None
+        ):
+            return base
+    # A new implementation branch has no upstream until its first push. The
+    # clone's remote HEAD still identifies the base it branched from.
+    return git_value(repo, "merge-base", "HEAD", "refs/remotes/origin/HEAD")
+
+
 def capture(root: Path, *, max_bytes: int) -> bytes:
     """Capture a stable file set, detecting concurrent writes before upload."""
     root = root.resolve()
@@ -127,7 +155,7 @@ def capture(root: Path, *, max_bytes: int) -> bytes:
                     # The commit the unpushed work sits on. Without it a
                     # reader cannot tell a checkpoint that is only dirty from
                     # one that also carries commits the remote never saw.
-                    "base_sha": git_value(repo, "rev-parse", "@{upstream}"),
+                    "base_sha": checkpoint_base(repo, root),
                 }
             )
     buffer = io.BytesIO()
