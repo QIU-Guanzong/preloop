@@ -1245,9 +1245,6 @@ avatars.
 
 ### Fixed
 
-- CI feedback uses bounded current-head GitHub Actions job evidence to separate
-  runner setup failures from code failures. Startup failures and explicit
-  pipeline infrastructure reasons use bounded escalation rather than code repair.
 - Hosted workspace recovery preserves never-pushed branches and their base
   commit identity across repeated checkpoints. Remote absence, divergence and
   connection failures have distinct outcomes. Codex command transcripts no
@@ -1261,6 +1258,9 @@ avatars.
   than rotating another grant and tripping provider reuse detection.
 - Private-runner launch and server logs report the configured container image,
   including the legacy `docker_image` alias, instead of the harness default.
+- CI feedback uses bounded current-head GitHub Actions job evidence to separate
+  runner setup failures from code failures. Startup failures and explicit
+  pipeline infrastructure reasons use bounded escalation rather than code repair.
 - Agents in a split Kubernetes deployment call the gateway Service instead
   of the API Service. API pods run `PRELOOP_SERVICE_ROLE=api` and never
   mount `/openai/v1`, so a model row without an explicit
