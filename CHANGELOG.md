@@ -1251,9 +1251,11 @@ avatars.
   and `deepseek-v4-pro-0813` were skipped because a native `time_band`
   was treated as unpriced, so a Qwen-hosted DeepSeek Flash flow had no
   dollar estimate. Idle is 22:00-08:00 UTC+8 from the public pricing
-  page; daytime is busy. `glm-5.3` is on the same Singapore list. Image,
-  audio, and a native row with only one band stay unpriced. See
+  page; daytime is busy. `glm-5.3` is on the same Singapore list. See
   `docs/pricing/reviews/2026-09-19-alibaba.md`.
+- Private-runner launch and server logs report the configured container image,
+  including the legacy `docker_image` alias, instead of the harness default.
+
 - Agents in a split Kubernetes deployment call the gateway Service instead
   of the API Service. API pods run `PRELOOP_SERVICE_ROLE=api` and never
   mount `/openai/v1`, so a model row without an explicit

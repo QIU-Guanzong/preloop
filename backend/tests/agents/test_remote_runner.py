@@ -624,3 +624,20 @@ async def test_terminal_execution_ignores_reused_runner_status(
         await executor.get_status(f"runner:{runner_id}:{execution_id}")
         == AgentStatus.FAILED
     )
+
+
+def test_payload_log_reports_legacy_image_without_exposing_config() -> None:
+    from preloop.agents.remote_runner import payload_for_log
+
+    result = payload_for_log(
+        {
+            "execution_id": "test-execution",
+            "agent_type": "codex",
+            "agent_config": {
+                "docker_image": " example.com/team/agent:v1 ",
+                "token": "private-token",
+            },
+        }
+    )
+    assert result["image"] == "example.com/team/agent:v1"
+    assert "private-token" not in str(result)
