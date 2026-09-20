@@ -23,7 +23,10 @@ evaluation when no access rule matches (`No access rules defined` /
 ## Console
 
 `/console/policies` is the instance-wide authoring page (sidebar item
-next to Tools). `/console/governance` redirects there. The per-tool
+next to Tools), available by default to users with `view_policies` permission.
+Operators can hide the page with `PRELOOP_POLICIES_CONSOLE=false`; instance
+admins retain access and backend permission checks remain in force.
+`/console/governance` redirects there. The per-tool
 widget on Tools is unchanged.
 
 Create, edit, disable, and delete rules from the Rules list. The

@@ -533,3 +533,25 @@ def test_response_rule_added_after_empty_request_preflight_blocks_output() -> No
         )
     assert out == ["data: content_policy_denied\n\n", "data: [DONE]\n\n"]
     assert load.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_worker_approval_holds_reuse_application_event_loop() -> None:
+    """Repeated HTTP worker holds must not strand pooled async DB connections."""
+    import asyncio
+
+    from anyio import to_thread
+
+    application_loop = asyncio.get_running_loop()
+    seen = []
+
+    async def approval() -> bool:
+        seen.append(asyncio.get_running_loop())
+        await asyncio.sleep(0)
+        return True
+
+    for _ in range(2):
+        assert await to_thread.run_sync(lambda: _await_model_io_hold(approval()))
+
+    assert seen == [application_loop, application_loop]
+    assert not any(loop.is_closed() for loop in seen)

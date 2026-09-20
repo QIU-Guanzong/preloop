@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 from uuid import UUID
 
+from anyio import from_thread
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -559,11 +560,17 @@ async def hold_for_model_io_approval(
     Returns True when approved. False when declined, expired, or the
     workflow is missing (fail closed).
     """
-    try:
-        workflow_id = _resolve_workflow_id(db, account_id, decision.approval_workflow)
-    finally:
-        if release_after_lookup is not None:
-            release_after_lookup()
+
+    def lookup_workflow() -> Optional[str]:
+        try:
+            return _resolve_workflow_id(db, account_id, decision.approval_workflow)
+        finally:
+            if release_after_lookup is not None:
+                release_after_lookup()
+
+    # HTTP workers can all be waiting on approvals. Use the loop executor
+    # rather than requesting another slot from the same AnyIO worker limiter.
+    workflow_id = await asyncio.to_thread(lookup_workflow)
     if not workflow_id:
         logger.error(
             "model I/O require_approval has no workflow rule_id=%s",
@@ -599,20 +606,29 @@ async def hold_for_model_io_approval(
 
 
 def _await_model_io_hold(awaitable: Any) -> bool:
-    """Drive ``hold_for_model_io_approval`` from sync gateway methods.
+    """Run an HTTP worker's approval hold on the application event loop.
 
-    FastAPI ``def`` endpoints and Starlette ``iterate_in_threadpool`` run
-    the gateway off the event loop, so ``asyncio.run`` is safe there. If
-    a loop is already running, blocking ``Future.result()`` would freeze
-    the worker; callers in that context must ``await`` the coroutine.
-    Patched sync mocks (tests) are returned as-is.
+    Async database connections belong to the application's loop. Creating a
+    temporary loop with ``asyncio.run`` closes that loop after one approval
+    and poisons the shared async connection pool for subsequent requests.
+    FastAPI sync endpoints and Starlette's sync stream iterators both run in
+    AnyIO worker threads, which can bridge back to the application loop.
     """
     if not asyncio.iscoroutine(awaitable):
         return bool(awaitable)
+
+    async def hold() -> bool:
+        return bool(await awaitable)
+
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return bool(asyncio.run(awaitable))
+        try:
+            return from_thread.run(hold)
+        except BaseException:
+            awaitable.close()
+            raise
+    awaitable.close()
     raise RuntimeError(
         "model I/O require_approval cannot block a running event loop; "
         "await hold_for_model_io_approval from async callers"
