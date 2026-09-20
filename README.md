@@ -213,7 +213,7 @@ The [disposable capacity lab](scripts/capacity/README.md) measures authenticated
 
 Release assets carry signed Sigstore build provenance and checksums. See [verification instructions](./docs/release-verification.md).
 
-Windows CLI release binaries: optional VirusTotal scanning; SignPath Authenticode signing is pending. [windows-cli.md](./docs/windows-cli.md), [windows-code-signing.md](./docs/windows-code-signing.md), [code-signing-policy.md](./docs/code-signing-policy.md).
+Windows CLI release binaries pass a required Defender scan and ten-minute observation before publication. Optional VirusTotal scanning and SignPath Authenticode signing provide additional release checks; signing is pending. [windows-cli.md](./docs/windows-cli.md), [windows-code-signing.md](./docs/windows-code-signing.md), [code-signing-policy.md](./docs/code-signing-policy.md).
 
 Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
 
