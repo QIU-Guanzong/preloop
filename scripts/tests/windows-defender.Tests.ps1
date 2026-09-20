@@ -143,6 +143,32 @@ Describe 'Windows release Defender validation' {
 }
 
 Describe 'Native process exit status' {
+  BeforeAll {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.IO;
+public sealed class ExitedDuringTimeoutProcess : IDisposable {
+    private int waits;
+    public ProcessStartInfo StartInfo { get; set; }
+    public StringReader StandardOutput = new StringReader("completed at timeout boundary");
+    public StringReader StandardError = new StringReader("");
+    public int ExitCode { get { return 0; } }
+    public bool Start() { return true; }
+    public bool WaitForExit(int milliseconds) { return ++waits > 1; }
+    public void Kill() { throw new InvalidOperationException("Process has exited"); }
+    public void Dispose() { StandardOutput.Dispose(); StandardError.Dispose(); }
+}
+'@
+  }
+
+  It 'retains timeout diagnostics when the child exits before Kill' {
+    Mock New-Object { [ExitedDuringTimeoutProcess]::new() } -ParameterFilter { $TypeName -eq 'System.Diagnostics.Process' }
+    $log = Join-Path $TestDrive 'timeout-race.log'
+    { Invoke-ValidationProcess -FilePath 'synthetic-child' -CommandLine 'test' -LogPath $log -TimeoutSeconds 2 } | Should -Throw '*timed out*'
+    (Get-Content -Raw $log) | Should -Match 'completed at timeout boundary'
+  }
+
   It 'captures a successful Windows PowerShell process and its output' -Skip:($env:OS -ne 'Windows_NT') {
     $executable = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
     $log = Join-Path $TestDrive 'success.log'
@@ -163,6 +189,37 @@ Describe 'Native process exit status' {
     $childProcessID = [int](Get-Content -Raw $log).Trim()
     $childProcessID | Should -BeGreaterThan 0
     Get-Process -Id $childProcessID -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+  }
+}
+
+Describe 'Threat history observation timestamps' {
+  It 'includes recent western/eastern timestamps and excludes older eastern timestamps' {
+    Mock Get-MpThreatDetection {
+      @(
+        [pscustomobject]@{ ThreatID = 1; InitialDetectionTime = [datetimeoffset]'2026-09-20T05:01:00-07:00'; LastThreatStatusChangeTime = $null },
+        [pscustomobject]@{ ThreatID = 2; InitialDetectionTime = [datetimeoffset]'2026-09-20T14:01:00+02:00'; LastThreatStatusChangeTime = $null },
+        [pscustomobject]@{ ThreatID = 3; InitialDetectionTime = [datetimeoffset]'2026-09-20T13:59:00+02:00'; LastThreatStatusChangeTime = $null },
+        [pscustomobject]@{ ThreatID = 4; InitialDetectionTime = [datetimeoffset]'2026-09-19T12:00:00Z'; LastThreatStatusChangeTime = [datetimeoffset]'2026-09-20T05:01:00-07:00' }
+      )
+    }
+    $recent = @(Get-RecentDefenderThreatDetections -Since ([datetimeoffset]'2026-09-20T12:00:00Z').UtcDateTime)
+    $recent.Count | Should -Be 3
+    $recent.ThreatID | Should -Contain 1
+    $recent.ThreatID | Should -Contain 2
+    $recent.ThreatID | Should -Contain 4
+    $recent.ThreatID | Should -Not -Contain 3
+  }
+
+  It 'normalizes the local DateTime values returned by CIM' {
+    Mock Get-MpThreatDetection {
+      @(
+        [pscustomobject]@{ ThreatID = 1; InitialDetectionTime = ([datetime]'2026-09-20T12:00:00Z').ToLocalTime(); LastThreatStatusChangeTime = $null },
+        [pscustomobject]@{ ThreatID = 2; InitialDetectionTime = ([datetime]'2026-09-20T11:59:00Z').ToLocalTime(); LastThreatStatusChangeTime = $null }
+      )
+    }
+    $recent = @(Get-RecentDefenderThreatDetections -Since ([datetimeoffset]'2026-09-20T12:00:00Z').UtcDateTime)
+    $recent.Count | Should -Be 1
+    $recent[0].ThreatID | Should -Be 1
   }
 }
 

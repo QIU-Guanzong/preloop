@@ -53,6 +53,17 @@ function Get-DefenderValidationEvents {
   }
 }
 
+function Get-RecentDefenderThreatDetections {
+  param([datetime]$Since)
+  $sinceUtc = $Since.ToUniversalTime()
+  return @(Get-MpThreatDetection -ErrorAction Stop | Where-Object {
+    # CIM timestamps are local DateTime values. DateTime comparisons alone do
+    # not account for Kind; normalize both timestamps to the UTC report clock.
+    ($_.InitialDetectionTime -and ([datetimeoffset]$_.InitialDetectionTime).UtcDateTime -ge $sinceUtc) -or
+      ($_.LastThreatStatusChangeTime -and ([datetimeoffset]$_.LastThreatStatusChangeTime).UtcDateTime -ge $sinceUtc)
+  })
+}
+
 function Invoke-ValidationProcess {
   param([string]$FilePath, [string]$CommandLine, [string]$LogPath, [int]$TimeoutSeconds)
   $info = New-Object System.Diagnostics.ProcessStartInfo
@@ -70,7 +81,10 @@ function Invoke-ValidationProcess {
     $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
     if ($timedOut) {
       # Cancel only our timed-out child, never the Defender service.
-      $process.Kill()
+      try { $process.Kill() } catch [System.InvalidOperationException] {
+        # The child can exit between WaitForExit and Kill. Retain the timeout
+        # outcome and its logs rather than masking it with an already-exited error.
+      }
       if (-not $process.WaitForExit(5000)) { throw 'Timed-out validation process did not stop.' }
     }
     # Direct Process ownership reliably retains ExitCode on Windows PowerShell 5.1.
@@ -178,9 +192,7 @@ function Invoke-WindowsDefenderValidation {
     do {
       $report.defender_after = Assert-DefenderCoverage
       $report.events = @(Get-DefenderValidationEvents -Since $started)
-      $report.threat_detections = @(Get-MpThreatDetection -ErrorAction Stop | Where-Object {
-        $_.InitialDetectionTime -ge $started -or $_.LastThreatStatusChangeTime -ge $started
-      })
+      $report.threat_detections = @(Get-RecentDefenderThreatDetections -Since $started)
       if ($report.events.Count -gt 0 -or $report.threat_detections.Count -gt 0) {
         throw 'Defender recorded a detection, remediation, or loss of real-time protection during validation.'
       }
@@ -191,9 +203,7 @@ function Invoke-WindowsDefenderValidation {
     # The final check occurs after the entire delayed observation interval.
     $report.defender_after = Assert-DefenderCoverage
     $report.events = @(Get-DefenderValidationEvents -Since $started)
-    $report.threat_detections = @(Get-MpThreatDetection -ErrorAction Stop | Where-Object {
-      $_.InitialDetectionTime -ge $started -or $_.LastThreatStatusChangeTime -ge $started
-    })
+    $report.threat_detections = @(Get-RecentDefenderThreatDetections -Since $started)
     if ($report.events.Count -gt 0 -or $report.threat_detections.Count -gt 0) { throw 'Defender reported a threat during delayed observation.' }
     Assert-ValidationArtifacts -Artifacts $report.artifacts
     $report.result = 'passed'
