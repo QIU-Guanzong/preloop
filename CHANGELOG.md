@@ -24,6 +24,11 @@ avatars.
 
 ### Added
 
+- Cost summaries accept optional `include_breakdown=false` and repeatable
+  `breakdown` selections while preserving the full response by default.
+  The Cost console shows totals first and loads tab details independently,
+  with section retries and protection against stale date-range responses.
+
 - Pi and DeepSeek Harness agents: CLI installation and onboarding, console/API
   identities, ephemeral Docker/Kubernetes/private-runner flows, native tool
   approvals, lifecycle events, and message/interrupt control of active sessions.
