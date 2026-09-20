@@ -303,4 +303,50 @@ describe('Cost progressive loading', () => {
       )
     ).not.to.exist;
   });
+
+  it('preserves a pricing deep link until delayed settings render its target', async () => {
+    const originalUrl = location.href;
+    const scroll = sinon.stub(Element.prototype, 'scrollIntoView');
+    const fallback = handler;
+    let resolveFeatures!: (response: Response) => void;
+    handler = (url) =>
+      url.pathname.endsWith('/features')
+        ? new Promise((resolve) => {
+            resolveFeatures = resolve;
+          })
+        : fallback(url);
+    history.replaceState(null, '', `${location.pathname}?panel=pricing`);
+    try {
+      const element = await fixture<CostView>(html`<cost-view></cost-view>`);
+      await waitUntil(() => !element['loading']);
+      expect(element['requestedPanel']).to.equal('pricing');
+      expect(scroll.called).to.equal(false);
+      resolveFeatures(reply({ features: { model_price_overrides: true } }));
+      await waitUntil(() => scroll.called);
+      expect((scroll.thisValues[0] as HTMLElement).id).to.equal(
+        'panel-pricing'
+      );
+      expect(element['requestedPanel']).to.equal(null);
+    } finally {
+      scroll.restore();
+      history.replaceState(null, '', originalUrl);
+      resolveFeatures?.(reply({ features: {} }));
+    }
+  });
+
+  it('preserves loaded budget controls when an unrelated settings request fails', async () => {
+    const fallback = handler;
+    handler = async (url) =>
+      url.pathname.endsWith('/ai-models')
+        ? reply({ detail: 'Unavailable' }, 503)
+        : fallback(url);
+    const element = await fixture<CostView>(html`<cost-view></cost-view>`);
+    await waitUntil(() => !element['loading'] && !element['contextLoading']);
+    await element.updateComplete;
+    expect(element.shadowRoot!.querySelector('budget-health-card')).to.exist;
+    expect(
+      element.shadowRoot!.querySelector('[aria-label="Cost summary metrics"]')
+    ).to.exist;
+    expect(element['contextError']).not.to.equal(null);
+  });
 });

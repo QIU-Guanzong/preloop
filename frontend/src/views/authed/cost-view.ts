@@ -223,6 +223,8 @@ export class CostView extends AuthedElement {
   @state() private sectionErrors: Record<string, string> = {};
   @state() private contextLoading = true;
   @state() private contextError: string | null = null;
+  @state() private budgetContextReady = false;
+  @state() private pricingContextReady = false;
   private loadGeneration = 0;
   private currentPeriod: DateRangeParams | null = null;
   private readyBreakdowns = new Set<CostUsageBreakdown>();
@@ -584,15 +586,20 @@ export class CostView extends AuthedElement {
    * with no hint where to look.
    */
   protected updated(): void {
-    if (this.loading || !this.requestedPanel) {
+    if (
+      this.loading ||
+      !this.requestedPanel ||
+      (this.requestedPanel === 'pricing' && !this.pricingContextReady)
+    ) {
       return;
     }
     const panel = this.requestedPanel;
-    this.requestedPanel = null;
     const target =
       this.renderRoot.querySelector(`#panel-${panel}`) ||
       this.renderRoot.querySelector('#panel-pricing-catalog');
-    target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (!target) return;
+    this.requestedPanel = null;
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
   private requestedPanel: string | null = null;
@@ -726,6 +733,8 @@ export class CostView extends AuthedElement {
     this.sectionErrors = {};
     this.readyBreakdowns = new Set();
     this.pendingBreakdowns = new Map();
+    this.budgetContextReady = false;
+    this.pricingContextReady = false;
     void this.loadContext(generation);
     try {
       const summary = await getCostAnalyticsSummary({
@@ -759,26 +768,44 @@ export class CostView extends AuthedElement {
   private async loadContext(generation = this.loadGeneration) {
     this.contextLoading = true;
     this.contextError = null;
-    try {
-      const [aiModels, features, policies] = await Promise.all([
-        getAIModels(),
-        getFeatures(),
-        getBudgetPolicies(),
-      ]);
-      if (generation !== this.loadGeneration) return;
-      this.aiModels = aiModels;
-      this.featureFlags = features.features || {};
-      this.budgetPolicies = policies;
-      const overrides = this.modelPriceOverridesEnabled
-        ? await getModelPriceOverrides({ activeOnly: true, passive: true })
-        : [];
-      if (generation === this.loadGeneration) this.pricingOverrides = overrides;
-    } catch {
-      if (generation !== this.loadGeneration) return;
-      this.contextError = 'Could not load cost settings.';
-    } finally {
-      if (generation === this.loadGeneration) this.contextLoading = false;
-    }
+    const tasks = [
+      {
+        label: 'model choices',
+        request: getAIModels().then((models) => {
+          if (generation === this.loadGeneration) this.aiModels = models;
+        }),
+      },
+      {
+        label: 'budget policies',
+        request: getBudgetPolicies().then((policies) => {
+          if (generation !== this.loadGeneration) return;
+          this.budgetPolicies = policies;
+          this.budgetContextReady = true;
+        }),
+      },
+      {
+        label: 'pricing settings',
+        request: getFeatures().then(async (features) => {
+          if (generation !== this.loadGeneration) return;
+          this.featureFlags = features.features || {};
+          const overrides = this.modelPriceOverridesEnabled
+            ? await getModelPriceOverrides({ activeOnly: true, passive: true })
+            : [];
+          if (generation !== this.loadGeneration) return;
+          this.pricingOverrides = overrides;
+          this.pricingContextReady = true;
+        }),
+      },
+    ];
+    const results = await Promise.allSettled(tasks.map((task) => task.request));
+    if (generation !== this.loadGeneration) return;
+    const failed = tasks
+      .filter((_, index) => results[index].status === 'rejected')
+      .map((task) => task.label);
+    this.contextError = failed.length
+      ? `Could not load ${failed.join(', ')}.`
+      : null;
+    this.contextLoading = false;
   }
 
   private async loadPreviousRangeSummary(
@@ -2618,8 +2645,10 @@ export class CostView extends AuthedElement {
   private renderControls() {
     return html`
       <div class="actions-stack">
-        ${this.contextError ? html`<sl-alert variant="warning" open>${this.contextError}<sl-button @click=${() => void this.loadContext()}>Retry</sl-button></sl-alert>` : this.contextLoading ? html`<div role="status"><sl-spinner></sl-spinner> Loading cost settings…</div>` : this.renderBudgets()}
-        ${!this.contextLoading && !this.contextError && this.modelPriceOverridesEnabled ? this.renderPricing() : nothing}
+        ${this.contextError ? html`<sl-alert variant="warning" open>${this.contextError}<sl-button @click=${() => void this.loadContext()}>Retry</sl-button></sl-alert>` : nothing}
+        ${this.contextLoading ? html`<div role="status"><sl-spinner></sl-spinner> Loading cost settings…</div>` : nothing}
+        ${this.budgetContextReady ? this.renderBudgets() : nothing}
+        ${this.pricingContextReady && this.modelPriceOverridesEnabled ? this.renderPricing() : nothing}
       </div>
     `;
   }
