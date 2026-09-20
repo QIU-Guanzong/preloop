@@ -2355,7 +2355,10 @@ def delete_flow(
             ),
         )
 
-    flow_name = flow.name  # capture before delete
+    # A committed deletion detaches the ORM row. Resolve relationship-backed
+    # response fields (such as ai_model_name) while its session is available.
+    response = schemas.FlowResponse.model_validate(flow)
+    flow_name = flow.name
     crud_flow.remove(db=db, id=flow_id, account_id=current_user.account_id)
 
     log_config_change(
@@ -2367,7 +2370,7 @@ def delete_flow(
     )
 
     logger.info(f"Successfully deleted flow {flow_id}")
-    return flow
+    return response
 
 
 @router.post(

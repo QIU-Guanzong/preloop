@@ -1336,7 +1336,8 @@ async def {internal_name}({params_str}) -> str:
                                 f"for tool '{name}'. Please try again."
                             ),
                         )
-                    ]
+                    ],
+                    is_error=True,
                 )
             if tools_are_halted:
                 logger.warning(
@@ -1355,7 +1356,10 @@ async def {internal_name}({params_str}) -> str:
                             "message": kill_switch_service.TOOL_DENIAL_MESSAGE,
                         }
                     )
-                return ToolResult(content=[TextContent(type="text", text=denied_text)])
+                return ToolResult(
+                    content=[TextContent(type="text", text=denied_text)],
+                    is_error=True,
+                )
 
         # ── Server-side justification enforcement ─────────────────────────
         # Schema injection alone isn't sufficient — clients can skip
@@ -1927,7 +1931,9 @@ async def {internal_name}({params_str}) -> str:
             from fastmcp.tools.tool import ToolResult
             from mcp.types import TextContent
 
-            return ToolResult(content=[TextContent(type="text", text=denial)])
+            return ToolResult(
+                content=[TextContent(type="text", text=denial)], is_error=True
+            )
         translation_token = None
         if name in self._registered_proxied_tools:
             translation_token = _is_proxy_translation_var.set(True)
