@@ -2019,11 +2019,13 @@ func runAgentsInstallPlugin(cmd *cobra.Command, args []string) error {
 			)
 		}
 	}
-	command := exec.Command(executable, installArgs...)
+	var command *exec.Cmd
 	if runtimeSessionSourceTypeForAgent(agentName) == "claude_code" {
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 		command = exec.CommandContext(ctx, executable, installArgs...)
+	} else {
+		command = exec.Command(executable, installArgs...)
 	}
 	output, err := command.CombinedOutput()
 	if len(output) > 0 {
